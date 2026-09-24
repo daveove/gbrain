@@ -73,6 +73,24 @@ export interface QueryCacheConfig {
  * land in distinct rows. Empty-string knobsHash is accepted (preserves
  * existing test setups) but production calls always pass the resolved hash.
  */
+export type QueryCacheTouch = { kind: 'hit' | 'write'; id: string };
+
+/**
+ * Retrieval proofs record cache hits and stores so their own writes are not
+ * counted as external mutations. Unset outside a proof. Not re-entrant.
+ */
+let queryCacheTouchObserver: ((event: QueryCacheTouch) => void) | null = null;
+
+export function setQueryCacheTouchObserver(
+  observer: ((event: QueryCacheTouch) => void) | null,
+): void {
+  queryCacheTouchObserver = observer;
+}
+
+function noteQueryCacheTouch(event: QueryCacheTouch): void {
+  queryCacheTouchObserver?.(event);
+}
+
 export function cacheRowId(queryText: string, sourceId: string, knobsHash = ''): string {
   const h = createHash('sha256');
   h.update(`${sourceId}::${queryText}::${knobsHash}`);
@@ -265,6 +283,7 @@ export class SemanticQueryCache {
           ? rows[0]
           : rows.find((r) => cacheTextGuard(queryText, r.query_text ?? ''));
       if (!row) return { hit: false };
+      noteQueryCacheTouch({ kind: 'hit', id: row.id });
 
       // Second query: fetch ONLY the winner's heavy payload. A row deleted
       // between the two statements (concurrent prune/clear) is a miss — the
@@ -321,6 +340,7 @@ export class SemanticQueryCache {
     const knobsHash = opts.knobsHash ?? '';
     const ttl = clampTtl(opts.ttlSeconds ?? this.ttlSeconds);
     const id = cacheRowId(queryText, sourceId, knobsHash);
+    noteQueryCacheTouch({ kind: 'write', id });
     const vec = embeddingToPgVector(queryEmbedding);
 
     // v0.40.3.0: capture the per-page snapshot + corpus-state bookmark

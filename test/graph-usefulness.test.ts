@@ -655,9 +655,14 @@ describe('relation manifest', () => {
       }],
     } as unknown as RelationManifest;
     expect(guardsAllLiteralTrue(manifest.rows[0].guards)).toBe(false);
-    const result = await applyRelationManifest(engine, manifest, JSON.stringify(manifest), { apply: true });
-    expect(result.applied).toBe(0);
-    expect(result.outcomes[0]?.status).toBe('skipped_guard');
+    const before = await linkCount(engine, 'topics/parent-note', 'topics/child-note');
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-stringly-')), 'receipt.json');
+    await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+      apply: true,
+      receiptPath,
+    })).rejects.toThrow(/literal boolean/);
+    expect(await linkCount(engine, 'topics/parent-note', 'topics/child-note')).toBe(before);
+    expect(existsSync(receiptPath)).toBe(false);
   });
 
   test('literal false guard skips the row', async () => {
@@ -1530,6 +1535,38 @@ describe('relation manifest', () => {
     expect(() => parseRelationManifest(JSON.stringify({ manifest_version: 1, rows: [row] })))
       .toThrow(/reconciliation-managed/);
   });
+
+  test('rejects a managed link_source at the apply boundary before any write', async () => {
+    await engine.putPage('topics/managed-a', {
+      title: 'Managed A', compiled_truth: 'managed a', type: 'note',
+    });
+    await engine.putPage('topics/managed-b', {
+      title: 'Managed B', compiled_truth: 'managed b', type: 'note',
+    });
+    const manifest = {
+      manifest_version: 1,
+      rows: [{
+        id: 'managed-1',
+        from_slug: 'topics/managed-a',
+        to_slug: 'topics/managed-b',
+        link_type: 'related_to',
+        link_source: 'frontmatter',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    } as RelationManifest;
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-managed-')), 'receipt.json');
+    await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+      apply: true,
+      receiptPath,
+    })).rejects.toThrow(/reconciliation-managed/);
+    expect(await linkCount(engine, 'topics/managed-a', 'topics/managed-b')).toBe(0);
+    expect(existsSync(receiptPath)).toBe(false);
+  });
 });
 
 describe('graph fingerprint identities', () => {
@@ -2067,6 +2104,60 @@ describe('retrieval proof', () => {
       expect(result.checks.production_mutations).toBeGreaterThan(0);
     } finally {
       engine.executeRaw = original;
+    }
+  });
+
+  test('a query cache clear during a question fails the proof', async () => {
+    await engine.executeRaw(
+      `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
+       VALUES ('proof-cache-clear', 'proof cache clear sentinel', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
+    );
+    _setRetrievalProofSearchForTests(async () => {
+      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-clear'`);
+      return [{ slug: 'topics/child-note', source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'cache-clear', query: 'cache clear sentinel', relevant_slugs: ['topics/child-note'] },
+        ],
+      }, { sourceId: 'default' });
+      expect(result.questions.map(q => q.score)).toEqual(['pass']);
+      expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-clear'`);
+    }
+  });
+
+  test('a foreign query cache row inserted between questions fails the proof', async () => {
+    let calls = 0;
+    _setRetrievalProofSearchForTests(async () => {
+      calls += 1;
+      if (calls === 2) {
+        await engine.executeRaw(
+          `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
+           VALUES ('proof-cache-foreign', 'foreign cache row', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
+        );
+      }
+      return [{ slug: 'topics/child-note', source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'cache-q1', query: 'cache foreign one', relevant_slugs: ['topics/child-note'] },
+          { id: 'cache-q2', query: 'cache foreign two', relevant_slugs: ['topics/child-note'] },
+        ],
+      }, { sourceId: 'default' });
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-foreign'`);
     }
   });
 

@@ -137,26 +137,27 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(sortJsonKeys(value));
 }
 
-function parseManifestRaw(manifestRaw: string): unknown {
-  try {
-    return JSON.parse(manifestRaw);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Relation manifestRaw is not valid JSON: ${message}`);
-  }
-}
-
 /**
- * The receipt hashes `manifestRaw`. Apply that parsed document, and refuse
- * a caller-supplied object that is not the same JSON value, before any
- * receipt or link write.
+ * The receipt hashes `manifestRaw`. Parse that string with the full manifest
+ * parser (managed `link_source`, literal boolean guards, version, field
+ * strings) and apply the parsed rows. Refuse a caller-supplied object that
+ * is not the same JSON value, before any receipt or link write.
  */
 function manifestBoundToRaw(manifest: RelationManifest, manifestRaw: string): RelationManifest {
-  const parsed = parseManifestRaw(manifestRaw);
+  let parsed: RelationManifest;
+  try {
+    parsed = parseRelationManifest(manifestRaw);
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      const message = err.message;
+      throw new Error(`Relation manifestRaw is not valid JSON: ${message}`);
+    }
+    throw err;
+  }
   if (canonicalJson(manifest) !== canonicalJson(parsed)) {
     throw new Error('Relation manifest object does not match manifestRaw');
   }
-  return parsed as RelationManifest;
+  return parsed;
 }
 
 async function pageExists(

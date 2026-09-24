@@ -2,6 +2,7 @@ import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { expandQuery } from '../search/expansion.ts';
 import { hybridSearchCached } from '../search/hybrid.ts';
+import { setQueryCacheTouchObserver } from '../search/query-cache.ts';
 import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
@@ -240,9 +241,11 @@ export interface RunRetrievalProofOpts {
 
 /**
  * Non-zero when the graph fingerprint changed during the proof, or when
- * `watermarkChanged` is set. A matching sha256 with a stable watermark is
- * the only zero. Any difference is at least 1 so a changing graph cannot
- * be reported as production_mutations: 0.
+ * `watermarkChanged` is set. The flag covers corpus sequence/xmin movement
+ * and a `query_cache` change that the proof itself did not store. A
+ * matching sha256 with a stable watermark is the only zero. Any difference
+ * is at least 1 so a changing graph cannot be reported as
+ * production_mutations: 0.
  */
 export function retrievalProofMutationCount(
   before: GraphFingerprint,
@@ -315,6 +318,56 @@ async function readCorpusMutationWatermark(engine: BrainEngine): Promise<string>
     throw new Error('Corpus mutation watermark returned no row');
   }
   return watermark;
+}
+
+type QueryCacheSnapshot = Map<string, string>;
+
+/**
+ * Content signature of `query_cache`, excluding hit_count and last_hit_at.
+ * A proof hit bumps those columns; the served payload does not change.
+ */
+async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSnapshot> {
+  const rows = await engine.executeRaw<{ id: string; sig: string }>(
+    `SELECT id,
+            md5(concat_ws('|',
+              query_text,
+              source_id,
+              coalesce(knobs_hash, ''),
+              ttl_seconds::text,
+              results::text,
+              meta::text,
+              coalesce(page_generations::text, ''),
+              coalesce(max_generation_at_store::text, ''),
+              created_at::text,
+              coalesce(embedding::text, '')
+            )) AS sig
+       FROM query_cache
+      ORDER BY id`,
+  );
+  const snapshot: QueryCacheSnapshot = new Map();
+  for (const row of rows) snapshot.set(row.id, row.sig);
+  return snapshot;
+}
+
+/**
+ * True when cache rows changed aside from ids this proof stored.
+ * Deletes always count: a hit that is cleared before the next sample is
+ * not a proof write.
+ */
+function queryCacheDiverged(
+  before: QueryCacheSnapshot,
+  after: QueryCacheSnapshot,
+  proofWriteIds: ReadonlySet<string>,
+): boolean {
+  for (const [id, sig] of before) {
+    const next = after.get(id);
+    if (next === undefined) return true;
+    if (next !== sig && !proofWriteIds.has(id)) return true;
+  }
+  for (const id of after.keys()) {
+    if (!before.has(id) && !proofWriteIds.has(id)) return true;
+  }
+  return false;
 }
 
 /** Pass requires no failed questions, no Readwise cites, and an unchanged graph. */
@@ -455,43 +508,64 @@ export async function runRetrievalProof(
   const watermarkBefore = await readCorpusMutationWatermark(engine);
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
+  const proofCacheWriteIds = new Set<string>();
+  let cacheMutated = false;
+  let cacheCursor = await readQueryCacheSnapshot(engine);
+  setQueryCacheTouchObserver((event) => {
+    if (event.kind === 'write') proofCacheWriteIds.add(event.id);
+  });
 
-  for (const q of questions) {
-    const topK = positiveTopK(q.top_k, questionLabel(q));
-    const searchOpts = {
-      limit: topK,
-      ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
-      ...(expandFn ? { expandFn } : {}),
-      _pinnedSearch: pinnedSearch,
-    };
-    // Production query and search go through hybridSearchCached. Bare
-    // hybridSearch recomputes live and can pass while a warm cache still
-    // serves a different set. The pin drives the cache key (mode, column,
-    // adaptive return, intent-pattern banks) and the inner search, so a
-    // warm bank cannot store or serve a different classification than the
-    // sealed settings. A hit is the row a production caller would get.
-    const hits = retrievalSearchForTests
-      ? await retrievalSearchForTests(engine, q.query, searchOpts)
-      : await hybridSearchCached(engine, q.query, searchOpts);
-    const topPages: RetrievalPageRef[] = hits.map(h => ({
-      source_id: h.source_id ?? opts.sourceId ?? 'default',
-      slug: h.slug,
-    }));
-    const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
-    results.push({
-      id: q.id,
-      query: q.query,
-      score: scoreRetrievalQuestion(q, topPages, opts.sourceId),
-      top_slugs: topPages.map(p => p.slug),
-      top_pages: topPages,
-      cited_readwise: citedReadwise,
-    });
+  const noteCache = async (): Promise<void> => {
+    const now = await readQueryCacheSnapshot(engine);
+    if (queryCacheDiverged(cacheCursor, now, proofCacheWriteIds)) cacheMutated = true;
+    cacheCursor = now;
+  };
+
+  try {
+    for (const q of questions) {
+      await noteCache();
+      const topK = positiveTopK(q.top_k, questionLabel(q));
+      const searchOpts = {
+        limit: topK,
+        ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+        ...(expandFn ? { expandFn } : {}),
+        _pinnedSearch: pinnedSearch,
+      };
+      // Production query and search go through hybridSearchCached. Bare
+      // hybridSearch recomputes live and can pass while a warm cache still
+      // serves a different set. The pin drives the cache key (mode, column,
+      // adaptive return, intent-pattern banks) and the inner search, so a
+      // warm bank cannot store or serve a different classification than the
+      // sealed settings. A hit is the row a production caller would get.
+      const hits = retrievalSearchForTests
+        ? await retrievalSearchForTests(engine, q.query, searchOpts)
+        : await hybridSearchCached(engine, q.query, searchOpts);
+      const topPages: RetrievalPageRef[] = hits.map(h => ({
+        source_id: h.source_id ?? opts.sourceId ?? 'default',
+        slug: h.slug,
+      }));
+      const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
+      results.push({
+        id: q.id,
+        query: q.query,
+        score: scoreRetrievalQuestion(q, topPages, opts.sourceId),
+        top_slugs: topPages.map(p => p.slug),
+        top_pages: topPages,
+        cited_readwise: citedReadwise,
+      });
+      await noteCache();
+    }
+  } finally {
+    setQueryCacheTouchObserver(null);
   }
 
   // Live config again. A change since the pin makes sha256 differ even
   // when the graph counts did not, so production_mutations cannot stay 0.
   // The watermark covers the case the hashes miss: a write during a
-  // question that is undone before this snapshot.
+  // question that is undone before this snapshot. query_cache is sampled
+  // around every question so a clear, prune, or foreign insert is visible
+  // even when the row is gone again by the time the graph fingerprint matches.
+  await noteCache();
   const afterPin = await readProofSearchPin(engine);
   const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
   const watermarkAfter = await readCorpusMutationWatermark(engine);
@@ -499,7 +573,7 @@ export async function runRetrievalProof(
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = citedReadwisePageCount(results, opts.sourceId);
   const productionMutations = retrievalProofMutationCount(before, after, {
-    watermarkChanged: watermarkBefore !== watermarkAfter,
+    watermarkChanged: watermarkBefore !== watermarkAfter || cacheMutated,
   });
 
   return {
