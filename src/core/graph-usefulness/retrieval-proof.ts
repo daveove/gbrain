@@ -257,7 +257,10 @@ type RetrievalProofSearch = (
   opts: {
     limit?: number;
     sourceId?: string;
-    _pinnedSearch?: Pick<PinnedProofSearch, 'mode' | 'overrides' | 'embeddingColumn'>;
+    _pinnedSearch?: Pick<
+      PinnedProofSearch,
+      'mode' | 'overrides' | 'embeddingColumn' | 'adaptiveReturn' | 'intentPatterns' | 'embeddingMultimodalModel'
+    >;
   },
 ) => Promise<Array<{ slug: string; source_id?: string }>>;
 
@@ -311,15 +314,18 @@ export async function runRetrievalProof(
   }
   await assertActiveExpectationSources(engine, questions);
 
-  // Resolve search.mode, per-key overrides, and the embedding column once.
-  // Every question receives this pin. hybridSearch would otherwise reload
-  // those settings per query, so a concurrent config write could mix
-  // retrieval configurations inside one proof.
+  // Resolve every live retrieval setting once. Every question receives
+  // this pin. hybridSearch would otherwise reload mode, adaptive return,
+  // intent patterns, and the embedding column per query, so a concurrent
+  // config write could mix retrieval configurations inside one proof.
   const pin = await readProofSearchPin(engine);
   const pinnedSearch = {
     mode: pin.mode,
     overrides: pin.overrides,
     embeddingColumn: pin.embeddingColumn,
+    adaptiveReturn: pin.adaptiveReturn,
+    intentPatterns: pin.intentPatterns,
+    embeddingMultimodalModel: pin.embeddingMultimodalModel,
   };
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];

@@ -3,6 +3,7 @@ import { isAbsolute, join } from 'path';
 import { homedir } from 'os';
 import type { EngineConfig, EmbeddingColumnConfig } from './types.ts';
 import { applyDbPlaneReadSideMerge, type DbPlaneEngineReader } from './config-db-merge.ts';
+import { mergeAdaptiveReturnFromDb } from './search/return-policy.ts';
 import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 
@@ -1212,6 +1213,10 @@ export async function loadConfigWithEngine(
         }
       : engine,
   );
+
+  // Flat DB keys `search.adaptive_return*` are what `gbrain config set` stores.
+  // hybridSearch reads them via adaptiveReturnFromConfig(cfg.search). File wins.
+  await mergeAdaptiveReturnFromDb(merged as unknown as Record<string, unknown>, dbStr);
 
   return merged;
 }

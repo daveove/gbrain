@@ -43,6 +43,7 @@ import { applyReranker, type RerankPassThroughReason, type RerankSkipReason } fr
 import {
   classifyQuery,
   classifyQueryWithBrainPatterns,
+  intentBanksFromRaw,
   isAmbiguousModalityQuery,
   loadEngineIntentPatterns,
   type QuerySuggestions,
@@ -964,13 +965,17 @@ export interface HybridSearchOpts extends SearchOpts {
   mode?: string;
   /**
    * INTERNAL — retrieval-proof pin. When set, this call uses the supplied
-   * mode, per-key overrides, and embedding column instead of re-reading
-   * them from the config table. Direct callers leave it unset.
+   * mode, per-key overrides, embedding column, adaptive return, intent
+   * patterns, and multimodal model instead of re-reading them. Direct
+   * callers leave it unset.
    */
   _pinnedSearch?: {
     mode?: string;
     overrides?: import('./mode.ts').SearchKeyOverrides;
     embeddingColumn: import('../types.ts').ResolvedColumn;
+    adaptiveReturn: Partial<import('./return-policy.ts').AdaptiveReturnConfig>;
+    intentPatterns: string | null;
+    embeddingMultimodalModel: string | null;
   };
   expandFn?: (query: string) => Promise<string[]>;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
@@ -1225,11 +1230,14 @@ export async function hybridSearch(
   // Failing cfg load (pre-config brain, mid-migration, no engine.getConfig)
   // falls through to the file-plane sync loadConfig() — same shape, just
   // misses DB-plane overrides.
-  // Column config is still loaded for the multimodal probe and adaptive
-  // return. A pin replaces only the resolved column so a concurrent
-  // search_embedding_column write cannot retarget this call.
-  const mergedCfg = await loadConfigWithEngine(engine).catch(() => null);
-  const cfgForColumn = mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
+  // A proof pin already resolved column, adaptive return, and the
+  // multimodal model. Skip the reload so a concurrent config write cannot
+  // change them mid-proof.
+  const cfgForColumn = pinned
+    ? null
+    : (await loadConfigWithEngine(engine).catch(() => null))
+      ?? ((await import('../config.ts')).loadConfig())
+      ?? null;
   const resolvedCol = pinned
     ? resolveEmbeddingColumn(
       { embeddingColumn: pinned.embeddingColumn },
@@ -1251,7 +1259,9 @@ export async function hybridSearch(
   // weight-adjustment path. Intent weighting is on by default (off via
   // `opts.intentWeighting = false`; mode bundle supplies the default).
   // #4415: merges the brain's `search.intent_patterns` config over the banks.
-  const suggestions = await classifyQueryWithBrainPatterns(engine, query);
+  const suggestions = pinned
+    ? classifyQuery(query, intentBanksFromRaw(pinned.intentPatterns))
+    : await classifyQueryWithBrainPatterns(engine, query);
   const intentWeightingOn = resolvedMode.intentWeighting;
   const intentWeights = intentWeightingOn
     ? weightsForIntent(suggestions.intent)
@@ -1496,8 +1506,9 @@ export async function hybridSearch(
   // multimodal-routed queries) the multimodal provider is reachable. Without
   // this guard a multimodal-only install would fall to keyword-only here and
   // never run the image/unified vector path.
-  const multimodalProviderProbe =
-    cfgForColumn?.embedding_multimodal_model ?? 'voyage:voyage-multimodal-3';
+  const multimodalProviderProbe = pinned
+    ? (pinned.embeddingMultimodalModel ?? 'voyage:voyage-multimodal-3')
+    : (cfgForColumn?.embedding_multimodal_model ?? 'voyage:voyage-multimodal-3');
   // The LLM intent tie-break (below) can escalate a regex-'text' query to
   // 'image'/'both'; account for that possibility so an ambiguous query on a
   // multimodal-only install still reaches the multimodal branch.
@@ -2235,7 +2246,9 @@ export async function hybridSearch(
   // survives the trim.
   const adaptiveCfg = resolveAdaptiveReturn(
     opts?.adaptiveReturn,
-    adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
+    pinned
+      ? pinned.adaptiveReturn
+      : adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
   let returnPool = aliasHopped;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;

@@ -21,6 +21,7 @@ import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
 import { canonicalSearchConfig, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { hybridSearch } from '../src/core/search/hybrid.ts';
 import { resolveSearchMode } from '../src/core/search/mode.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -1278,6 +1279,11 @@ describe('graph fingerprint identities', () => {
       expect(fpSql[0]).toContain('link_identities');
       expect(fpSql[0]).toContain('corpus_revision');
       expect(fpSql[0]).toContain('content_chunks');
+      expect(fpSql[0]).toContain('emotional_weight');
+      expect(fpSql[0]).toContain('effective_date');
+      expect(fpSql[0]).toContain('FROM takes t');
+      expect(fpSql[0]).toContain('page_aliases');
+      expect(fpSql[0]).toContain('slug_aliases');
       expect(fpSql[0]).toContain('JOIN sources s ON s.id = p.source_id AND NOT s.archived');
       expect(fpSql[0]).toContain('source_archive');
       expect(fp.active_pages).toBeGreaterThan(0);
@@ -1344,6 +1350,69 @@ describe('graph fingerprint identities', () => {
     expect(afterEmbed.active_pages).toBe(before.active_pages);
     expect(afterEmbed.link_rows).toBe(before.link_rows);
     expect(retrievalProofMutationCount(afterChunk, afterEmbed)).toBeGreaterThan(0);
+  });
+
+  test('changes sha256 when ranking inputs change without content or graph identity changes', async () => {
+    const slug = 'topics/rank-rev';
+    await engine.putPage(slug, { title: 'Rank', compiled_truth: 'rank body', type: 'note' });
+    const before = await computeGraphFingerprint(engine);
+    const pageId = `(SELECT id FROM pages WHERE slug = '${slug}' AND source_id = 'default' AND deleted_at IS NULL)`;
+
+    await engine.executeRaw(
+      `UPDATE pages SET emotional_weight = 0.8 WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL`,
+      [slug],
+    );
+    const afterWeight = await computeGraphFingerprint(engine);
+    expect(afterWeight.sha256).not.toBe(before.sha256);
+    expect(afterWeight.active_pages).toBe(before.active_pages);
+    expect(afterWeight.link_rows).toBe(before.link_rows);
+    expect(afterWeight.valid_links).toBe(before.valid_links);
+    expect(afterWeight.zero_degree_pages).toBe(before.zero_degree_pages);
+
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2020-01-15T00:00:00Z' WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL`,
+      [slug],
+    );
+    const afterDate = await computeGraphFingerprint(engine);
+    expect(afterDate.sha256).not.toBe(afterWeight.sha256);
+    expect(afterDate.active_pages).toBe(before.active_pages);
+    expect(afterDate.link_rows).toBe(before.link_rows);
+
+    await engine.executeRaw(
+      `INSERT INTO takes (page_id, row_num, claim, kind, holder, weight, active)
+       SELECT id, 1, 'a standing claim', 'fact', 'self', 0.5, true
+       FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL`,
+      [slug],
+    );
+    const afterTake = await computeGraphFingerprint(engine);
+    expect(afterTake.sha256).not.toBe(afterDate.sha256);
+    expect(afterTake.active_pages).toBe(before.active_pages);
+    expect(afterTake.link_rows).toBe(before.link_rows);
+
+    await engine.executeRaw(
+      `UPDATE takes SET active = false WHERE page_id = ${pageId} AND row_num = 1`,
+    );
+    const afterInactive = await computeGraphFingerprint(engine);
+    expect(afterInactive.sha256).not.toBe(afterTake.sha256);
+    expect(afterInactive.link_rows).toBe(before.link_rows);
+
+    await engine.executeRaw(
+      `INSERT INTO page_aliases (source_id, alias_norm, slug) VALUES ('default', 'rank rev alias', $1)`,
+      [slug],
+    );
+    const afterPageAlias = await computeGraphFingerprint(engine);
+    expect(afterPageAlias.sha256).not.toBe(afterInactive.sha256);
+    expect(afterPageAlias.active_pages).toBe(before.active_pages);
+
+    await engine.executeRaw(
+      `INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug) VALUES ('default', 'topics/rank-old', $1)`,
+      [slug],
+    );
+    const afterSlugAlias = await computeGraphFingerprint(engine);
+    expect(afterSlugAlias.sha256).not.toBe(afterPageAlias.sha256);
+    expect(afterSlugAlias.active_pages).toBe(before.active_pages);
+    expect(afterSlugAlias.link_rows).toBe(before.link_rows);
+    expect(retrievalProofMutationCount(before, afterSlugAlias)).toBeGreaterThan(0);
   });
 
   test('excludes archived-source pages and changes when a source is archived', async () => {
@@ -1693,6 +1762,97 @@ describe('retrieval proof', () => {
       await engine.unsetConfig('search.mode');
       await engine.unsetConfig('search.expansion');
       await engine.unsetConfig('search_embedding_column');
+    }
+  });
+
+  test('pins adaptive return and intent patterns and fingerprints a live change', async () => {
+    await engine.setConfig('search.adaptive_return', 'false');
+    await engine.setConfig('search.adaptive_return_entity_max', '2');
+    await engine.setConfig('search.intent_patterns', '{"salience_on":["never-match-xyz"]}');
+    const seen: Array<{ enabled?: boolean; entityMax?: number; patterns?: string | null }> = [];
+    _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
+      seen.push({
+        enabled: opts._pinnedSearch?.adaptiveReturn.enabled,
+        entityMax: opts._pinnedSearch?.adaptiveReturn.entityMax,
+        patterns: opts._pinnedSearch?.intentPatterns ?? null,
+      });
+      if (seen.length === 1) {
+        await engine.setConfig('search.adaptive_return', 'true');
+        await engine.setConfig('search.adaptive_return_entity_max', '1');
+        await engine.setConfig('search.intent_patterns', '{"salience_on":["always-match-xyz"]}');
+      }
+      return [{ slug: 'topics/parent-note', source_id: 'default' }];
+    });
+    try {
+      const beforePin = await readProofSearchPin(engine);
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'q1', query: 'one', relevant_slugs: ['topics/parent-note'] },
+          { id: 'q2', query: 'two', relevant_slugs: ['topics/parent-note'] },
+        ],
+      }, { sourceId: 'default' });
+      const afterPin = await readProofSearchPin(engine);
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).toEqual(seen[1]);
+      expect(seen[0]?.patterns).toBe(beforePin.intentPatterns);
+      expect(seen[0]?.enabled).toBe(beforePin.adaptiveReturn.enabled);
+      expect(seen[0]?.entityMax).toBe(beforePin.adaptiveReturn.entityMax);
+      expect(beforePin.canonical).toContain('never-match-xyz');
+      expect(beforePin.canonical).not.toBe(afterPin.canonical);
+      expect(afterPin.canonical).toContain('always-match-xyz');
+      expect(afterPin.intentPatterns).toContain('always-match-xyz');
+      expect(afterPin.canonical).toContain('"search.adaptive_return":"true"');
+      expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.unsetConfig('search.adaptive_return');
+      await engine.unsetConfig('search.adaptive_return_entity_max');
+      await engine.unsetConfig('search.intent_patterns');
+    }
+  });
+
+  test('pinned hybrid search does not reread adaptive return or intent patterns', async () => {
+    await engine.setConfig('search.adaptive_return', 'true');
+    await engine.setConfig('search.intent_patterns', '{"entity":["parent"]}');
+    const pin = await readProofSearchPin(engine);
+    const originalGet = engine.getConfig.bind(engine);
+    const originalAll = engine.getAllConfig.bind(engine);
+    const seen: string[] = [];
+    let allCalls = 0;
+    engine.getConfig = async (key: string) => {
+      seen.push(key);
+      return originalGet(key);
+    };
+    engine.getAllConfig = async () => {
+      allCalls += 1;
+      return originalAll();
+    };
+    try {
+      await hybridSearch(engine, 'parent note', {
+        limit: 3,
+        sourceId: 'default',
+        _pinnedSearch: {
+          mode: pin.mode,
+          overrides: pin.overrides,
+          embeddingColumn: pin.embeddingColumn,
+          adaptiveReturn: pin.adaptiveReturn,
+          intentPatterns: pin.intentPatterns,
+          embeddingMultimodalModel: pin.embeddingMultimodalModel,
+        },
+      });
+      expect(seen).not.toContain('search.intent_patterns');
+      expect(seen).not.toContain('search.adaptive_return');
+      expect(seen).not.toContain('search.adaptive_return_entity_max');
+      expect(seen).not.toContain('search.mode');
+      expect(allCalls).toBe(0);
+    } finally {
+      engine.getConfig = originalGet;
+      engine.getAllConfig = originalAll;
+      await engine.unsetConfig('search.adaptive_return');
+      await engine.unsetConfig('search.intent_patterns');
     }
   });
 

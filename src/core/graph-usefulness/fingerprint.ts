@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../engine.ts';
+import { EXTRACTION_PROVENANCE_KEY, EXTRACTION_STATUS_KEY } from '../extraction-review.ts';
 import { junkMeasureSelectSql, junkPatternIds } from './junk-classify.ts';
 import type { GraphFingerprint, JunkSlugSample } from './types.ts';
 
@@ -93,6 +94,8 @@ export async function computeGraphSnapshot(
     `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')} AND ${pageVisible('pf')})
      AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})`;
   const sourceInScope = scope ? 's.id = ANY($1::text[])' : 'TRUE';
+  const rowInScope = (alias: string) =>
+    scope ? `${alias}.source_id = ANY($1::text[])` : 'TRUE';
 
   // One statement: Postgres assigns a single snapshot, so counts, page
   // identities, link identities, corpus revision, and source archive state
@@ -112,6 +115,8 @@ export async function computeGraphSnapshot(
     link_identities: unknown;
     corpus_revision: string | null;
     source_archive: unknown;
+    page_alias_revision: string | null;
+    slug_alias_revision: string | null;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
@@ -190,6 +195,21 @@ export async function computeGraphSnapshot(
                  , E'\n' ORDER BY c.chunk_index, c.id))
                  FROM content_chunks c
                  WHERE c.page_id = sp.id
+               ), '') || E'\\n' ||
+               COALESCE(p.effective_date::text, '') || E'\\n' ||
+               COALESCE(p.updated_at::text, '') || E'\\n' ||
+               COALESCE(p.created_at::text, '') || E'\\n' ||
+               COALESCE(p.emotional_weight::text, '') || E'\\n' ||
+               COALESCE(p.title, '') || E'\\n' ||
+               COALESCE(p.type, '') || E'\\n' ||
+               COALESCE(p.frontmatter->>'${EXTRACTION_STATUS_KEY}', '') || E'\\n' ||
+               COALESCE(p.frontmatter->>'${EXTRACTION_PROVENANCE_KEY}', '') || E'\\n' ||
+               COALESCE((
+                 SELECT md5(string_agg(
+                   t.id::text || E'\\n' || CASE WHEN t.active THEN '1' ELSE '0' END,
+                   E'\\n' ORDER BY t.id))
+                 FROM takes t
+                 WHERE t.page_id = sp.id
                ), '')
              ) AS page_rev
            FROM scoped_pages sp
@@ -203,7 +223,21 @@ export async function computeGraphSnapshot(
          ) ORDER BY s.id)
          FROM sources s
          WHERE ${sourceInScope}
-       ), '[]'::json) AS source_archive${measureSql}`,
+       ), '[]'::json) AS source_archive,
+       COALESCE((
+         SELECT md5(string_agg(
+           pa.source_id || E'\\n' || pa.alias_norm || E'\\n' || pa.slug,
+           E'\\n' ORDER BY pa.source_id, pa.alias_norm, pa.slug, pa.id))
+         FROM page_aliases pa
+         WHERE ${rowInScope('pa')}
+       ), '') AS page_alias_revision,
+       COALESCE((
+         SELECT md5(string_agg(
+           sa.source_id || E'\\n' || sa.alias_slug || E'\\n' || sa.canonical_slug,
+           E'\\n' ORDER BY sa.source_id, sa.alias_slug, sa.canonical_slug, sa.id))
+         FROM slug_aliases sa
+         WHERE ${rowInScope('sa')}
+       ), '') AS slug_alias_revision${measureSql}`,
     params,
   );
 
@@ -218,6 +252,8 @@ export async function computeGraphSnapshot(
   const links = identityMatrix(r.link_identities);
   const sourceArchive = identityMatrix(r.source_archive);
   const corpusRevision = typeof r.corpus_revision === 'string' ? r.corpus_revision : '';
+  const pageAliasRevision = typeof r.page_alias_revision === 'string' ? r.page_alias_revision : '';
+  const slugAliasRevision = typeof r.slug_alias_revision === 'string' ? r.slug_alias_revision : '';
 
   const fp: GraphFingerprint = {
     active_pages: Number(r.active_pages),
@@ -227,13 +263,15 @@ export async function computeGraphSnapshot(
     sha256: '',
   };
   // Counts stay on the public receipt. The hash also covers identities, a
-  // content/chunk revision, and each source's archived flag. Replacing one
-  // edge with another, rewriting page content, or archiving a source
-  // changes sha256. Archived sources are omitted from the page and link
-  // inputs, matching search. All of those inputs come from the same
-  // statement, so they share one snapshot. Proof callers also pass the
-  // effective search configuration; that uses a distinct version tag so
-  // graph-only receipts stay comparable with each other.
+  // content/chunk/ranking revision, alias tables, and each source's archived
+  // flag. Replacing one edge with another, rewriting page content, changing
+  // a ranking input (effective date, emotional weight, active takes, title,
+  // type, aliases), or archiving a source changes sha256. Archived sources
+  // are omitted from the page and link inputs, matching search. All of those
+  // inputs come from the same statement, so they share one snapshot. Proof
+  // callers also pass the effective search configuration; that uses a
+  // distinct version tag so graph-only receipts stay comparable with each
+  // other.
   const searchConfig = opts?.searchConfig;
   const hash = createHash('sha256');
   hash.update(searchConfig !== undefined ? 'graph-fingerprint-v5\n' : 'graph-fingerprint-v4\n');
@@ -260,6 +298,10 @@ export async function computeGraphSnapshot(
     hash.update(JSON.stringify(source));
     hash.update('\n');
   }
+  hash.update(pageAliasRevision);
+  hash.update('\n');
+  hash.update(slugAliasRevision);
+  hash.update('\n');
   if (searchConfig !== undefined) {
     hash.update('\n');
     hash.update(searchConfig);
