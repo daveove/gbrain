@@ -468,7 +468,14 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     const positionals = graphPositionals(args);
     const action = positionals[1];
     const proofPath = positionals[2];
-    if (action !== 'run' || !proofPath) {
+    // Exactly retrieval-proof + run + proof path. A surplus token such as
+    // `unexpected`, including one placed after `--`, must not be ignored
+    // while --out still writes a receipt.
+    if (positionals.length !== 3 || action !== 'run' || !proofPath) {
+      const extra = positionals.slice(3);
+      if (extra.length > 0) {
+        console.error(`Unexpected argument${extra.length === 1 ? '' : 's'}: ${extra.join(' ')}`);
+      }
       console.error('Usage: gbrain graph retrieval-proof run <proof.json> [--out <path>] [--json]');
       setCliExitVerdict(2);
       return;
@@ -559,7 +566,9 @@ DAV-6220 usefulness:
       Every row source must name an active source. Archived sources are rejected.
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
-      Score a sealed question pack; fingerprints must stay identical (read-only).
+      Score a sealed question pack (read-only). The graph fingerprint and a
+      corpus mutation watermark must both stay unchanged. A link added during
+      a question and removed before the final snapshot still fails the proof.
       --out writes the full result, including fingerprint_before and fingerprint_after.
       An explicit --source is resolved and must name an active source.
       Bare relevant_slugs / forbidden_slugs require a single --source.
@@ -567,7 +576,8 @@ DAV-6220 usefulness:
       Each question needs at least one distinct relevant slug or page.
       When the pinned search mode enables expansion, search uses the production query expander.
       Search goes through the production cached query path under those pinned settings.
-      Exits nonzero when a question fails, a hit cites Readwise, or the fingerprint changes.
+      Exits nonzero when a question fails, a hit cites Readwise, the fingerprint
+      changes, or the corpus mutation watermark changes.
 
 Valued flags accept both --name value and --name=value
 (--limit, --source, --receipt-out, --out). An empty value, or a following
@@ -575,8 +585,9 @@ token that starts with '-', is rejected before apply.
 Unknown flags are rejected before connect (for example --dry-run).
 Flags after -- are positional. They do not count as --apply, --yes, or --help.
 relations verify and relations apply accept exactly one manifest path.
+retrieval-proof run accepts exactly one proof path.
 Extra positional arguments are rejected before the source is resolved
-or the manifest is read.
+or the manifest or proof is read.
 retrieval-proof --out refuses to overwrite an existing file.
 `);
 }

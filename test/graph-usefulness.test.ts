@@ -1800,6 +1800,8 @@ describe('retrieval proof', () => {
     expect(retrievalProofPassed(0, 0, mutations)).toBe(false);
     expect(retrievalProofMutationCount(before, { ...before })).toBe(0);
     expect(retrievalProofMutationCount(before, { ...before, sha256: 'ccc' })).toBe(1);
+    expect(retrievalProofMutationCount(before, { ...before }, { watermarkChanged: true })).toBe(1);
+    expect(retrievalProofMutationCount(before, { ...before }, { watermarkChanged: false })).toBe(0);
   });
 
   test('scores hits as (source_id, slug) and requires --source for bare slugs', async () => {
@@ -1907,6 +1909,52 @@ describe('retrieval proof', () => {
     }
   });
 
+  test('surplus positionals on retrieval-proof are rejected before the proof is read', async () => {
+    const proof = join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json');
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-proof-surplus-'));
+    const missing = join(dir, 'missing.json');
+    const out = join(dir, 'receipt.json');
+    const origLog = console.log;
+    const origErr = console.error;
+    const errors: string[] = [];
+    console.log = () => {};
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    try {
+      await runGraphUsefulness(engine, [
+        'retrieval-proof', 'run', proof, 'unexpected',
+        '--out', out, '--source', 'not-a-real-source',
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(errors.join('\n')).toContain('Unexpected argument: unexpected');
+      expect(errors.join('\n')).not.toMatch(/not found|archived/i);
+      expect(existsSync(out)).toBe(false);
+
+      errors.length = 0;
+      _resetCliExitVerdictForTests();
+      await runGraphUsefulness(engine, [
+        'retrieval-proof', 'run', missing, 'unexpected', '--out', out,
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(errors.join('\n')).toContain('Unexpected argument: unexpected');
+      expect(errors.join('\n')).not.toMatch(/ENOENT|no such file|not found/i);
+      expect(existsSync(out)).toBe(false);
+
+      errors.length = 0;
+      _resetCliExitVerdictForTests();
+      await runGraphUsefulness(engine, [
+        'retrieval-proof', 'run', proof, '--', '--out', out,
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(errors.join('\n')).toContain('Unexpected arguments: --out');
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
   test('fails the live proof when the graph changes mid-run', async () => {
     const raw = readFileSync(join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json'), 'utf8');
     const manifest = parseRetrievalProofManifest(raw);
@@ -1938,6 +1986,36 @@ describe('retrieval proof', () => {
       expect(result.checks.production_mutations).toBeGreaterThan(0);
     } finally {
       engine.executeRaw = original;
+    }
+  });
+
+  test('a backlink added and removed during a question fails the proof', async () => {
+    const from = 'topics/revert-from';
+    const to = 'topics/revert-to';
+    await engine.putPage(from, { title: 'From', compiled_truth: 'revert from', type: 'note' });
+    await engine.putPage(to, { title: 'To', compiled_truth: 'revert to', type: 'note' });
+    _setRetrievalProofSearchForTests(async () => {
+      await engine.addLink(from, to, 'boost', 'related_to', 'manual');
+      const removed = await engine.removeLink(from, to, 'related_to', 'manual');
+      expect(removed).toBe(1);
+      return [{ slug: to, source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'reverted-link', query: 'revert boost', relevant_slugs: [to] },
+        ],
+      }, { sourceId: 'default' });
+      expect(result.questions.map(q => q.score)).toEqual(['pass']);
+      expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
+      expect(result.fingerprint_before.link_rows).toBe(result.fingerprint_after.link_rows);
+      expect(result.fingerprint_before.active_pages).toBe(result.fingerprint_after.active_pages);
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+      expect(await linkCount(engine, from, to)).toBe(0);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
     }
   });
 

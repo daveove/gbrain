@@ -239,21 +239,82 @@ export interface RunRetrievalProofOpts {
 }
 
 /**
- * Non-zero when the graph fingerprint changed during the proof.
- * A matching sha256 is the only zero. Any difference is at least 1 so a
- * changing graph cannot be reported as production_mutations: 0.
+ * Non-zero when the graph fingerprint changed during the proof, or when
+ * `watermarkChanged` is set. A matching sha256 with a stable watermark is
+ * the only zero. Any difference is at least 1 so a changing graph cannot
+ * be reported as production_mutations: 0.
  */
 export function retrievalProofMutationCount(
   before: GraphFingerprint,
   after: GraphFingerprint,
+  opts?: { watermarkChanged?: boolean },
 ): number {
-  if (before.sha256 === after.sha256) return 0;
+  const watermarkChanged = opts?.watermarkChanged === true;
+  if (before.sha256 === after.sha256 && !watermarkChanged) return 0;
   const delta =
     Math.abs(after.active_pages - before.active_pages)
     + Math.abs(after.link_rows - before.link_rows)
     + Math.abs(after.valid_links - before.valid_links)
     + Math.abs(after.zero_degree_pages - before.zero_degree_pages);
   return Math.max(1, delta);
+}
+
+/**
+ * Tables whose rows change retrieval. Sequence counters catch an insert
+ * that is deleted before the final fingerprint. Row xmin catches an update
+ * that is written back. pg_stat tuple counters are not used: they flush
+ * late and can move during a proof that did not write.
+ */
+const CORPUS_WATERMARK_TABLES = [
+  'pages',
+  'links',
+  'content_chunks',
+  'sources',
+  'page_aliases',
+  'slug_aliases',
+  'takes',
+  'config',
+] as const;
+
+const CORPUS_WATERMARK_SEQUENCES = [
+  'pages_id_seq',
+  'links_id_seq',
+  'content_chunks_id_seq',
+  'page_aliases_id_seq',
+  'slug_aliases_id_seq',
+  'takes_id_seq',
+] as const;
+
+/**
+ * Monotonic corpus-mutation watermark. Endpoint fingerprints miss a
+ * backlink that is committed during a question and removed before the
+ * final snapshot: the hashes match, but the sequence or the row xmin
+ * does not return to its earlier value.
+ */
+async function readCorpusMutationWatermark(engine: BrainEngine): Promise<string> {
+  const xidSql = CORPUS_WATERMARK_TABLES
+    .map((table) => `COALESCE((SELECT max(xmin::text::bigint) FROM ${table}), 0)::text`)
+    .join(` || ',' || `);
+  const rows = await engine.executeRaw<{ watermark: string | null }>(
+    `SELECT
+       COALESCE((
+         SELECT string_agg(
+           sequencename || '=' || COALESCE(last_value::text, 'none'),
+           ',' ORDER BY sequencename
+         )
+         FROM pg_sequences
+         WHERE sequencename = ANY($1::text[])
+       ), '')
+       || '|' ||
+       ${xidSql}
+       AS watermark`,
+    [[...CORPUS_WATERMARK_SEQUENCES]],
+  );
+  const watermark = rows[0]?.watermark;
+  if (typeof watermark !== 'string' || watermark.length === 0) {
+    throw new Error('Corpus mutation watermark returned no row');
+  }
+  return watermark;
 }
 
 /** Pass requires no failed questions, no Readwise cites, and an unchanged graph. */
@@ -389,6 +450,9 @@ export async function runRetrievalProof(
     overrides: pin.overrides,
   }));
   const expandFn = expansionExpander === PROOF_EXPANSION_EXPANDER_ID ? expandQuery : undefined;
+  // Watermark first, fingerprint last on the way out, so every question
+  // sits inside the window. A reverted write still moves the watermark.
+  const watermarkBefore = await readCorpusMutationWatermark(engine);
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
 
@@ -426,12 +490,17 @@ export async function runRetrievalProof(
 
   // Live config again. A change since the pin makes sha256 differ even
   // when the graph counts did not, so production_mutations cannot stay 0.
+  // The watermark covers the case the hashes miss: a write during a
+  // question that is undone before this snapshot.
   const afterPin = await readProofSearchPin(engine);
   const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
+  const watermarkAfter = await readCorpusMutationWatermark(engine);
   const scores = { pass: 0, partial: 0, fail: 0 };
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = citedReadwisePageCount(results, opts.sourceId);
-  const productionMutations = retrievalProofMutationCount(before, after);
+  const productionMutations = retrievalProofMutationCount(before, after, {
+    watermarkChanged: watermarkBefore !== watermarkAfter,
+  });
 
   return {
     passed: retrievalProofPassed(scores.fail, citedReadwise, productionMutations),
