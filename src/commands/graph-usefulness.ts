@@ -482,6 +482,11 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
         setCliExitVerdict(2);
         return;
       }
+      if (isResolverUserError(e)) {
+        console.error(e instanceof Error ? e.message : String(e));
+        setCliExitVerdict(1);
+        return;
+      }
       throw e;
     }
     if (outPath) {

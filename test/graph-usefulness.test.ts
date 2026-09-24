@@ -28,6 +28,7 @@ import {
   guardsAllLiteralTrue,
   loadRelationManifestFile,
   MutationReceiptExistsError,
+  _setBeforeGuardedLinkInsertForTests,
   _setBeforeReceiptCommitForTests,
   parseRelationManifest,
 } from '../src/core/graph-usefulness/relation-manifest.ts';
@@ -48,15 +49,17 @@ import { classifyJunkSlugs, slugLooksReadwise } from '../src/core/graph-usefulne
 let engine: BrainEngine;
 
 function failFingerprintOnCall(target: BrainEngine, which: number): () => void {
-  const original = target.executeRaw.bind(target);
+  const original = target.executeRaw;
   let fpCalls = 0;
-  target.executeRaw = async (sql, params, opts) => {
+  // Keep the receiver. A bound wrapper would run the guarded insert's
+  // transaction statements on the outer connection and stall PGLite.
+  target.executeRaw = async function(this: BrainEngine, sql, params, opts) {
     if (typeof sql === 'string' && sql.includes('zero_degree_pages')) {
       fpCalls += 1;
       if (fpCalls === which) throw new Error('simulated fingerprint failure');
     }
-    return original(sql, params, opts);
-  };
+    return original.call(this, sql, params, opts);
+  } as BrainEngine['executeRaw'];
   return () => { target.executeRaw = original; };
 }
 
@@ -186,7 +189,7 @@ describe('graph CLI routing', () => {
       throw exitError;
     }) as typeof process.exit;
     console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
-    const original = engine.addLink.bind(engine);
+    const original = engine.addLink;
     let calls = 0;
     engine.addLink = async (...args) => {
       calls += 1;
@@ -297,25 +300,19 @@ describe('limit parsing', () => {
         },
       ],
     }));
-    const original = engine.addLink.bind(engine);
-    const linked: string[] = [];
-    engine.addLink = async (...args) => {
-      linked.push(String(args[1]));
-      return original(...args);
-    };
     const origLog = console.log;
     console.log = () => {};
     try {
       await runGraphUsefulness(engine, [
         'relations', 'apply', '--limit=1', manifestPath, '--apply', '--yes', `--receipt-out=${receiptPath}`,
       ]);
-      expect(linked).toEqual(['topics/lim-b']);
+      expect(await linkCount(engine, 'topics/lim-a', 'topics/lim-b')).toBe(1);
+      expect(await linkCount(engine, 'topics/lim-a', 'topics/lim-c')).toBe(0);
       const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
       expect(receipt.counts.planned).toBe(1);
       expect(receipt.counts.applied).toBe(1);
       expect(receipt.mode).toBe('apply');
     } finally {
-      engine.addLink = original;
       console.log = origLog;
       process.exitCode = undefined;
       _resetCliExitVerdictForTests();
@@ -380,13 +377,11 @@ describe('relation manifest', () => {
     const raw = JSON.stringify(manifest);
     const receiptDir = mkdtempSync(join(tmpdir(), 'gbrain-receipt-'));
     const receiptPath = join(receiptDir, 'partial.json');
-    const original = engine.addLink.bind(engine);
     let calls = 0;
-    engine.addLink = async (...args) => {
+    _setBeforeGuardedLinkInsertForTests(async () => {
       calls += 1;
       if (calls === 2) throw new Error('simulated batch failure');
-      return original(...args);
-    };
+    });
     try {
       await expect(applyRelationManifest(engine, manifest, raw, {
         apply: true,
@@ -397,7 +392,7 @@ describe('relation manifest', () => {
       expect(receipt.outcomes.filter((o: { status: string }) => o.status === 'applied').length).toBe(1);
       expect(receipt.after.sha256).toBeTruthy();
     } finally {
-      engine.addLink = original;
+      _setBeforeGuardedLinkInsertForTests(null);
     }
   });
 
@@ -505,7 +500,7 @@ describe('relation manifest', () => {
     const body = readFileSync(receiptPath, 'utf8');
     expect(JSON.parse(body).mode).toBe('apply');
 
-    const original = engine.addLink.bind(engine);
+    const original = engine.addLink;
     let calls = 0;
     engine.addLink = async (...args) => {
       calls += 1;
@@ -547,7 +542,7 @@ describe('relation manifest', () => {
       }],
     }));
     const origGet = engine.getConfig.bind(engine);
-    const origAdd = engine.addLink.bind(engine);
+    const origAdd = engine.addLink;
     let calls = 0;
     engine.getConfig = async (key: string) => {
       if (key === 'schema_pack') return 'gbrain-base';
@@ -594,7 +589,7 @@ describe('relation manifest', () => {
     const blocker = join(dir, 'not-a-directory');
     writeFileSync(blocker, 'x');
     const receiptPath = join(blocker, 'receipt.json');
-    const original = engine.addLink.bind(engine);
+    const original = engine.addLink;
     let calls = 0;
     engine.addLink = async (...args) => {
       calls += 1;
@@ -724,13 +719,11 @@ describe('relation manifest', () => {
       ],
     }));
     const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-fp-loop-')), 'receipt.json');
-    const original = engine.addLink.bind(engine);
     let calls = 0;
-    engine.addLink = async (...args) => {
+    _setBeforeGuardedLinkInsertForTests(async () => {
       calls += 1;
       if (calls === 2) throw new Error('simulated batch failure');
-      return original(...args);
-    };
+    });
     const restore = failFingerprintOnCall(engine, 2);
     try {
       await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
@@ -740,8 +733,110 @@ describe('relation manifest', () => {
       expect(await linkCount(engine, 'topics/fp-loop-a', 'topics/fp-loop-b')).toBe(0);
       expect(existsSync(receiptPath)).toBe(false);
     } finally {
-      engine.addLink = original;
+      _setBeforeGuardedLinkInsertForTests(null);
       restore();
+    }
+  });
+
+  test('a concurrent edge under the no-edge lock is not overwritten or applied', async () => {
+    await engine.putPage('topics/race-same-a', { title: 'Race A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/race-same-b', { title: 'Race B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/race-diff-a', { title: 'Race C', compiled_truth: 'c', type: 'note' });
+    await engine.putPage('topics/race-diff-b', { title: 'Race D', compiled_truth: 'd', type: 'note' });
+
+    const same = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'race-same',
+        from_slug: 'topics/race-same-a',
+        to_slug: 'topics/race-same-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'manifest-context',
+        guards: TRUE_GUARDS,
+      }],
+    }));
+    _setBeforeGuardedLinkInsertForTests(async (tx, row) => {
+      await tx.addLink(
+        row.from_slug,
+        row.to_slug,
+        'concurrent-context',
+        row.link_type,
+        row.link_source,
+        row.from_slug,
+        undefined,
+        {
+          fromSourceId: row.from_source_id ?? 'default',
+          toSourceId: row.to_source_id ?? 'default',
+          originSourceId: row.from_source_id ?? 'default',
+        },
+      );
+    });
+    try {
+      const sameResult = await applyRelationManifest(engine, same, JSON.stringify(same), { apply: true });
+      expect(sameResult.applied).toBe(0);
+      expect(sameResult.outcomes[0]?.status).toBe('skipped_already_linked');
+      expect(sameResult.outcomes[0]?.reason).toBe('forward edge already exists');
+      const sameRows = await engine.executeRaw<{ link_type: string; context: string; n: string }>(
+        `SELECT l.link_type, l.context, count(*)::text AS n
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL
+          GROUP BY l.link_type, l.context`,
+        ['topics/race-same-a', 'topics/race-same-b'],
+      );
+      expect(sameRows).toEqual([{ link_type: 'related_to', context: 'concurrent-context', n: '1' }]);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
+    }
+
+    const different = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'race-diff',
+        from_slug: 'topics/race-diff-a',
+        to_slug: 'topics/race-diff-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'manifest-context',
+        guards: TRUE_GUARDS,
+      }],
+    }));
+    _setBeforeGuardedLinkInsertForTests(async (tx, row) => {
+      await tx.addLink(
+        row.from_slug,
+        row.to_slug,
+        'other-edge',
+        'mentions',
+        'manual',
+        row.from_slug,
+        undefined,
+        {
+          fromSourceId: row.from_source_id ?? 'default',
+          toSourceId: row.to_source_id ?? 'default',
+          originSourceId: row.from_source_id ?? 'default',
+        },
+      );
+    });
+    try {
+      const diffResult = await applyRelationManifest(engine, different, JSON.stringify(different), { apply: true });
+      expect(diffResult.applied).toBe(0);
+      expect(diffResult.outcomes[0]?.status).toBe('skipped_already_linked');
+      const diffRows = await engine.executeRaw<{ link_type: string; link_source: string }>(
+        `SELECT l.link_type, l.link_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL
+          ORDER BY l.link_type`,
+        ['topics/race-diff-a', 'topics/race-diff-b'],
+      );
+      expect(diffRows).toEqual([{ link_type: 'mentions', link_source: 'manual' }]);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
     }
   });
 
@@ -757,17 +852,19 @@ describe('relation manifest', () => {
 
 describe('graph fingerprint identities', () => {
   test('reads counts and identities in one statement', async () => {
-    const original = engine.executeRaw.bind(engine);
+    const original = engine.executeRaw;
     const fpSql: string[] = [];
-    engine.executeRaw = async (sql, params, opts) => {
+    engine.executeRaw = async function(this: BrainEngine, sql, params, opts) {
       if (typeof sql === 'string' && sql.includes('zero_degree_pages')) fpSql.push(sql);
-      return original(sql, params, opts);
-    };
+      return original.call(this, sql, params, opts);
+    } as BrainEngine['executeRaw'];
     try {
       const fp = await computeGraphFingerprint(engine);
       expect(fpSql).toHaveLength(1);
       expect(fpSql[0]).toContain('page_identities');
       expect(fpSql[0]).toContain('link_identities');
+      expect(fpSql[0]).toContain('corpus_revision');
+      expect(fpSql[0]).toContain('content_chunks');
       expect(fp.active_pages).toBeGreaterThan(0);
       expect(fp.sha256).toHaveLength(64);
     } finally {
@@ -790,6 +887,48 @@ describe('graph fingerprint identities', () => {
     expect(after.zero_degree_pages).toBe(before.zero_degree_pages);
     expect(after.sha256).not.toBe(before.sha256);
     expect(retrievalProofMutationCount(before, after)).toBeGreaterThan(0);
+  });
+
+  test('changes sha256 when content, chunks, or embeddings change without graph identity changes', async () => {
+    const slug = 'topics/corpus-rev';
+    await engine.putPage(slug, { title: 'Rev', compiled_truth: 'body-v1', type: 'note' });
+    await engine.upsertChunks(slug, [
+      { chunk_index: 0, chunk_text: 'body-v1', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'default' });
+    const before = await computeGraphFingerprint(engine);
+
+    await engine.putPage(slug, { title: 'Rev', compiled_truth: 'body-v2', type: 'note' });
+    const afterContent = await computeGraphFingerprint(engine);
+    expect(afterContent.sha256).not.toBe(before.sha256);
+    expect(afterContent.active_pages).toBe(before.active_pages);
+    expect(afterContent.link_rows).toBe(before.link_rows);
+    expect(afterContent.valid_links).toBe(before.valid_links);
+    expect(afterContent.zero_degree_pages).toBe(before.zero_degree_pages);
+
+    await engine.executeRaw(
+      `UPDATE content_chunks SET chunk_text = 'chunk-rewritten'
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    const afterChunk = await computeGraphFingerprint(engine);
+    expect(afterChunk.sha256).not.toBe(afterContent.sha256);
+    expect(afterChunk.active_pages).toBe(before.active_pages);
+    expect(afterChunk.link_rows).toBe(before.link_rows);
+
+    await engine.executeRaw(
+      `UPDATE content_chunks
+          SET embedding = array_fill(0.25, ARRAY[1536])::vector,
+              embedded_at = now()
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    const afterEmbed = await computeGraphFingerprint(engine);
+    expect(afterEmbed.sha256).not.toBe(afterChunk.sha256);
+    expect(afterEmbed.active_pages).toBe(before.active_pages);
+    expect(afterEmbed.link_rows).toBe(before.link_rows);
+    expect(retrievalProofMutationCount(afterChunk, afterEmbed)).toBeGreaterThan(0);
   });
 });
 
@@ -935,10 +1074,10 @@ describe('retrieval proof', () => {
   test('fails the live proof when the graph changes mid-run', async () => {
     const raw = readFileSync(join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json'), 'utf8');
     const manifest = parseRetrievalProofManifest(raw);
-    const original = engine.executeRaw.bind(engine);
+    const original = engine.executeRaw;
     let fpCalls = 0;
     let busy = false;
-    engine.executeRaw = async (sql, params, opts) => {
+    engine.executeRaw = async function(this: BrainEngine, sql, params, opts) {
       if (!busy && typeof sql === 'string' && sql.includes('zero_degree_pages')) {
         fpCalls += 1;
         if (fpCalls === 2) {
@@ -954,8 +1093,8 @@ describe('retrieval proof', () => {
           }
         }
       }
-      return original(sql, params, opts);
-    };
+      return original.call(this, sql, params, opts);
+    } as BrainEngine['executeRaw'];
     try {
       const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
       expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
@@ -963,6 +1102,109 @@ describe('retrieval proof', () => {
       expect(result.checks.production_mutations).toBeGreaterThan(0);
     } finally {
       engine.executeRaw = original;
+    }
+  });
+
+  test('a content rewrite during the proof counts as a mutation when identities stay put', async () => {
+    const slug = 'topics/proof-corpus';
+    await engine.putPage(slug, { title: 'Proof corpus', compiled_truth: 'before rewrite', type: 'note' });
+    const raw = readFileSync(join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json'), 'utf8');
+    const manifest = parseRetrievalProofManifest(raw);
+    const original = engine.executeRaw;
+    let fpCalls = 0;
+    let busy = false;
+    engine.executeRaw = async function(this: BrainEngine, sql, params, opts) {
+      if (!busy && typeof sql === 'string' && sql.includes('zero_degree_pages')) {
+        fpCalls += 1;
+        if (fpCalls === 2) {
+          busy = true;
+          try {
+            await engine.putPage(slug, {
+              title: 'Proof corpus',
+              compiled_truth: 'rewritten while the proof was running',
+              type: 'note',
+            });
+          } finally {
+            busy = false;
+          }
+        }
+      }
+      return original.call(this, sql, params, opts);
+    } as BrainEngine['executeRaw'];
+    try {
+      const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(result.fingerprint_after.active_pages).toBe(result.fingerprint_before.active_pages);
+      expect(result.fingerprint_after.link_rows).toBe(result.fingerprint_before.link_rows);
+      expect(result.fingerprint_after.valid_links).toBe(result.fingerprint_before.valid_links);
+      expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
+      expect(result.passed).toBe(false);
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+    } finally {
+      engine.executeRaw = original;
+    }
+  });
+
+  test('rejects a string expectation list instead of walking its characters', () => {
+    const proof = (field: string, value: unknown) => JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'q-shape',
+        query: 'parent',
+        relevant_slugs: ['topics/parent-note'],
+        [field]: value,
+      }],
+    });
+    expect(() => parseRetrievalProofManifest(proof('forbidden_slugs', 'topics/secret')))
+      .toThrow(/Question q-shape: forbidden_slugs must be an array of non-empty slug strings/);
+    expect(() => parseRetrievalProofManifest(proof('relevant_slugs', 'topics/parent-note')))
+      .toThrow(/relevant_slugs must be an array of non-empty slug strings/);
+    expect(() => parseRetrievalProofManifest(proof('forbidden_pages', 'wiki::topics/secret')))
+      .toThrow(/forbidden_pages must be an array of \{source_id, slug\} objects/);
+    expect(() => parseRetrievalProofManifest(proof('relevant_pages', { source_id: 'wiki', slug: 'topics/parent-note' })))
+      .toThrow(/relevant_pages must be an array/);
+    expect(() => scoreRetrievalQuestion({
+      id: 'q-shape',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note'],
+      forbidden_slugs: 'topics/secret' as unknown as string[],
+    }, [
+      { slug: 'topics/secret', source_id: 'wiki' },
+    ], 'wiki')).toThrow(/forbidden_slugs must be an array of non-empty slug strings/);
+  });
+
+  test('rejects an unknown or archived source in page expectations before search', async () => {
+    let searches = 0;
+    _setRetrievalProofSearchForTests(async () => {
+      searches += 1;
+      return [{ slug: 'topics/secret', source_id: 'wiki' }];
+    });
+    try {
+      await expect(runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{
+          id: 'typo-src',
+          query: 'secret',
+          relevant_pages: [{ source_id: 'default', slug: 'topics/parent-note' }],
+          forbidden_pages: [{ source_id: 'wkii', slug: 'topics/secret' }],
+        }],
+      })).rejects.toThrow(/Source "wkii" not found/);
+      expect(searches).toBe(0);
+
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, archived) VALUES ('oldwiki', 'oldwiki', true)
+         ON CONFLICT (id) DO UPDATE SET archived = true`,
+      );
+      await expect(runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{
+          id: 'arch-src',
+          query: 'secret',
+          forbidden_pages: [{ source_id: 'oldwiki', slug: 'topics/secret' }],
+        }],
+      })).rejects.toThrow(/not found or is archived/);
+      expect(searches).toBe(0);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
     }
   });
 
@@ -1277,18 +1519,12 @@ describe('relation source scope and option terminator', () => {
     let stdout = '';
     console.log = (...a: unknown[]) => { stdout += a.map(String).join(' ') + '\n'; };
     console.error = () => {};
-    const original = engine.addLink.bind(engine);
-    let calls = 0;
-    engine.addLink = async (...args) => {
-      calls += 1;
-      return original(...args);
-    };
     try {
       await runGraphUsefulness(engine, [
         'relations', 'apply', manifestPath, '--receipt-out', join(dir, 'hidden.json'), '--json',
         '--', '--apply', '--yes', '--dry-run',
       ]);
-      expect(calls).toBe(0);
+      expect(await linkCount(engine, from, to)).toBe(0);
       const hidden = JSON.parse(stdout);
       expect(hidden.mode).toBe('dry-run');
       expect(hidden.applied).toBe(0);
@@ -1299,12 +1535,11 @@ describe('relation source scope and option terminator', () => {
         '--receipt-out', join(dir, 'real.json'),
         '--', '--dry-run',
       ]);
-      expect(calls).toBe(1);
+      expect(await linkCount(engine, from, to)).toBe(1);
       const applied = JSON.parse(stdout);
       expect(applied.mode).toBe('apply');
       expect(applied.applied).toBe(1);
     } finally {
-      engine.addLink = original;
       console.log = origLog;
       console.error = origErr;
       process.exitCode = undefined;
@@ -1418,7 +1653,7 @@ describe('relation source scope and option terminator', () => {
     }]);
     writeFileSync(manifestPath, raw);
     const manifest = parseRelationManifest(raw);
-    const original = engine.addLink.bind(engine);
+    const original = engine.addLink;
     let calls = 0;
     engine.addLink = async (...args) => {
       calls += 1;
@@ -1489,7 +1724,7 @@ describe('relation source scope and option terminator', () => {
     const errors: string[] = [];
     console.log = () => {};
     console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
-    const original = engine.addLink.bind(engine);
+    const original = engine.addLink;
     let calls = 0;
     engine.addLink = async (...args) => {
       calls += 1;

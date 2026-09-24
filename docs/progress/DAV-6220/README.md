@@ -26,8 +26,8 @@ gbrain graph retrieval-proof run /path/to/retrieval-proof.json \
 
 ## Manifest contracts
 
-- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Every guard must be a JSON boolean. Apply re-checks them and writes a link only when each one is literal `true`.
-- **Retrieval proof** (`proof_version: 2`): scored question list; output includes `checks.scores` and `checks.cited_readwise_pages` (the number of Readwise hits, not the number of questions that cited any; must stay `0` for Readwise-cleared corpora). Each question's `top_k` must be a positive integer. `passed` is false when the before/after graph fingerprint differs, and `checks.production_mutations` is then non-zero. `measure` and `retrieval-proof` reject an unknown `--source` instead of scoring an empty corpus.
+- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Every guard must be a JSON boolean. Apply re-checks them and writes a link only when each one is literal `true`. The no-edge recheck and the insert share one transaction that locks the endpoint pages. A concurrent edge is left as it is and is not counted as applied.
+- **Retrieval proof** (`proof_version: 2`): scored question list; output includes `checks.scores` and `checks.cited_readwise_pages` (the number of Readwise hits, not the number of questions that cited any; must stay `0` for Readwise-cleared corpora). Each question's `top_k` must be a positive integer. Slug and page expectation fields must be arrays. Source-qualified page expectations must name an active source. `passed` is false when the before/after graph fingerprint differs, including a content, chunk, or embedding rewrite that leaves page and link identities in place, and `checks.production_mutations` is then non-zero. `measure` and `retrieval-proof` reject an unknown `--source` instead of scoring an empty corpus.
 
 ## Mutation receipt fields
 

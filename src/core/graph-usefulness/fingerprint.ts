@@ -50,6 +50,7 @@ export async function computeGraphFingerprint(
     zero_degree_pages: string;
     page_identities: unknown;
     link_identities: unknown;
+    corpus_revision: string | null;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
@@ -101,7 +102,38 @@ export async function computeGraphFingerprint(
          JOIN pages tp ON tp.id = l.to_page_id
          LEFT JOIN pages op ON op.id = l.origin_page_id
          WHERE ${linkInScope}
-       ), '[]'::json) AS link_identities`,
+       ), '[]'::json) AS link_identities,
+       COALESCE((
+         SELECT md5(string_agg(page_rev, E'\n' ORDER BY source_id, slug))
+         FROM (
+           SELECT
+             sp.source_id,
+             sp.slug,
+             md5(
+               sp.source_id || E'\n' || sp.slug || E'\n' ||
+               p.generation::text || E'\n' ||
+               COALESCE(p.content_hash, '') || E'\n' ||
+               md5(COALESCE(p.compiled_truth, '')) || E'\n' ||
+               COALESCE((
+                 SELECT md5(string_agg(
+                   c.chunk_index::text || E'\n' ||
+                   md5(c.chunk_text) || E'\n' ||
+                   COALESCE(c.embedded_text_hash, '') || E'\n' ||
+                   COALESCE(c.embedded_at::text, '') || E'\n' ||
+                   COALESCE(md5(c.embedding::text), '') || E'\n' ||
+                   COALESCE(md5(c.embedding_image::text), '') || E'\n' ||
+                   COALESCE(md5(c.embedding_multimodal::text), '') || E'\n' ||
+                   COALESCE(c.model, '') || E'\n' ||
+                   COALESCE(c.modality, '')
+                 , E'\n' ORDER BY c.chunk_index, c.id))
+                 FROM content_chunks c
+                 WHERE c.page_id = sp.id
+               ), '')
+             ) AS page_rev
+           FROM scoped_pages sp
+           JOIN pages p ON p.id = sp.id
+         ) corpus
+       ), '') AS corpus_revision`,
     params,
   );
 
@@ -109,9 +141,11 @@ export async function computeGraphFingerprint(
     active_pages: '0', link_rows: '0', valid_links: '0', zero_degree_pages: '0',
     page_identities: [],
     link_identities: [],
+    corpus_revision: '',
   };
   const pages = identityMatrix(r.page_identities);
   const links = identityMatrix(r.link_identities);
+  const corpusRevision = typeof r.corpus_revision === 'string' ? r.corpus_revision : '';
 
   const fp: GraphFingerprint = {
     active_pages: Number(r.active_pages),
@@ -120,12 +154,13 @@ export async function computeGraphFingerprint(
     zero_degree_pages: Number(r.zero_degree_pages),
     sha256: '',
   };
-  // Counts stay on the public receipt. The hash also covers identities so
-  // replacing one edge with another (same counts) changes sha256.
-  // Identities come from the same statement as the counts, so a concurrent
-  // same-count edge swap cannot tear the hash away from the counts.
+  // Counts stay on the public receipt. The hash also covers identities and
+  // a content/chunk revision, so replacing one edge with another, or
+  // rewriting page content, chunks, or embeddings without changing
+  // (source_id, slug) or links, changes sha256. All of those inputs come
+  // from the same statement, so they share one snapshot.
   const hash = createHash('sha256');
-  hash.update('graph-fingerprint-v2\n');
+  hash.update('graph-fingerprint-v3\n');
   hash.update(JSON.stringify({
     active_pages: fp.active_pages,
     link_rows: fp.link_rows,
@@ -142,6 +177,9 @@ export async function computeGraphFingerprint(
     hash.update(JSON.stringify(l));
     hash.update('\n');
   }
+  hash.update('\n');
+  hash.update(corpusRevision);
+  hash.update('\n');
   fp.sha256 = hash.digest('hex');
   return fp;
 }

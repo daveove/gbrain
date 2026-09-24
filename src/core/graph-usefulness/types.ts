@@ -68,9 +68,11 @@ export interface GraphFingerprint {
   valid_links: number;
   zero_degree_pages: number;
   /**
-   * Hash of the four counts plus ordered active-page `(source_id, slug)`
-   * identities and ordered link endpoints, type, context, and source.
-   * Aggregate counts alone stay on this object for receipts.
+   * Hash of the four counts, ordered active-page `(source_id, slug)`
+   * identities, ordered link endpoints, type, context, and source, and a
+   * content/chunk revision (page generation, content hash, compiled truth,
+   * chunk text, and embedding revision). Aggregate counts alone stay on
+   * this object for receipts.
    */
   sha256: string;
 }

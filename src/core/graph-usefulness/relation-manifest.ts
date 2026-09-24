@@ -2,6 +2,8 @@ import { createHash } from 'crypto';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { dirname } from 'path';
 import type { BrainEngine } from '../engine.ts';
+import { sanitizeForJsonb } from '../batch-rows.ts';
+import { PageMissingError } from '../engine-errors.ts';
 import { MANAGED_LINK_SOURCES } from '../ops/links.ts';
 import {
   loadActivePackForWriteVocabulary,
@@ -229,6 +231,23 @@ async function assertActivePackLinkVocabulary(
   }
 }
 
+/**
+ * Runs inside the locked apply transaction, after the endpoint pages are
+ * locked and before the no-edge recheck. Tests inject a concurrent edge
+ * or a write failure. Production leaves this null.
+ */
+let beforeGuardedLinkInsertForTests: ((
+  tx: BrainEngine,
+  row: RelationManifestRow,
+) => Promise<void>) | null = null;
+
+/** @internal */
+export function _setBeforeGuardedLinkInsertForTests(
+  fn: ((tx: BrainEngine, row: RelationManifestRow) => Promise<void>) | null,
+): void {
+  beforeGuardedLinkInsertForTests = fn;
+}
+
 /** @internal Fault injection for receipt-commit failure tests. */
 let beforeReceiptCommitForTests: (() => void) | null = null;
 
@@ -326,6 +345,73 @@ async function fingerprintAfterMutation(
   }
 }
 
+type GuardedInsertResult = 'inserted' | 'already_linked' | 'conflict';
+
+/**
+ * Recheck `no_incident_edge` and insert in one transaction.
+ *
+ * The endpoint pages are locked FOR UPDATE first, so another session cannot
+ * commit a link that references them until this transaction ends. The
+ * following statement then sees every edge that committed before the lock
+ * and inserts only when none exist. ON CONFLICT DO NOTHING does not
+ * overwrite an identical row, and a zero-row insert is a conflict rather
+ * than a new applied link.
+ */
+async function insertNoIncidentEdge(
+  engine: BrainEngine,
+  row: RelationManifestRow,
+): Promise<GuardedInsertResult> {
+  const fromSrc = row.from_source_id ?? 'default';
+  const toSrc = row.to_source_id ?? 'default';
+  const context = sanitizeForJsonb(row.context ?? 'DAV-6220 relation manifest');
+  const linkType = row.link_type || '';
+  const linkSource = row.link_source;
+
+  return engine.transaction(async (tx) => {
+    const locked = await tx.executeRaw<{ id: number; slug: string; source_id: string }>(
+      `SELECT id, slug, source_id FROM pages
+        WHERE deleted_at IS NULL
+          AND (
+            (slug = $1 AND source_id = $2)
+            OR (slug = $3 AND source_id = $4)
+          )
+        ORDER BY id
+        FOR UPDATE`,
+      [row.from_slug, fromSrc, row.to_slug, toSrc],
+    );
+    const from = locked.find(p => p.slug === row.from_slug && p.source_id === fromSrc);
+    const to = locked.find(p => p.slug === row.to_slug && p.source_id === toSrc);
+    if (!from) throw new PageMissingError('addLink', 'from', row.from_slug, fromSrc);
+    if (!to) throw new PageMissingError('addLink', 'to', row.to_slug, toSrc);
+    // Pages stay locked. A competing edge inserted here is visible to the
+    // recheck below, and another session cannot commit one until we finish.
+    await beforeGuardedLinkInsertForTests?.(tx, row);
+
+    const rows = await tx.executeRaw<{ incident_n: string; inserted_n: string }>(
+      `WITH incident AS (
+         SELECT 1 FROM links l
+         WHERE l.from_page_id = $1 AND l.to_page_id = $2
+       ),
+       inserted AS (
+         INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id)
+         SELECT $1, $2, $3, $4, $5, $1
+         WHERE NOT EXISTS (SELECT 1 FROM incident)
+         ON CONFLICT ON CONSTRAINT links_from_to_type_source_origin_unique DO NOTHING
+         RETURNING id
+       )
+       SELECT
+         (SELECT count(*)::text FROM incident) AS incident_n,
+         (SELECT count(*)::text FROM inserted) AS inserted_n`,
+      [from.id, to.id, linkType, context, linkSource],
+    );
+    const incidentN = Number(rows[0]?.incident_n ?? 0);
+    const insertedN = Number(rows[0]?.inserted_n ?? 0);
+    if (incidentN > 0) return 'already_linked';
+    if (insertedN === 0) return 'conflict';
+    return 'inserted';
+  });
+}
+
 function writeMutationReceipt(
   path: string,
   manifest: RelationManifest,
@@ -390,23 +476,17 @@ export async function applyRelationManifest(
         continue;
       }
 
-      const fromSrc = row.from_source_id ?? 'default';
-      const toSrc = row.to_source_id ?? 'default';
-      const linkOpts = {
-        fromSourceId: fromSrc,
-        toSourceId: toSrc,
-        originSourceId: fromSrc,
-      };
-      await engine.addLink(
-        row.from_slug,
-        row.to_slug,
-        row.context ?? 'DAV-6220 relation manifest',
-        row.link_type,
-        row.link_source,
-        row.from_slug,
-        undefined,
-        linkOpts,
-      ); // gbrain-allow-direct-insert: manifest-bound DAV-6220 graph reconnect — guarded apply, receipted
+      const inserted = await insertNoIncidentEdge(engine, row);
+      if (inserted !== 'inserted') {
+        outcomes.push({
+          id: row.id,
+          status: 'skipped_already_linked',
+          reason: inserted === 'conflict'
+            ? 'identical edge conflict; not overwritten'
+            : 'forward edge already exists',
+        });
+        continue;
+      }
       appliedRows.push(row);
       outcomes.push({ id: row.id, status: 'applied' });
     }

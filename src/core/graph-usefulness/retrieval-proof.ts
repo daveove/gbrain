@@ -1,6 +1,8 @@
 import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { hybridSearch } from '../search/hybrid.ts';
+import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
+import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import type {
@@ -31,10 +33,53 @@ export function retrievalHitKey(
   return `${sid}::${hit.slug}`;
 }
 
-function pageRefKey(ref: RetrievalPageRef): string {
-  if (!ref?.source_id || !ref?.slug) {
-    throw new Error('relevant_pages and forbidden_pages entries require source_id and slug');
+function questionLabel(q: { id?: string }): string {
+  return q.id || '(missing id)';
+}
+
+function expectationError(questionId: string, field: string, detail: string): Error {
+  return new Error(`Question ${questionId}: ${field} ${detail}`);
+}
+
+/** Slug expectation fields must be arrays of non-empty strings. A string would be walked character by character. */
+function readSlugList(value: unknown, questionId: string, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.length === 0)) {
+    throw expectationError(questionId, field, 'must be an array of non-empty slug strings');
   }
+  return value as string[];
+}
+
+/** Page expectation fields must be arrays of `{source_id, slug}` objects. */
+function readPageList(value: unknown, questionId: string, field: string): RetrievalPageRef[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw expectationError(questionId, field, 'must be an array of {source_id, slug} objects');
+  }
+  const refs: RetrievalPageRef[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw expectationError(questionId, field, 'entries require source_id and slug');
+    }
+    const sourceId = (entry as { source_id?: unknown }).source_id;
+    const slug = (entry as { slug?: unknown }).slug;
+    if (typeof sourceId !== 'string' || sourceId.length === 0 || typeof slug !== 'string' || slug.length === 0) {
+      throw expectationError(questionId, field, 'entries require source_id and slug');
+    }
+    refs.push({ source_id: sourceId, slug });
+  }
+  return refs;
+}
+
+function assertExpectationShape(q: RetrievalProofQuestion): void {
+  const questionId = questionLabel(q);
+  readSlugList(q.relevant_slugs, questionId, 'relevant_slugs');
+  readSlugList(q.forbidden_slugs, questionId, 'forbidden_slugs');
+  readPageList(q.relevant_pages, questionId, 'relevant_pages');
+  readPageList(q.forbidden_pages, questionId, 'forbidden_pages');
+}
+
+function pageRefKey(ref: RetrievalPageRef): string {
   return `${ref.source_id}::${ref.slug}`;
 }
 
@@ -49,11 +94,16 @@ function expectationKeys(
   pages: RetrievalPageRef[] | undefined,
   slugs: string[] | undefined,
   sourceId: string | undefined,
+  questionId: string,
+  pageField: string,
+  slugField: string,
 ): string[] {
-  const keys = (pages ?? []).map(pageRefKey);
-  if ((slugs?.length ?? 0) > 0) {
+  const pageRefs = readPageList(pages, questionId, pageField) ?? [];
+  const slugRefs = readSlugList(slugs, questionId, slugField);
+  const keys = pageRefs.map(pageRefKey);
+  if ((slugRefs?.length ?? 0) > 0) {
     if (!sourceId) throw new SlugOnlyProofNeedsSourceError();
-    for (const slug of slugs ?? []) keys.push(`${sourceId}::${slug}`);
+    for (const slug of slugRefs ?? []) keys.push(`${sourceId}::${slug}`);
   }
   return keys;
 }
@@ -85,7 +135,8 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
     throw new Error('Retrieval proof manifest must include questions');
   }
   for (const q of parsed.questions) {
-    const questionId = q.id || '(missing id)';
+    const questionId = questionLabel(q);
+    assertExpectationShape(q);
     positiveHitThreshold(q.min_hits_in_top_k, questionId);
     positiveTopK(q.top_k, questionId);
   }
@@ -102,16 +153,21 @@ export function scoreRetrievalQuestion(
   hits: Array<{ slug: string; source_id?: string }>,
   sourceId?: string,
 ): RetrievalScore {
-  const k = positiveTopK(q.top_k, q.id || '(missing id)');
+  const questionId = questionLabel(q);
+  const k = positiveTopK(q.top_k, questionId);
   const slice = hits.slice(0, k).map(h => retrievalHitKey(h, sourceId));
-  const forbidden = expectationKeys(q.forbidden_pages, q.forbidden_slugs, sourceId);
+  const forbidden = expectationKeys(
+    q.forbidden_pages, q.forbidden_slugs, sourceId, questionId, 'forbidden_pages', 'forbidden_slugs',
+  );
   if (forbidden.some(s => slice.includes(s))) return 'fail';
 
-  const relevant = expectationKeys(q.relevant_pages, q.relevant_slugs, sourceId);
+  const relevant = expectationKeys(
+    q.relevant_pages, q.relevant_slugs, sourceId, questionId, 'relevant_pages', 'relevant_slugs',
+  );
   if (relevant.length === 0) return 'partial';
 
   const matched = relevant.filter(s => slice.includes(s)).length;
-  const minHits = positiveHitThreshold(q.min_hits_in_top_k, q.id || '(missing id)');
+  const minHits = positiveHitThreshold(q.min_hits_in_top_k, questionId);
   if (matched >= minHits && slice[0] && relevant.includes(slice[0])) return 'pass';
   if (matched >= minHits) return 'partial';
   return 'fail';
@@ -195,27 +251,54 @@ export function _setRetrievalProofSearchForTests(fn: RetrievalProofSearch | null
   retrievalSearchForTests = fn;
 }
 
+/**
+ * Every distinct relevant_pages / forbidden_pages source must be an active
+ * concrete source. A typo such as `wkii` would otherwise fail to match a
+ * real hit and let the proof pass. Same bar as CLI scope and relation rows.
+ */
+async function assertActiveExpectationSources(
+  engine: BrainEngine,
+  questions: RetrievalProofQuestion[],
+): Promise<void> {
+  const ids = new Set<string>();
+  for (const q of questions) {
+    const questionId = questionLabel(q);
+    for (const ref of readPageList(q.relevant_pages, questionId, 'relevant_pages') ?? []) ids.add(ref.source_id);
+    for (const ref of readPageList(q.forbidden_pages, questionId, 'forbidden_pages') ?? []) ids.add(ref.source_id);
+  }
+  for (const id of ids) {
+    if (id === ALL_SOURCES || !isValidSourceId(id)) {
+      throw new SourceTargetError(
+        `Invalid --source value "${id}". Must match [a-z0-9-]{1,32}.`,
+      );
+    }
+    await resolveSourceId(engine, id);
+  }
+}
+
 export async function runRetrievalProof(
   engine: BrainEngine,
   manifest: RetrievalProofManifest,
   opts: RunRetrievalProofOpts = {},
 ): Promise<RetrievalProofResult> {
-  if (manifestUsesBareSlugs(manifest) && !opts.sourceId) {
+  const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
+  for (const q of questions) assertExpectationShape(q);
+  if (manifestUsesBareSlugs({ ...manifest, questions }) && !opts.sourceId) {
     throw new SlugOnlyProofNeedsSourceError();
   }
 
-  const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
   // Reject a malformed top_k before any search. slice(0, -1) would otherwise
   // score almost the whole result set.
   for (const q of questions) {
-    positiveTopK(q.top_k, q.id || '(missing id)');
+    positiveTopK(q.top_k, questionLabel(q));
   }
+  await assertActiveExpectationSources(engine, questions);
 
   const before = await computeGraphFingerprint(engine);
   const results: RetrievalProofQuestionResult[] = [];
 
   for (const q of questions) {
-    const topK = positiveTopK(q.top_k, q.id || '(missing id)');
+    const topK = positiveTopK(q.top_k, questionLabel(q));
     const searchOpts = {
       limit: topK,
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
