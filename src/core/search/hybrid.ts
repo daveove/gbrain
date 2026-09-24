@@ -44,6 +44,7 @@ import {
   classifyQuery,
   classifyQueryWithBrainPatterns,
   intentBanksFromRaw,
+  intentPatternFingerprint,
   isAmbiguousModalityQuery,
   loadEngineIntentPatterns,
   type QuerySuggestions,
@@ -2423,7 +2424,15 @@ export async function hybridSearchCached(
   // that scopes the cache row so a tokenmax write can't be served to a
   // conservative read. See [CDX-4] in the plan.
   const { loadSearchModeConfig, resolveSearchMode, knobsHash } = await import('./mode.ts');
-  const modeInputForCache = await loadSearchModeConfig(engine);
+  // A retrieval proof passes `_pinnedSearch` so the cache key and the inner
+  // search share one sealed snapshot. Reloading mode here, or classifying
+  // with the 30s intent-pattern bank, would store a fresh ranking under a
+  // stale key (or serve a stale hit) while the proof fingerprint still
+  // reports the fresh config.
+  const pinned = opts?._pinnedSearch;
+  const modeInputForCache = pinned
+    ? { mode: pinned.mode, overrides: pinned.overrides }
+    : await loadSearchModeConfig(engine);
   const resolvedForCache = resolveSearchMode({
     // T4/D5 — per-call mode folds into the cache key (resolved_mode is part
     // of knobsHash) so a per-call `--mode tokenmax` read can't be served a
@@ -2468,9 +2477,17 @@ export async function hybridSearchCached(
   // provider/dim. isCacheSafe compares the resolved column's full
   // embedding space (name + dim + model) against cfg and returns true
   // only when ALL match. Otherwise skip.
-  const mergedCfgCached = await loadConfigWithEngine(engine).catch(() => null);
-  const cfgCached = mergedCfgCached ?? ((await import('../config.ts')).loadConfig()) ?? { engine: 'pglite' as const };
-  const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
+  const mergedCfgCached = pinned ? null : await loadConfigWithEngine(engine).catch(() => null);
+  const cfgCached = pinned
+    ? {
+        engine: 'pglite' as const,
+        embedding_model: pinned.embeddingColumn.embeddingModel,
+        embedding_dimensions: pinned.embeddingColumn.dimensions,
+      }
+    : (mergedCfgCached ?? ((await import('../config.ts')).loadConfig()) ?? { engine: 'pglite' as const });
+  const resolvedColCached = pinned
+    ? resolveEmbeddingColumn({ embeddingColumn: pinned.embeddingColumn }, { engine: 'pglite' })
+    : resolveEmbeddingColumn(opts, cfgCached);
   const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
 
   // wave-g (#4415): classify ONCE with the brain's `search.intent_patterns`
@@ -2479,7 +2496,13 @@ export async function hybridSearchCached(
   // hybridSearch resolves. Pre-fix, det= was computed via the pattern-less
   // global classifier, so a fresh process keyed its first cache row under a
   // pattern-less detail while the stored results used the pattern-aware one.
-  const intentStateForCache = await loadEngineIntentPatterns(engine);
+  // A proof pin compiles the sealed raw value instead of that TTL cache.
+  const intentStateForCache = pinned
+    ? {
+        banks: intentBanksFromRaw(pinned.intentPatterns),
+        fingerprint: intentPatternFingerprint(pinned.intentPatterns),
+      }
+    : await loadEngineIntentPatterns(engine);
   const cacheSuggestions = classifyQuery(query, intentStateForCache.banks);
 
   // 2026-08 fix wave (E5b): resolve the adaptive-return gate ONCE for both
@@ -2491,10 +2514,13 @@ export async function hybridSearchCached(
   // write (or bank-TTL expiry) landing BETWEEN the two loads can store a set
   // trimmed under intent X beneath a key claiming intent Y for up to
   // ttl_seconds — same class as the documented #4356 double-resolution
-  // caveat: cache-only, self-healing, accepted.
+  // caveat: cache-only, self-healing, accepted. A proof pin closes that
+  // window for the call: this key and the inner search both use the pin.
   const adaptiveResolvedForCache = resolveAdaptiveReturn(
     opts?.adaptiveReturn,
-    adaptiveReturnFromConfig(cfgCached as unknown as Record<string, unknown> | null),
+    pinned
+      ? pinned.adaptiveReturn
+      : adaptiveReturnFromConfig(cfgCached as unknown as Record<string, unknown> | null),
   );
 
   // Cache key carries the column + provider so different embedding spaces

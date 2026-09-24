@@ -32,6 +32,11 @@ export interface GraphSnapshot {
    * `zero_degree_pages` stays on the retrieval predicate.
    */
   measure_zero_degree_pages: number;
+  /**
+   * Live incident links for `graph measure`. Zero when `measure` was not
+   * requested. The fingerprint's `link_rows` stays on the retrieval predicate.
+   */
+  measure_link_rows: number;
 }
 
 function resolveScope(opts?: ScopeOpts): string[] | null {
@@ -113,6 +118,25 @@ export async function computeGraphSnapshot(
        AND l.link_source IS DISTINCT FROM 'mentions'`
     : 'FALSE';
   const linkInScope = `(${bothEndsInScope}) OR (${inboundRankingEdge})`;
+  // Public measure link_rows counts every live edge that touches a scoped
+  // page, in either direction, including mentions and cross-source edges.
+  // linkInScope stays the retrieval fingerprint predicate.
+  const measureIncident =
+    `EXISTS (
+       SELECT 1 FROM pages ep
+       WHERE ep.deleted_at IS NULL
+         AND ${pageVisible('ep')}
+         AND ${inScope('ep')}
+         AND (ep.id = l.from_page_id OR ep.id = l.to_page_id)
+     )
+     AND EXISTS (
+       SELECT 1 FROM pages fp
+       WHERE fp.id = l.from_page_id AND fp.deleted_at IS NULL AND ${pageVisible('fp')}
+     )
+     AND EXISTS (
+       SELECT 1 FROM pages tp
+       WHERE tp.id = l.to_page_id AND tp.deleted_at IS NULL AND ${pageVisible('tp')}
+     )`;
   // Degree for `graph measure` is connectivity, not backlink ranking.
   // linkInScope admits a cross-source edge only when its target is in scope,
   // so an in-scope page with only an outgoing edge looks zero-degree.
@@ -142,6 +166,7 @@ export async function computeGraphSnapshot(
   // cannot tear across a concurrent commit.
   const measureSql = opts?.measure
     ? `,
+       (SELECT count(*)::text FROM links l WHERE ${measureIncident}) AS measure_link_rows,
        (SELECT COALESCE(avg(deg), 0)::text FROM measure_degrees) AS avg_degree,
        (SELECT COALESCE((percentile_cont(0.5) WITHIN GROUP (ORDER BY deg)), 0)::text FROM measure_degrees) AS median_degree,
        (SELECT count(*)::text FROM measure_degrees WHERE deg = 0) AS measure_zero_degree_pages,
@@ -159,6 +184,7 @@ export async function computeGraphSnapshot(
     page_alias_revision: string | null;
     slug_alias_revision: string | null;
     measure_zero_degree_pages?: string;
+    measure_link_rows?: string;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
@@ -233,7 +259,8 @@ export async function computeGraphSnapshot(
                    COALESCE(md5(c.embedding_image::text), '') || E'\n' ||
                    COALESCE(md5(c.embedding_multimodal::text), '') || E'\n' ||
                    COALESCE(c.model, '') || E'\n' ||
-                   COALESCE(c.modality, '')
+                   COALESCE(c.modality, '') || E'\n' ||
+                   COALESCE(c.chunk_source, '')
                  , E'\n' ORDER BY c.chunk_index, c.id))
                  FROM content_chunks c
                  WHERE c.page_id = sp.id
@@ -307,8 +334,9 @@ export async function computeGraphSnapshot(
   // Counts stay on the public receipt. The hash also covers identities, a
   // content/chunk/ranking revision, alias tables, and each source's archived
   // flag. Replacing one edge with another, rewriting page content, changing
-  // a ranking input (effective date, emotional weight, active takes, title,
-  // type, aliases), or archiving a source changes sha256. Archived sources
+  // a chunk's source, changing a ranking input (effective date, emotional
+  // weight, active takes, title, type, aliases), or archiving a source
+  // changes sha256. Archived sources
   // are omitted from page inputs, matching search. Scoped link inputs also
   // keep every non-mention inbound edge into those pages, including edges
   // whose from-page is outside the source, matching getBacklinkCounts. All of those
@@ -370,5 +398,6 @@ export async function computeGraphSnapshot(
     median_degree: opts?.measure ? finiteNumber(r.median_degree) : 0,
     junk_slug_samples,
     measure_zero_degree_pages: opts?.measure ? finiteNumber(r.measure_zero_degree_pages) : 0,
+    measure_link_rows: opts?.measure ? finiteNumber(r.measure_link_rows) : 0,
   };
 }

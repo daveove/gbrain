@@ -23,7 +23,11 @@ import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprin
 import { canonicalSearchConfig, PROOF_EXPANSION_EXPANDER_ID, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { expandQuery } from '../src/core/search/expansion.ts';
-import { awaitPendingSearchCacheWrites, hybridSearch } from '../src/core/search/hybrid.ts';
+import { awaitPendingSearchCacheWrites, hybridSearch, hybridSearchCached } from '../src/core/search/hybrid.ts';
+import {
+  clearIntentPatternConfigForTests,
+  loadEngineIntentPatterns,
+} from '../src/core/search/query-intent.ts';
 import { resolveSearchMode } from '../src/core/search/mode.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -267,12 +271,15 @@ describe('graph-usefulness measure', () => {
       const fpOutgoing = await computeGraphFingerprint(engine, { sourceId: 'degout' });
       expect(outgoing.zero_degree_pages).toBe(0);
       expect(outgoing.avg_degree).toBe(1);
+      expect(outgoing.link_rows).toBe(before.link_rows + 1);
+      expect(outgoing.fingerprint.link_rows).toBe(fpBefore.link_rows);
       expect(outgoing.fingerprint.zero_degree_pages).toBe(fpBefore.zero_degree_pages);
       expect(fpOutgoing.sha256).toBe(fpBefore.sha256);
       expect(fpOutgoing.link_rows).toBe(fpBefore.link_rows);
       const incomingSide = await measureGraphUsefulness(engine, { sourceId: 'degin' });
       expect(incomingSide.zero_degree_pages).toBe(0);
       expect(incomingSide.avg_degree).toBe(1);
+      expect(incomingSide.link_rows).toBe(1);
 
       await engine.executeRaw(
         `DELETE FROM links WHERE from_page_id IN (
@@ -288,6 +295,8 @@ describe('graph-usefulness measure', () => {
       const fpMention = await computeGraphFingerprint(engine, { sourceId: 'degout' });
       expect(mention.zero_degree_pages).toBe(0);
       expect(mention.avg_degree).toBe(1);
+      expect(mention.link_rows).toBe(before.link_rows + 1);
+      expect(mention.fingerprint.link_rows).toBe(fpBefore.link_rows);
       expect(fpMention.sha256).toBe(fpBefore.sha256);
       expect(fpMention.link_rows).toBe(fpBefore.link_rows);
     } finally {
@@ -1396,6 +1405,7 @@ describe('graph fingerprint identities', () => {
       expect(fpSql[0]).toContain('link_identities');
       expect(fpSql[0]).toContain('corpus_revision');
       expect(fpSql[0]).toContain('content_chunks');
+      expect(fpSql[0]).toContain('chunk_source');
       expect(fpSql[0]).toContain('emotional_weight');
       expect(fpSql[0]).toContain('effective_date');
       expect(fpSql[0]).toContain('FROM takes t');
@@ -1467,6 +1477,20 @@ describe('graph fingerprint identities', () => {
     expect(afterEmbed.active_pages).toBe(before.active_pages);
     expect(afterEmbed.link_rows).toBe(before.link_rows);
     expect(retrievalProofMutationCount(afterChunk, afterEmbed)).toBeGreaterThan(0);
+
+    await engine.executeRaw(
+      `UPDATE content_chunks SET chunk_source = 'timeline'
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    const afterSource = await computeGraphFingerprint(engine);
+    expect(afterSource.sha256).not.toBe(afterEmbed.sha256);
+    expect(afterSource.active_pages).toBe(before.active_pages);
+    expect(afterSource.link_rows).toBe(before.link_rows);
+    expect(afterSource.valid_links).toBe(before.valid_links);
+    expect(afterSource.zero_degree_pages).toBe(before.zero_degree_pages);
+    expect(retrievalProofMutationCount(afterEmbed, afterSource)).toBeGreaterThan(0);
   });
 
   test('changes sha256 when ranking inputs change without content or graph identity changes', async () => {
@@ -2205,6 +2229,114 @@ describe('retrieval proof', () => {
       _setRetrievalProofSearchForTests(null);
       if (priorMode == null) await engine.unsetConfig('search.mode');
       else await engine.setConfig('search.mode', priorMode);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+      await engine.executeRaw(
+        `DELETE FROM pages WHERE slug = $1 AND source_id = 'default'`,
+        [slug],
+      );
+    }
+  });
+
+  test('cached lookup keys follow the proof pin, not the intent-pattern TTL', async () => {
+    const slug = 'topics/pin-cache-page';
+    const query = 'pin cache key sealed unique phrase';
+    const dim = 1536;
+    const stalePatterns = '{"salience_on":["never-match-stale-pin"]}';
+    const freshPatterns = '{"salience_on":["never-match-fresh-pin"]}';
+    clearIntentPatternConfigForTests();
+    await engine.setConfig('search.intent_patterns', stalePatterns);
+    const warmed = await loadEngineIntentPatterns(engine);
+    expect(warmed.raw).toBe(stalePatterns);
+    await engine.setConfig('search.intent_patterns', freshPatterns);
+    const stillStale = await loadEngineIntentPatterns(engine);
+    expect(stillStale.raw).toBe(stalePatterns);
+    const pin = await readProofSearchPin(engine);
+    expect(pin.intentPatterns).toBe(freshPatterns);
+    await engine.putPage(slug, {
+      title: 'Pin Cache Page',
+      compiled_truth: query,
+      type: 'note',
+    });
+    await engine.upsertChunks(slug, [
+      { chunk_index: 0, chunk_text: query, chunk_source: 'compiled_truth' },
+    ], { sourceId: 'default' });
+    await engine.executeRaw(
+      `UPDATE content_chunks
+          SET embedding = array_fill(0.25, ARRAY[${dim}])::vector,
+              embedded_at = now()
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-small',
+      embedding_dimensions: dim,
+      env: { OPENAI_API_KEY: 'sk-test-pin-cache' },
+    });
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => ({
+      embeddings: opts.values.map(() => new Array(dim).fill(0.25)),
+    })) as never);
+    const searchWith = (intentPatterns: string, mode?: string) => hybridSearchCached(engine, query, {
+      limit: 3,
+      sourceId: 'default',
+      _pinnedSearch: {
+        mode: mode ?? pin.mode,
+        overrides: pin.overrides,
+        embeddingColumn: pin.embeddingColumn,
+        adaptiveReturn: pin.adaptiveReturn,
+        intentPatterns,
+        embeddingMultimodalModel: pin.embeddingMultimodalModel,
+      },
+    });
+    const storedHash = async () => {
+      const rows = await engine.executeRaw<{ knobs_hash: string }>(
+        `SELECT knobs_hash FROM query_cache WHERE query_text = $1`,
+        [query],
+      );
+      return rows[0]?.knobs_hash ?? '';
+    };
+    try {
+      await searchWith(stalePatterns);
+      await awaitPendingSearchCacheWrites();
+      const staleHash = await storedHash();
+      expect(staleHash).not.toBe('');
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+
+      await searchWith(freshPatterns);
+      await awaitPendingSearchCacheWrites();
+      const freshHash = await storedHash();
+      expect(freshHash).not.toBe('');
+      expect(freshHash).not.toBe(staleHash);
+
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+      const otherMode = pin.mode === 'tokenmax' ? 'conservative' : 'tokenmax';
+      await searchWith(freshPatterns, otherMode);
+      await awaitPendingSearchCacheWrites();
+      const modeHash = await storedHash();
+      expect(modeHash).not.toBe('');
+      expect(modeHash).not.toBe(freshHash);
+
+      await engine.executeRaw(
+        `UPDATE query_cache SET knobs_hash = $1, results = $2::text::jsonb WHERE query_text = $3`,
+        [staleHash, JSON.stringify([{
+          slug: 'topics/stale-pattern-decoy',
+          source_id: 'default',
+          score: 1,
+          page_id: 1,
+          chunk_text: 'decoy',
+          chunk_index: 0,
+          chunk_id: 0,
+        }]), query],
+      );
+      const freshHit = await searchWith(freshPatterns);
+      expect(freshHit.map(h => h.slug)).not.toContain('topics/stale-pattern-decoy');
+      const staleHit = await searchWith(stalePatterns);
+      expect(staleHit.map(h => h.slug)).toContain('topics/stale-pattern-decoy');
+    } finally {
+      __setEmbedTransportForTests(null);
+      resetGateway();
+      clearIntentPatternConfigForTests();
+      await engine.unsetConfig('search.intent_patterns');
       await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
       await engine.executeRaw(
         `DELETE FROM pages WHERE slug = $1 AND source_id = 'default'`,

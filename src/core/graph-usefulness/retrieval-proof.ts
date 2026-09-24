@@ -402,8 +402,10 @@ export async function runRetrievalProof(
     };
     // Production query and search go through hybridSearchCached. Bare
     // hybridSearch recomputes live and can pass while a warm cache still
-    // serves a different set. The pin rides along so a miss keeps the sealed
-    // settings; a hit is the row a production caller would get for them.
+    // serves a different set. The pin drives the cache key (mode, column,
+    // adaptive return, intent-pattern banks) and the inner search, so a
+    // warm bank cannot store or serve a different classification than the
+    // sealed settings. A hit is the row a production caller would get.
     const hits = retrievalSearchForTests
       ? await retrievalSearchForTests(engine, q.query, searchOpts)
       : await hybridSearchCached(engine, q.query, searchOpts);

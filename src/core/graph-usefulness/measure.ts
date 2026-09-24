@@ -11,7 +11,7 @@ export async function measureGraphUsefulness(
   const snap = await computeGraphSnapshot(engine, { ...opts, measure: true });
   return {
     active_pages: snap.fingerprint.active_pages,
-    link_rows: snap.fingerprint.link_rows,
+    link_rows: snap.measure_link_rows,
     valid_links: snap.fingerprint.valid_links,
     zero_degree_pages: snap.measure_zero_degree_pages,
     avg_degree: snap.avg_degree,
