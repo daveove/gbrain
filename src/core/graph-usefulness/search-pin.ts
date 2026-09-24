@@ -4,7 +4,8 @@
  * hybridSearch re-reads search mode, per-key overrides, the embedding
  * column, adaptive return, intent patterns, and the multimodal model on
  * every call. A proof resolves that set once and passes it back in, then
- * hashes it into the before/after fingerprints.
+ * hashes it into the before/after fingerprints. The hash also records
+ * whether that resolution wired the production query expander.
  */
 
 import { loadConfig, loadConfigWithEngine } from '../config.ts';
@@ -21,6 +22,20 @@ import {
   type AdaptiveReturnConfig,
 } from '../search/return-policy.ts';
 import type { ResolvedColumn } from '../types.ts';
+
+/**
+ * Stable id for `expandQuery` (`src/core/search/expansion.ts`), the expander
+ * the query operation passes as `expandFn`. Proofs fingerprint this id when
+ * the pinned mode enables expansion, and null when it does not.
+ */
+export const PROOF_EXPANSION_EXPANDER_ID = 'expandQuery';
+
+/** Null when resolved knobs leave expansion off. Otherwise the production expander id. */
+export function proofExpansionExpander(
+  knobs: { expansion: boolean },
+): typeof PROOF_EXPANSION_EXPANDER_ID | null {
+  return knobs.expansion ? PROOF_EXPANSION_EXPANDER_ID : null;
+}
 
 /** Config-table keys hybrid search reads that are not folded into mode knobs. */
 export const PROOF_SEARCH_RAW_KEYS = [
@@ -94,6 +109,7 @@ export function canonicalSearchConfig(
     intent_patterns: live?.intentPatterns ?? null,
     embedding_multimodal_model: live?.embeddingMultimodalModel ?? null,
     raw,
+    expansion_expander: proofExpansionExpander(knobs),
   });
 }
 

@@ -564,6 +564,8 @@ DAV-6220 usefulness:
       An explicit --source is resolved and must name an active source.
       Bare relevant_slugs / forbidden_slugs require a single --source.
       relevant_pages / forbidden_pages are already (source_id, slug).
+      Each question needs at least one distinct relevant slug or page.
+      When the pinned search mode enables expansion, search uses the production query expander.
       Exits nonzero when a question fails, a hit cites Readwise, or the fingerprint changes.
 
 Valued flags accept both --name value and --name=value

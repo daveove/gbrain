@@ -20,7 +20,8 @@ import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-f
 import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/graph-usefulness/limit.ts';
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
-import { canonicalSearchConfig, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { canonicalSearchConfig, PROOF_EXPANSION_EXPANDER_ID, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { expandQuery } from '../src/core/search/expansion.ts';
 import { hybridSearch } from '../src/core/search/hybrid.ts';
 import { resolveSearchMode } from '../src/core/search/mode.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -1493,6 +1494,11 @@ describe('graph fingerprint identities', () => {
     expect(canonicalSearchConfig(knobs, column)).not.toBe(
       canonicalSearchConfig(resolveSearchMode({ mode: 'balanced', overrides: { expansion: true } }), column),
     );
+    expect(canonicalSearchConfig(resolveSearchMode({ mode: 'conservative' }), column))
+      .toContain('"expansion_expander":null');
+    expect(canonicalSearchConfig(resolveSearchMode({ mode: 'tokenmax' }), column))
+      .toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+    expect(expandQuery.name).toBe(PROOF_EXPANSION_EXPANDER_ID);
   });
 });
 
@@ -1856,6 +1862,112 @@ describe('retrieval proof', () => {
     }
   });
 
+  test('wires expandQuery when pinned retrieval enables expansion and omits it when expansion is off', async () => {
+    const manifest = {
+      proof_version: 2,
+      questions: [
+        { id: 'q1', query: 'parent note topic', relevant_slugs: ['topics/parent-note'] },
+        { id: 'q2', query: 'child note topic', relevant_slugs: ['topics/child-note'] },
+      ],
+    };
+    const seen: Array<typeof expandQuery | undefined> = [];
+    _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
+      seen.push(opts.expandFn);
+      return [{ slug: 'topics/parent-note', source_id: 'default' }];
+    });
+    try {
+      await engine.setConfig('search.mode', 'conservative');
+      await engine.unsetConfig('search.expansion');
+      const offPin = await readProofSearchPin(engine);
+      expect(offPin.canonical).toContain('"expansion_expander":null');
+      await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(seen).toEqual([undefined, undefined]);
+
+      await engine.setConfig('search.mode', 'tokenmax');
+      const modePin = await readProofSearchPin(engine);
+      expect(modePin.canonical).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+      expect(modePin.canonical).not.toBe(offPin.canonical);
+      expect((await computeGraphFingerprint(engine, { searchConfig: offPin.canonical })).sha256)
+        .not.toBe((await computeGraphFingerprint(engine, { searchConfig: modePin.canonical })).sha256);
+      seen.length = 0;
+      await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(seen).toEqual([expandQuery, expandQuery]);
+
+      await engine.setConfig('search.mode', 'conservative');
+      await engine.setConfig('search.expansion', 'true');
+      seen.length = 0;
+      let flipped = false;
+      _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
+        seen.push(opts.expandFn);
+        if (!flipped) {
+          flipped = true;
+          await engine.setConfig('search.expansion', 'false');
+        }
+        return [{ slug: 'topics/parent-note', source_id: 'default' }];
+      });
+      const before = await readProofSearchPin(engine);
+      const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      const after = await readProofSearchPin(engine);
+      expect(seen).toEqual([expandQuery, expandQuery]);
+      expect(before.canonical).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+      expect(after.canonical).toContain('"expansion_expander":null');
+      expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
+      expect(result.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.unsetConfig('search.mode');
+      await engine.unsetConfig('search.expansion');
+    }
+  });
+
+  test('rejects a question with no relevant expectation before search', async () => {
+    const proof = (question: Record<string, unknown>) => JSON.stringify({
+      proof_version: 2,
+      questions: [question],
+    });
+    const message = /Question q-none: must include at least one distinct relevant expectation/;
+    expect(() => parseRetrievalProofManifest(proof({
+      id: 'q-none', query: 'parent',
+    }))).toThrow(message);
+    expect(() => parseRetrievalProofManifest(proof({
+      id: 'q-none', query: 'parent', relevant_slugs: [], relevant_pages: [],
+    }))).toThrow(message);
+    expect(() => parseRetrievalProofManifest(proof({
+      id: 'q-none', query: 'parent', forbidden_slugs: ['topics/secret'],
+    }))).toThrow(message);
+    expect(parseRetrievalProofManifest(proof({
+      id: 'q-dup',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note', 'topics/parent-note'],
+    })).questions).toHaveLength(1);
+    expect(parseRetrievalProofManifest(proof({
+      id: 'q-page',
+      query: 'parent',
+      relevant_pages: [
+        { source_id: 'wiki', slug: 'topics/parent-note' },
+        { source_id: 'wiki', slug: 'topics/parent-note' },
+      ],
+    })).questions).toHaveLength(1);
+
+    let searches = 0;
+    _setRetrievalProofSearchForTests(async () => {
+      searches += 1;
+      return [{ slug: 'topics/parent-note', source_id: 'default' }];
+    });
+    try {
+      await expect(runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{ id: 'q-none', query: 'parent', relevant_slugs: [], forbidden_slugs: ['topics/secret'] }],
+      }, { sourceId: 'default' })).rejects.toThrow(message);
+      expect(searches).toBe(0);
+      expect(scoreRetrievalQuestion({
+        id: 'q-none', query: 'parent', relevant_slugs: [],
+      }, [{ slug: 'topics/parent-note', source_id: 'default' }], 'default')).toBe('partial');
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+    }
+  });
+
   test('rejects a string expectation list instead of walking its characters', () => {
     const proof = (field: string, value: unknown) => JSON.stringify({
       proof_version: 2,
@@ -1911,6 +2023,7 @@ describe('retrieval proof', () => {
         questions: [{
           id: 'arch-src',
           query: 'secret',
+          relevant_pages: [{ source_id: 'default', slug: 'topics/parent-note' }],
           forbidden_pages: [{ source_id: 'oldwiki', slug: 'topics/secret' }],
         }],
       })).rejects.toThrow(/not found or is archived/);

@@ -1,11 +1,18 @@
 import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
+import { expandQuery } from '../search/expansion.ts';
 import { hybridSearch } from '../search/hybrid.ts';
+import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
-import { readProofSearchPin, type PinnedProofSearch } from './search-pin.ts';
+import {
+  PROOF_EXPANSION_EXPANDER_ID,
+  proofExpansionExpander,
+  readProofSearchPin,
+  type PinnedProofSearch,
+} from './search-pin.ts';
 import type {
   GraphFingerprint,
   RetrievalPageRef,
@@ -103,6 +110,26 @@ function distinctKeys(keys: string[]): string[] {
   return out;
 }
 
+/**
+ * A question with no relevant slug or page scores `partial`, and a proof
+ * ignores partial when deciding `passed`. Require one distinct expectation
+ * so that path cannot report success.
+ */
+function assertRelevantExpectation(q: RetrievalProofQuestion): void {
+  const questionId = questionLabel(q);
+  const pages = readPageList(q.relevant_pages, questionId, 'relevant_pages') ?? [];
+  const slugs = readSlugList(q.relevant_slugs, questionId, 'relevant_slugs') ?? [];
+  // Prefix the two kinds so a bare slug cannot collapse into a page key.
+  const distinct = distinctKeys([
+    ...pages.map(ref => `page:${pageRefKey(ref)}`),
+    ...slugs.map(slug => `slug:${slug}`),
+  ]);
+  if (distinct.length > 0) return;
+  throw new Error(
+    `Question ${questionId}: must include at least one distinct relevant expectation (relevant_slugs or relevant_pages)`,
+  );
+}
+
 function expectationKeys(
   pages: RetrievalPageRef[] | undefined,
   slugs: string[] | undefined,
@@ -150,6 +177,7 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
   for (const q of parsed.questions) {
     const questionId = questionLabel(q);
     assertExpectationShape(q);
+    assertRelevantExpectation(q);
     positiveHitThreshold(q.min_hits_in_top_k, questionId);
     positiveTopK(q.top_k, questionId);
   }
@@ -177,6 +205,8 @@ export function scoreRetrievalQuestion(
   const relevant = distinctKeys(expectationKeys(
     q.relevant_pages, q.relevant_slugs, sourceId, questionId, 'relevant_pages', 'relevant_slugs',
   ));
+  // Parsing and runRetrievalProof reject this. Direct scoring stays partial
+  // so a caller can tell an empty expectation set from a miss.
   if (relevant.length === 0) return 'partial';
 
   const matched = relevant.filter(s => slice.includes(s)).length;
@@ -257,6 +287,8 @@ type RetrievalProofSearch = (
   opts: {
     limit?: number;
     sourceId?: string;
+    /** Production `expandQuery` when the pinned mode enables expansion. */
+    expandFn?: (query: string) => Promise<string[]>;
     _pinnedSearch?: Pick<
       PinnedProofSearch,
       'mode' | 'overrides' | 'embeddingColumn' | 'adaptiveReturn' | 'intentPatterns' | 'embeddingMultimodalModel'
@@ -302,7 +334,10 @@ export async function runRetrievalProof(
   opts: RunRetrievalProofOpts = {},
 ): Promise<RetrievalProofResult> {
   const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
-  for (const q of questions) assertExpectationShape(q);
+  for (const q of questions) {
+    assertExpectationShape(q);
+    assertRelevantExpectation(q);
+  }
   if (manifestUsesBareSlugs({ ...manifest, questions }) && !opts.sourceId) {
     throw new SlugOnlyProofNeedsSourceError();
   }
@@ -327,6 +362,14 @@ export async function runRetrievalProof(
     intentPatterns: pin.intentPatterns,
     embeddingMultimodalModel: pin.embeddingMultimodalModel,
   };
+  // Same resolution hybridSearch applies to the pin. Decided once so a
+  // config write between questions cannot turn expansion on or off.
+  // hybridSearch runs expandFn only when that resolution enables expansion.
+  const expansionExpander = proofExpansionExpander(resolveSearchMode({
+    mode: pin.mode,
+    overrides: pin.overrides,
+  }));
+  const expandFn = expansionExpander === PROOF_EXPANSION_EXPANDER_ID ? expandQuery : undefined;
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
 
@@ -335,6 +378,7 @@ export async function runRetrievalProof(
     const searchOpts = {
       limit: topK,
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+      ...(expandFn ? { expandFn } : {}),
       _pinnedSearch: pinnedSearch,
     };
     const hits = retrievalSearchForTests
