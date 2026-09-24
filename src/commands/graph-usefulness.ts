@@ -23,6 +23,7 @@ import type { RetrievalProofResult } from '../core/graph-usefulness/types.ts';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { isResolverUserError, resolveSourceId } from '../core/source-resolver.ts';
 
 /** Subcommands handled here. Bare slugs stay on the traverse_graph operation. */
 export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
@@ -338,7 +339,20 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       return;
     }
     const limit = parseLimitArg(args);
-    const defaultSourceId = parseSource(args).sourceId;
+    // Flag, env, dotfile, registered path, and brain default. Omitted row
+    // source ids must not skip this chain and land on literal `default`.
+    const explicitSource = parseSource(args).sourceId ?? null;
+    let defaultSourceId: string;
+    try {
+      defaultSourceId = await resolveSourceId(engine, explicitSource);
+    } catch (e) {
+      if (isResolverUserError(e)) {
+        console.error(e instanceof Error ? e.message : String(e));
+        setCliExitVerdict(1);
+        return;
+      }
+      throw e;
+    }
     const receiptOut = takeFlag(args, '--receipt-out')
       ?? `docs/progress/DAV-6220/mutation-receipt-${Date.now()}.json`;
     const { manifest, raw } = loadRelationManifestFile(manifestPath);
@@ -437,14 +451,16 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     }
     if (json) {
       console.log(JSON.stringify(result, null, 2));
-      return;
+    } else {
+      console.log(
+        `retrieval-proof: questions=${result.checks.questions} ` +
+        `pass=${result.checks.scores.pass} partial=${result.checks.scores.partial} fail=${result.checks.scores.fail} ` +
+        `readwise_cites=${result.checks.cited_readwise_pages}`,
+      );
+      if (outPath) console.log(`  wrote: ${outPath}`);
     }
-    console.log(
-      `retrieval-proof: questions=${result.checks.questions} ` +
-      `pass=${result.checks.scores.pass} partial=${result.checks.scores.partial} fail=${result.checks.scores.fail} ` +
-      `readwise_cites=${result.checks.cited_readwise_pages}`,
-    );
-    if (outPath) console.log(`  wrote: ${outPath}`);
+    // Failed question, Readwise lineage, or a changed fingerprint.
+    if (!result.passed) setCliExitVerdict(1);
     return;
   }
 
@@ -464,19 +480,22 @@ DAV-6220 usefulness:
 
   relations verify <manifest.json> [--json] [--limit N] [--write-receipt] [--source <id>]
       Re-check manifest guards without writing links.
-      --source is the default for rows that omit from_source_id or to_source_id.
+      Omitted row source ids use the resolved CLI source
+      (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
 
   relations apply <manifest.json> [--apply] [--yes] [--limit N]
       [--receipt-out <path>] [--json] [--source <id>]
       Dry-run by default. --apply --yes writes manifest rows that still pass guards.
-      --source fills an omitted row source id. A row that sets from_source_id or
-      to_source_id keeps that value.
+      Omitted row source ids use the resolved CLI source
+      (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
+      A row that sets from_source_id or to_source_id keeps that value.
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
       --out writes the full result, including fingerprint_before and fingerprint_after.
       Bare relevant_slugs / forbidden_slugs require a single --source.
       relevant_pages / forbidden_pages are already (source_id, slug).
+      Exits nonzero when a question fails, a hit cites Readwise, or the fingerprint changes.
 
 Valued flags accept both --name value and --name=value
 (--limit, --source, --receipt-out, --out). An empty value, or a following

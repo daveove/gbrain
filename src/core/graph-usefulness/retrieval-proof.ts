@@ -58,6 +58,15 @@ function expectationKeys(
   return keys;
 }
 
+/** Missing threshold defaults to 1. Zero, negative, and non-integers are rejected. */
+function positiveHitThreshold(value: unknown, questionId: string): number {
+  if (value === undefined) return 1;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error(`Question ${questionId}: min_hits_in_top_k must be a positive integer`);
+  }
+  return value;
+}
+
 export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest {
   const parsed = JSON.parse(raw) as RetrievalProofManifest;
   if (parsed.proof_version !== RETRIEVAL_PROOF_VERSION) {
@@ -65,6 +74,9 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
   }
   if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
     throw new Error('Retrieval proof manifest must include questions');
+  }
+  for (const q of parsed.questions) {
+    positiveHitThreshold(q.min_hits_in_top_k, q.id || '(missing id)');
   }
   return parsed;
 }
@@ -88,7 +100,7 @@ export function scoreRetrievalQuestion(
   if (relevant.length === 0) return 'partial';
 
   const matched = relevant.filter(s => slice.includes(s)).length;
-  const minHits = q.min_hits_in_top_k ?? 1;
+  const minHits = positiveHitThreshold(q.min_hits_in_top_k, q.id || '(missing id)');
   if (matched >= minHits && slice[0] && relevant.includes(slice[0])) return 'pass';
   if (matched >= minHits) return 'partial';
   return 'fail';

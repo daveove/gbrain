@@ -248,6 +248,23 @@ async function rollbackAppliedLinks(
   if (failures.length > 0) throw new Error(failures.join('; '));
 }
 
+/** Drop committed rows and the reserved receipt. Returns the undo clause. */
+async function undoAppliedLinks(
+  engine: BrainEngine,
+  receiptPath: string,
+  appliedRows: RelationManifestRow[],
+): Promise<string> {
+  let undo = `rolled back ${appliedRows.length} applied link(s)`;
+  try {
+    await rollbackAppliedLinks(engine, appliedRows);
+    try { unlinkSync(receiptPath); } catch { /* reserved path may remain */ }
+  } catch (undoErr) {
+    const detail = undoErr instanceof Error ? undoErr.message : String(undoErr);
+    undo = `rollback failed (${detail})`;
+  }
+  return undo;
+}
+
 async function commitReceiptOrUndo(
   engine: BrainEngine,
   path: string,
@@ -257,16 +274,28 @@ async function commitReceiptOrUndo(
   try {
     write();
   } catch (err) {
-    let undo = `rolled back ${appliedRows.length} applied link(s)`;
-    try {
-      await rollbackAppliedLinks(engine, appliedRows);
-      try { unlinkSync(path); } catch { /* reserved path may remain */ }
-    } catch (undoErr) {
-      const detail = undoErr instanceof Error ? undoErr.message : String(undoErr);
-      undo = `rollback failed (${detail})`;
-    }
+    const undo = await undoAppliedLinks(engine, path, appliedRows);
     const writeMessage = err instanceof Error ? err.message : String(err);
     throw new Error(`Receipt write failed; ${undo}: ${writeMessage}`);
+  }
+}
+
+/**
+ * Post-mutation fingerprint. When a receipt was reserved, a failed read
+ * rolls committed rows back so they are not left applied beside an empty file.
+ */
+async function fingerprintAfterMutation(
+  engine: BrainEngine,
+  receiptPath: string | undefined,
+  appliedRows: RelationManifestRow[],
+): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
+  try {
+    return await computeGraphFingerprint(engine);
+  } catch (err) {
+    const fpMessage = err instanceof Error ? err.message : String(err);
+    if (!receiptPath) throw err;
+    const undo = await undoAppliedLinks(engine, receiptPath, appliedRows);
+    throw new Error(`Graph fingerprint failed; ${undo}: ${fpMessage}`);
   }
 }
 
@@ -354,9 +383,17 @@ export async function applyRelationManifest(
       outcomes.push({ id: row.id, status: 'applied' });
     }
   } catch (err) {
-    const after = await computeGraphFingerprint(engine);
     const message = err instanceof Error ? err.message : String(err);
-    if (message.startsWith('Receipt write failed;')) throw err;
+    if (message.startsWith('Receipt write failed;') || message.startsWith('Graph fingerprint failed;')) {
+      throw err;
+    }
+    let after: Awaited<ReturnType<typeof computeGraphFingerprint>>;
+    try {
+      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedRows);
+    } catch (fpErr) {
+      const fpMessage = fpErr instanceof Error ? fpErr.message : String(fpErr);
+      throw new Error(`${message} (${fpMessage})`);
+    }
     if (opts.receiptPath) {
       try {
         await commitReceiptOrUndo(engine, opts.receiptPath, appliedRows, () => {
@@ -380,7 +417,7 @@ export async function applyRelationManifest(
     throw err;
   }
 
-  const after = await computeGraphFingerprint(engine);
+  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedRows);
   const applied = outcomes.filter(o => o.status === 'applied').length;
   const ready = outcomes.filter(o => o.status === 'dry_run' || o.status === 'applied').length;
   const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;

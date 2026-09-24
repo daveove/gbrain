@@ -45,6 +45,30 @@ import { classifyJunkSlugs, slugLooksReadwise } from '../src/core/graph-usefulne
 
 let engine: BrainEngine;
 
+function failFingerprintOnCall(target: BrainEngine, which: number): () => void {
+  const original = target.executeRaw.bind(target);
+  let fpCalls = 0;
+  target.executeRaw = async (sql, params, opts) => {
+    if (typeof sql === 'string' && sql.includes('zero_degree_pages')) {
+      fpCalls += 1;
+      if (fpCalls === which) throw new Error('simulated fingerprint failure');
+    }
+    return original(sql, params, opts);
+  };
+  return () => { target.executeRaw = original; };
+}
+
+async function linkCount(target: BrainEngine, from: string, to: string): Promise<number> {
+  const rows = await target.executeRaw<{ n: string }>(
+    `SELECT count(*)::text AS n FROM links l
+      JOIN pages fp ON fp.id = l.from_page_id
+      JOIN pages tp ON tp.id = l.to_page_id
+     WHERE fp.slug = $1 AND tp.slug = $2 AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+    [from, to],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
@@ -629,6 +653,96 @@ describe('relation manifest', () => {
     }
   });
 
+  test('rolls back applied links when the post-apply fingerprint fails', async () => {
+    await engine.putPage('topics/fp-fail-a', { title: 'Fp A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/fp-fail-b', { title: 'Fp B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'fp-fail-1',
+        from_slug: 'topics/fp-fail-a',
+        to_slug: 'topics/fp-fail-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-fp-fail-')), 'receipt.json');
+    const restore = failFingerprintOnCall(engine, 2);
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/Graph fingerprint failed; rolled back 1 applied link/);
+      expect(await linkCount(engine, 'topics/fp-fail-a', 'topics/fp-fail-b')).toBe(0);
+      expect(existsSync(receiptPath)).toBe(false);
+    } finally {
+      restore();
+    }
+  });
+
+  test('rolls back when the in-loop fingerprint fails after addLink throws', async () => {
+    await engine.putPage('topics/fp-loop-a', { title: 'Loop A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/fp-loop-b', { title: 'Loop B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/fp-loop-c', { title: 'Loop C', compiled_truth: 'c', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [
+        {
+          id: 'fp-loop-1',
+          from_slug: 'topics/fp-loop-a',
+          to_slug: 'topics/fp-loop-b',
+          link_type: 'related_to',
+          link_source: 'tana-relation-r2',
+          guards: {
+            exact_endpoint_match: true,
+            source_relation_current: true,
+            no_incident_edge: true,
+            readwise_clear: true,
+          },
+        },
+        {
+          id: 'fp-loop-2',
+          from_slug: 'topics/fp-loop-a',
+          to_slug: 'topics/fp-loop-c',
+          link_type: 'related_to',
+          link_source: 'tana-relation-r2',
+          guards: {
+            exact_endpoint_match: true,
+            source_relation_current: true,
+            no_incident_edge: true,
+            readwise_clear: true,
+          },
+        },
+      ],
+    }));
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-fp-loop-')), 'receipt.json');
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      if (calls === 2) throw new Error('simulated batch failure');
+      return original(...args);
+    };
+    const restore = failFingerprintOnCall(engine, 2);
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/simulated batch failure \(Graph fingerprint failed; rolled back 1 applied link/);
+      expect(await linkCount(engine, 'topics/fp-loop-a', 'topics/fp-loop-b')).toBe(0);
+      expect(existsSync(receiptPath)).toBe(false);
+    } finally {
+      engine.addLink = original;
+      restore();
+    }
+  });
+
   test('rejects managed link_source in manifest', () => {
     const row = {
       id: 'x', from_slug: 'a', to_slug: 'b', link_type: 't', link_source: 'markdown',
@@ -830,6 +944,82 @@ describe('retrieval proof', () => {
       engine.executeRaw = original;
     }
   });
+
+  test('rejects a non-positive min_hits_in_top_k while parsing', () => {
+    const proof = (minHits: unknown) => JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'q-min',
+        query: 'parent',
+        relevant_slugs: ['topics/parent-note'],
+        min_hits_in_top_k: minHits,
+      }],
+    });
+    expect(() => parseRetrievalProofManifest(proof(0))).toThrow(/Question q-min: min_hits_in_top_k must be a positive integer/);
+    expect(() => parseRetrievalProofManifest(proof(-1))).toThrow(/positive integer/);
+    expect(() => parseRetrievalProofManifest(proof(1.5))).toThrow(/positive integer/);
+    expect(parseRetrievalProofManifest(proof(1)).questions[0]?.min_hits_in_top_k).toBe(1);
+    const omitted = JSON.stringify({
+      proof_version: 2,
+      questions: [{ id: 'q-omit', query: 'parent', relevant_slugs: ['topics/parent-note'] }],
+    });
+    expect(parseRetrievalProofManifest(omitted).questions).toHaveLength(1);
+
+    const zero = {
+      id: 'q-zero',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note'],
+      min_hits_in_top_k: 0,
+    };
+    expect(() => scoreRetrievalQuestion(zero, [
+      { slug: 'topics/parent-note', source_id: 'default' },
+    ], 'default')).toThrow(/positive integer/);
+  });
+
+  test('a failed retrieval proof exits nonzero after the result is printed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-proof-exit-'));
+    const proof = join(dir, 'proof.json');
+    const outPath = join(dir, 'out.json');
+    writeFileSync(proof, JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'miss',
+        query: 'parent note topic',
+        relevant_slugs: ['topics/no-such-page-dav6220'],
+        min_hits_in_top_k: 1,
+        top_k: 5,
+      }],
+    }));
+    const origLog = console.log;
+    const origErr = console.error;
+    let stdout = '';
+    console.log = (...a: unknown[]) => { stdout += a.map(String).join(' ') + '\n'; };
+    console.error = () => {};
+    try {
+      await runGraphUsefulness(engine, [
+        '--source', 'default', 'retrieval-proof', 'run', proof, '--out', outPath,
+      ]);
+      expect(stdout).toContain('retrieval-proof:');
+      expect(stdout).toContain('fail=1');
+      expect(currentExitCode()).toBe(1);
+      const saved = JSON.parse(readFileSync(outPath, 'utf8'));
+      expect(saved.passed).toBe(false);
+
+      _resetCliExitVerdictForTests();
+      stdout = '';
+      await runGraphUsefulness(engine, [
+        '--source', 'default', 'retrieval-proof', 'run', proof, '--json',
+      ]);
+      const parsed = JSON.parse(stdout);
+      expect(parsed.passed).toBe(false);
+      expect(currentExitCode()).toBe(1);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
 });
 
 const TRUE_GUARDS = {
@@ -1013,6 +1203,126 @@ describe('relation source scope and option terminator', () => {
       const applied = JSON.parse(stdout);
       expect(applied.mode).toBe('apply');
       expect(applied.applied).toBe(1);
+    } finally {
+      engine.addLink = original;
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('GBRAIN_SOURCE and sources.default fill omitted manifest endpoint sources', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('wiki', 'wiki') ON CONFLICT (id) DO NOTHING`,
+    );
+    const guards = TRUE_GUARDS;
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      const envFrom = 'topics/ambient-env-from';
+      const envTo = 'topics/ambient-env-to';
+      await engine.putPage(envFrom, { title: 'From', compiled_truth: 'env from', type: 'note' }, { sourceId: 'wiki' });
+      await engine.putPage(envTo, { title: 'To', compiled_truth: 'env to', type: 'note' }, { sourceId: 'wiki' });
+      await engine.putPage(envFrom, { title: 'From', compiled_truth: 'env from default', type: 'note' }, { sourceId: 'default' });
+      await engine.putPage(envTo, { title: 'To', compiled_truth: 'env to default', type: 'note' }, { sourceId: 'default' });
+      const dir = mkdtempSync(join(tmpdir(), 'gbrain-ambient-src-'));
+      const manifestPath = join(dir, 'manifest.json');
+      writeFileSync(manifestPath, relationManifest([{
+        id: 'ambient-env',
+        from_slug: envFrom,
+        to_slug: envTo,
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards,
+      }]));
+      await withEnv({ GBRAIN_SOURCE: 'wiki' }, async () => {
+        await runGraphUsefulness(engine, [
+          'relations', 'apply', manifestPath, '--apply', '--yes',
+          '--receipt-out', join(dir, 'env-receipt.json'), '--json',
+        ]);
+      });
+      const envLinks = await engine.executeRaw<{ from_source: string; to_source: string }>(
+        `SELECT fp.source_id AS from_source, tp.source_id AS to_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        [envFrom, envTo],
+      );
+      expect(envLinks).toEqual([{ from_source: 'wiki', to_source: 'wiki' }]);
+
+      const cfgFrom = 'topics/ambient-cfg-from';
+      const cfgTo = 'topics/ambient-cfg-to';
+      await engine.putPage(cfgFrom, { title: 'From', compiled_truth: 'cfg from', type: 'note' }, { sourceId: 'wiki' });
+      await engine.putPage(cfgTo, { title: 'To', compiled_truth: 'cfg to', type: 'note' }, { sourceId: 'wiki' });
+      const cfgPath = join(dir, 'cfg.json');
+      writeFileSync(cfgPath, relationManifest([{
+        id: 'ambient-cfg',
+        from_slug: cfgFrom,
+        to_slug: cfgTo,
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards,
+      }]));
+      await engine.setConfig('sources.default', 'wiki');
+      await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+        await runGraphUsefulness(engine, [
+          'relations', 'apply', cfgPath, '--apply', '--yes',
+          '--receipt-out', join(dir, 'cfg-receipt.json'), '--json',
+        ]);
+      });
+      const cfgLinks = await engine.executeRaw<{ from_source: string; to_source: string }>(
+        `SELECT fp.source_id AS from_source, tp.source_id AS to_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        [cfgFrom, cfgTo],
+      );
+      expect(cfgLinks).toEqual([{ from_source: 'wiki', to_source: 'wiki' }]);
+    } finally {
+      await engine.unsetConfig('sources.default');
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('unknown --source is rejected before apply', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-missing-src-'));
+    const manifestPath = join(dir, 'manifest.json');
+    writeFileSync(manifestPath, relationManifest([{
+      id: 'missing-src',
+      from_slug: 'topics/parent-note',
+      to_slug: 'topics/child-note',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]));
+    const origLog = console.log;
+    const origErr = console.error;
+    const errors: string[] = [];
+    console.log = () => {};
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--source', 'no-such-src', '--apply', '--yes', '--json',
+      ]);
+      expect(currentExitCode()).toBe(1);
+      expect(errors.some(line => line.includes('not found or is archived'))).toBe(true);
+      expect(calls).toBe(0);
     } finally {
       engine.addLink = original;
       console.log = origLog;
