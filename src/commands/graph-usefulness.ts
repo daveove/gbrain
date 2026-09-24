@@ -23,7 +23,7 @@ import type { RetrievalProofResult } from '../core/graph-usefulness/types.ts';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
-import { isResolverUserError, resolveSourceId } from '../core/source-resolver.ts';
+import { ALL_SOURCES, isResolverUserError, resolveSourceId } from '../core/source-resolver.ts';
 
 /** Subcommands handled here. Bare slugs stay on the traverse_graph operation. */
 export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
@@ -248,6 +248,33 @@ function parseSource(args: string[]): { sourceId?: string } {
   return sourceId ? { sourceId } : {};
 }
 
+/**
+ * Explicit `--source` for usefulness reads. Same resolver as relations:
+ * the id must match the source-id grammar and name an active source.
+ * An omitted flag stays unscoped (whole-brain measure / proof). `__all__`
+ * is that unscoped sentinel, not a SQL filter. Returns undefined after a
+ * user-facing resolver error (stderr + exit 1) so the caller does not read.
+ */
+async function resolveUsefulnessReadScope(
+  engine: BrainEngine,
+  args: string[],
+): Promise<{ sourceId?: string } | undefined> {
+  const explicit = parseSource(args).sourceId ?? null;
+  if (!explicit) return {};
+  try {
+    const resolved = await resolveSourceId(engine, explicit);
+    if (resolved === ALL_SOURCES) return {};
+    return { sourceId: resolved };
+  } catch (e) {
+    if (isResolverUserError(e)) {
+      console.error(e instanceof Error ? e.message : String(e));
+      setCliExitVerdict(1);
+      return undefined;
+    }
+    throw e;
+  }
+}
+
 export class MissingGraphLimitError extends Error {
   constructor() {
     super('--limit requires a value (positive integer)');
@@ -306,7 +333,8 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
   }
 
   if (sub === 'measure' || sub === 'stats') {
-    const scope = parseSource(args);
+    const scope = await resolveUsefulnessReadScope(engine, args);
+    if (!scope) return;
     const report = await measureGraphUsefulness(engine, scope);
     if (json) {
       console.log(JSON.stringify(report, null, 2));
@@ -414,6 +442,8 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       setCliExitVerdict(2);
       return;
     }
+    const scope = await resolveUsefulnessReadScope(engine, args);
+    if (!scope) return;
     const outPath = takeFlag(args, '--out');
     if (outPath && existsSync(outPath)) {
       console.error(`Refusing to overwrite existing retrieval-proof receipt: ${outPath}`);
@@ -421,7 +451,6 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       return;
     }
     const manifest = loadRetrievalProofFile(proofPath);
-    const scope = parseSource(args);
     const limit = parseLimitArg(args);
     let result: RetrievalProofResult;
     try {
@@ -477,6 +506,8 @@ Traverse (traverse_graph operation; source scope and thin-client routing apply):
 DAV-6220 usefulness:
   measure [--json] [--source <id>]
       Read-only connectivity + junk-slug samples.
+      An explicit --source is resolved and must name an active source.
+      An omitted --source measures the whole brain.
 
   relations verify <manifest.json> [--json] [--limit N] [--write-receipt] [--source <id>]
       Re-check manifest guards without writing links.
@@ -493,6 +524,7 @@ DAV-6220 usefulness:
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
       --out writes the full result, including fingerprint_before and fingerprint_after.
+      An explicit --source is resolved and must name an active source.
       Bare relevant_slugs / forbidden_slugs require a single --source.
       relevant_pages / forbidden_pages are already (source_id, slug).
       Exits nonzero when a question fails, a hit cites Readwise, or the fingerprint changes.

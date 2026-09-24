@@ -38,6 +38,8 @@ import {
   retrievalProofMutationCount,
   retrievalProofPassed,
   scoreRetrievalQuestion,
+  citedReadwisePageCount,
+  _setRetrievalProofSearchForTests,
   SlugOnlyProofNeedsSourceError,
 } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import type { RelationManifest } from '../src/core/graph-usefulness/types.ts';
@@ -976,6 +978,85 @@ describe('retrieval proof', () => {
     ], 'default')).toThrow(/positive integer/);
   });
 
+  test('rejects a non-positive top_k before search or slice', async () => {
+    const proof = (topK: unknown) => JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'q-topk',
+        query: 'parent',
+        relevant_slugs: ['topics/parent-note'],
+        top_k: topK,
+      }],
+    });
+    expect(() => parseRetrievalProofManifest(proof(-1))).toThrow(/Question q-topk: top_k must be a positive integer/);
+    expect(() => parseRetrievalProofManifest(proof(0))).toThrow(/top_k must be a positive integer/);
+    expect(() => parseRetrievalProofManifest(proof(1.5))).toThrow(/top_k must be a positive integer/);
+    expect(parseRetrievalProofManifest(proof(5)).questions[0]?.top_k).toBe(5);
+
+    const hits = [
+      { slug: 'topics/other', source_id: 'default' },
+      { slug: 'topics/parent-note', source_id: 'default' },
+      { slug: 'topics/tail', source_id: 'default' },
+    ];
+    expect(() => scoreRetrievalQuestion({
+      id: 'q-topk',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note'],
+      top_k: -1,
+    }, hits, 'default')).toThrow(/top_k must be a positive integer/);
+
+    let searches = 0;
+    _setRetrievalProofSearchForTests(async () => {
+      searches += 1;
+      return hits;
+    });
+    try {
+      await expect(runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{
+          id: 'q-topk',
+          query: 'parent',
+          relevant_pages: [{ source_id: 'default', slug: 'topics/parent-note' }],
+          top_k: -1,
+        }],
+      })).rejects.toThrow(/top_k must be a positive integer/);
+      expect(searches).toBe(0);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+    }
+  });
+
+  test('cited_readwise_pages counts hits inside one question', async () => {
+    const topPages = [
+      { source_id: 'readwise', slug: 'articles/one' },
+      { source_id: 'readwise', slug: 'articles/two' },
+      { source_id: 'default', slug: 'topics/parent-note' },
+    ];
+    expect(citedReadwisePageCount([{ top_pages: topPages }])).toBe(2);
+    expect(citedReadwisePageCount([
+      { top_pages: [topPages[0]!] },
+      { top_pages: [{ source_id: 'default', slug: 'topics/other' }] },
+    ])).toBe(1);
+
+    _setRetrievalProofSearchForTests(async () => topPages);
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{
+          id: 'rw-hits',
+          query: 'parent',
+          relevant_pages: [{ source_id: 'default', slug: 'topics/parent-note' }],
+          top_k: 5,
+        }],
+      });
+      expect(result.questions[0]?.cited_readwise).toBe(true);
+      expect(result.checks.cited_readwise_pages).toBe(2);
+      expect(result.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+    }
+  });
+
   test('a failed retrieval proof exits nonzero after the result is printed', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-proof-exit-'));
     const proof = join(dir, 'proof.json');
@@ -1325,6 +1406,80 @@ describe('relation source scope and option terminator', () => {
       expect(calls).toBe(0);
     } finally {
       engine.addLink = original;
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+});
+
+describe('usefulness read source resolution', () => {
+  test('measure and retrieval-proof reject an unknown --source', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('src-read', 'src-read') ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.putPage('topics/src-read-only', {
+      title: 'Scoped read',
+      compiled_truth: 'only on src-read',
+      type: 'note',
+    }, { sourceId: 'src-read' });
+
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-read-src-'));
+    const proof = join(dir, 'proof.json');
+    writeFileSync(proof, JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'scoped',
+        query: 'parent note topic',
+        relevant_slugs: ['topics/parent-note'],
+        top_k: 5,
+      }],
+    }));
+
+    const origLog = console.log;
+    const origErr = console.error;
+    let stdout = '';
+    const errors: string[] = [];
+    console.log = (...a: unknown[]) => { stdout += a.map(String).join(' ') + '\n'; };
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    try {
+      await runGraphUsefulness(engine, ['measure', '--source', 'wkii', '--json']);
+      expect(currentExitCode()).toBe(1);
+      expect(stdout).toBe('');
+      expect(errors.some(line => line.includes('Source "wkii" not found or is archived'))).toBe(true);
+
+      _resetCliExitVerdictForTests();
+      stdout = '';
+      errors.length = 0;
+      await runGraphUsefulness(engine, ['retrieval-proof', 'run', proof, '--source', 'wkii', '--json']);
+      expect(currentExitCode()).toBe(1);
+      expect(stdout).toBe('');
+      expect(errors.some(line => line.includes('Source "wkii" not found or is archived'))).toBe(true);
+
+      _resetCliExitVerdictForTests();
+      stdout = '';
+      errors.length = 0;
+      await runGraphUsefulness(engine, ['stats', '--source', 'Not_A_Slug', '--json']);
+      expect(currentExitCode()).toBe(1);
+      expect(stdout).toBe('');
+      expect(errors.some(line => line.includes('Invalid --source value'))).toBe(true);
+
+      _resetCliExitVerdictForTests();
+      stdout = '';
+      errors.length = 0;
+      await runGraphUsefulness(engine, ['measure', '--source', 'src-read', '--json']);
+      expect(currentExitCode()).toBe(0);
+      const scoped = JSON.parse(stdout) as { active_pages: number };
+      expect(scoped.active_pages).toBeGreaterThanOrEqual(1);
+
+      _resetCliExitVerdictForTests();
+      stdout = '';
+      await runGraphUsefulness(engine, ['measure', '--source', '__all__', '--json']);
+      expect(currentExitCode()).toBe(0);
+      const all = JSON.parse(stdout) as { active_pages: number };
+      expect(all.active_pages).toBeGreaterThan(scoped.active_pages);
+    } finally {
       console.log = origLog;
       console.error = origErr;
       process.exitCode = undefined;

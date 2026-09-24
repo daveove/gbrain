@@ -67,6 +67,15 @@ function positiveHitThreshold(value: unknown, questionId: string): number {
   return value;
 }
 
+/** Missing top_k defaults to 10. Zero, negative, and non-integers are rejected. */
+function positiveTopK(value: unknown, questionId: string): number {
+  if (value === undefined) return 10;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error(`Question ${questionId}: top_k must be a positive integer`);
+  }
+  return value;
+}
+
 export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest {
   const parsed = JSON.parse(raw) as RetrievalProofManifest;
   if (parsed.proof_version !== RETRIEVAL_PROOF_VERSION) {
@@ -76,7 +85,9 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
     throw new Error('Retrieval proof manifest must include questions');
   }
   for (const q of parsed.questions) {
-    positiveHitThreshold(q.min_hits_in_top_k, q.id || '(missing id)');
+    const questionId = q.id || '(missing id)';
+    positiveHitThreshold(q.min_hits_in_top_k, questionId);
+    positiveTopK(q.top_k, questionId);
   }
   return parsed;
 }
@@ -91,7 +102,7 @@ export function scoreRetrievalQuestion(
   hits: Array<{ slug: string; source_id?: string }>,
   sourceId?: string,
 ): RetrievalScore {
-  const k = q.top_k ?? 10;
+  const k = positiveTopK(q.top_k, q.id || '(missing id)');
   const slice = hits.slice(0, k).map(h => retrievalHitKey(h, sourceId));
   const forbidden = expectationKeys(q.forbidden_pages, q.forbidden_slugs, sourceId);
   if (forbidden.some(s => slice.includes(s))) return 'fail';
@@ -138,14 +149,50 @@ export function retrievalProofPassed(
   return failCount === 0 && citedReadwise === 0 && productionMutations === 0;
 }
 
+/** Readwise hits in one result list, via slug or source_id. */
+export function countReadwiseHits(
+  hits: Array<{ slug: string; source_id?: string }>,
+  scopeSourceId?: string,
+): number {
+  let count = 0;
+  for (const h of hits) {
+    if (slugLooksReadwise(h.slug, h.source_id ?? scopeSourceId ?? 'default')) count += 1;
+  }
+  return count;
+}
+
 /** True when any hit carries Readwise lineage via slug or source_id. */
 export function hitsIncludeReadwiseLineage(
   hits: Array<{ slug: string; source_id?: string }>,
   scopeSourceId?: string,
 ): boolean {
-  return hits.some(h =>
-    slugLooksReadwise(h.slug, h.source_id ?? scopeSourceId ?? 'default'),
-  );
+  return countReadwiseHits(hits, scopeSourceId) > 0;
+}
+
+/**
+ * Receipt total for `cited_readwise_pages`.
+ * One question with several Readwise hits contributes each hit, not 1.
+ */
+export function citedReadwisePageCount(
+  results: Array<{ top_pages?: Array<{ slug: string; source_id?: string }> }>,
+  scopeSourceId?: string,
+): number {
+  let count = 0;
+  for (const r of results) count += countReadwiseHits(r.top_pages ?? [], scopeSourceId);
+  return count;
+}
+
+type RetrievalProofSearch = (
+  engine: BrainEngine,
+  query: string,
+  opts: { limit?: number; sourceId?: string },
+) => Promise<Array<{ slug: string; source_id?: string }>>;
+
+/** @internal Replace hybrid search so a proof can be scored without a corpus. */
+let retrievalSearchForTests: RetrievalProofSearch | null = null;
+
+export function _setRetrievalProofSearchForTests(fn: RetrievalProofSearch | null): void {
+  retrievalSearchForTests = fn;
 }
 
 export async function runRetrievalProof(
@@ -157,15 +204,25 @@ export async function runRetrievalProof(
     throw new SlugOnlyProofNeedsSourceError();
   }
 
-  const before = await computeGraphFingerprint(engine);
   const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
+  // Reject a malformed top_k before any search. slice(0, -1) would otherwise
+  // score almost the whole result set.
+  for (const q of questions) {
+    positiveTopK(q.top_k, q.id || '(missing id)');
+  }
+
+  const before = await computeGraphFingerprint(engine);
   const results: RetrievalProofQuestionResult[] = [];
 
   for (const q of questions) {
-    const hits = await hybridSearch(engine, q.query, {
-      limit: q.top_k ?? 10,
+    const topK = positiveTopK(q.top_k, q.id || '(missing id)');
+    const searchOpts = {
+      limit: topK,
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
-    });
+    };
+    const hits = retrievalSearchForTests
+      ? await retrievalSearchForTests(engine, q.query, searchOpts)
+      : await hybridSearch(engine, q.query, searchOpts);
     const topPages: RetrievalPageRef[] = hits.map(h => ({
       source_id: h.source_id ?? opts.sourceId ?? 'default',
       slug: h.slug,
@@ -184,7 +241,7 @@ export async function runRetrievalProof(
   const after = await computeGraphFingerprint(engine);
   const scores = { pass: 0, partial: 0, fail: 0 };
   for (const r of results) scores[r.score] += 1;
-  const citedReadwise = results.filter(r => r.cited_readwise).length;
+  const citedReadwise = citedReadwisePageCount(results, opts.sourceId);
   const productionMutations = retrievalProofMutationCount(before, after);
 
   return {
