@@ -9,6 +9,8 @@ import {
   undeclaredLinkTypeMessage,
   undeclaredLinkTypeSuggestion,
 } from '../schema-pack/write-vocabulary.ts';
+import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
+import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import type {
@@ -153,6 +155,31 @@ function resolveRowSources(row: RelationManifestRow, defaultSourceId: string | u
   const toSrc = row.to_source_id ?? fallback;
   if (row.from_source_id === fromSrc && row.to_source_id === toSrc) return row;
   return { ...row, from_source_id: fromSrc, to_source_id: toSrc };
+}
+
+/**
+ * Every distinct endpoint source must be an active concrete source.
+ * Explicit row ids bypass the CLI resolver, and pageExists still sees
+ * pages retained on an archived source. Reject those before any receipt
+ * or addLink. `__all__` is not a concrete source.
+ */
+async function assertActiveConcreteRowSources(
+  engine: BrainEngine,
+  rows: RelationManifestRow[],
+): Promise<void> {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    ids.add(row.from_source_id ?? 'default');
+    ids.add(row.to_source_id ?? 'default');
+  }
+  for (const id of ids) {
+    if (id === ALL_SOURCES || !isValidSourceId(id)) {
+      throw new SourceTargetError(
+        `Invalid --source value "${id}". Must match [a-z0-9-]{1,32}.`,
+      );
+    }
+    await resolveSourceId(engine, id);
+  }
 }
 
 /** Thrown when a receipt path already exists. The existing file is left untouched. */
@@ -340,10 +367,11 @@ export async function applyRelationManifest(
   opts: ApplyRelationManifestOpts,
 ): Promise<RelationApplyResult> {
   if (opts.receiptPath) refuseExistingReceipt(opts.receiptPath);
-  const before = await computeGraphFingerprint(engine);
   const sha = manifestSha256(manifestRaw);
   const slice = (opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows)
     .map(row => resolveRowSources(row, opts.defaultSourceId));
+  await assertActiveConcreteRowSources(engine, slice);
+  const before = await computeGraphFingerprint(engine);
   await assertActivePackLinkVocabulary(engine, slice);
   // Prove the receipt path can be created before the first addLink.
   if (opts.receiptPath) reserveMutationReceipt(opts.receiptPath);

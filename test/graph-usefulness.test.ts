@@ -756,6 +756,25 @@ describe('relation manifest', () => {
 });
 
 describe('graph fingerprint identities', () => {
+  test('reads counts and identities in one statement', async () => {
+    const original = engine.executeRaw.bind(engine);
+    const fpSql: string[] = [];
+    engine.executeRaw = async (sql, params, opts) => {
+      if (typeof sql === 'string' && sql.includes('zero_degree_pages')) fpSql.push(sql);
+      return original(sql, params, opts);
+    };
+    try {
+      const fp = await computeGraphFingerprint(engine);
+      expect(fpSql).toHaveLength(1);
+      expect(fpSql[0]).toContain('page_identities');
+      expect(fpSql[0]).toContain('link_identities');
+      expect(fp.active_pages).toBeGreaterThan(0);
+      expect(fp.sha256).toHaveLength(64);
+    } finally {
+      engine.executeRaw = original;
+    }
+  });
+
   test('changes sha256 when an edge is swapped without count change', async () => {
     await engine.putPage('topics/fp-a', { title: 'A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/fp-b', { title: 'B', compiled_truth: 'b', type: 'note' });
@@ -1368,6 +1387,85 @@ describe('relation source scope and option terminator', () => {
       expect(cfgLinks).toEqual([{ from_source: 'wiki', to_source: 'wiki' }]);
     } finally {
       await engine.unsetConfig('sources.default');
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('rejects an archived source named by a manifest row before addLink', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('archsrc', 'archsrc') ON CONFLICT (id) DO NOTHING`,
+    );
+    const from = 'topics/arch-from';
+    const to = 'topics/arch-to';
+    await engine.putPage(from, { title: 'From', compiled_truth: 'arch from', type: 'note' }, { sourceId: 'archsrc' });
+    await engine.putPage(to, { title: 'To', compiled_truth: 'arch to', type: 'note' }, { sourceId: 'archsrc' });
+    await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'archsrc'`);
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-arch-src-'));
+    const manifestPath = join(dir, 'manifest.json');
+    const receiptPath = join(dir, 'receipt.json');
+    const raw = relationManifest([{
+      id: 'arch-row',
+      from_slug: from,
+      to_slug: to,
+      from_source_id: 'archsrc',
+      to_source_id: 'archsrc',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    writeFileSync(manifestPath, raw);
+    const manifest = parseRelationManifest(raw);
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    const origLog = console.log;
+    const origErr = console.error;
+    const errors: string[] = [];
+    console.log = () => {};
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    try {
+      await expect(applyRelationManifest(engine, manifest, raw, {
+        apply: true,
+        receiptPath,
+        defaultSourceId: 'default',
+      })).rejects.toThrow(/Source "archsrc" not found or is archived/);
+      expect(calls).toBe(0);
+      expect(existsSync(receiptPath)).toBe(false);
+      expect(await linkCount(engine, from, to)).toBe(0);
+
+      const sentinel = relationManifest([{
+        id: 'all-row',
+        from_slug: from,
+        to_slug: to,
+        from_source_id: '__all__',
+        to_source_id: 'default',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: TRUE_GUARDS,
+      }]);
+      const allManifest = parseRelationManifest(sentinel);
+      await expect(applyRelationManifest(engine, allManifest, sentinel, {
+        apply: true,
+        defaultSourceId: 'default',
+      })).rejects.toThrow(/Invalid --source value "__all__"/);
+      expect(calls).toBe(0);
+
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--apply', '--yes', '--json',
+        '--receipt-out', join(dir, 'cli-receipt.json'),
+      ]);
+      expect(currentExitCode()).toBe(1);
+      expect(errors.some(line => line.includes('Source "archsrc" not found or is archived'))).toBe(true);
+      expect(calls).toBe(0);
+      expect(existsSync(join(dir, 'cli-receipt.json'))).toBe(false);
+    } finally {
+      engine.addLink = original;
       console.log = origLog;
       console.error = origErr;
       process.exitCode = undefined;

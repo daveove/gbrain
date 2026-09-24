@@ -12,6 +12,7 @@ import {
   applyRelationManifest,
   loadRelationManifestFile,
   summarizeRowStatuses,
+  type ApplyRelationManifestOpts,
 } from '../core/graph-usefulness/relation-manifest.ts';
 import {
   loadRetrievalProofFile,
@@ -19,7 +20,7 @@ import {
   SlugOnlyProofNeedsSourceError,
 } from '../core/graph-usefulness/retrieval-proof.ts';
 import { InvalidGraphLimitError, parseOptionalPositiveLimit } from '../core/graph-usefulness/limit.ts';
-import type { RetrievalProofResult } from '../core/graph-usefulness/types.ts';
+import type { RelationApplyResult, RelationManifest, RetrievalProofResult } from '../core/graph-usefulness/types.ts';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -243,6 +244,24 @@ function hasFlag(args: string[], name: string): boolean {
   return argsBeforeOptionTerminator(args).includes(name);
 }
 
+async function applyManifestOrRejectSource(
+  engine: BrainEngine,
+  manifest: RelationManifest,
+  raw: string,
+  opts: ApplyRelationManifestOpts,
+): Promise<RelationApplyResult | undefined> {
+  try {
+    return await applyRelationManifest(engine, manifest, raw, opts);
+  } catch (e) {
+    if (isResolverUserError(e)) {
+      console.error(e instanceof Error ? e.message : String(e));
+      setCliExitVerdict(1);
+      return undefined;
+    }
+    throw e;
+  }
+}
+
 function parseSource(args: string[]): { sourceId?: string } {
   const sourceId = takeFlag(args, '--source');
   return sourceId ? { sourceId } : {};
@@ -386,12 +405,13 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     const { manifest, raw } = loadRelationManifestFile(manifestPath);
 
     if (action === 'verify') {
-      const result = await applyRelationManifest(engine, manifest, raw, {
+      const result = await applyManifestOrRejectSource(engine, manifest, raw, {
         apply: false,
         limit,
         defaultSourceId,
         receiptPath: hasFlag(args, '--write-receipt') ? receiptOut : undefined,
       });
+      if (!result) return;
       if (json) {
         console.log(JSON.stringify(result, null, 2));
         return;
@@ -409,13 +429,14 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
         setCliExitVerdict(2);
         return;
       }
-      const result = await applyRelationManifest(engine, manifest, raw, {
+      const result = await applyManifestOrRejectSource(engine, manifest, raw, {
         apply: apply && yes,
         limit,
         defaultSourceId,
         receiptPath: receiptOut,
         operator: process.env.USER ?? 'gbrain',
       });
+      if (!result) return;
       if (json) {
         console.log(JSON.stringify(result, null, 2));
         return;
@@ -520,6 +541,7 @@ DAV-6220 usefulness:
       Omitted row source ids use the resolved CLI source
       (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
       A row that sets from_source_id or to_source_id keeps that value.
+      Every row source must name an active source. Archived sources are rejected.
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
