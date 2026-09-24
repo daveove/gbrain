@@ -10,12 +10,15 @@ export async function measureGraphUsefulness(
   const scope = opts?.sourceIds ?? (opts?.sourceId ? [opts.sourceId] : null);
   const inScope = (alias: string) =>
     scope ? `${alias}.source_id = ANY($1::text[])` : 'TRUE';
-  const linkScope = scope
-    ? `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')})
-       AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')})`
-    : 'TRUE';
+  // Same active-source predicate as the fingerprint. Archived corpora must
+  // not enter average/median degree or junk-slug samples.
+  const pageVisible = (alias: string) =>
+    `EXISTS (SELECT 1 FROM sources s WHERE s.id = ${alias}.source_id AND NOT s.archived)`;
+  const linkScope =
+    `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')} AND ${pageVisible('pf')})
+     AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})`;
   const params = scope ? [scope] : [];
-  const pageScope = inScope('p');
+  const pageScope = `${inScope('p')} AND ${pageVisible('p')}`;
 
   const degreeRows = await engine.executeRaw<{
     avg_degree: string | null;

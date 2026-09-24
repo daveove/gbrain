@@ -9,7 +9,8 @@ This directory holds **immutable receipts** for bounded graph-reconnection work 
 `gbrain graph <slug>` still runs **graph traversal** (`traverse_graph`). DAV-6220 subcommands are explicit: `measure`, `relations`, `retrieval-proof`.
 
 ```bash
-# Read-only baseline (pages, links, zero-degree count, junk-slug samples)
+# Read-only baseline (pages, links, zero-degree count, junk-slug samples).
+# Archived sources are excluded from degree and junk samples.
 gbrain graph measure --json
 
 # Verify a sealed relation manifest (no writes)
@@ -26,7 +27,7 @@ gbrain graph retrieval-proof run /path/to/retrieval-proof.json \
 
 ## Manifest contracts
 
-- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Every guard must be a JSON boolean. Apply re-checks them and writes a link only when each one is literal `true`. The no-edge recheck and the insert share one transaction that locks the endpoint pages and their source rows. A concurrent edge is left as it is and is not counted as applied. A source archived after the preflight is rejected inside that transaction. The mutation receipt is durable JSON before each link commits, with a pending row, so a crash does not leave an empty receipt beside applied links.
+- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Every guard must be a JSON boolean. Apply re-checks them and writes a link only when each one is literal `true`. The no-edge recheck and the insert share one transaction that locks the endpoint pages and their source rows. Any incident edge on either endpoint — including a reverse edge or an edge to a third page — is left as it is and is not counted as applied. `relations verify` and `relations apply` accept exactly one manifest path; extra positional arguments are rejected before the manifest is read. A source archived after the preflight is rejected inside that transaction. The mutation receipt is durable JSON before each link commits, with a pending row, so a crash does not leave an empty receipt beside applied links.
 - **Retrieval proof** (`proof_version: 2`): scored question list; output includes `checks.scores` and `checks.cited_readwise_pages` (the number of Readwise hits, not the number of questions that cited any; must stay `0` for Readwise-cleared corpora). Each question's `top_k` must be a positive integer. Slug and page expectation fields must be arrays. Source-qualified page expectations must name an active source. `passed` is false when the before/after graph fingerprint differs, including a content, chunk, or embedding rewrite that leaves page and link identities in place, and `checks.production_mutations` is then non-zero. `measure` and `retrieval-proof` reject an unknown `--source` instead of scoring an empty corpus.
 
 ## Mutation receipt fields

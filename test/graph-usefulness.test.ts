@@ -103,6 +103,50 @@ describe('graph-usefulness measure', () => {
     expect(m.active_pages).toBeGreaterThanOrEqual(2);
     expect(m.fingerprint.sha256).toHaveLength(64);
   });
+
+  test('unscoped degree and junk exclude archived sources', async () => {
+    const baseline = await measureGraphUsefulness(engine);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('archmeas', 'archmeas', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'archmeas'`,
+    );
+    const junk = 'topics/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+    await engine.putPage(junk, {
+      title: 'Junk', compiled_truth: 'archived junk slug', type: 'note',
+    }, { sourceId: 'archmeas' });
+    await engine.putPage('topics/archmeas-a', {
+      title: 'Arch A', compiled_truth: 'archived degree a', type: 'note',
+    }, { sourceId: 'archmeas' });
+    await engine.putPage('topics/archmeas-b', {
+      title: 'Arch B', compiled_truth: 'archived degree b', type: 'note',
+    }, { sourceId: 'archmeas' });
+    await engine.addLink(
+      'topics/archmeas-a', 'topics/archmeas-b', 'ctx', 'related_to', 'manual',
+      undefined, undefined,
+      { fromSourceId: 'archmeas', toSourceId: 'archmeas' },
+    );
+
+    const live = await measureGraphUsefulness(engine);
+    const uuidCount = (samples: { pattern: string; count: number; examples: string[] }[]) =>
+      samples.find(s => s.pattern === 'uuid_blob');
+    expect(live.active_pages).toBe(baseline.active_pages + 3);
+    expect(live.avg_degree).not.toBe(baseline.avg_degree);
+    expect(uuidCount(live.junk_slug_samples)?.examples).toContain(junk);
+    expect(uuidCount(live.junk_slug_samples)?.count)
+      .toBe((uuidCount(baseline.junk_slug_samples)?.count ?? 0) + 1);
+
+    await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'archmeas'`);
+    const after = await measureGraphUsefulness(engine);
+    expect(after.active_pages).toBe(baseline.active_pages);
+    expect(after.avg_degree).toBe(baseline.avg_degree);
+    expect(after.median_degree).toBe(baseline.median_degree);
+    expect(after.zero_degree_pages).toBe(baseline.zero_degree_pages);
+    expect(after.link_rows).toBe(baseline.link_rows);
+    expect(uuidCount(after.junk_slug_samples)?.examples ?? []).not.toContain(junk);
+    expect(uuidCount(after.junk_slug_samples)?.count ?? 0)
+      .toBe(uuidCount(baseline.junk_slug_samples)?.count ?? 0);
+    expect(after.fingerprint.active_pages).toBe(after.active_pages);
+  });
 });
 
 describe('graph CLI routing', () => {
@@ -368,6 +412,7 @@ describe('relation manifest', () => {
     await engine.putPage('topics/batch-a', { title: 'A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/batch-b', { title: 'B', compiled_truth: 'b', type: 'note' });
     await engine.putPage('topics/batch-c', { title: 'C', compiled_truth: 'c', type: 'note' });
+    await engine.putPage('topics/batch-d', { title: 'D', compiled_truth: 'd', type: 'note' });
     const manifest = parseRelationManifest(JSON.stringify({
       manifest_version: 1,
       rows: [
@@ -381,7 +426,7 @@ describe('relation manifest', () => {
         },
         {
           id: 'b2',
-          from_slug: 'topics/batch-a',
+          from_slug: 'topics/batch-d',
           to_slug: 'topics/batch-c',
           link_type: 'related_to',
           link_source: 'tana-relation-r2',
@@ -757,6 +802,7 @@ describe('relation manifest', () => {
     await engine.putPage('topics/fp-loop-a', { title: 'Loop A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/fp-loop-b', { title: 'Loop B', compiled_truth: 'b', type: 'note' });
     await engine.putPage('topics/fp-loop-c', { title: 'Loop C', compiled_truth: 'c', type: 'note' });
+    await engine.putPage('topics/fp-loop-d', { title: 'Loop D', compiled_truth: 'd', type: 'note' });
     const manifest = parseRelationManifest(JSON.stringify({
       manifest_version: 1,
       rows: [
@@ -775,7 +821,7 @@ describe('relation manifest', () => {
         },
         {
           id: 'fp-loop-2',
-          from_slug: 'topics/fp-loop-a',
+          from_slug: 'topics/fp-loop-d',
           to_slug: 'topics/fp-loop-c',
           link_type: 'related_to',
           link_source: 'tana-relation-r2',
@@ -846,7 +892,7 @@ describe('relation manifest', () => {
       const sameResult = await applyRelationManifest(engine, same, JSON.stringify(same), { apply: true });
       expect(sameResult.applied).toBe(0);
       expect(sameResult.outcomes[0]?.status).toBe('skipped_already_linked');
-      expect(sameResult.outcomes[0]?.reason).toBe('forward edge already exists');
+      expect(sameResult.outcomes[0]?.reason).toBe('incident edge already exists');
       const sameRows = await engine.executeRaw<{ link_type: string; context: string; n: string }>(
         `SELECT l.link_type, l.context, count(*)::text AS n
            FROM links l
@@ -910,6 +956,117 @@ describe('relation manifest', () => {
     }
   });
 
+  test('no_incident_edge rejects when either endpoint has any incident edge', async () => {
+    const row = (id: string, from: string, to: string) => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id,
+        from_slug: from,
+        to_slug: to,
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: TRUE_GUARDS,
+      }],
+    }));
+    const note = (slug: string, title: string) =>
+      engine.putPage(slug, { title, compiled_truth: title, type: 'note' });
+
+    await note('topics/inc-free-a', 'Free A');
+    await note('topics/inc-free-b', 'Free B');
+    const free = row('inc-free', 'topics/inc-free-a', 'topics/inc-free-b');
+    const freeResult = await applyRelationManifest(engine, free, JSON.stringify(free), { apply: true });
+    expect(freeResult.applied).toBe(1);
+
+    await note('topics/inc-rev-a', 'Rev A');
+    await note('topics/inc-rev-b', 'Rev B');
+    await engine.addLink('topics/inc-rev-b', 'topics/inc-rev-a', 'ctx', 'related_to', 'manual');
+    const rev = row('inc-rev', 'topics/inc-rev-a', 'topics/inc-rev-b');
+    const revDry = await applyRelationManifest(engine, rev, JSON.stringify(rev), { apply: false });
+    expect(revDry.outcomes[0]?.status).toBe('skipped_already_linked');
+    expect(revDry.outcomes[0]?.reason).toBe('incident edge already exists');
+    const revApply = await applyRelationManifest(engine, rev, JSON.stringify(rev), { apply: true });
+    expect(revApply.applied).toBe(0);
+    expect(await linkCount(engine, 'topics/inc-rev-a', 'topics/inc-rev-b')).toBe(0);
+
+    await note('topics/inc-out-a', 'Out A');
+    await note('topics/inc-out-b', 'Out B');
+    await note('topics/inc-out-c', 'Out C');
+    await engine.addLink('topics/inc-out-a', 'topics/inc-out-c', 'ctx', 'mentions', 'manual');
+    const outgoing = row('inc-out', 'topics/inc-out-a', 'topics/inc-out-b');
+    const outApply = await applyRelationManifest(engine, outgoing, JSON.stringify(outgoing), { apply: true });
+    expect(outApply.applied).toBe(0);
+    expect(outApply.outcomes[0]?.status).toBe('skipped_already_linked');
+    expect(await linkCount(engine, 'topics/inc-out-a', 'topics/inc-out-b')).toBe(0);
+
+    await note('topics/inc-in-a', 'In A');
+    await note('topics/inc-in-b', 'In B');
+    await note('topics/inc-in-c', 'In C');
+    await engine.addLink('topics/inc-in-c', 'topics/inc-in-b', 'ctx', 'mentions', 'manual');
+    const incoming = row('inc-in', 'topics/inc-in-a', 'topics/inc-in-b');
+    const inApply = await applyRelationManifest(engine, incoming, JSON.stringify(incoming), { apply: true });
+    expect(inApply.applied).toBe(0);
+    expect(inApply.outcomes[0]?.status).toBe('skipped_already_linked');
+    expect(await linkCount(engine, 'topics/inc-in-a', 'topics/inc-in-b')).toBe(0);
+
+    await note('topics/inc-hook-rev-a', 'Hook Rev A');
+    await note('topics/inc-hook-rev-b', 'Hook Rev B');
+    const hookRev = row('inc-hook-rev', 'topics/inc-hook-rev-a', 'topics/inc-hook-rev-b');
+    _setBeforeGuardedLinkInsertForTests(async (tx, manifestRow) => {
+      await tx.addLink(
+        manifestRow.to_slug,
+        manifestRow.from_slug,
+        'reverse-under-lock',
+        'mentions',
+        'manual',
+        manifestRow.to_slug,
+        undefined,
+        {
+          fromSourceId: manifestRow.to_source_id ?? 'default',
+          toSourceId: manifestRow.from_source_id ?? 'default',
+          originSourceId: manifestRow.to_source_id ?? 'default',
+        },
+      );
+    });
+    try {
+      const hooked = await applyRelationManifest(engine, hookRev, JSON.stringify(hookRev), { apply: true });
+      expect(hooked.applied).toBe(0);
+      expect(hooked.outcomes[0]?.status).toBe('skipped_already_linked');
+      expect(hooked.outcomes[0]?.reason).toBe('incident edge already exists');
+      expect(await linkCount(engine, 'topics/inc-hook-rev-a', 'topics/inc-hook-rev-b')).toBe(0);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
+    }
+
+    await note('topics/inc-hook-third-a', 'Hook Third A');
+    await note('topics/inc-hook-third-b', 'Hook Third B');
+    await note('topics/inc-hook-third-c', 'Hook Third C');
+    const hookThird = row('inc-hook-third', 'topics/inc-hook-third-a', 'topics/inc-hook-third-b');
+    _setBeforeGuardedLinkInsertForTests(async (tx, manifestRow) => {
+      await tx.addLink(
+        manifestRow.from_slug,
+        'topics/inc-hook-third-c',
+        'third-under-lock',
+        'mentions',
+        'manual',
+        manifestRow.from_slug,
+        undefined,
+        {
+          fromSourceId: manifestRow.from_source_id ?? 'default',
+          toSourceId: 'default',
+          originSourceId: manifestRow.from_source_id ?? 'default',
+        },
+      );
+    });
+    try {
+      const hooked = await applyRelationManifest(engine, hookThird, JSON.stringify(hookThird), { apply: true });
+      expect(hooked.applied).toBe(0);
+      expect(hooked.outcomes[0]?.status).toBe('skipped_already_linked');
+      expect(await linkCount(engine, 'topics/inc-hook-third-a', 'topics/inc-hook-third-b')).toBe(0);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
+    }
+  });
+
   test('a source archived inside the insert transaction does not receive a link', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, archived) VALUES ('livesrc', 'livesrc', false)
@@ -953,6 +1110,7 @@ describe('relation manifest', () => {
     await engine.putPage('topics/dur-a', { title: 'Dur A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/dur-b', { title: 'Dur B', compiled_truth: 'b', type: 'note' });
     await engine.putPage('topics/dur-c', { title: 'Dur C', compiled_truth: 'c', type: 'note' });
+    await engine.putPage('topics/dur-d', { title: 'Dur D', compiled_truth: 'd', type: 'note' });
     const manifest = parseRelationManifest(JSON.stringify({
       manifest_version: 1,
       rows: [
@@ -966,7 +1124,7 @@ describe('relation manifest', () => {
         },
         {
           id: 'dur-2',
-          from_slug: 'topics/dur-a',
+          from_slug: 'topics/dur-d',
           to_slug: 'topics/dur-c',
           link_type: 'related_to',
           link_source: 'tana-relation-r2',
@@ -995,7 +1153,7 @@ describe('relation manifest', () => {
       })).rejects.toThrow(/simulated crash before second commit/);
       expect(seen).toEqual(['dur-1', 'dur-2']);
       expect(await linkCount(engine, 'topics/dur-a', 'topics/dur-b')).toBe(1);
-      expect(await linkCount(engine, 'topics/dur-a', 'topics/dur-c')).toBe(0);
+      expect(await linkCount(engine, 'topics/dur-d', 'topics/dur-c')).toBe(0);
       const saved = readFileSync(receiptPath, 'utf8');
       expect(saved.trim().length).toBeGreaterThan(0);
       const receipt = JSON.parse(saved) as { partial_failure?: boolean; outcomes: Array<{ id: string; status: string }> };
@@ -1783,21 +1941,67 @@ describe('relation source scope and option terminator', () => {
         'relations', 'apply', manifestPath, '--receipt-out', join(dir, 'hidden.json'), '--json',
         '--', '--apply', '--yes', '--dry-run',
       ]);
+      expect(currentExitCode()).toBe(2);
       expect(await linkCount(engine, from, to)).toBe(0);
-      const hidden = JSON.parse(stdout);
-      expect(hidden.mode).toBe('dry-run');
-      expect(hidden.applied).toBe(0);
+      expect(stdout).toBe('');
 
       stdout = '';
+      _resetCliExitVerdictForTests();
       await runGraphUsefulness(engine, [
         'relations', 'apply', manifestPath, '--apply', '--yes', '--json',
         '--receipt-out', join(dir, 'real.json'),
-        '--', '--dry-run',
       ]);
       expect(await linkCount(engine, from, to)).toBe(1);
       const applied = JSON.parse(stdout);
       expect(applied.mode).toBe('apply');
       expect(applied.applied).toBe(1);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('surplus positionals on relations apply are rejected before the manifest is read', async () => {
+    const from = 'topics/surplus-from';
+    const to = 'topics/surplus-to';
+    await engine.putPage(from, { title: 'From', compiled_truth: 'surplus from', type: 'note' });
+    await engine.putPage(to, { title: 'To', compiled_truth: 'surplus to', type: 'note' });
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rel-surplus-'));
+    const manifestPath = join(dir, 'manifest.json');
+    writeFileSync(manifestPath, relationManifest([{
+      id: 'surplus-1',
+      from_slug: from,
+      to_slug: to,
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]));
+    const origLog = console.log;
+    const origErr = console.error;
+    const errors: string[] = [];
+    console.log = () => {};
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, 'unexpected', '--apply', '--yes',
+        '--source', 'not-a-real-source',
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(await linkCount(engine, from, to)).toBe(0);
+      expect(errors.join('\n')).toContain('Unexpected argument: unexpected');
+      expect(errors.join('\n')).not.toMatch(/not found|archived/i);
+
+      errors.length = 0;
+      _resetCliExitVerdictForTests();
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', join(dir, 'missing.json'), 'unexpected', '--apply', '--yes',
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(errors.join('\n')).toContain('Unexpected argument: unexpected');
+      expect(errors.join('\n')).not.toMatch(/ENOENT|no such file|not found/i);
+      expect(await linkCount(engine, from, to)).toBe(0);
     } finally {
       console.log = origLog;
       console.error = origErr;

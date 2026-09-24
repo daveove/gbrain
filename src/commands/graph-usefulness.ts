@@ -384,8 +384,14 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     const positionals = graphPositionals(args);
     const action = positionals[1];
     const manifestPath = positionals[2];
-    if (!action || !manifestPath) {
-      console.error('Usage: gbrain graph relations verify|apply <manifest.json> ...');
+    // Exactly relations + action + manifest. A surplus token such as
+    // `unexpected` must not be ignored while --apply --yes still commits.
+    if (positionals.length !== 3 || !action || !manifestPath) {
+      const extra = positionals.slice(3);
+      if (extra.length > 0) {
+        console.error(`Unexpected argument${extra.length === 1 ? '' : 's'}: ${extra.join(' ')}`);
+      }
+      console.error('Usage: gbrain graph relations verify|apply <manifest.json>');
       setCliExitVerdict(2);
       return;
     }
@@ -565,6 +571,9 @@ Valued flags accept both --name value and --name=value
 token that starts with '-', is rejected before apply.
 Unknown flags are rejected before connect (for example --dry-run).
 Flags after -- are positional. They do not count as --apply, --yes, or --help.
+relations verify and relations apply accept exactly one manifest path.
+Extra positional arguments are rejected before the source is resolved
+or the manifest is read.
 retrieval-proof --out refuses to overwrite an existing file.
 `);
 }

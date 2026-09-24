@@ -104,13 +104,15 @@ async function hasIncidentEdge(
   toSourceId: string,
 ): Promise<boolean> {
   const rows = await engine.executeRaw<{ n: string }>(
-    `SELECT count(*)::text AS n FROM links l
-      JOIN pages fp ON fp.id = l.from_page_id
-      JOIN pages tp ON tp.id = l.to_page_id
-     WHERE fp.slug = $1 AND tp.slug = $2
-       AND fp.source_id = $3 AND tp.source_id = $4
-       AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
-    [from, to, fromSourceId, toSourceId],
+    `WITH endpoints AS (
+       SELECT p.id FROM pages p
+        WHERE p.deleted_at IS NULL
+          AND ((p.slug = $1 AND p.source_id = $2) OR (p.slug = $3 AND p.source_id = $4))
+     )
+     SELECT count(*)::text AS n FROM links l
+      WHERE l.from_page_id IN (SELECT id FROM endpoints)
+         OR l.to_page_id IN (SELECT id FROM endpoints)`,
+    [from, fromSourceId, to, toSourceId],
   );
   return Number(rows[0]?.n ?? 0) > 0;
 }
@@ -138,7 +140,7 @@ async function evaluateRow(
   }
 
   if (await hasIncidentEdge(engine, row.from_slug, row.to_slug, fromSrc, toSrc)) {
-    return { id: row.id, status: 'skipped_already_linked', reason: 'forward edge already exists' };
+    return { id: row.id, status: 'skipped_already_linked', reason: 'incident edge already exists' };
   }
 
   return { id: row.id, status: 'ready' };
@@ -421,8 +423,9 @@ function readInsertedLinkId(value: unknown): number | null {
  * The endpoint pages are locked FOR UPDATE first, so another session cannot
  * commit a link that references them until this transaction ends. The
  * following statement then sees every edge that committed before the lock
- * and inserts only when none exist. ON CONFLICT DO NOTHING does not
- * overwrite an identical row, and a zero-row insert is a conflict rather
+ * and inserts only when neither endpoint has any incident edge, in either
+ * direction, including an edge to a third page. ON CONFLICT DO NOTHING does
+ * not overwrite an identical row, and a zero-row insert is a conflict rather
  * than a new applied link.
  */
 async function insertNoIncidentEdge(
@@ -473,7 +476,7 @@ async function insertNoIncidentEdge(
     }>(
       `WITH incident AS (
          SELECT 1 FROM links l
-         WHERE l.from_page_id = $1 AND l.to_page_id = $2
+         WHERE l.from_page_id IN ($1, $2) OR l.to_page_id IN ($1, $2)
        ),
        inserted AS (
          INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id)
@@ -604,7 +607,7 @@ export async function applyRelationManifest(
           status: 'skipped_already_linked',
           reason: inserted.status === 'conflict'
             ? 'identical edge conflict; not overwritten'
-            : 'forward edge already exists',
+            : 'incident edge already exists',
         });
         checkpoint();
         continue;
