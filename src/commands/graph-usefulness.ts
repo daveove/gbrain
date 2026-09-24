@@ -177,9 +177,10 @@ export function printGraphUsefulnessHelp(): void {
 
 /**
  * Subcommand whitelist for usefulness flags. Null when the invocation is bare
- * traversal, help, or a clean usefulness command. Unknown flags and valued
- * flags whose next token is another option are reported here so dispatch can
- * refuse before connecting. The scan stops at `--`.
+ * traversal, help, or a clean usefulness command. Unknown flags, including
+ * single-dash tokens such as `-x`, and valued flags whose next token is
+ * another option are reported here so dispatch can refuse before connecting.
+ * The scan stops at `--`.
  */
 export function findGraphUsefulnessFlagProblem(args: string[]): GraphUsefulnessFlagProblem | null {
   const sub = graphUsefulnessSubcommand(args);
@@ -189,8 +190,11 @@ export function findGraphUsefulnessFlagProblem(args: string[]): GraphUsefulnessF
   const { legal, valued } = legalGraphUsefulnessFlags(sub, graphPositionals(args)[1]);
   for (let i = 0; i < optionArgs.length; i++) {
     const a = optionArgs[i];
+    if (!a.startsWith('-')) continue;
+    // `-h` is help. Every other single-dash token, including `-x`, is unknown.
+    if (a === '-h') continue;
     const m = /^--([a-z0-9][a-z0-9-]*)(?:=(.*))?$/i.exec(a);
-    if (!m) continue;
+    if (!m) return { kind: 'unknown', flag: a };
     if (/[A-Z]/.test(m[1])) return { kind: 'unknown', flag: `--${m[1]}` };
     const name = `--${m[1]}`;
     if (!legal.has(name)) return { kind: 'unknown', flag: name };

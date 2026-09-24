@@ -177,6 +177,12 @@ describe('graph CLI routing', () => {
     expect(findGraphUsefulnessFlagProblem([
       'relations', 'apply', 'm.json', '--apply', '--yes', '--limit=1', '--receipt-out=r.json',
     ])).toBeNull();
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--apply', '--yes', '-x',
+    ])).toEqual({ kind: 'unknown', flag: '-x' });
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--', '-x',
+    ])).toBeNull();
     expect(findGraphUsefulnessFlagProblem(['people/alice-example', '--depth', '2'])).toBeNull();
 
     const origExit = process.exit;
@@ -214,6 +220,15 @@ describe('graph CLI routing', () => {
         'relations', 'apply', 'manifest.json', '--receipt-out', '--apply', '--yes',
       ])).rejects.toBe(exitError);
       expect(code).toBe(2);
+      expect(calls).toBe(0);
+
+      code = -1;
+      errors.length = 0;
+      await expect(runGraphUsefulness(engine, [
+        'relations', 'apply', 'manifest.json', '--apply', '--yes', '-x',
+      ])).rejects.toBe(exitError);
+      expect(code).toBe(1);
+      expect(errors.some(line => line.includes('unknown flag -x'))).toBe(true);
       expect(calls).toBe(0);
     } finally {
       process.exit = origExit;
@@ -835,6 +850,103 @@ describe('relation manifest', () => {
         ['topics/race-diff-a', 'topics/race-diff-b'],
       );
       expect(diffRows).toEqual([{ link_type: 'mentions', link_source: 'manual' }]);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
+    }
+  });
+
+  test('a source archived inside the insert transaction does not receive a link', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('livesrc', 'livesrc', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false`,
+    );
+    const from = 'topics/live-from';
+    const to = 'topics/live-to';
+    await engine.putPage(from, { title: 'From', compiled_truth: 'live from', type: 'note' }, { sourceId: 'livesrc' });
+    await engine.putPage(to, { title: 'To', compiled_truth: 'live to', type: 'note' }, { sourceId: 'livesrc' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'live-row',
+        from_slug: from,
+        to_slug: to,
+        from_source_id: 'livesrc',
+        to_source_id: 'livesrc',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: TRUE_GUARDS,
+      }],
+    }));
+    _setBeforeGuardedLinkInsertForTests(async (tx) => {
+      await tx.executeRaw(`UPDATE sources SET archived = true WHERE id = 'livesrc'`);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+      })).rejects.toThrow(/Source "livesrc" not found or is archived/);
+      expect(await linkCount(engine, from, to)).toBe(0);
+      const still = await engine.executeRaw<{ archived: boolean | null }>(
+        `SELECT archived FROM sources WHERE id = 'livesrc'`,
+      );
+      expect(still[0]?.archived).not.toBe(true);
+    } finally {
+      _setBeforeGuardedLinkInsertForTests(null);
+    }
+  });
+
+  test('the receipt names a row before its link transaction commits', async () => {
+    await engine.putPage('topics/dur-a', { title: 'Dur A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/dur-b', { title: 'Dur B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/dur-c', { title: 'Dur C', compiled_truth: 'c', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [
+        {
+          id: 'dur-1',
+          from_slug: 'topics/dur-a',
+          to_slug: 'topics/dur-b',
+          link_type: 'related_to',
+          link_source: 'tana-relation-r2',
+          guards: TRUE_GUARDS,
+        },
+        {
+          id: 'dur-2',
+          from_slug: 'topics/dur-a',
+          to_slug: 'topics/dur-c',
+          link_type: 'related_to',
+          link_source: 'tana-relation-r2',
+          guards: TRUE_GUARDS,
+        },
+      ],
+    }));
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-dur-')), 'receipt.json');
+    const seen: string[] = [];
+    _setBeforeGuardedLinkInsertForTests(async (_tx, row) => {
+      const body = readFileSync(receiptPath, 'utf8');
+      expect(body.trim().length).toBeGreaterThan(0);
+      const receipt = JSON.parse(body) as {
+        phase?: string;
+        outcomes: Array<{ id: string; status: string }>;
+      };
+      expect(receipt.phase).toBe('in_progress');
+      expect(receipt.outcomes.some(o => o.id === row.id && o.status === 'pending_commit')).toBe(true);
+      seen.push(row.id);
+      if (row.id === 'dur-2') throw new Error('simulated crash before second commit');
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/simulated crash before second commit/);
+      expect(seen).toEqual(['dur-1', 'dur-2']);
+      expect(await linkCount(engine, 'topics/dur-a', 'topics/dur-b')).toBe(1);
+      expect(await linkCount(engine, 'topics/dur-a', 'topics/dur-c')).toBe(0);
+      const saved = readFileSync(receiptPath, 'utf8');
+      expect(saved.trim().length).toBeGreaterThan(0);
+      const receipt = JSON.parse(saved) as { partial_failure?: boolean; outcomes: Array<{ id: string; status: string }> };
+      expect(receipt.partial_failure).toBe(true);
+      expect(receipt.outcomes.filter(o => o.status === 'applied').map(o => o.id)).toEqual(['dur-1']);
+      expect(receipt.outcomes.some(o => o.status === 'pending_commit')).toBe(false);
     } finally {
       _setBeforeGuardedLinkInsertForTests(null);
     }

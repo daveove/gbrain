@@ -1,5 +1,15 @@
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeSync,
+} from 'fs';
 import { dirname } from 'path';
 import type { BrainEngine } from '../engine.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
@@ -255,18 +265,62 @@ export function _setBeforeReceiptCommitForTests(fn: (() => void) | null): void {
   beforeReceiptCommitForTests = fn;
 }
 
-/**
- * Exclusive-create the receipt path before any link mutation. A parent that
- * cannot be created, or a path that already exists, fails here.
- */
-function reserveMutationReceipt(path: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+function fsyncDir(dir: string): void {
+  let fd: number | undefined;
   try {
-    writeFileSync(path, '', { flag: 'wx' });
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as { code?: string }).code : undefined;
+    if (code !== 'EINVAL' && code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EBADF') throw err;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Replace `path` with a complete JSON body. A crash keeps the previous file. */
+function replaceDurableFile(path: string, body: string): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  const fd = openSync(tmp, 'w');
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    renameSync(tmp, path);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch { /* the rename error is the one that matters */ }
+    throw err;
+  }
+  fsyncDir(dirname(path));
+}
+
+/**
+ * Exclusive-create the receipt as durable JSON before any link mutation.
+ * An empty file is never the reserved state: a crash mid-loop must leave a
+ * receipt that names the rows, not a blocker with no record.
+ */
+function reserveMutationReceipt(path: string, body: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'wx');
   } catch (err) {
     if (isEexist(err)) throw new MutationReceiptExistsError(path);
     throw err;
   }
+  try {
+    writeSync(fd, body);
+    fsyncSync(fd);
+  } catch (err) {
+    try { unlinkSync(path); } catch { /* exclusive path may remain */ }
+    throw err;
+  } finally {
+    closeSync(fd);
+  }
+  fsyncDir(dirname(path));
 }
 
 async function rollbackAppliedLinks(
@@ -383,9 +437,20 @@ async function insertNoIncidentEdge(
     const to = locked.find(p => p.slug === row.to_slug && p.source_id === toSrc);
     if (!from) throw new PageMissingError('addLink', 'from', row.from_slug, fromSrc);
     if (!to) throw new PageMissingError('addLink', 'to', row.to_slug, toSrc);
-    // Pages stay locked. A competing edge inserted here is visible to the
-    // recheck below, and another session cannot commit one until we finish.
+    // Hold the source rows across the insert. An archive that commits after
+    // the preflight blocks here until this transaction ends, and one that
+    // already committed is visible to the re-read below.
+    await tx.executeRaw(
+      `SELECT id FROM sources WHERE id = $1 OR id = $2 ORDER BY id FOR UPDATE`,
+      [fromSrc, toSrc],
+    );
+    // Pages and sources stay locked. A competing edge or archive inserted
+    // here is visible to the recheck below.
     await beforeGuardedLinkInsertForTests?.(tx, row);
+    const sourceIds = fromSrc === toSrc ? [fromSrc] : [fromSrc, toSrc];
+    for (const id of sourceIds) {
+      await resolveSourceId(tx, id);
+    }
 
     const rows = await tx.executeRaw<{ incident_n: string; inserted_n: string }>(
       `WITH incident AS (
@@ -442,8 +507,10 @@ function writeMutationReceipt(
     ...extra,
   };
   beforeReceiptCommitForTests?.();
-  // The path was exclusive-created by reserveMutationReceipt. Fill that file.
-  writeFileSync(path, JSON.stringify(receipt, null, 2) + '\n', { flag: 'w' });
+  // The path was exclusive-created by reserveMutationReceipt. Replace that
+  // in-progress file with the final receipt. rename keeps a crash from
+  // leaving it empty.
+  replaceDurableFile(path, JSON.stringify(receipt, null, 2) + '\n');
 }
 
 export async function applyRelationManifest(
@@ -459,23 +526,54 @@ export async function applyRelationManifest(
   await assertActiveConcreteRowSources(engine, slice);
   const before = await computeGraphFingerprint(engine);
   await assertActivePackLinkVocabulary(engine, slice);
-  // Prove the receipt path can be created before the first addLink.
-  if (opts.receiptPath) reserveMutationReceipt(opts.receiptPath);
+  const createdAt = new Date().toISOString();
   const outcomes: RelationRowOutcome[] = [];
   const appliedRows: RelationManifestRow[] = [];
+
+  const checkpointBody = (pendingId?: string): string => {
+    const listed = pendingId
+      ? [...outcomes, { id: pendingId, status: 'pending_commit' as const }]
+      : outcomes;
+    return JSON.stringify({
+      issue: manifest.issue ?? 'DAV-6220',
+      mode: opts.apply ? 'apply' : 'dry-run',
+      created_at: createdAt,
+      manifest_sha256: sha,
+      operator: opts.operator ?? 'gbrain',
+      phase: 'in_progress',
+      counts: {
+        planned: slice.length,
+        applied: listed.filter(o => o.status === 'applied').length,
+        skipped: listed.filter(o => o.status.startsWith('skipped')).length,
+      },
+      before,
+      outcomes: listed,
+    }, null, 2) + '\n';
+  };
+  const checkpoint = (pendingId?: string): void => {
+    if (!opts.receiptPath) return;
+    replaceDurableFile(opts.receiptPath, checkpointBody(pendingId));
+  };
+  // Durable JSON from the first exclusive create. Never an empty file.
+  if (opts.receiptPath) reserveMutationReceipt(opts.receiptPath, checkpointBody());
 
   try {
     for (const row of slice) {
       const verdict = await evaluateRow(engine, row);
       if (verdict.status !== 'ready') {
         outcomes.push(verdict);
+        checkpoint();
         continue;
       }
       if (!opts.apply) {
         outcomes.push({ id: row.id, status: 'dry_run' });
+        checkpoint();
         continue;
       }
 
+      // Record the row before the link transaction commits. A crash in the
+      // insert leaves this pending_commit entry instead of an empty receipt.
+      checkpoint(row.id);
       const inserted = await insertNoIncidentEdge(engine, row);
       if (inserted !== 'inserted') {
         outcomes.push({
@@ -485,10 +583,12 @@ export async function applyRelationManifest(
             ? 'identical edge conflict; not overwritten'
             : 'forward edge already exists',
         });
+        checkpoint();
         continue;
       }
       appliedRows.push(row);
       outcomes.push({ id: row.id, status: 'applied' });
+      checkpoint();
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
