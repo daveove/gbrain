@@ -5,6 +5,7 @@ import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
+import { readProofSearchPin, type PinnedProofSearch } from './search-pin.ts';
 import type {
   GraphFingerprint,
   RetrievalPageRef,
@@ -253,7 +254,11 @@ export function citedReadwisePageCount(
 type RetrievalProofSearch = (
   engine: BrainEngine,
   query: string,
-  opts: { limit?: number; sourceId?: string },
+  opts: {
+    limit?: number;
+    sourceId?: string;
+    _pinnedSearch?: Pick<PinnedProofSearch, 'mode' | 'overrides' | 'embeddingColumn'>;
+  },
 ) => Promise<Array<{ slug: string; source_id?: string }>>;
 
 /** @internal Replace hybrid search so a proof can be scored without a corpus. */
@@ -306,7 +311,17 @@ export async function runRetrievalProof(
   }
   await assertActiveExpectationSources(engine, questions);
 
-  const before = await computeGraphFingerprint(engine);
+  // Resolve search.mode, per-key overrides, and the embedding column once.
+  // Every question receives this pin. hybridSearch would otherwise reload
+  // those settings per query, so a concurrent config write could mix
+  // retrieval configurations inside one proof.
+  const pin = await readProofSearchPin(engine);
+  const pinnedSearch = {
+    mode: pin.mode,
+    overrides: pin.overrides,
+    embeddingColumn: pin.embeddingColumn,
+  };
+  const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
 
   for (const q of questions) {
@@ -314,6 +329,7 @@ export async function runRetrievalProof(
     const searchOpts = {
       limit: topK,
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+      _pinnedSearch: pinnedSearch,
     };
     const hits = retrievalSearchForTests
       ? await retrievalSearchForTests(engine, q.query, searchOpts)
@@ -333,7 +349,10 @@ export async function runRetrievalProof(
     });
   }
 
-  const after = await computeGraphFingerprint(engine);
+  // Live config again. A change since the pin makes sha256 differ even
+  // when the graph counts did not, so production_mutations cannot stay 0.
+  const afterPin = await readProofSearchPin(engine);
+  const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
   const scores = { pass: 0, partial: 0, fail: 0 };
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = citedReadwisePageCount(results, opts.sourceId);

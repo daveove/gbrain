@@ -962,6 +962,16 @@ export interface HybridSearchOpts extends SearchOpts {
    * costly tokenmax bundle. Unknown values fall back to the default bundle.
    */
   mode?: string;
+  /**
+   * INTERNAL — retrieval-proof pin. When set, this call uses the supplied
+   * mode, per-key overrides, and embedding column instead of re-reading
+   * them from the config table. Direct callers leave it unset.
+   */
+  _pinnedSearch?: {
+    mode?: string;
+    overrides?: import('./mode.ts').SearchKeyOverrides;
+    embeddingColumn: import('../types.ts').ResolvedColumn;
+  };
   expandFn?: (query: string) => Promise<string[]>;
   /** Override default RRF K constant (default: 60). Lower values boost top-ranked results more. */
   rrfK?: number;
@@ -1171,7 +1181,10 @@ export async function hybridSearch(
   // per-mode evals would not test production search if modes lived only in
   // the wrapper. See `[CDX-5+6]` in the plan.
   const { loadSearchModeConfig, resolveSearchMode } = await import('./mode.ts');
-  const modeInput = await loadSearchModeConfig(engine);
+  const pinned = opts?._pinnedSearch;
+  const modeInput = pinned
+    ? { mode: pinned.mode, overrides: pinned.overrides }
+    : await loadSearchModeConfig(engine);
   const resolvedMode = resolveSearchMode({
     // T4/D5 — per-call mode selector (e.g. `--mode tokenmax`). The op layer
     // only passes this for trusted/local callers; remote callers leave it
@@ -1212,11 +1225,19 @@ export async function hybridSearch(
   // Failing cfg load (pre-config brain, mid-migration, no engine.getConfig)
   // falls through to the file-plane sync loadConfig() — same shape, just
   // misses DB-plane overrides.
+  // Column config is still loaded for the multimodal probe and adaptive
+  // return. A pin replaces only the resolved column so a concurrent
+  // search_embedding_column write cannot retarget this call.
   const mergedCfg = await loadConfigWithEngine(engine).catch(() => null);
   const cfgForColumn = mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
-  const resolvedCol = cfgForColumn
-    ? resolveEmbeddingColumn(opts, cfgForColumn)
-    : resolveEmbeddingColumn(opts, { engine: 'pglite' });
+  const resolvedCol = pinned
+    ? resolveEmbeddingColumn(
+      { embeddingColumn: pinned.embeddingColumn },
+      { engine: 'pglite' },
+    )
+    : cfgForColumn
+      ? resolveEmbeddingColumn(opts, cfgForColumn)
+      : resolveEmbeddingColumn(opts, { engine: 'pglite' });
 
   const limit = opts?.limit || resolvedMode.searchLimit;
   const offset = opts?.offset || 0;

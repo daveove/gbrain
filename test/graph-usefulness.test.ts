@@ -20,6 +20,8 @@ import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-f
 import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/graph-usefulness/limit.ts';
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
+import { canonicalSearchConfig, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { resolveSearchMode } from '../src/core/search/mode.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
@@ -146,6 +148,92 @@ describe('graph-usefulness measure', () => {
     expect(uuidCount(after.junk_slug_samples)?.count ?? 0)
       .toBe(uuidCount(baseline.junk_slug_samples)?.count ?? 0);
     expect(after.fingerprint.active_pages).toBe(after.active_pages);
+  });
+
+  test('reads degree, junk, and fingerprint from one statement', async () => {
+    const original = engine.executeRaw;
+    const sqls: string[] = [];
+    engine.executeRaw = async function(this: BrainEngine, sql, params, opts) {
+      if (typeof sql === 'string') sqls.push(sql);
+      return original.call(this, sql, params, opts);
+    } as BrainEngine['executeRaw'];
+    try {
+      const m = await measureGraphUsefulness(engine);
+      expect(sqls).toHaveLength(1);
+      const sql = sqls[0]!;
+      expect(sql).toContain('avg_degree');
+      expect(sql).toContain('median_degree');
+      expect(sql).toContain('zero_degree_pages');
+      expect(sql).toContain('page_identities');
+      expect(sql).toContain('source_archive');
+      expect(sql).not.toContain('LIMIT 50000');
+      const uuidCountSql = sql.match(
+        /\(SELECT count\(\*\)::text FROM scoped_pages sp WHERE sp\.slug ~\* '[^']+'\) AS junk_uuid_blob_n/,
+      )?.[0];
+      expect(uuidCountSql).toBeTruthy();
+      expect(uuidCountSql).not.toContain('LIMIT');
+      expect(sql).toContain('LIMIT 3');
+      expect(m.fingerprint.sha256).toHaveLength(64);
+      expect(Number.isFinite(m.avg_degree)).toBe(true);
+      expect(Number.isFinite(m.median_degree)).toBe(true);
+    } finally {
+      engine.executeRaw = original;
+    }
+  });
+
+  test('counts junk patterns over the whole scoped corpus and caps only examples', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('junkpar', 'junkpar', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'junkpar'`,
+    );
+    const slugs = [
+      'vendor/pnpm-store/pkg',
+      'cache/.pnpm-store/a',
+      'import/<span data-type=x>',
+      'a/b/c/d/e/f/g/h',
+      'a/b/c/d/e/f/g',
+      'repo/.git/config',
+      'repo/./keep',
+      'repo/keep.',
+      'plain/note',
+      'u/00000000-0000-4000-8000-000000000001',
+      'u/00000000-0000-4000-8000-000000000002',
+      'u/00000000-0000-4000-8000-000000000003',
+      'u/00000000-0000-4000-8000-000000000004',
+      'zzz/00000000-0000-4000-8000-000000000099',
+    ];
+    try {
+      for (const slug of slugs) {
+        await engine.putPage(slug, {
+          title: 'Junk parity', compiled_truth: 'junk parity body', type: 'note',
+        }, { sourceId: 'junkpar' });
+      }
+      await engine.executeRaw(
+        `INSERT INTO pages (source_id, slug, type, title)
+         VALUES ('junkpar', 'Case/AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE', 'note', 'Upper UUID')`,
+      );
+      const measured = await measureGraphUsefulness(engine, { sourceId: 'junkpar' });
+      const stored = await engine.executeRaw<{ slug: string }>(
+        `SELECT p.slug FROM pages p
+           JOIN sources s ON s.id = p.source_id AND NOT s.archived
+          WHERE p.deleted_at IS NULL AND p.source_id = $1
+          ORDER BY p.slug, p.source_id`,
+        ['junkpar'],
+      );
+      const expected = classifyJunkSlugs(stored.map(r => r.slug));
+      expect(measured.junk_slug_samples).toEqual(expected);
+      const uuid = measured.junk_slug_samples.find(s => s.pattern === 'uuid_blob');
+      expect(uuid?.count).toBeGreaterThan(uuid?.examples.length ?? 0);
+      expect(uuid?.examples).toHaveLength(3);
+      expect(uuid?.examples).not.toContain('zzz/00000000-0000-4000-8000-000000000099');
+      expect(uuid?.count).toBe(6);
+      expect(measured.junk_slug_samples.find(s => s.pattern === 'deep_path_noise')?.count).toBe(1);
+      expect(measured.junk_slug_samples.find(s => s.pattern === 'dotfile_segment')?.examples)
+        .not.toContain('repo/./keep');
+    } finally {
+      await engine.executeRaw(`DELETE FROM pages WHERE source_id = 'junkpar'`);
+      await engine.executeRaw(`DELETE FROM sources WHERE id = 'junkpar'`);
+    }
   });
 });
 
@@ -1312,6 +1400,31 @@ describe('graph fingerprint identities', () => {
     expect(after.zero_degree_pages).toBe(before.zero_degree_pages);
     expect(after.sha256).not.toBe(before.sha256);
   });
+
+  test('folds search configuration into sha256 without changing counts', async () => {
+    const plain = await computeGraphFingerprint(engine);
+    const conservative = await computeGraphFingerprint(engine, { searchConfig: '{"mode":"conservative"}' });
+    const tokenmax = await computeGraphFingerprint(engine, { searchConfig: '{"mode":"tokenmax"}' });
+    const again = await computeGraphFingerprint(engine, { searchConfig: '{"mode":"conservative"}' });
+    expect(conservative.sha256).toBe(again.sha256);
+    expect(conservative.sha256).not.toBe(tokenmax.sha256);
+    expect(conservative.sha256).not.toBe(plain.sha256);
+    expect(conservative.active_pages).toBe(plain.active_pages);
+    expect(conservative.link_rows).toBe(plain.link_rows);
+    expect(conservative.valid_links).toBe(plain.valid_links);
+    expect(conservative.zero_degree_pages).toBe(plain.zero_degree_pages);
+    expect(retrievalProofMutationCount(conservative, tokenmax)).toBeGreaterThan(0);
+    const knobs = resolveSearchMode({ mode: 'balanced' });
+    const column = {
+      name: 'embedding', type: 'vector' as const, dimensions: 1536, embeddingModel: 'openai:text-embedding-3-small',
+    };
+    expect(canonicalSearchConfig(knobs, column)).not.toBe(
+      canonicalSearchConfig(knobs, { ...column, name: 'embedding_image' }),
+    );
+    expect(canonicalSearchConfig(knobs, column)).not.toBe(
+      canonicalSearchConfig(resolveSearchMode({ mode: 'balanced', overrides: { expansion: true } }), column),
+    );
+  });
 });
 
 describe('retrieval proof', () => {
@@ -1523,6 +1636,63 @@ describe('retrieval proof', () => {
       expect(result.checks.production_mutations).toBeGreaterThan(0);
     } finally {
       engine.executeRaw = original;
+    }
+  });
+
+  test('pins search config for every question and fingerprints a live change', async () => {
+    await engine.setConfig('search.mode', 'conservative');
+    await engine.setConfig('search.expansion', 'true');
+    const seen: Array<{ mode?: string; expansion?: boolean; column?: string } | undefined> = [];
+    _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
+      seen.push(opts._pinnedSearch
+        ? {
+          mode: opts._pinnedSearch.mode,
+          expansion: opts._pinnedSearch.overrides.expansion,
+          column: opts._pinnedSearch.embeddingColumn.name,
+        }
+        : undefined);
+      if (seen.length === 1) {
+        await engine.setConfig('search.mode', 'tokenmax');
+        await engine.setConfig('search.expansion', 'false');
+        await engine.setConfig('search_embedding_column', 'embedding_image');
+      }
+      return [{ slug: 'topics/parent-note', source_id: 'default' }];
+    });
+    try {
+      const beforePin = await readProofSearchPin(engine);
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'q1', query: 'one', relevant_slugs: ['topics/parent-note'] },
+          { id: 'q2', query: 'two', relevant_slugs: ['topics/parent-note'] },
+        ],
+      }, { sourceId: 'default' });
+      const afterPin = await readProofSearchPin(engine);
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).toEqual(seen[1]);
+      expect(seen[0]?.mode).toBe('conservative');
+      expect(seen[0]?.expansion).toBe(true);
+      expect(seen[0]?.column).toBe('embedding');
+      expect(seen[1]?.column).toBe('embedding');
+      expect(beforePin.canonical).not.toBe(afterPin.canonical);
+      expect(afterPin.canonical).toContain('embedding_image');
+      expect(afterPin.mode).toBe('tokenmax');
+      expect(result.questions.map(q => q.score)).toEqual(['pass', 'pass']);
+      expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
+      expect(result.fingerprint_before.sha256).toBe(
+        (await computeGraphFingerprint(engine, { searchConfig: beforePin.canonical })).sha256,
+      );
+      expect(result.fingerprint_after.sha256).toBe(
+        (await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical })).sha256,
+      );
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+      expect(await engine.getConfig('search.mode')).toBe('tokenmax');
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.unsetConfig('search.mode');
+      await engine.unsetConfig('search.expansion');
+      await engine.unsetConfig('search_embedding_column');
     }
   });
 

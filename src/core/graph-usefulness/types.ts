@@ -71,7 +71,9 @@ export interface GraphFingerprint {
    * Hash of the four counts, ordered active-page `(source_id, slug)`
    * identities, ordered link endpoints, type, context, and source, and a
    * content/chunk revision (page generation, content hash, compiled truth,
-   * chunk text, and embedding revision). Aggregate counts alone stay on
+   * chunk text, and embedding revision). Retrieval-proof fingerprints also
+   * hash the effective search configuration (resolved mode, per-key
+   * overrides, and embedding column). Aggregate counts alone stay on
    * this object for receipts.
    */
   sha256: string;

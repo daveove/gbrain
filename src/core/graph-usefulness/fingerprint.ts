@@ -1,10 +1,28 @@
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../engine.ts';
-import type { GraphFingerprint } from './types.ts';
+import { junkMeasureSelectSql, junkPatternIds } from './junk-classify.ts';
+import type { GraphFingerprint, JunkSlugSample } from './types.ts';
 
 export interface ScopeOpts {
   sourceId?: string;
   sourceIds?: string[];
+}
+
+export interface SnapshotOpts extends ScopeOpts {
+  /**
+   * Canonical retrieval config from `readProofSearchPin`. When set, it is
+   * part of sha256 (graph-fingerprint-v5). Omitted on graph-only receipts.
+   */
+  searchConfig?: string;
+  /** Degree stats and full-corpus junk samples from this same statement. */
+  measure?: boolean;
+}
+
+export interface GraphSnapshot {
+  fingerprint: GraphFingerprint;
+  avg_degree: number;
+  median_degree: number;
+  junk_slug_samples: JunkSlugSample[];
 }
 
 function resolveScope(opts?: ScopeOpts): string[] | null {
@@ -25,13 +43,44 @@ function identityMatrix(value: unknown): unknown[][] {
   return parsed.filter(Array.isArray);
 }
 
+function stringList(value: unknown): string[] {
+  let parsed = value;
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter((item): item is string => typeof item === 'string');
+}
+
+function finiteNumber(value: unknown): number {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
 /**
  * Cheap brain fingerprint for before/after mutation receipts.
+ * Pass `searchConfig` to fold the proof's retrieval settings into sha256.
  */
 export async function computeGraphFingerprint(
   engine: BrainEngine,
-  opts?: ScopeOpts,
+  opts?: SnapshotOpts,
 ): Promise<GraphFingerprint> {
+  return (await computeGraphSnapshot(engine, opts)).fingerprint;
+}
+
+/**
+ * Counts, identities, corpus revision, and source archive state from one
+ * statement. With `measure`, degree stats and junk samples come from that
+ * same statement so a concurrent writer cannot tear the report.
+ */
+export async function computeGraphSnapshot(
+  engine: BrainEngine,
+  opts?: SnapshotOpts,
+): Promise<GraphSnapshot> {
   const scope = resolveScope(opts);
   const params: unknown[] = scope ? [scope] : [];
   const inScope = (alias: string) =>
@@ -48,7 +97,13 @@ export async function computeGraphFingerprint(
   // One statement: Postgres assigns a single snapshot, so counts, page
   // identities, link identities, corpus revision, and source archive state
   // cannot tear across a concurrent commit.
-  const rows = await engine.executeRaw<{
+  const measureSql = opts?.measure
+    ? `,
+       (SELECT COALESCE(avg(deg), 0)::text FROM degrees) AS avg_degree,
+       (SELECT COALESCE((percentile_cont(0.5) WITHIN GROUP (ORDER BY deg)), 0)::text FROM degrees) AS median_degree,
+       ${junkMeasureSelectSql()}`
+    : '';
+  const rows = await engine.executeRaw<Record<string, unknown> & {
     active_pages: string;
     link_rows: string;
     valid_links: string;
@@ -148,7 +203,7 @@ export async function computeGraphFingerprint(
          ) ORDER BY s.id)
          FROM sources s
          WHERE ${sourceInScope}
-       ), '[]'::json) AS source_archive`,
+       ), '[]'::json) AS source_archive${measureSql}`,
     params,
   );
 
@@ -176,9 +231,12 @@ export async function computeGraphFingerprint(
   // edge with another, rewriting page content, or archiving a source
   // changes sha256. Archived sources are omitted from the page and link
   // inputs, matching search. All of those inputs come from the same
-  // statement, so they share one snapshot.
+  // statement, so they share one snapshot. Proof callers also pass the
+  // effective search configuration; that uses a distinct version tag so
+  // graph-only receipts stay comparable with each other.
+  const searchConfig = opts?.searchConfig;
   const hash = createHash('sha256');
-  hash.update('graph-fingerprint-v4\n');
+  hash.update(searchConfig !== undefined ? 'graph-fingerprint-v5\n' : 'graph-fingerprint-v4\n');
   hash.update(JSON.stringify({
     active_pages: fp.active_pages,
     link_rows: fp.link_rows,
@@ -202,6 +260,28 @@ export async function computeGraphFingerprint(
     hash.update(JSON.stringify(source));
     hash.update('\n');
   }
+  if (searchConfig !== undefined) {
+    hash.update('\n');
+    hash.update(searchConfig);
+    hash.update('\n');
+  }
   fp.sha256 = hash.digest('hex');
-  return fp;
+  const junk_slug_samples: JunkSlugSample[] = [];
+  if (opts?.measure) {
+    for (const id of junkPatternIds()) {
+      const count = finiteNumber(r[`junk_${id}_n`]);
+      if (count <= 0) continue;
+      junk_slug_samples.push({
+        pattern: id,
+        count,
+        examples: stringList(r[`junk_${id}_examples`]),
+      });
+    }
+  }
+  return {
+    fingerprint: fp,
+    avg_degree: opts?.measure ? finiteNumber(r.avg_degree) : 0,
+    median_degree: opts?.measure ? finiteNumber(r.median_degree) : 0,
+    junk_slug_samples,
+  };
 }
