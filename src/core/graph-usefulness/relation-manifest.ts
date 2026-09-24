@@ -118,6 +118,47 @@ export function manifestSha256(raw: string): string {
   return createHash('sha256').update(raw).digest('hex');
 }
 
+function sortJsonKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonKeys);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      const child = record[key];
+      if (child === undefined) continue;
+      sorted[key] = sortJsonKeys(child);
+    }
+    return sorted;
+  }
+  return value;
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortJsonKeys(value));
+}
+
+function parseManifestRaw(manifestRaw: string): unknown {
+  try {
+    return JSON.parse(manifestRaw);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Relation manifestRaw is not valid JSON: ${message}`);
+  }
+}
+
+/**
+ * The receipt hashes `manifestRaw`. Apply that parsed document, and refuse
+ * a caller-supplied object that is not the same JSON value, before any
+ * receipt or link write.
+ */
+function manifestBoundToRaw(manifest: RelationManifest, manifestRaw: string): RelationManifest {
+  const parsed = parseManifestRaw(manifestRaw);
+  if (canonicalJson(manifest) !== canonicalJson(parsed)) {
+    throw new Error('Relation manifest object does not match manifestRaw');
+  }
+  return parsed as RelationManifest;
+}
+
 async function pageExists(
   engine: BrainEngine,
   slug: string,
@@ -631,6 +672,9 @@ export async function applyRelationManifest(
   manifestRaw: string,
   opts: ApplyRelationManifestOpts,
 ): Promise<RelationApplyResult> {
+  // Receipt hashes manifestRaw. Apply that document so a second object
+  // cannot name different endpoints under the same hash.
+  manifest = manifestBoundToRaw(manifest, manifestRaw);
   // Same string checks as parse. A caller that skips the parser still
   // fails before the receipt is reserved or any row is written.
   if (!Array.isArray(manifest.rows)) {

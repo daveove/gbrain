@@ -36,6 +36,7 @@ import {
   applyRelationManifest,
   guardsAllLiteralTrue,
   loadRelationManifestFile,
+  manifestSha256,
   MutationReceiptExistsError,
   _setBeforeGuardedLinkInsertForTests,
   _setBeforeReceiptCommitForTests,
@@ -1439,6 +1440,86 @@ describe('relation manifest', () => {
     )).rejects.toThrow(/link_type must be a non-empty string/);
     expect(await linkCount(engine, 'topics/typed-a', 'topics/typed-b')).toBe(0);
     expect(existsSync(receiptPath)).toBe(false);
+  });
+
+  test('rejects a manifest object that differs from the hashed bytes', async () => {
+    await engine.putPage('topics/bind-a', {
+      title: 'Bind A', compiled_truth: 'bind a', type: 'note',
+    });
+    await engine.putPage('topics/bind-b', {
+      title: 'Bind B', compiled_truth: 'bind b', type: 'note',
+    });
+    await engine.putPage('topics/bind-c', {
+      title: 'Bind C', compiled_truth: 'bind c', type: 'note',
+    });
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const sealed = {
+      manifest_version: 1,
+      rows: [{
+        id: 'bind-1',
+        from_slug: 'topics/bind-a',
+        to_slug: 'topics/bind-b',
+        link_type: 'related_to',
+        link_source: 'manual',
+        guards,
+      }],
+    };
+    const swapped = {
+      ...sealed,
+      rows: [{ ...sealed.rows[0], to_slug: 'topics/bind-c' }],
+    };
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-bind-')), 'receipt.json');
+    await expect(applyRelationManifest(
+      engine,
+      swapped as RelationManifest,
+      JSON.stringify(sealed),
+      { apply: true, receiptPath },
+    )).rejects.toThrow(/does not match manifestRaw/);
+    expect(await linkCount(engine, 'topics/bind-a', 'topics/bind-b')).toBe(0);
+    expect(await linkCount(engine, 'topics/bind-a', 'topics/bind-c')).toBe(0);
+    expect(existsSync(receiptPath)).toBe(false);
+  });
+
+  test('applies rows parsed from manifestRaw when the object matches', async () => {
+    await engine.putPage('topics/bind-raw-a', {
+      title: 'Bind Raw A', compiled_truth: 'bind raw a', type: 'note',
+    });
+    await engine.putPage('topics/bind-raw-b', {
+      title: 'Bind Raw B', compiled_truth: 'bind raw b', type: 'note',
+    });
+    const raw = `${JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'bind-raw-1',
+        from_slug: 'topics/bind-raw-a',
+        to_slug: 'topics/bind-raw-b',
+        link_type: 'related_to',
+        link_source: 'manual',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }, null, 2)}\n`;
+    const manifest = parseRelationManifest(raw);
+    expect(JSON.stringify(manifest)).not.toBe(raw);
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-bind-raw-')), 'receipt.json');
+    const result = await applyRelationManifest(engine, manifest, raw, {
+      apply: true,
+      receiptPath,
+    });
+    expect(result.applied).toBe(1);
+    expect(result.manifest_sha256).toBe(manifestSha256(raw));
+    expect(await linkCount(engine, 'topics/bind-raw-a', 'topics/bind-raw-b')).toBe(1);
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+    expect(receipt.manifest_sha256).toBe(manifestSha256(raw));
   });
 
   test('rejects managed link_source in manifest', () => {
