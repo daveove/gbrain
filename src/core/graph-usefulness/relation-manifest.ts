@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import type { BrainEngine } from '../engine.ts';
 import { MANAGED_LINK_SOURCES } from '../ops/links.ts';
@@ -131,6 +131,22 @@ export interface ApplyRelationManifestOpts {
   operator?: string;
 }
 
+/** Thrown when a receipt path already exists. The existing file is left untouched. */
+export class MutationReceiptExistsError extends Error {
+  constructor(path: string) {
+    super(`Refusing to overwrite existing mutation receipt: ${path}`);
+    this.name = 'MutationReceiptExistsError';
+  }
+}
+
+function isEexist(err: unknown): boolean {
+  return !!err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'EEXIST';
+}
+
+function refuseExistingReceipt(path: string): void {
+  if (existsSync(path)) throw new MutationReceiptExistsError(path);
+}
+
 function writeMutationReceipt(
   path: string,
   manifest: RelationManifest,
@@ -161,7 +177,14 @@ function writeMutationReceipt(
     ...extra,
   };
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(receipt, null, 2) + '\n');
+  refuseExistingReceipt(path);
+  const body = JSON.stringify(receipt, null, 2) + '\n';
+  try {
+    writeFileSync(path, body, { flag: 'wx' });
+  } catch (err) {
+    if (isEexist(err)) throw new MutationReceiptExistsError(path);
+    throw err;
+  }
 }
 
 export async function applyRelationManifest(
@@ -170,6 +193,7 @@ export async function applyRelationManifest(
   manifestRaw: string,
   opts: ApplyRelationManifestOpts,
 ): Promise<RelationApplyResult> {
+  if (opts.receiptPath) refuseExistingReceipt(opts.receiptPath);
   const before = await computeGraphFingerprint(engine);
   const sha = manifestSha256(manifestRaw);
   const slice = opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows;
@@ -210,17 +234,24 @@ export async function applyRelationManifest(
     const after = await computeGraphFingerprint(engine);
     const message = err instanceof Error ? err.message : String(err);
     if (opts.receiptPath) {
-      writeMutationReceipt(
-        opts.receiptPath,
-        manifest,
-        sha,
-        opts,
-        slice.length,
-        before,
-        after,
-        outcomes,
-        { partial_failure: true, error: message },
-      );
+      try {
+        writeMutationReceipt(
+          opts.receiptPath,
+          manifest,
+          sha,
+          opts,
+          slice.length,
+          before,
+          after,
+          outcomes,
+          { partial_failure: true, error: message },
+        );
+      } catch (receiptErr) {
+        if (receiptErr instanceof MutationReceiptExistsError) {
+          throw new Error(`${message} (${receiptErr.message})`);
+        }
+        throw receiptErr;
+      }
     }
     throw err;
   }

@@ -51,6 +51,7 @@ export function isGraphUsefulnessSubcommand(firstPositional: string | undefined)
 /**
  * Positional tokens, skipping values of flags in `FLAGS_WITH_VALUES`.
  * `--source wiki retrieval-proof` yields `['retrieval-proof']`, not `['wiki', ...]`.
+ * `--source=wiki` keeps the value on the flag token and does not swallow the next arg.
  */
 export function graphPositionals(args: string[]): string[] {
   const out: string[] = [];
@@ -60,7 +61,9 @@ export function graphPositionals(args: string[]): string[] {
       out.push(a);
       continue;
     }
-    if (FLAGS_WITH_VALUES.has(a)) i++;
+    const eq = a.indexOf('=');
+    const name = eq > 2 ? a.slice(0, eq) : a;
+    if (FLAGS_WITH_VALUES.has(name) && eq < 0) i++;
   }
   return out;
 }
@@ -76,10 +79,45 @@ export function graphUsefulnessSubcommand(args: string[]): string | undefined {
   return isGraphUsefulnessSubcommand(sub) ? sub : undefined;
 }
 
+export class MissingGraphFlagValueError extends Error {
+  constructor(name: string) {
+    super(`${name} requires a value`);
+    this.name = 'MissingGraphFlagValueError';
+  }
+}
+
+/**
+ * `--name value` and `--name=value`. Undefined when the flag is absent.
+ * A present flag with no value (or an empty `--name=`) throws.
+ */
+function readSeparatedOrInlineFlag(args: string[], name: string): string | undefined {
+  const prefix = `${name}=`;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === name) {
+      if (i + 1 >= args.length) throw new MissingGraphFlagValueError(name);
+      return args[i + 1];
+    }
+    if (a.startsWith(prefix)) {
+      const value = a.slice(prefix.length);
+      if (value.length === 0) throw new MissingGraphFlagValueError(name);
+      return value;
+    }
+  }
+  return undefined;
+}
+
 function takeFlag(args: string[], name: string): string | undefined {
-  const i = args.indexOf(name);
-  if (i < 0 || i + 1 >= args.length) return undefined;
-  return args[i + 1];
+  try {
+    return readSeparatedOrInlineFlag(args, name);
+  } catch (e) {
+    if (e instanceof MissingGraphFlagValueError) {
+      console.error(e.message);
+      setCliExitVerdict(2);
+      process.exit(2);
+    }
+    throw e;
+  }
 }
 
 function hasFlag(args: string[], name: string): boolean {
@@ -99,14 +137,16 @@ export class MissingGraphLimitError extends Error {
 }
 
 /**
- * Raw `--limit` token, or undefined when the flag is omitted.
- * A present flag with no following argument is a missing value, not an omit.
+ * Raw `--limit` value (`--limit N` or `--limit=N`), or undefined when omitted.
+ * A present flag with no value, including empty `--limit=`, is a missing value.
  */
 export function readLimitFlag(args: string[]): string | undefined {
-  const i = args.indexOf('--limit');
-  if (i < 0) return undefined;
-  if (i + 1 >= args.length) throw new MissingGraphLimitError();
-  return args[i + 1];
+  try {
+    return readSeparatedOrInlineFlag(args, '--limit');
+  } catch (e) {
+    if (e instanceof MissingGraphFlagValueError) throw new MissingGraphLimitError();
+    throw e;
+  }
 }
 
 function parseLimitArg(args: string[]): number | undefined {
@@ -176,9 +216,9 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       return;
     }
     const limit = parseLimitArg(args);
-    const { manifest, raw } = loadRelationManifestFile(manifestPath);
     const receiptOut = takeFlag(args, '--receipt-out')
       ?? `docs/progress/DAV-6220/mutation-receipt-${Date.now()}.json`;
+    const { manifest, raw } = loadRelationManifestFile(manifestPath);
 
     if (action === 'verify') {
       const result = await applyRelationManifest(engine, manifest, raw, {
@@ -235,6 +275,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       setCliExitVerdict(2);
       return;
     }
+    const outPath = takeFlag(args, '--out');
     const manifest = loadRetrievalProofFile(proofPath);
     const scope = parseSource(args);
     const limit = parseLimitArg(args);
@@ -249,10 +290,9 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       }
       throw e;
     }
-    const outPath = takeFlag(args, '--out');
     if (outPath) {
       mkdirSync(dirname(outPath), { recursive: true });
-      writeFileSync(outPath, JSON.stringify({ passed: result.passed, checks: result.checks, questions: result.questions }, null, 2) + '\n');
+      writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n');
     }
     if (json) {
       console.log(JSON.stringify(result, null, 2));
@@ -290,7 +330,11 @@ DAV-6220 usefulness:
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
+      --out writes the full result, including fingerprint_before and fingerprint_after.
       Bare relevant_slugs / forbidden_slugs require a single --source.
       relevant_pages / forbidden_pages are already (source_id, slug).
+
+Valued flags accept both --name value and --name=value
+(--limit, --source, --receipt-out, --out). An empty value is rejected.
 `);
 }

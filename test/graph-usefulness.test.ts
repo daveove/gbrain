@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { join } from 'path';
-import { readFileSync, mkdtempSync } from 'fs';
+import { readFileSync, mkdtempSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import {
   GRAPH_USEFULNESS_SUBCOMMANDS,
@@ -22,6 +22,7 @@ import {
   applyRelationManifest,
   guardsAllLiteralTrue,
   loadRelationManifestFile,
+  MutationReceiptExistsError,
   parseRelationManifest,
 } from '../src/core/graph-usefulness/relation-manifest.ts';
 import {
@@ -92,6 +93,10 @@ describe('graph CLI routing', () => {
       .toBe('retrieval-proof');
     expect(graphUsefulnessSubcommand(['--source', 'wiki', 'relations', 'verify', 'm.json']))
       .toBe('relations');
+    expect(graphPositionals(['--source=wiki', 'retrieval-proof', 'run', 'proof.json']))
+      .toEqual(['retrieval-proof', 'run', 'proof.json']);
+    expect(graphPositionals(['relations', 'apply', '--limit=1', 'm.json', '--receipt-out=r.json']))
+      .toEqual(['relations', 'apply', 'm.json']);
   });
 
   test('bare graph stays on the operation path', () => {
@@ -118,6 +123,9 @@ describe('limit parsing', () => {
     expect(readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes']))
       .toBeUndefined();
     expect(readLimitFlag(['--limit', '3'])).toBe('3');
+    expect(readLimitFlag(['--limit=1'])).toBe('1');
+    expect(readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes', '--limit=2'])).toBe('2');
+    expect(() => readLimitFlag(['--limit='])).toThrow(MissingGraphLimitError);
     expect(() => readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes', '--limit']))
       .toThrow(MissingGraphLimitError);
 
@@ -135,6 +143,65 @@ describe('limit parsing', () => {
       expect(code).toBe(2);
     } finally {
       process.exit = origExit;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('inline --limit=1 applies one row before the rest of the manifest', async () => {
+    await engine.putPage('topics/lim-a', { title: 'Lim A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/lim-b', { title: 'Lim B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/lim-c', { title: 'Lim C', compiled_truth: 'c', type: 'note' });
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-limit-'));
+    const manifestPath = join(dir, 'manifest.json');
+    const receiptPath = join(dir, 'receipt.json');
+    writeFileSync(manifestPath, JSON.stringify({
+      manifest_version: 1,
+      rows: [
+        {
+          id: 'lim-1',
+          from_slug: 'topics/lim-a',
+          to_slug: 'topics/lim-b',
+          link_type: 'child_of',
+          link_source: 'tana-relation-r2',
+          guards,
+        },
+        {
+          id: 'lim-2',
+          from_slug: 'topics/lim-a',
+          to_slug: 'topics/lim-c',
+          link_type: 'child_of',
+          link_source: 'tana-relation-r2',
+          guards,
+        },
+      ],
+    }));
+    const original = engine.addLink.bind(engine);
+    const linked: string[] = [];
+    engine.addLink = async (...args) => {
+      linked.push(String(args[1]));
+      return original(...args);
+    };
+    const origLog = console.log;
+    console.log = () => {};
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', '--limit=1', manifestPath, '--apply', '--yes', `--receipt-out=${receiptPath}`,
+      ]);
+      expect(linked).toEqual(['topics/lim-b']);
+      const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
+      expect(receipt.counts.planned).toBe(1);
+      expect(receipt.counts.applied).toBe(1);
+      expect(receipt.mode).toBe('apply');
+    } finally {
+      engine.addLink = original;
+      console.log = origLog;
       process.exitCode = undefined;
       _resetCliExitVerdictForTests();
     }
@@ -282,6 +349,69 @@ describe('relation manifest', () => {
     expect(result.outcomes[0]?.status).toBe('skipped_guard');
   });
 
+  test('refuses to overwrite an existing mutation receipt', async () => {
+    await engine.putPage('topics/rcpt-a', { title: 'Rcpt A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/rcpt-b', { title: 'Rcpt B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/rcpt-c', { title: 'Rcpt C', compiled_truth: 'c', type: 'note' });
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const first = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'rcpt-1',
+        from_slug: 'topics/rcpt-a',
+        to_slug: 'topics/rcpt-b',
+        link_type: 'child_of',
+        link_source: 'tana-relation-r2',
+        guards,
+      }],
+    }));
+    const second = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'rcpt-2',
+        from_slug: 'topics/rcpt-a',
+        to_slug: 'topics/rcpt-c',
+        link_type: 'child_of',
+        link_source: 'tana-relation-r2',
+        guards,
+      }],
+    }));
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-rcpt-')), 'mutation.json');
+    const applied = await applyRelationManifest(engine, first, JSON.stringify(first), {
+      apply: true,
+      receiptPath,
+    });
+    expect(applied.applied).toBe(1);
+    const body = readFileSync(receiptPath, 'utf8');
+    expect(JSON.parse(body).mode).toBe('apply');
+
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await expect(applyRelationManifest(engine, second, JSON.stringify(second), {
+        apply: false,
+        receiptPath,
+      })).rejects.toThrow(MutationReceiptExistsError);
+      await expect(applyRelationManifest(engine, second, JSON.stringify(second), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(MutationReceiptExistsError);
+      expect(calls).toBe(0);
+      expect(readFileSync(receiptPath, 'utf8')).toBe(body);
+    } finally {
+      engine.addLink = original;
+    }
+  });
+
   test('rejects managed link_source in manifest', () => {
     const row = {
       id: 'x', from_slug: 'a', to_slug: 'b', link_type: 't', link_source: 'markdown',
@@ -404,6 +534,37 @@ describe('retrieval proof', () => {
       await runGraphUsefulness(engine, ['--source', 'wiki', 'relations', 'verify', manifestPath, '--json']);
       expect(stderr).not.toContain('Usage:');
       expect(stderr).not.toContain('Unknown relations action');
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('persists fingerprints in retrieval-proof --out JSON', async () => {
+    const proof = join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json');
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-proof-'));
+    const spaced = join(dir, 'independent-verification.json');
+    const inline = join(dir, 'inline-verification.json');
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      await runGraphUsefulness(engine, [
+        '--source', 'default', 'retrieval-proof', 'run', proof, '--out', spaced,
+      ]);
+      await runGraphUsefulness(engine, [
+        '--source=default', 'retrieval-proof', 'run', proof, `--out=${inline}`,
+      ]);
+      for (const path of [spaced, inline]) {
+        const saved = JSON.parse(readFileSync(path, 'utf8'));
+        expect(saved.fingerprint_before.sha256).toHaveLength(64);
+        expect(saved.fingerprint_after.sha256).toBe(saved.fingerprint_before.sha256);
+        expect(saved.checks.production_mutations).toBe(0);
+        expect(saved.questions.length).toBeGreaterThan(0);
+      }
     } finally {
       console.log = origLog;
       console.error = origErr;
