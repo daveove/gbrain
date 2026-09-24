@@ -47,6 +47,16 @@ export interface RunRetrievalProofOpts {
   limit?: number;
 }
 
+/** True when any hit carries Readwise lineage via slug or source_id. */
+export function hitsIncludeReadwiseLineage(
+  hits: Array<{ slug: string; source_id?: string }>,
+  scopeSourceId?: string,
+): boolean {
+  return hits.some(h =>
+    slugLooksReadwise(h.slug, h.source_id ?? scopeSourceId ?? 'default'),
+  );
+}
+
 export async function runRetrievalProof(
   engine: BrainEngine,
   manifest: RetrievalProofManifest,
@@ -62,7 +72,7 @@ export async function runRetrievalProof(
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
     });
     const topSlugs = hits.map(h => h.slug);
-    const citedReadwise = topSlugs.some(s => slugLooksReadwise(s, opts.sourceId ?? 'default'));
+    const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
     results.push({
       id: q.id,
       query: q.query,

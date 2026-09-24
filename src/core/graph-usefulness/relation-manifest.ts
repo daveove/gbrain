@@ -103,6 +103,39 @@ export interface ApplyRelationManifestOpts {
   operator?: string;
 }
 
+function writeMutationReceipt(
+  path: string,
+  manifest: RelationManifest,
+  sha: string,
+  opts: ApplyRelationManifestOpts,
+  sliceLen: number,
+  before: Awaited<ReturnType<typeof computeGraphFingerprint>>,
+  after: Awaited<ReturnType<typeof computeGraphFingerprint>>,
+  outcomes: RelationRowOutcome[],
+  extra?: { partial_failure?: boolean; error?: string },
+): void {
+  const applied = outcomes.filter(o => o.status === 'applied').length;
+  const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;
+  const receipt: MutationReceipt = {
+    issue: manifest.issue ?? 'DAV-6220',
+    mode: opts.apply ? 'apply' : 'dry-run',
+    created_at: new Date().toISOString(),
+    manifest_sha256: sha,
+    operator: opts.operator ?? 'gbrain',
+    counts: {
+      planned: sliceLen,
+      applied,
+      skipped,
+    },
+    before,
+    after,
+    outcomes,
+    ...extra,
+  };
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(receipt, null, 2) + '\n');
+}
+
 export async function applyRelationManifest(
   engine: BrainEngine,
   manifest: RelationManifest,
@@ -114,35 +147,54 @@ export async function applyRelationManifest(
   const slice = opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows;
   const outcomes: RelationRowOutcome[] = [];
 
-  for (const row of slice) {
-    const verdict = await evaluateRow(engine, row);
-    if (verdict.status !== 'ready') {
-      outcomes.push(verdict);
-      continue;
-    }
-    if (!opts.apply) {
-      outcomes.push({ id: row.id, status: 'dry_run' });
-      continue;
-    }
+  try {
+    for (const row of slice) {
+      const verdict = await evaluateRow(engine, row);
+      if (verdict.status !== 'ready') {
+        outcomes.push(verdict);
+        continue;
+      }
+      if (!opts.apply) {
+        outcomes.push({ id: row.id, status: 'dry_run' });
+        continue;
+      }
 
-    const fromSrc = row.from_source_id ?? 'default';
-    const toSrc = row.to_source_id ?? 'default';
-    const linkOpts = {
-      fromSourceId: fromSrc,
-      toSourceId: toSrc,
-      originSourceId: fromSrc,
-    };
-    await engine.addLink(
-      row.from_slug,
-      row.to_slug,
-      row.context ?? 'DAV-6220 relation manifest',
-      row.link_type,
-      row.link_source,
-      row.from_slug,
-      undefined,
-      linkOpts,
-    ); // gbrain-allow-direct-insert: manifest-bound DAV-6220 graph reconnect — guarded apply, receipted
-    outcomes.push({ id: row.id, status: 'applied' });
+      const fromSrc = row.from_source_id ?? 'default';
+      const toSrc = row.to_source_id ?? 'default';
+      const linkOpts = {
+        fromSourceId: fromSrc,
+        toSourceId: toSrc,
+        originSourceId: fromSrc,
+      };
+      await engine.addLink(
+        row.from_slug,
+        row.to_slug,
+        row.context ?? 'DAV-6220 relation manifest',
+        row.link_type,
+        row.link_source,
+        row.from_slug,
+        undefined,
+        linkOpts,
+      ); // gbrain-allow-direct-insert: manifest-bound DAV-6220 graph reconnect — guarded apply, receipted
+      outcomes.push({ id: row.id, status: 'applied' });
+    }
+  } catch (err) {
+    const after = await computeGraphFingerprint(engine);
+    const message = err instanceof Error ? err.message : String(err);
+    if (opts.receiptPath) {
+      writeMutationReceipt(
+        opts.receiptPath,
+        manifest,
+        sha,
+        opts,
+        slice.length,
+        before,
+        after,
+        outcomes,
+        { partial_failure: true, error: message },
+      );
+    }
+    throw err;
   }
 
   const after = await computeGraphFingerprint(engine);
@@ -163,23 +215,16 @@ export async function applyRelationManifest(
   };
 
   if (opts.receiptPath) {
-    const receipt: MutationReceipt = {
-      issue: manifest.issue ?? 'DAV-6220',
-      mode: opts.apply ? 'apply' : 'dry-run',
-      created_at: new Date().toISOString(),
-      manifest_sha256: sha,
-      operator: opts.operator ?? 'gbrain',
-      counts: {
-        planned: slice.length,
-        applied,
-        skipped: result.skipped,
-      },
+    writeMutationReceipt(
+      opts.receiptPath,
+      manifest,
+      sha,
+      opts,
+      slice.length,
       before,
       after,
       outcomes,
-    };
-    mkdirSync(dirname(opts.receiptPath), { recursive: true });
-    writeFileSync(opts.receiptPath, JSON.stringify(receipt, null, 2) + '\n');
+    );
     result.receipt_path = opts.receiptPath;
   }
 

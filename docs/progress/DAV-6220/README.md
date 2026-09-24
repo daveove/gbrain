@@ -6,6 +6,8 @@ This directory holds **immutable receipts** for bounded graph-reconnection work 
 
 **Say to your agent:** *"Measure how connected my brain graph is after import"* — *"Run the DAV-6220 retrieval proof pack and save the receipt under docs/progress/DAV-6220/"*
 
+`gbrain graph <slug>` still runs **graph traversal** (`traverse_graph`). DAV-6220 subcommands are explicit: `measure`, `relations`, `retrieval-proof`.
+
 ```bash
 # Read-only baseline (pages, links, zero-degree count, junk-slug samples)
 gbrain graph measure --json

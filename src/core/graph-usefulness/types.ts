@@ -138,4 +138,7 @@ export interface MutationReceipt {
   before: GraphFingerprint;
   after: GraphFingerprint;
   outcomes: RelationRowOutcome[];
+  /** Set when apply aborted mid-run after one or more links committed. */
+  partial_failure?: boolean;
+  error?: string;
 }
