@@ -92,9 +92,21 @@ export async function computeGraphSnapshot(
   // same predicate so an archive between questions changes the snapshot.
   const pageVisible = (alias: string) =>
     `EXISTS (SELECT 1 FROM sources s WHERE s.id = ${alias}.source_id AND NOT s.archived)`;
-  const linkInScope =
+  // Edges whose two endpoints are both in scope. Unscoped proofs keep this
+  // predicate alone so an archived endpoint still drops the edge.
+  const bothEndsInScope =
     `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')} AND ${pageVisible('pf')})
      AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})`;
+  // getBacklinkCounts ranks a scoped hit by every inbound link and does not
+  // filter the from-page's source. Mention edges are excluded there
+  // (`IS DISTINCT FROM 'mentions'`). A scoped fingerprint must hash the same
+  // edges, or a cross-source relation can reorder later proof questions
+  // while sha256 stays equal.
+  const inboundRankingEdge = scope
+    ? `EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})
+       AND l.link_source IS DISTINCT FROM 'mentions'`
+    : 'FALSE';
+  const linkInScope = `(${bothEndsInScope}) OR (${inboundRankingEdge})`;
   const sourceInScope = scope ? 's.id = ANY($1::text[])' : 'TRUE';
   const rowInScope = (alias: string) =>
     scope ? `${alias}.source_id = ANY($1::text[])` : 'TRUE';
@@ -269,7 +281,9 @@ export async function computeGraphSnapshot(
   // flag. Replacing one edge with another, rewriting page content, changing
   // a ranking input (effective date, emotional weight, active takes, title,
   // type, aliases), or archiving a source changes sha256. Archived sources
-  // are omitted from the page and link inputs, matching search. All of those
+  // are omitted from page inputs, matching search. Scoped link inputs also
+  // keep every non-mention inbound edge into those pages, including edges
+  // whose from-page is outside the source, matching getBacklinkCounts. All of those
   // inputs come from the same statement, so they share one snapshot. Proof
   // callers also pass the effective search configuration; that uses a
   // distinct version tag so graph-only receipts stay comparable with each

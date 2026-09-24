@@ -1456,6 +1456,71 @@ describe('graph fingerprint identities', () => {
     expect(retrievalProofMutationCount(before, after)).toBeGreaterThan(0);
   });
 
+  test('scoped fingerprint includes cross-source inbound ranking edges', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('fp-wiki', 'fp-wiki', false),
+         ('fp-notes', 'fp-notes', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/fp-wiki-target', {
+      title: 'Wiki target', compiled_truth: 'scoped target', type: 'note',
+    }, { sourceId: 'fp-wiki' });
+    await engine.putPage('topics/fp-wiki-other', {
+      title: 'Wiki other', compiled_truth: 'scoped other', type: 'note',
+    }, { sourceId: 'fp-wiki' });
+    await engine.putPage('topics/fp-notes-origin', {
+      title: 'Notes origin', compiled_truth: 'foreign origin', type: 'note',
+    }, { sourceId: 'fp-notes' });
+
+    const wikiBefore = await computeGraphFingerprint(engine, { sourceId: 'fp-wiki' });
+    const notesBefore = await computeGraphFingerprint(engine, { sourceId: 'fp-notes' });
+    try {
+      await engine.addLink(
+        'topics/fp-notes-origin', 'topics/fp-wiki-target', 'cross', 'related_to', 'manual',
+        undefined, undefined,
+        { fromSourceId: 'fp-notes', toSourceId: 'fp-wiki' },
+      );
+      const wikiAfter = await computeGraphFingerprint(engine, { sourceId: 'fp-wiki' });
+      const notesAfter = await computeGraphFingerprint(engine, { sourceId: 'fp-notes' });
+      expect(wikiAfter.sha256).not.toBe(wikiBefore.sha256);
+      expect(wikiAfter.active_pages).toBe(wikiBefore.active_pages);
+      expect(wikiAfter.link_rows).toBe(wikiBefore.link_rows + 1);
+      expect(wikiAfter.valid_links).toBe(wikiBefore.valid_links + 1);
+      expect(wikiAfter.zero_degree_pages).toBe(wikiBefore.zero_degree_pages - 1);
+      expect(retrievalProofMutationCount(wikiBefore, wikiAfter)).toBeGreaterThan(0);
+      // The origin source's backlink ranking does not see its own outgoing edge.
+      expect(notesAfter.sha256).toBe(notesBefore.sha256);
+      expect(notesAfter.link_rows).toBe(notesBefore.link_rows);
+      expect(notesAfter.valid_links).toBe(notesBefore.valid_links);
+
+      await engine.addLink(
+        'topics/fp-notes-origin', 'topics/fp-wiki-other', 'mention', 'related_to', 'mentions',
+        undefined, undefined,
+        { fromSourceId: 'fp-notes', toSourceId: 'fp-wiki' },
+      );
+      const wikiAfterMention = await computeGraphFingerprint(engine, { sourceId: 'fp-wiki' });
+      expect(wikiAfterMention.sha256).toBe(wikiAfter.sha256);
+      expect(wikiAfterMention.link_rows).toBe(wikiAfter.link_rows);
+      expect(wikiAfterMention.valid_links).toBe(wikiAfter.valid_links);
+
+      await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'fp-notes'`);
+      const wikiAfterArchive = await computeGraphFingerprint(engine, { sourceId: 'fp-wiki' });
+      expect(wikiAfterArchive.sha256).toBe(wikiAfter.sha256);
+      expect(wikiAfterArchive.link_rows).toBe(wikiAfter.link_rows);
+
+      const target = await engine.getPage('topics/fp-wiki-target', { sourceId: 'fp-wiki' });
+      const other = await engine.getPage('topics/fp-wiki-other', { sourceId: 'fp-wiki' });
+      expect(target?.id).toBeDefined();
+      expect(other?.id).toBeDefined();
+      const counts = await engine.getBacklinkCounts([target!.id, other!.id]);
+      expect(counts.get(target!.id)).toBe(1);
+      expect(counts.get(other!.id)).toBe(0);
+    } finally {
+      await engine.executeRaw(`UPDATE sources SET archived = false WHERE id = 'fp-notes'`);
+    }
+  });
+
   test('archiving an empty source changes sha256 without changing counts', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, archived) VALUES ('emptysrc', 'emptysrc', false)
