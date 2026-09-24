@@ -13,7 +13,7 @@ export async function measureGraphUsefulness(
     active_pages: snap.fingerprint.active_pages,
     link_rows: snap.fingerprint.link_rows,
     valid_links: snap.fingerprint.valid_links,
-    zero_degree_pages: snap.fingerprint.zero_degree_pages,
+    zero_degree_pages: snap.measure_zero_degree_pages,
     avg_degree: snap.avg_degree,
     median_degree: snap.median_degree,
     junk_slug_samples: snap.junk_slug_samples,

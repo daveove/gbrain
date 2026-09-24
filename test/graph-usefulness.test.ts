@@ -21,8 +21,9 @@ import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
 import { canonicalSearchConfig, PROOF_EXPANSION_EXPANDER_ID, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { expandQuery } from '../src/core/search/expansion.ts';
-import { hybridSearch } from '../src/core/search/hybrid.ts';
+import { awaitPendingSearchCacheWrites, hybridSearch } from '../src/core/search/hybrid.ts';
 import { resolveSearchMode } from '../src/core/search/mode.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -235,6 +236,63 @@ describe('graph-usefulness measure', () => {
     } finally {
       await engine.executeRaw(`DELETE FROM pages WHERE source_id = 'junkpar'`);
       await engine.executeRaw(`DELETE FROM sources WHERE id = 'junkpar'`);
+    }
+  });
+
+  test('scoped degree counts cross-source edges in both directions', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('degout', 'degout', false),
+         ('degin', 'degin', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/deg-a', {
+      title: 'Deg A', compiled_truth: 'degree page a', type: 'note',
+    }, { sourceId: 'degout' });
+    await engine.putPage('topics/deg-b', {
+      title: 'Deg B', compiled_truth: 'degree page b', type: 'note',
+    }, { sourceId: 'degin' });
+    try {
+      const before = await measureGraphUsefulness(engine, { sourceId: 'degout' });
+      const fpBefore = await computeGraphFingerprint(engine, { sourceId: 'degout' });
+      expect(before.zero_degree_pages).toBe(1);
+      expect(before.fingerprint.zero_degree_pages).toBe(1);
+
+      await engine.addLink(
+        'topics/deg-a', 'topics/deg-b', 'out', 'related_to', 'manual',
+        undefined, undefined,
+        { fromSourceId: 'degout', toSourceId: 'degin' },
+      );
+      const outgoing = await measureGraphUsefulness(engine, { sourceId: 'degout' });
+      const fpOutgoing = await computeGraphFingerprint(engine, { sourceId: 'degout' });
+      expect(outgoing.zero_degree_pages).toBe(0);
+      expect(outgoing.avg_degree).toBe(1);
+      expect(outgoing.fingerprint.zero_degree_pages).toBe(fpBefore.zero_degree_pages);
+      expect(fpOutgoing.sha256).toBe(fpBefore.sha256);
+      expect(fpOutgoing.link_rows).toBe(fpBefore.link_rows);
+      const incomingSide = await measureGraphUsefulness(engine, { sourceId: 'degin' });
+      expect(incomingSide.zero_degree_pages).toBe(0);
+      expect(incomingSide.avg_degree).toBe(1);
+
+      await engine.executeRaw(
+        `DELETE FROM links WHERE from_page_id IN (
+           SELECT id FROM pages WHERE slug = 'topics/deg-a' AND source_id = 'degout'
+         )`,
+      );
+      await engine.addLink(
+        'topics/deg-b', 'topics/deg-a', 'mention', 'related_to', 'mentions',
+        undefined, undefined,
+        { fromSourceId: 'degin', toSourceId: 'degout' },
+      );
+      const mention = await measureGraphUsefulness(engine, { sourceId: 'degout' });
+      const fpMention = await computeGraphFingerprint(engine, { sourceId: 'degout' });
+      expect(mention.zero_degree_pages).toBe(0);
+      expect(mention.avg_degree).toBe(1);
+      expect(fpMention.sha256).toBe(fpBefore.sha256);
+      expect(fpMention.link_rows).toBe(fpBefore.link_rows);
+    } finally {
+      await engine.executeRaw(`DELETE FROM pages WHERE source_id IN ('degout', 'degin')`);
+      await engine.executeRaw(`DELETE FROM sources WHERE id IN ('degout', 'degin')`);
     }
   });
 });
@@ -849,6 +907,64 @@ describe('relation manifest', () => {
         ['topics/rb-id-a', 'topics/rb-id-b'],
       );
       expect(rows).toEqual([{ origin_null: true, context: 'other-writer' }]);
+    } finally {
+      _setBeforeReceiptCommitForTests(null);
+      rmSync(receiptPath, { recursive: true, force: true });
+    }
+  });
+
+  test('receipt rollback leaves a concurrent update of the inserted link', async () => {
+    await engine.putPage('topics/own-a', { title: 'Own A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/own-b', { title: 'Own B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'own-1',
+        from_slug: 'topics/own-a',
+        to_slug: 'topics/own-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'manifest-owned',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-own-'));
+    const receiptPath = join(dir, 'receipt.json');
+    _setBeforeReceiptCommitForTests(async () => {
+      await engine.addLink(
+        'topics/own-a',
+        'topics/own-b',
+        'other-writer',
+        'related_to',
+        'tana-relation-r2',
+        'topics/own-a',
+        'notes',
+        { fromSourceId: 'default', toSourceId: 'default', originSourceId: 'default' },
+      );
+      unlinkSync(receiptPath);
+      mkdirSync(receiptPath);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/left 1 concurrently updated link/);
+      const rows = await engine.executeRaw<{ context: string; origin_field: string | null; n: string }>(
+        `SELECT l.context, l.origin_field, count(*)::text AS n
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL
+          GROUP BY l.context, l.origin_field`,
+        ['topics/own-a', 'topics/own-b'],
+      );
+      expect(rows).toEqual([{ context: 'other-writer', origin_field: 'notes', n: '1' }]);
     } finally {
       _setBeforeReceiptCommitForTests(null);
       rmSync(receiptPath, { recursive: true, force: true });
@@ -1982,6 +2098,118 @@ describe('retrieval proof', () => {
       _setRetrievalProofSearchForTests(null);
       await engine.unsetConfig('search.mode');
       await engine.unsetConfig('search.expansion');
+    }
+  });
+
+  test('rejects a question without a non-empty id and query', async () => {
+    const proof = (question: Record<string, unknown>) => JSON.stringify({
+      proof_version: 2,
+      questions: [question],
+    });
+    const relevant = { relevant_slugs: ['topics/parent-note'] };
+    expect(() => parseRetrievalProofManifest(proof({ query: 'parent', ...relevant })))
+      .toThrow(/non-empty string id/);
+    expect(() => parseRetrievalProofManifest(proof({ id: '', query: 'parent', ...relevant })))
+      .toThrow(/non-empty string id/);
+    expect(() => parseRetrievalProofManifest(proof({ id: 1, query: 'parent', ...relevant })))
+      .toThrow(/non-empty string id/);
+    expect(() => parseRetrievalProofManifest(proof({ id: 'q-empty', query: '', ...relevant })))
+      .toThrow(/Question q-empty: query must be a non-empty string/);
+    expect(() => parseRetrievalProofManifest(proof({ id: 'q-missing', ...relevant })))
+      .toThrow(/Question q-missing: query must be a non-empty string/);
+    expect(() => parseRetrievalProofManifest(proof({ id: 'q-type', query: 1, ...relevant })))
+      .toThrow(/Question q-type: query must be a non-empty string/);
+
+    let searches = 0;
+    _setRetrievalProofSearchForTests(async () => {
+      searches += 1;
+      return [{ slug: 'topics/parent-note', source_id: 'default' }];
+    });
+    try {
+      await expect(runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [{ id: 'q-run', query: '', ...relevant } as never],
+      }, { sourceId: 'default' })).rejects.toThrow(/Question q-run: query must be a non-empty string/);
+      expect(searches).toBe(0);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+    }
+  });
+
+  test('scores a warm production cache hit instead of a live recompute', async () => {
+    const slug = 'topics/cache-proof-page';
+    const query = 'cache proof sealed unique phrase';
+    const dim = 1536;
+    const priorMode = await engine.getConfig('search.mode');
+    await engine.setConfig('search.mode', 'conservative');
+    await engine.putPage(slug, {
+      title: 'Cache Proof Page',
+      compiled_truth: query,
+      type: 'note',
+    });
+    await engine.upsertChunks(slug, [
+      { chunk_index: 0, chunk_text: query, chunk_source: 'compiled_truth' },
+    ], { sourceId: 'default' });
+    await engine.executeRaw(
+      `UPDATE content_chunks
+          SET embedding = array_fill(0.25, ARRAY[${dim}])::vector,
+              embedded_at = now()
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-small',
+      embedding_dimensions: dim,
+      env: { OPENAI_API_KEY: 'sk-test-cache-proof' },
+    });
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => ({
+      embeddings: opts.values.map(() => new Array(dim).fill(0.25)),
+    })) as never);
+    const manifest = {
+      proof_version: 2 as const,
+      questions: [{ id: 'q-cache', query, relevant_slugs: [slug] }],
+    };
+    try {
+      const first = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(first.questions[0]?.score).toBe('pass');
+      expect(first.passed).toBe(true);
+      await awaitPendingSearchCacheWrites();
+      const cached = await engine.executeRaw<{ n: string }>(
+        `SELECT count(*)::text AS n FROM query_cache WHERE query_text = $1`,
+        [query],
+      );
+      expect(Number(cached[0]?.n ?? 0)).toBeGreaterThan(0);
+      await engine.executeRaw(
+        `UPDATE query_cache
+            SET results = $1::text::jsonb
+          WHERE query_text = $2`,
+        [JSON.stringify([{
+          slug: 'topics/cache-decoy',
+          source_id: 'default',
+          score: 1,
+          page_id: 1,
+          chunk_text: 'decoy',
+          chunk_index: 0,
+          chunk_id: 0,
+        }]), query],
+      );
+      const second = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(second.questions[0]?.top_slugs).toEqual(['topics/cache-decoy']);
+      expect(second.questions[0]?.score).toBe('fail');
+      expect(second.checks.production_mutations).toBe(0);
+      expect(second.passed).toBe(false);
+    } finally {
+      __setEmbedTransportForTests(null);
+      resetGateway();
+      _setRetrievalProofSearchForTests(null);
+      if (priorMode == null) await engine.unsetConfig('search.mode');
+      else await engine.setConfig('search.mode', priorMode);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+      await engine.executeRaw(
+        `DELETE FROM pages WHERE slug = $1 AND source_id = 'default'`,
+        [slug],
+      );
     }
   });
 

@@ -26,6 +26,12 @@ export interface GraphSnapshot {
   avg_degree: number;
   median_degree: number;
   junk_slug_samples: JunkSlugSample[];
+  /**
+   * Zero-degree count from incident edges in either direction.
+   * Zero when `measure` was not requested. The fingerprint's
+   * `zero_degree_pages` stays on the retrieval predicate.
+   */
+  measure_zero_degree_pages: number;
 }
 
 function resolveScope(opts?: ScopeOpts): string[] | null {
@@ -107,6 +113,26 @@ export async function computeGraphSnapshot(
        AND l.link_source IS DISTINCT FROM 'mentions'`
     : 'FALSE';
   const linkInScope = `(${bothEndsInScope}) OR (${inboundRankingEdge})`;
+  // Degree for `graph measure` is connectivity, not backlink ranking.
+  // linkInScope admits a cross-source edge only when its target is in scope,
+  // so an in-scope page with only an outgoing edge looks zero-degree.
+  // Incident edges count in either direction, including mentions, as long as
+  // both endpoints are live pages on non-archived sources. Retrieval
+  // fingerprints keep linkInScope.
+  const measureDegreesCte = opts?.measure
+    ? `,
+     measure_degrees AS (
+       SELECT sp.id,
+         (SELECT count(*)::int FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id AND fp.deleted_at IS NULL
+           JOIN pages tp ON tp.id = l.to_page_id AND tp.deleted_at IS NULL
+           WHERE (l.from_page_id = sp.id OR l.to_page_id = sp.id)
+             AND ${pageVisible('fp')}
+             AND ${pageVisible('tp')}
+         ) AS deg
+       FROM scoped_pages sp
+     )`
+    : '';
   const sourceInScope = scope ? 's.id = ANY($1::text[])' : 'TRUE';
   const rowInScope = (alias: string) =>
     scope ? `${alias}.source_id = ANY($1::text[])` : 'TRUE';
@@ -116,8 +142,9 @@ export async function computeGraphSnapshot(
   // cannot tear across a concurrent commit.
   const measureSql = opts?.measure
     ? `,
-       (SELECT COALESCE(avg(deg), 0)::text FROM degrees) AS avg_degree,
-       (SELECT COALESCE((percentile_cont(0.5) WITHIN GROUP (ORDER BY deg)), 0)::text FROM degrees) AS median_degree,
+       (SELECT COALESCE(avg(deg), 0)::text FROM measure_degrees) AS avg_degree,
+       (SELECT COALESCE((percentile_cont(0.5) WITHIN GROUP (ORDER BY deg)), 0)::text FROM measure_degrees) AS median_degree,
+       (SELECT count(*)::text FROM measure_degrees WHERE deg = 0) AS measure_zero_degree_pages,
        ${junkMeasureSelectSql()}`
     : '';
   const rows = await engine.executeRaw<Record<string, unknown> & {
@@ -131,6 +158,7 @@ export async function computeGraphSnapshot(
     source_archive: unknown;
     page_alias_revision: string | null;
     slug_alias_revision: string | null;
+    measure_zero_degree_pages?: string;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
@@ -146,7 +174,7 @@ export async function computeGraphSnapshot(
              AND (${linkInScope})
          ) AS deg
        FROM scoped_pages sp
-     )
+     )${measureDegreesCte}
      SELECT
        (SELECT count(*)::text FROM scoped_pages) AS active_pages,
        (SELECT count(*)::text FROM links l WHERE ${linkInScope}) AS link_rows,
@@ -341,5 +369,6 @@ export async function computeGraphSnapshot(
     avg_degree: opts?.measure ? finiteNumber(r.avg_degree) : 0,
     median_degree: opts?.measure ? finiteNumber(r.median_degree) : 0,
     junk_slug_samples,
+    measure_zero_degree_pages: opts?.measure ? finiteNumber(r.measure_zero_degree_pages) : 0,
   };
 }

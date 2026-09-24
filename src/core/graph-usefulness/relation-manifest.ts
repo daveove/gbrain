@@ -325,34 +325,74 @@ function reserveMutationReceipt(path: string, body: string): void {
   fsyncDir(dirname(path));
 }
 
+/** Columns this manifest inserted. A later addLink can update the same id. */
+interface ManifestOwnedLink {
+  fromPageId: number;
+  toPageId: number;
+  linkType: string;
+  linkSource: string;
+  originPageId: number;
+  context: string;
+}
+
 interface AppliedManifestLink {
   row: RelationManifestRow;
   linkId: number;
+  owned: ManifestOwnedLink;
 }
 
 /**
- * Delete exactly the row this manifest inserted.
- * `removeLink` matches endpoint, type, and source and would also delete a
- * concurrent NULL-origin row that shares those fields.
+ * Delete a row only while it is still the version this manifest inserted.
+ * addLink's ON CONFLICT DO UPDATE can change context and origin_field on
+ * that same id after the insert commits. Deleting by id alone would remove
+ * the other writer's committed update. A row that no longer matches is left
+ * in place. A row that is already gone counts as rolled back.
+ * Returns how many rows were left because another writer owns them.
  */
 async function rollbackAppliedLinks(
   engine: BrainEngine,
   applied: AppliedManifestLink[],
-): Promise<void> {
+): Promise<number> {
   const failures: string[] = [];
+  let preserved = 0;
   for (const item of [...applied].reverse()) {
     try {
       const removed = await engine.executeRaw<{ id: number }>(
-        `DELETE FROM links WHERE id = $1 RETURNING id`,
+        `DELETE FROM links
+          WHERE id = $1
+            AND from_page_id = $2
+            AND to_page_id = $3
+            AND link_type = $4
+            AND link_source IS NOT DISTINCT FROM $5
+            AND origin_page_id IS NOT DISTINCT FROM $6
+            AND context IS NOT DISTINCT FROM $7
+            AND origin_field IS NULL
+            AND link_kind IS NULL
+            AND resolution_type IS NULL
+          RETURNING id`,
+        [
+          item.linkId,
+          item.owned.fromPageId,
+          item.owned.toPageId,
+          item.owned.linkType,
+          item.owned.linkSource,
+          item.owned.originPageId,
+          item.owned.context,
+        ],
+      );
+      if (removed.length === 1) continue;
+      const still = await engine.executeRaw<{ id: number }>(
+        `SELECT id FROM links WHERE id = $1`,
         [item.linkId],
       );
-      if (removed.length !== 1) failures.push(`${item.row.id}: link not removed`);
+      if (still.length === 1) preserved += 1;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       failures.push(`${item.row.id}: ${message}`);
     }
   }
   if (failures.length > 0) throw new Error(failures.join('; '));
+  return preserved;
 }
 
 /** Drop committed rows and the reserved receipt. Returns the undo clause. */
@@ -363,7 +403,11 @@ async function undoAppliedLinks(
 ): Promise<string> {
   let undo = `rolled back ${appliedRows.length} applied link(s)`;
   try {
-    await rollbackAppliedLinks(engine, appliedRows);
+    const preserved = await rollbackAppliedLinks(engine, appliedRows);
+    if (preserved > 0) {
+      const removed = appliedRows.length - preserved;
+      undo = `rolled back ${removed} applied link(s); left ${preserved} concurrently updated link(s)`;
+    }
     try { unlinkSync(receiptPath); } catch { /* reserved path may remain */ }
   } catch (undoErr) {
     const detail = undoErr instanceof Error ? undoErr.message : String(undoErr);
@@ -407,7 +451,7 @@ async function fingerprintAfterMutation(
 }
 
 type GuardedInsertResult =
-  | { status: 'inserted'; linkId: number }
+  | { status: 'inserted'; linkId: number; owned: ManifestOwnedLink }
   | { status: 'already_linked' }
   | { status: 'conflict' };
 
@@ -499,7 +543,18 @@ async function insertNoIncidentEdge(
     // Still inside the insert transaction. A missing id aborts that insert
     // instead of recording a row this run cannot later delete by id.
     if (linkId === null) throw new Error(`manifest row ${row.id}: inserted link id missing`);
-    return { status: 'inserted', linkId };
+    return {
+      status: 'inserted',
+      linkId,
+      owned: {
+        fromPageId: from.id,
+        toPageId: to.id,
+        linkType,
+        linkSource,
+        originPageId: from.id,
+        context,
+      },
+    };
   });
 }
 
@@ -612,7 +667,7 @@ export async function applyRelationManifest(
         checkpoint();
         continue;
       }
-      appliedLinks.push({ row, linkId: inserted.linkId });
+      appliedLinks.push({ row, linkId: inserted.linkId, owned: inserted.owned });
       outcomes.push({ id: row.id, status: 'applied' });
       checkpoint();
     }

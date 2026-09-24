@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { expandQuery } from '../search/expansion.ts';
-import { hybridSearch } from '../search/hybrid.ts';
+import { hybridSearchCached } from '../search/hybrid.ts';
 import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
@@ -43,6 +43,22 @@ export function retrievalHitKey(
 
 function questionLabel(q: { id?: string }): string {
   return q.id || '(missing id)';
+}
+
+/**
+ * A sealed question is only runnable with a real id and a real query.
+ * A missing or empty query used to parse when a relevant expectation was set,
+ * then search ran with that empty string.
+ */
+function assertQuestionIdentity(q: RetrievalProofQuestion): void {
+  const id = (q as { id?: unknown } | null)?.id;
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error('Retrieval proof question requires a non-empty string id');
+  }
+  const query = (q as { query?: unknown }).query;
+  if (typeof query !== 'string' || query.length === 0) {
+    throw new Error(`Question ${id}: query must be a non-empty string`);
+  }
 }
 
 function expectationError(questionId: string, field: string, detail: string): Error {
@@ -175,6 +191,7 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
     throw new Error('Retrieval proof manifest must include questions');
   }
   for (const q of parsed.questions) {
+    assertQuestionIdentity(q);
     const questionId = questionLabel(q);
     assertExpectationShape(q);
     assertRelevantExpectation(q);
@@ -334,7 +351,9 @@ export async function runRetrievalProof(
   opts: RunRetrievalProofOpts = {},
 ): Promise<RetrievalProofResult> {
   const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
+  // Identity first, before any fingerprint or source lookup.
   for (const q of questions) {
+    assertQuestionIdentity(q);
     assertExpectationShape(q);
     assertRelevantExpectation(q);
   }
@@ -381,9 +400,13 @@ export async function runRetrievalProof(
       ...(expandFn ? { expandFn } : {}),
       _pinnedSearch: pinnedSearch,
     };
+    // Production query and search go through hybridSearchCached. Bare
+    // hybridSearch recomputes live and can pass while a warm cache still
+    // serves a different set. The pin rides along so a miss keeps the sealed
+    // settings; a hit is the row a production caller would get for them.
     const hits = retrievalSearchForTests
       ? await retrievalSearchForTests(engine, q.query, searchOpts)
-      : await hybridSearch(engine, q.query, searchOpts);
+      : await hybridSearchCached(engine, q.query, searchOpts);
     const topPages: RetrievalPageRef[] = hits.map(h => ({
       source_id: h.source_id ?? opts.sourceId ?? 'default',
       slug: h.slug,
