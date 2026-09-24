@@ -1,10 +1,9 @@
 /**
- * gbrain graph — traverse (default) + DAV-6220 usefulness subcommands.
+ * DAV-6220 graph usefulness subcommands.
  *
- *   gbrain graph <slug> [--type T] ...     traverse_graph (legacy surface)
- *   gbrain graph measure [--json] [--source <id>]
- *   gbrain graph relations verify|apply <manifest.json> ...
- *   gbrain graph retrieval-proof run <proof.json> ...
+ * Bare `gbrain graph <slug>` is traverse_graph and must stay on the operation
+ * dispatcher (makeContext, source scope, thin-client MCP). This module handles
+ * only: measure, stats, relations, retrieval-proof, help.
  */
 
 import type { BrainEngine } from '../core/engine.ts';
@@ -23,7 +22,7 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 
-/** Subcommands handled by DAV-6220 graph usefulness; anything else delegates to traverse_graph. */
+/** Subcommands handled here. Bare slugs stay on the traverse_graph operation. */
 export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
   'measure',
   'stats',
@@ -32,9 +31,35 @@ export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
   'help',
 ]);
 
+const FLAGS_WITH_VALUES = new Set([
+  '--source',
+  '--limit',
+  '--receipt-out',
+  '--out',
+  '--depth',
+  '--link-type',
+  '--direction',
+  '--type',
+]);
+
 export function isGraphUsefulnessSubcommand(firstPositional: string | undefined): boolean {
-  if (!firstPositional) return true;
-  return GRAPH_USEFULNESS_SUBCOMMANDS.has(firstPositional);
+  return !!firstPositional && GRAPH_USEFULNESS_SUBCOMMANDS.has(firstPositional);
+}
+
+/** First positional token, skipping flags that take a value. */
+export function firstGraphPositional(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (!a.startsWith('--')) return a;
+    if (FLAGS_WITH_VALUES.has(a)) i++;
+  }
+  return undefined;
+}
+
+/** Usefulness subcommand name, or undefined when this invocation is bare traversal. */
+export function graphUsefulnessSubcommand(args: string[]): string | undefined {
+  const sub = firstGraphPositional(args);
+  return isGraphUsefulnessSubcommand(sub) ? sub : undefined;
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -45,15 +70,6 @@ function takeFlag(args: string[], name: string): string | undefined {
 
 function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
-}
-
-function firstPositional(args: string[]): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (!a.startsWith('--')) return a;
-    if (a === '--source' || a === '--limit' || a === '--receipt-out' || a === '--out') i++;
-  }
-  return undefined;
 }
 
 function parseSource(args: string[]): { sourceId?: string } {
@@ -75,17 +91,21 @@ function parseLimitArg(args: string[]): number | undefined {
 }
 
 export async function runGraphUsefulness(engine: BrainEngine, args: string[]): Promise<void> {
-  const sub = firstPositional(args);
+  if (hasFlag(args, '--help') || hasFlag(args, '-h')) {
+    printGraphHelp();
+    return;
+  }
 
-  if (!isGraphUsefulnessSubcommand(sub)) {
-    const { runGraphQuery } = await import('./graph-query.ts');
-    await runGraphQuery(engine, args);
+  const sub = graphUsefulnessSubcommand(args);
+  if (!sub) {
+    console.error('gbrain graph: usefulness subcommand required. Bare `gbrain graph <slug>` is traverse_graph.');
+    setCliExitVerdict(2);
     return;
   }
 
   const json = hasFlag(args, '--json');
 
-  if (!sub || sub === 'help') {
+  if (sub === 'help') {
     printGraphHelp();
     return;
   }
@@ -212,8 +232,8 @@ function printGraphHelp(): void {
   console.log(`Usage: gbrain graph <slug> [traverse options]
        gbrain graph <usefulness subcommand> ...
 
-Traverse (unchanged — same as traverse_graph op):
-  gbrain graph <slug> [--type T] [--depth N] [--direction in|out|both] [--include-foreign]
+Traverse (traverse_graph operation; source scope and thin-client routing apply):
+  gbrain graph <slug> [--depth N] [--link-type T] [--direction in|out|both] [--source <id>]
 
 DAV-6220 usefulness:
   measure [--json] [--source <id>]

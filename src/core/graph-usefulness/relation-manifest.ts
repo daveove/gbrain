@@ -13,7 +13,34 @@ import type {
   RelationRowOutcome,
   RelationRowStatus,
 } from './types.ts';
-import { RELATION_MANIFEST_VERSION } from './types.ts';
+import { RELATION_MANIFEST_VERSION, type RelationRowGuards } from './types.ts';
+
+/** Required guard keys. Each must be a real boolean; apply requires literal true. */
+export const REQUIRED_RELATION_GUARDS = [
+  'exact_endpoint_match',
+  'source_relation_current',
+  'no_incident_edge',
+  'readwise_clear',
+] as const;
+
+export function guardsAllLiteralTrue(guards: RelationRowGuards): boolean {
+  return REQUIRED_RELATION_GUARDS.every(key => guards[key] === true);
+}
+
+function assertLiteralBooleanGuards(row: RelationManifestRow): void {
+  const guards = row.guards as unknown;
+  if (!guards || typeof guards !== 'object' || Array.isArray(guards)) {
+    throw new Error(`Row ${row.id}: guards block is required`);
+  }
+  const record = guards as Record<string, unknown>;
+  for (const key of REQUIRED_RELATION_GUARDS) {
+    if (typeof record[key] !== 'boolean') {
+      throw new Error(
+        `Row ${row.id}: guard ${key} must be a literal boolean (got ${JSON.stringify(record[key])})`,
+      );
+    }
+  }
+}
 
 export function parseRelationManifest(raw: string): RelationManifest {
   const parsed = JSON.parse(raw) as RelationManifest;
@@ -31,6 +58,7 @@ export function parseRelationManifest(raw: string): RelationManifest {
       throw new Error(`Row ${row.id}: link_source '${row.link_source}' is reconciliation-managed`);
     }
     if (!row.guards) throw new Error(`Row ${row.id}: guards block is required`);
+    assertLiteralBooleanGuards(row);
   }
   return parsed;
 }
@@ -75,8 +103,8 @@ async function evaluateRow(
   const fromSrc = row.from_source_id ?? 'default';
   const toSrc = row.to_source_id ?? 'default';
 
-  if (!g.exact_endpoint_match || !g.source_relation_current || !g.no_incident_edge || !g.readwise_clear) {
-    return { id: row.id, status: 'skipped_guard', reason: 'manifest guard flag false' };
+  if (!guardsAllLiteralTrue(g)) {
+    return { id: row.id, status: 'skipped_guard', reason: 'manifest guard flag is not literal true' };
   }
 
   const fromOk = await pageExists(engine, row.from_slug, fromSrc);

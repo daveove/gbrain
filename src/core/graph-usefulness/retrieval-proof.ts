@@ -4,6 +4,7 @@ import { hybridSearch } from '../search/hybrid.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import type {
+  GraphFingerprint,
   RetrievalProofManifest,
   RetrievalProofQuestion,
   RetrievalProofQuestionResult,
@@ -47,6 +48,33 @@ export interface RunRetrievalProofOpts {
   limit?: number;
 }
 
+/**
+ * Non-zero when the graph fingerprint changed during the proof.
+ * A matching sha256 is the only zero. Any difference is at least 1 so a
+ * changing graph cannot be reported as production_mutations: 0.
+ */
+export function retrievalProofMutationCount(
+  before: GraphFingerprint,
+  after: GraphFingerprint,
+): number {
+  if (before.sha256 === after.sha256) return 0;
+  const delta =
+    Math.abs(after.active_pages - before.active_pages)
+    + Math.abs(after.link_rows - before.link_rows)
+    + Math.abs(after.valid_links - before.valid_links)
+    + Math.abs(after.zero_degree_pages - before.zero_degree_pages);
+  return Math.max(1, delta);
+}
+
+/** Pass requires no failed questions, no Readwise cites, and an unchanged graph. */
+export function retrievalProofPassed(
+  failCount: number,
+  citedReadwise: number,
+  productionMutations: number,
+): boolean {
+  return failCount === 0 && citedReadwise === 0 && productionMutations === 0;
+}
+
 /** True when any hit carries Readwise lineage via slug or source_id. */
 export function hitsIncludeReadwiseLineage(
   hits: Array<{ slug: string; source_id?: string }>,
@@ -86,14 +114,15 @@ export async function runRetrievalProof(
   const scores = { pass: 0, partial: 0, fail: 0 };
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = results.filter(r => r.cited_readwise).length;
+  const productionMutations = retrievalProofMutationCount(before, after);
 
   return {
-    passed: scores.fail === 0 && citedReadwise === 0,
+    passed: retrievalProofPassed(scores.fail, citedReadwise, productionMutations),
     checks: {
       questions: results.length,
       scores,
       cited_readwise_pages: citedReadwise,
-      production_mutations: 0,
+      production_mutations: productionMutations,
     },
     questions: results,
     fingerprint_before: before,

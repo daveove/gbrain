@@ -26,8 +26,8 @@ gbrain graph retrieval-proof run /path/to/retrieval-proof.json \
 
 ## Manifest contracts
 
-- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Apply re-checks every guard against live pages before `addLink`.
-- **Retrieval proof** (`proof_version: 2`): scored question list; output includes `checks.scores` and `checks.cited_readwise_pages` (must stay `0` for Readwise-cleared corpora).
+- **Relation manifest** (`manifest_version: 1`): each row carries pre-sealed `guards` (`exact_endpoint_match`, `source_relation_current`, `no_incident_edge`, `readwise_clear`). Every guard must be a JSON boolean. Apply re-checks them and writes a link only when each one is literal `true`.
+- **Retrieval proof** (`proof_version: 2`): scored question list; output includes `checks.scores` and `checks.cited_readwise_pages` (must stay `0` for Readwise-cleared corpora). `passed` is false when the before/after graph fingerprint differs, and `checks.production_mutations` is then non-zero.
 
 ## Mutation receipt fields
 
