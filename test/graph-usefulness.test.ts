@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { join } from 'path';
-import { readFileSync, mkdtempSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import {
   GRAPH_USEFULNESS_SUBCOMMANDS,
@@ -8,10 +8,12 @@ import {
   graphUsefulnessSubcommand,
   isGraphUsefulnessSubcommand,
   MissingGraphLimitError,
+  findGraphUsefulnessFlagProblem,
   readLimitFlag,
+  rejectGraphUsefulnessFlagProblem,
   runGraphUsefulness,
 } from '../src/commands/graph-usefulness.ts';
-import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
+import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/graph-usefulness/limit.ts';
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
@@ -23,8 +25,10 @@ import {
   guardsAllLiteralTrue,
   loadRelationManifestFile,
   MutationReceiptExistsError,
+  _setBeforeReceiptCommitForTests,
   parseRelationManifest,
 } from '../src/core/graph-usefulness/relation-manifest.ts';
+import { withEnv } from './helpers/with-env.ts';
 import {
   runRetrievalProof,
   parseRetrievalProofManifest,
@@ -104,8 +108,70 @@ describe('graph CLI routing', () => {
     const usefulness = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness.ts'), 'utf8');
     expect(cli).not.toContain("'graph', 'graph-query'");
     expect(cli).toContain('dispatchGraphUsefulness');
+    expect(cli).toContain('rejectGraphUsefulnessFlagProblem');
+    const rejectAt = cli.indexOf('rejectGraphUsefulnessFlagProblem');
+    const dispatchAt = cli.indexOf('dispatchGraphUsefulness');
+    expect(rejectAt).toBeGreaterThan(-1);
+    expect(rejectAt).toBeLessThan(dispatchAt);
     expect(cli).not.toContain("case 'graph':");
     expect(usefulness).not.toContain('runGraphQuery');
+  });
+
+  test('unknown flags and option-valued flags are rejected before apply', async () => {
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--apply', '--yes', '--dry-run',
+    ])).toEqual({ kind: 'unknown', flag: '--dry-run' });
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--receipt-out', '--apply', '--yes',
+    ])).toEqual({ kind: 'missing_value', flag: '--receipt-out' });
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--apply', '--yes', '--limit=1', '--receipt-out=r.json',
+    ])).toBeNull();
+    expect(findGraphUsefulnessFlagProblem(['people/alice-example', '--depth', '2'])).toBeNull();
+
+    const origExit = process.exit;
+    const origErr = console.error;
+    const exitError = new Error('__exit__');
+    let code: number | undefined;
+    const errors: string[] = [];
+    process.exit = ((c?: number) => {
+      code = c;
+      throw exitError;
+    }) as typeof process.exit;
+    console.error = (...a: unknown[]) => { errors.push(a.map(String).join(' ')); };
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await expect(runGraphUsefulness(engine, [
+        'relations', 'apply', 'manifest.json', '--apply', '--yes', '--dry-run',
+      ])).rejects.toBe(exitError);
+      expect(code).toBe(1);
+      expect(errors.some(line => line.includes('unknown flag --dry-run'))).toBe(true);
+
+      code = -1;
+      errors.length = 0;
+      expect(() => rejectGraphUsefulnessFlagProblem([
+        'relations', 'apply', 'manifest.json', '--apply', '--yes', '--dry-run',
+      ])).toThrow(exitError);
+      expect(code).toBe(1);
+
+      code = -1;
+      await expect(runGraphUsefulness(engine, [
+        'relations', 'apply', 'manifest.json', '--receipt-out', '--apply', '--yes',
+      ])).rejects.toBe(exitError);
+      expect(code).toBe(2);
+      expect(calls).toBe(0);
+    } finally {
+      process.exit = origExit;
+      console.error = origErr;
+      engine.addLink = original;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
   });
 });
 
@@ -126,6 +192,8 @@ describe('limit parsing', () => {
     expect(readLimitFlag(['--limit=1'])).toBe('1');
     expect(readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes', '--limit=2'])).toBe('2');
     expect(() => readLimitFlag(['--limit='])).toThrow(MissingGraphLimitError);
+    expect(() => readLimitFlag(['--limit', '--apply'])).toThrow(MissingGraphLimitError);
+    expect(() => readLimitFlag(['--limit=--1'])).toThrow(MissingGraphLimitError);
     expect(() => readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes', '--limit']))
       .toThrow(MissingGraphLimitError);
 
@@ -168,7 +236,7 @@ describe('limit parsing', () => {
           id: 'lim-1',
           from_slug: 'topics/lim-a',
           to_slug: 'topics/lim-b',
-          link_type: 'child_of',
+          link_type: 'related_to',
           link_source: 'tana-relation-r2',
           guards,
         },
@@ -176,7 +244,7 @@ describe('limit parsing', () => {
           id: 'lim-2',
           from_slug: 'topics/lim-a',
           to_slug: 'topics/lim-c',
-          link_type: 'child_of',
+          link_type: 'related_to',
           link_source: 'tana-relation-r2',
           guards,
         },
@@ -248,7 +316,7 @@ describe('relation manifest', () => {
           id: 'b1',
           from_slug: 'topics/batch-a',
           to_slug: 'topics/batch-b',
-          link_type: 'child_of',
+          link_type: 'related_to',
           link_source: 'tana-relation-r2',
           guards: { exact_endpoint_match: true, source_relation_current: true, no_incident_edge: true, readwise_clear: true },
         },
@@ -256,7 +324,7 @@ describe('relation manifest', () => {
           id: 'b2',
           from_slug: 'topics/batch-a',
           to_slug: 'topics/batch-c',
-          link_type: 'child_of',
+          link_type: 'related_to',
           link_source: 'tana-relation-r2',
           guards: { exact_endpoint_match: true, source_relation_current: true, no_incident_edge: true, readwise_clear: true },
         },
@@ -291,7 +359,7 @@ describe('relation manifest', () => {
       id: 's',
       from_slug: 'topics/parent-note',
       to_slug: 'topics/child-note',
-      link_type: 'child_of',
+      link_type: 'related_to',
       link_source: 'tana-relation-r2',
       guards: {
         exact_endpoint_match: 'true',
@@ -311,7 +379,7 @@ describe('relation manifest', () => {
         id: 's',
         from_slug: 'topics/parent-note',
         to_slug: 'topics/child-note',
-        link_type: 'child_of',
+        link_type: 'related_to',
         link_source: 'tana-relation-r2',
         guards: {
           exact_endpoint_match: 'true',
@@ -334,7 +402,7 @@ describe('relation manifest', () => {
         id: 'g-false',
         from_slug: 'topics/parent-note',
         to_slug: 'topics/child-note',
-        link_type: 'child_of',
+        link_type: 'related_to',
         link_source: 'tana-relation-r2',
         guards: {
           exact_endpoint_match: false,
@@ -365,7 +433,7 @@ describe('relation manifest', () => {
         id: 'rcpt-1',
         from_slug: 'topics/rcpt-a',
         to_slug: 'topics/rcpt-b',
-        link_type: 'child_of',
+        link_type: 'related_to',
         link_source: 'tana-relation-r2',
         guards,
       }],
@@ -376,7 +444,7 @@ describe('relation manifest', () => {
         id: 'rcpt-2',
         from_slug: 'topics/rcpt-a',
         to_slug: 'topics/rcpt-c',
-        link_type: 'child_of',
+        link_type: 'related_to',
         link_source: 'tana-relation-r2',
         guards,
       }],
@@ -409,6 +477,134 @@ describe('relation manifest', () => {
       expect(readFileSync(receiptPath, 'utf8')).toBe(body);
     } finally {
       engine.addLink = original;
+    }
+  });
+
+  test('rejects an undeclared link type before addLink when a pack resolves', async () => {
+    await engine.putPage('topics/vocab-a', { title: 'Vocab A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/vocab-b', { title: 'Vocab B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'vocab-1',
+        from_slug: 'topics/vocab-a',
+        to_slug: 'topics/vocab-b',
+        link_type: 'definitely_not_a_link_verb',
+        link_source: 'tana-relation-r2',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const origGet = engine.getConfig.bind(engine);
+    const origAdd = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.getConfig = async (key: string) => {
+      if (key === 'schema_pack') return 'gbrain-base';
+      return origGet(key);
+    };
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return origAdd(...args);
+    };
+    try {
+      await withEnv({ GBRAIN_SCHEMA_PACK: undefined }, async () => {
+        await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), { apply: true }))
+          .rejects.toThrow(/not declared in active schema pack 'gbrain-base'/);
+        await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), { apply: false }))
+          .rejects.toThrow(/definitely_not_a_link_verb/);
+      });
+      expect(calls).toBe(0);
+    } finally {
+      engine.getConfig = origGet;
+      engine.addLink = origAdd;
+    }
+  });
+
+  test('refuses to apply when the receipt parent cannot be created', async () => {
+    await engine.putPage('topics/dur-a', { title: 'Dur A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/dur-b', { title: 'Dur B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'dur-parent',
+        from_slug: 'topics/dur-a',
+        to_slug: 'topics/dur-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-parent-'));
+    const blocker = join(dir, 'not-a-directory');
+    writeFileSync(blocker, 'x');
+    const receiptPath = join(blocker, 'receipt.json');
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow();
+      expect(calls).toBe(0);
+    } finally {
+      engine.addLink = original;
+    }
+  });
+
+  test('rolls back applied links when the final receipt cannot be saved', async () => {
+    await engine.putPage('topics/undo-a', { title: 'Undo A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/undo-b', { title: 'Undo B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'undo-1',
+        from_slug: 'topics/undo-a',
+        to_slug: 'topics/undo-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-undo-'));
+    const receiptPath = join(dir, 'receipt.json');
+    _setBeforeReceiptCommitForTests(() => {
+      unlinkSync(receiptPath);
+      mkdirSync(receiptPath);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/rolled back 1 applied link/);
+      const rows = await engine.executeRaw<{ n: string }>(
+        `SELECT count(*)::text AS n FROM links l
+          JOIN pages fp ON fp.id = l.from_page_id
+          JOIN pages tp ON tp.id = l.to_page_id
+         WHERE fp.slug = $1 AND tp.slug = $2 AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        ['topics/undo-a', 'topics/undo-b'],
+      );
+      expect(Number(rows[0]?.n ?? 0)).toBe(0);
+    } finally {
+      _setBeforeReceiptCommitForTests(null);
+      rmSync(receiptPath, { recursive: true, force: true });
     }
   });
 
@@ -565,6 +761,13 @@ describe('retrieval proof', () => {
         expect(saved.checks.production_mutations).toBe(0);
         expect(saved.questions.length).toBeGreaterThan(0);
       }
+
+      const prior = readFileSync(spaced, 'utf8');
+      await runGraphUsefulness(engine, [
+        '--source', 'default', 'retrieval-proof', 'run', proof, '--out', spaced,
+      ]);
+      expect(currentExitCode()).toBe(2);
+      expect(readFileSync(spaced, 'utf8')).toBe(prior);
     } finally {
       console.log = origLog;
       console.error = origErr;

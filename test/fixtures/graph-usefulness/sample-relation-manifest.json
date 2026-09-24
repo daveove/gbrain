@@ -7,7 +7,7 @@
       "id": "rel-1",
       "from_slug": "topics/parent-note",
       "to_slug": "topics/child-note",
-      "link_type": "child_of",
+      "link_type": "related_to",
       "link_source": "tana-relation-r2",
       "context": "fixture parent-child",
       "from_source_id": "default",

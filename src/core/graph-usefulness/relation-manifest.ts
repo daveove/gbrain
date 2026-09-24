@@ -1,8 +1,14 @@
 import { createHash } from 'crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
 import { dirname } from 'path';
 import type { BrainEngine } from '../engine.ts';
 import { MANAGED_LINK_SOURCES } from '../ops/links.ts';
+import {
+  loadActivePackForWriteVocabulary,
+  packDeclaresLinkType,
+  undeclaredLinkTypeMessage,
+  undeclaredLinkTypeSuggestion,
+} from '../schema-pack/write-vocabulary.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import type {
@@ -147,6 +153,105 @@ function refuseExistingReceipt(path: string): void {
   if (existsSync(path)) throw new MutationReceiptExistsError(path);
 }
 
+/**
+ * Same active-pack rule as add_link: an explicit link_type must be declared
+ * when a pack resolves. No resolvable pack means there is nothing to enforce.
+ * Runs before any addLink so a manifest cannot insert an out-of-schema verb.
+ */
+async function assertActivePackLinkVocabulary(
+  engine: BrainEngine,
+  rows: RelationManifestRow[],
+): Promise<void> {
+  const packs = new Map<string, Awaited<ReturnType<typeof loadActivePackForWriteVocabulary>>>();
+  for (const row of rows) {
+    const linkType = typeof row.link_type === 'string' ? row.link_type : '';
+    if (linkType.length === 0) continue;
+    const sourceId = row.from_source_id ?? 'default';
+    let pack = packs.get(sourceId);
+    if (pack === undefined) {
+      pack = await loadActivePackForWriteVocabulary({
+        engine,
+        remote: false,
+        sourceId,
+      });
+      packs.set(sourceId, pack);
+    }
+    if (pack && !packDeclaresLinkType(pack, linkType)) {
+      throw new Error(
+        `${undeclaredLinkTypeMessage(linkType, pack, 'relations apply')} ${undeclaredLinkTypeSuggestion(pack)}`,
+      );
+    }
+  }
+}
+
+/** @internal Fault injection for receipt-commit failure tests. */
+let beforeReceiptCommitForTests: (() => void) | null = null;
+
+export function _setBeforeReceiptCommitForTests(fn: (() => void) | null): void {
+  beforeReceiptCommitForTests = fn;
+}
+
+/**
+ * Exclusive-create the receipt path before any link mutation. A parent that
+ * cannot be created, or a path that already exists, fails here.
+ */
+function reserveMutationReceipt(path: string): void {
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(path, '', { flag: 'wx' });
+  } catch (err) {
+    if (isEexist(err)) throw new MutationReceiptExistsError(path);
+    throw err;
+  }
+}
+
+async function rollbackAppliedLinks(
+  engine: BrainEngine,
+  rows: RelationManifestRow[],
+): Promise<void> {
+  const failures: string[] = [];
+  for (const row of [...rows].reverse()) {
+    const fromSrc = row.from_source_id ?? 'default';
+    const toSrc = row.to_source_id ?? 'default';
+    try {
+      const removed = await engine.removeLink(
+        row.from_slug,
+        row.to_slug,
+        row.link_type,
+        row.link_source,
+        { fromSourceId: fromSrc, toSourceId: toSrc },
+      );
+      if (removed < 1) failures.push(`${row.id}: link not removed`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${row.id}: ${message}`);
+    }
+  }
+  if (failures.length > 0) throw new Error(failures.join('; '));
+}
+
+async function commitReceiptOrUndo(
+  engine: BrainEngine,
+  path: string,
+  appliedRows: RelationManifestRow[],
+  write: () => void,
+): Promise<void> {
+  try {
+    write();
+  } catch (err) {
+    let undo = `rolled back ${appliedRows.length} applied link(s)`;
+    try {
+      await rollbackAppliedLinks(engine, appliedRows);
+      try { unlinkSync(path); } catch { /* reserved path may remain */ }
+    } catch (undoErr) {
+      const detail = undoErr instanceof Error ? undoErr.message : String(undoErr);
+      undo = `rollback failed (${detail})`;
+    }
+    const writeMessage = err instanceof Error ? err.message : String(err);
+    throw new Error(`Receipt write failed; ${undo}: ${writeMessage}`);
+  }
+}
+
 function writeMutationReceipt(
   path: string,
   manifest: RelationManifest,
@@ -176,15 +281,9 @@ function writeMutationReceipt(
     outcomes,
     ...extra,
   };
-  mkdirSync(dirname(path), { recursive: true });
-  refuseExistingReceipt(path);
-  const body = JSON.stringify(receipt, null, 2) + '\n';
-  try {
-    writeFileSync(path, body, { flag: 'wx' });
-  } catch (err) {
-    if (isEexist(err)) throw new MutationReceiptExistsError(path);
-    throw err;
-  }
+  beforeReceiptCommitForTests?.();
+  // The path was exclusive-created by reserveMutationReceipt. Fill that file.
+  writeFileSync(path, JSON.stringify(receipt, null, 2) + '\n', { flag: 'w' });
 }
 
 export async function applyRelationManifest(
@@ -197,7 +296,11 @@ export async function applyRelationManifest(
   const before = await computeGraphFingerprint(engine);
   const sha = manifestSha256(manifestRaw);
   const slice = opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows;
+  await assertActivePackLinkVocabulary(engine, slice);
+  // Prove the receipt path can be created before the first addLink.
+  if (opts.receiptPath) reserveMutationReceipt(opts.receiptPath);
   const outcomes: RelationRowOutcome[] = [];
+  const appliedRows: RelationManifestRow[] = [];
 
   try {
     for (const row of slice) {
@@ -228,29 +331,31 @@ export async function applyRelationManifest(
         undefined,
         linkOpts,
       ); // gbrain-allow-direct-insert: manifest-bound DAV-6220 graph reconnect — guarded apply, receipted
+      appliedRows.push(row);
       outcomes.push({ id: row.id, status: 'applied' });
     }
   } catch (err) {
     const after = await computeGraphFingerprint(engine);
     const message = err instanceof Error ? err.message : String(err);
+    if (message.startsWith('Receipt write failed;')) throw err;
     if (opts.receiptPath) {
       try {
-        writeMutationReceipt(
-          opts.receiptPath,
-          manifest,
-          sha,
-          opts,
-          slice.length,
-          before,
-          after,
-          outcomes,
-          { partial_failure: true, error: message },
-        );
+        await commitReceiptOrUndo(engine, opts.receiptPath, appliedRows, () => {
+          writeMutationReceipt(
+            opts.receiptPath!,
+            manifest,
+            sha,
+            opts,
+            slice.length,
+            before,
+            after,
+            outcomes,
+            { partial_failure: true, error: message },
+          );
+        });
       } catch (receiptErr) {
-        if (receiptErr instanceof MutationReceiptExistsError) {
-          throw new Error(`${message} (${receiptErr.message})`);
-        }
-        throw receiptErr;
+        const receiptMessage = receiptErr instanceof Error ? receiptErr.message : String(receiptErr);
+        throw new Error(`${message} (${receiptMessage})`);
       }
     }
     throw err;
@@ -274,16 +379,18 @@ export async function applyRelationManifest(
   };
 
   if (opts.receiptPath) {
-    writeMutationReceipt(
-      opts.receiptPath,
-      manifest,
-      sha,
-      opts,
-      slice.length,
-      before,
-      after,
-      outcomes,
-    );
+    await commitReceiptOrUndo(engine, opts.receiptPath, appliedRows, () => {
+      writeMutationReceipt(
+        opts.receiptPath!,
+        manifest,
+        sha,
+        opts,
+        slice.length,
+        before,
+        after,
+        outcomes,
+      );
+    });
     result.receipt_path = opts.receiptPath;
   }
 

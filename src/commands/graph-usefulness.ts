@@ -20,7 +20,7 @@ import {
 } from '../core/graph-usefulness/retrieval-proof.ts';
 import { InvalidGraphLimitError, parseOptionalPositiveLimit } from '../core/graph-usefulness/limit.ts';
 import type { RetrievalProofResult } from '../core/graph-usefulness/types.ts';
-import { writeFileSync, mkdirSync } from 'fs';
+import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 
@@ -63,7 +63,11 @@ export function graphPositionals(args: string[]): string[] {
     }
     const eq = a.indexOf('=');
     const name = eq > 2 ? a.slice(0, eq) : a;
-    if (FLAGS_WITH_VALUES.has(name) && eq < 0) i++;
+    // A following option is not a value. Leave it in place so flag checks see it.
+    if (FLAGS_WITH_VALUES.has(name) && eq < 0) {
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith('-')) i++;
+    }
   }
   return out;
 }
@@ -95,16 +99,104 @@ function readSeparatedOrInlineFlag(args: string[], name: string): string | undef
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === name) {
-      if (i + 1 >= args.length) throw new MissingGraphFlagValueError(name);
-      return args[i + 1];
+      const next = args[i + 1];
+      // `--receipt-out --apply` must not take `--apply` as the path.
+      if (next === undefined || next.startsWith('-')) throw new MissingGraphFlagValueError(name);
+      return next;
     }
     if (a.startsWith(prefix)) {
       const value = a.slice(prefix.length);
-      if (value.length === 0) throw new MissingGraphFlagValueError(name);
+      if (value.length === 0 || value.startsWith('-')) throw new MissingGraphFlagValueError(name);
       return value;
     }
   }
   return undefined;
+}
+
+export interface GraphUsefulnessFlagProblem {
+  kind: 'unknown' | 'missing_value';
+  flag: string;
+}
+
+function legalGraphUsefulnessFlags(sub: string, action: string | undefined): { legal: Set<string>; valued: Set<string> } {
+  const legal = new Set<string>(['--help', '--json', '--source']);
+  const valued = new Set<string>(['--source']);
+  if (sub === 'measure' || sub === 'stats') return { legal, valued };
+  if (sub === 'relations') {
+    legal.add('--limit');
+    legal.add('--receipt-out');
+    valued.add('--limit');
+    valued.add('--receipt-out');
+    if (action === 'verify') {
+      legal.add('--write-receipt');
+    } else if (action === 'apply') {
+      legal.add('--apply');
+      legal.add('--yes');
+    } else {
+      legal.add('--write-receipt');
+      legal.add('--apply');
+      legal.add('--yes');
+    }
+    return { legal, valued };
+  }
+  if (sub === 'retrieval-proof') {
+    legal.add('--limit');
+    legal.add('--out');
+    valued.add('--limit');
+    valued.add('--out');
+  }
+  return { legal, valued };
+}
+
+/**
+ * Subcommand whitelist for usefulness flags. Null when the invocation is bare
+ * traversal, help, or a clean usefulness command. Unknown flags and valued
+ * flags whose next token is another option are reported here so dispatch can
+ * refuse before connecting.
+ */
+export function findGraphUsefulnessFlagProblem(args: string[]): GraphUsefulnessFlagProblem | null {
+  const sub = graphUsefulnessSubcommand(args);
+  if (!sub || sub === 'help') return null;
+  if (args.includes('--help') || args.includes('-h')) return null;
+  const { legal, valued } = legalGraphUsefulnessFlags(sub, graphPositionals(args)[1]);
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--') break;
+    const m = /^--([a-z0-9][a-z0-9-]*)(?:=(.*))?$/i.exec(a);
+    if (!m) continue;
+    if (/[A-Z]/.test(m[1])) return { kind: 'unknown', flag: `--${m[1]}` };
+    const name = `--${m[1]}`;
+    if (!legal.has(name)) return { kind: 'unknown', flag: name };
+    if (!valued.has(name)) continue;
+    const inline = m[2];
+    if (inline !== undefined) {
+      if (inline.length === 0 || inline.startsWith('-')) return { kind: 'missing_value', flag: name };
+      continue;
+    }
+    const next = args[i + 1];
+    if (next === undefined || next.startsWith('-')) return { kind: 'missing_value', flag: name };
+    i++;
+  }
+  return null;
+}
+
+/** Exit before connect/apply. No-op for bare traversal and --help. */
+export function rejectGraphUsefulnessFlagProblem(args: string[]): void {
+  const problem = findGraphUsefulnessFlagProblem(args);
+  if (!problem) return;
+  if (problem.kind === 'unknown') {
+    const message = `unknown flag ${problem.flag} for 'gbrain graph'`;
+    if (args.some(a => a === '--json' || (a.startsWith('--json=') && a !== '--json=false'))) {
+      process.stdout.write(JSON.stringify({ status: 'error', reason: 'invalid_flag', message }) + '\n');
+    }
+    console.error(`gbrain graph: ${message}`);
+    console.error('Run: gbrain graph --help');
+    process.exit(1);
+  }
+  const hint = problem.flag === '--limit' ? ' (positive integer)' : '';
+  console.error(`${problem.flag} requires a value${hint}`);
+  setCliExitVerdict(2);
+  process.exit(2);
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -167,6 +259,10 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     printGraphHelp();
     return;
   }
+
+  // Direct callers (and the CLI, which also checks before connect) must not
+  // reach apply with an unknown flag or an option token used as a value.
+  rejectGraphUsefulnessFlagProblem(args);
 
   const sub = graphUsefulnessSubcommand(args);
   if (!sub) {
@@ -276,6 +372,11 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       return;
     }
     const outPath = takeFlag(args, '--out');
+    if (outPath && existsSync(outPath)) {
+      console.error(`Refusing to overwrite existing retrieval-proof receipt: ${outPath}`);
+      setCliExitVerdict(2);
+      return;
+    }
     const manifest = loadRetrievalProofFile(proofPath);
     const scope = parseSource(args);
     const limit = parseLimitArg(args);
@@ -292,7 +393,18 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     }
     if (outPath) {
       mkdirSync(dirname(outPath), { recursive: true });
-      writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n');
+      const body = JSON.stringify(result, null, 2) + '\n';
+      try {
+        writeFileSync(outPath, body, { flag: 'wx' });
+      } catch (err) {
+        const code = err && typeof err === 'object' && 'code' in err ? (err as { code?: string }).code : undefined;
+        if (code === 'EEXIST') {
+          console.error(`Refusing to overwrite existing retrieval-proof receipt: ${outPath}`);
+          setCliExitVerdict(2);
+          return;
+        }
+        throw err;
+      }
     }
     if (json) {
       console.log(JSON.stringify(result, null, 2));
@@ -335,6 +447,9 @@ DAV-6220 usefulness:
       relevant_pages / forbidden_pages are already (source_id, slug).
 
 Valued flags accept both --name value and --name=value
-(--limit, --source, --receipt-out, --out). An empty value is rejected.
+(--limit, --source, --receipt-out, --out). An empty value, or a following
+token that starts with '-', is rejected before apply.
+Unknown flags are rejected before connect (for example --dry-run).
+retrieval-proof --out refuses to overwrite an existing file.
 `);
 }
