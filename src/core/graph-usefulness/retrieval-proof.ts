@@ -5,6 +5,7 @@ import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import type {
   GraphFingerprint,
+  RetrievalPageRef,
   RetrievalProofManifest,
   RetrievalProofQuestion,
   RetrievalProofQuestionResult,
@@ -12,6 +13,50 @@ import type {
   RetrievalScore,
 } from './types.ts';
 import { RETRIEVAL_PROOF_VERSION } from './types.ts';
+
+export class SlugOnlyProofNeedsSourceError extends Error {
+  constructor() {
+    super(
+      'Retrieval proof lists bare slugs. Pass a single --source so hits are scored as (source_id, slug), or use relevant_pages and forbidden_pages with source_id.',
+    );
+    this.name = 'SlugOnlyProofNeedsSourceError';
+  }
+}
+
+export function retrievalHitKey(
+  hit: { slug: string; source_id?: string },
+  sourceId?: string,
+): string {
+  const sid = hit.source_id ?? sourceId ?? 'default';
+  return `${sid}::${hit.slug}`;
+}
+
+function pageRefKey(ref: RetrievalPageRef): string {
+  if (!ref?.source_id || !ref?.slug) {
+    throw new Error('relevant_pages and forbidden_pages entries require source_id and slug');
+  }
+  return `${ref.source_id}::${ref.slug}`;
+}
+
+/** True when any question lists bare slugs that are not source-qualified. */
+export function manifestUsesBareSlugs(manifest: RetrievalProofManifest): boolean {
+  return manifest.questions.some(q =>
+    (q.relevant_slugs?.length ?? 0) > 0 || (q.forbidden_slugs?.length ?? 0) > 0,
+  );
+}
+
+function expectationKeys(
+  pages: RetrievalPageRef[] | undefined,
+  slugs: string[] | undefined,
+  sourceId: string | undefined,
+): string[] {
+  const keys = (pages ?? []).map(pageRefKey);
+  if ((slugs?.length ?? 0) > 0) {
+    if (!sourceId) throw new SlugOnlyProofNeedsSourceError();
+    for (const slug of slugs ?? []) keys.push(`${sourceId}::${slug}`);
+  }
+  return keys;
+}
 
 export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest {
   const parsed = JSON.parse(raw) as RetrievalProofManifest;
@@ -24,22 +69,28 @@ export function parseRetrievalProofManifest(raw: string): RetrievalProofManifest
   return parsed;
 }
 
-function scoreQuestion(
+/**
+ * Score one question against source-qualified hits.
+ * Bare `relevant_slugs` / `forbidden_slugs` require `sourceId`.
+ * `relevant_pages` / `forbidden_pages` already carry `(source_id, slug)`.
+ */
+export function scoreRetrievalQuestion(
   q: RetrievalProofQuestion,
-  topSlugs: string[],
+  hits: Array<{ slug: string; source_id?: string }>,
+  sourceId?: string,
 ): RetrievalScore {
   const k = q.top_k ?? 10;
-  const slice = topSlugs.slice(0, k);
-  const forbidden = q.forbidden_slugs ?? [];
+  const slice = hits.slice(0, k).map(h => retrievalHitKey(h, sourceId));
+  const forbidden = expectationKeys(q.forbidden_pages, q.forbidden_slugs, sourceId);
   if (forbidden.some(s => slice.includes(s))) return 'fail';
 
-  const relevant = q.relevant_slugs ?? [];
+  const relevant = expectationKeys(q.relevant_pages, q.relevant_slugs, sourceId);
   if (relevant.length === 0) return 'partial';
 
-  const hits = relevant.filter(s => slice.includes(s)).length;
+  const matched = relevant.filter(s => slice.includes(s)).length;
   const minHits = q.min_hits_in_top_k ?? 1;
-  if (hits >= minHits && slice[0] && relevant.includes(slice[0])) return 'pass';
-  if (hits >= minHits) return 'partial';
+  if (matched >= minHits && slice[0] && relevant.includes(slice[0])) return 'pass';
+  if (matched >= minHits) return 'partial';
   return 'fail';
 }
 
@@ -90,6 +141,10 @@ export async function runRetrievalProof(
   manifest: RetrievalProofManifest,
   opts: RunRetrievalProofOpts = {},
 ): Promise<RetrievalProofResult> {
+  if (manifestUsesBareSlugs(manifest) && !opts.sourceId) {
+    throw new SlugOnlyProofNeedsSourceError();
+  }
+
   const before = await computeGraphFingerprint(engine);
   const questions = opts.limit ? manifest.questions.slice(0, opts.limit) : manifest.questions;
   const results: RetrievalProofQuestionResult[] = [];
@@ -99,13 +154,17 @@ export async function runRetrievalProof(
       limit: q.top_k ?? 10,
       ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
     });
-    const topSlugs = hits.map(h => h.slug);
+    const topPages: RetrievalPageRef[] = hits.map(h => ({
+      source_id: h.source_id ?? opts.sourceId ?? 'default',
+      slug: h.slug,
+    }));
     const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
     results.push({
       id: q.id,
       query: q.query,
-      score: scoreQuestion(q, topSlugs),
-      top_slugs: topSlugs,
+      score: scoreRetrievalQuestion(q, topPages, opts.sourceId),
+      top_slugs: topPages.map(p => p.slug),
+      top_pages: topPages,
       cited_readwise: citedReadwise,
     });
   }

@@ -67,6 +67,11 @@ export interface GraphFingerprint {
   link_rows: number;
   valid_links: number;
   zero_degree_pages: number;
+  /**
+   * Hash of the four counts plus ordered active-page `(source_id, slug)`
+   * identities and ordered link endpoints, type, context, and source.
+   * Aggregate counts alone stay on this object for receipts.
+   */
   sha256: string;
 }
 
@@ -89,11 +94,26 @@ export interface JunkSlugSample {
 
 export type RetrievalScore = 'pass' | 'partial' | 'fail';
 
+/** Source-qualified page identity. Pages are `(source_id, slug)`, not slug alone. */
+export interface RetrievalPageRef {
+  source_id: string;
+  slug: string;
+}
+
 export interface RetrievalProofQuestion {
   id: string;
   query: string;
+  /**
+   * Bare slugs. Scored only when the run passes a single source id, which
+   * qualifies every slug as `(source, slug)`.
+   */
   relevant_slugs?: string[];
+  /** Bare slugs. Same single-source rule as `relevant_slugs`. */
   forbidden_slugs?: string[];
+  /** Source-qualified hits that count as relevant. */
+  relevant_pages?: RetrievalPageRef[];
+  /** Source-qualified hits that fail the question. */
+  forbidden_pages?: RetrievalPageRef[];
   min_hits_in_top_k?: number;
   top_k?: number;
 }
@@ -108,6 +128,8 @@ export interface RetrievalProofQuestionResult {
   query: string;
   score: RetrievalScore;
   top_slugs: string[];
+  /** Hit identities in rank order. Scoring uses these, not bare slugs. */
+  top_pages: RetrievalPageRef[];
   cited_readwise: boolean;
 }
 

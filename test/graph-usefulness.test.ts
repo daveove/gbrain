@@ -4,11 +4,17 @@ import { readFileSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import {
   GRAPH_USEFULNESS_SUBCOMMANDS,
+  graphPositionals,
   graphUsefulnessSubcommand,
   isGraphUsefulnessSubcommand,
+  MissingGraphLimitError,
+  readLimitFlag,
+  runGraphUsefulness,
 } from '../src/commands/graph-usefulness.ts';
+import { _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
 import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/graph-usefulness/limit.ts';
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
+import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
@@ -23,6 +29,8 @@ import {
   parseRetrievalProofManifest,
   retrievalProofMutationCount,
   retrievalProofPassed,
+  scoreRetrievalQuestion,
+  SlugOnlyProofNeedsSourceError,
 } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import type { RelationManifest } from '../src/core/graph-usefulness/types.ts';
 import { classifyJunkSlugs, slugLooksReadwise } from '../src/core/graph-usefulness/junk-classify.ts';
@@ -73,6 +81,19 @@ describe('graph CLI routing', () => {
     expect(graphUsefulnessSubcommand(['relations', 'verify', 'm.json'])).toBe('relations');
   });
 
+  test('valued flags before relations and retrieval-proof are not positionals', () => {
+    expect(graphPositionals(['--source', 'wiki', 'retrieval-proof', 'run', 'proof.json']))
+      .toEqual(['retrieval-proof', 'run', 'proof.json']);
+    expect(graphPositionals(['--source', 'wiki', 'relations', 'apply', 'm.json', '--limit', '2']))
+      .toEqual(['relations', 'apply', 'm.json']);
+    expect(graphPositionals(['retrieval-proof', 'run', '--out', 'out.json', 'proof.json']))
+      .toEqual(['retrieval-proof', 'run', 'proof.json']);
+    expect(graphUsefulnessSubcommand(['--source', 'wiki', 'retrieval-proof', 'run', 'proof.json']))
+      .toBe('retrieval-proof');
+    expect(graphUsefulnessSubcommand(['--source', 'wiki', 'relations', 'verify', 'm.json']))
+      .toBe('relations');
+  });
+
   test('bare graph stays on the operation path', () => {
     const cli = readFileSync(join(import.meta.dir, '../src/cli.ts'), 'utf8');
     const usefulness = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness.ts'), 'utf8');
@@ -91,6 +112,32 @@ describe('limit parsing', () => {
     expect(() => parseOptionalPositiveLimit('-1')).toThrow(InvalidGraphLimitError);
     expect(() => parseOptionalPositiveLimit('abc')).toThrow(InvalidGraphLimitError);
     expect(() => parseOptionalPositiveLimit('1.5')).toThrow(InvalidGraphLimitError);
+  });
+
+  test('rejects a valueless --limit before applying', async () => {
+    expect(readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes']))
+      .toBeUndefined();
+    expect(readLimitFlag(['--limit', '3'])).toBe('3');
+    expect(() => readLimitFlag(['relations', 'apply', 'm.json', '--apply', '--yes', '--limit']))
+      .toThrow(MissingGraphLimitError);
+
+    const origExit = process.exit;
+    const exitError = new Error('__exit__');
+    let code: number | undefined;
+    process.exit = ((c?: number) => {
+      code = c;
+      throw exitError;
+    }) as typeof process.exit;
+    try {
+      await expect(runGraphUsefulness(engine, [
+        'relations', 'apply', 'manifest.json', '--apply', '--yes', '--limit',
+      ])).rejects.toBe(exitError);
+      expect(code).toBe(2);
+    } finally {
+      process.exit = origExit;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
   });
 });
 
@@ -245,6 +292,25 @@ describe('relation manifest', () => {
   });
 });
 
+describe('graph fingerprint identities', () => {
+  test('changes sha256 when an edge is swapped without count change', async () => {
+    await engine.putPage('topics/fp-a', { title: 'A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/fp-b', { title: 'B', compiled_truth: 'b', type: 'note' });
+    await engine.putPage('topics/fp-c', { title: 'C', compiled_truth: 'c', type: 'note' });
+    await engine.addLink('topics/fp-a', 'topics/fp-b', 'ctx', 'related_to', 'manual');
+    const before = await computeGraphFingerprint(engine);
+    expect(await engine.removeLink('topics/fp-a', 'topics/fp-b', 'related_to', 'manual')).toBe(1);
+    await engine.addLink('topics/fp-a', 'topics/fp-c', 'ctx', 'related_to', 'manual');
+    const after = await computeGraphFingerprint(engine);
+    expect(after.active_pages).toBe(before.active_pages);
+    expect(after.link_rows).toBe(before.link_rows);
+    expect(after.valid_links).toBe(before.valid_links);
+    expect(after.zero_degree_pages).toBe(before.zero_degree_pages);
+    expect(after.sha256).not.toBe(before.sha256);
+    expect(retrievalProofMutationCount(before, after)).toBeGreaterThan(0);
+  });
+});
+
 describe('retrieval proof', () => {
   test('detects readwise via result source_id even when slug is neutral', () => {
     expect(hitsIncludeReadwiseLineage([
@@ -258,7 +324,7 @@ describe('retrieval proof', () => {
   test('scores fixture question without mutating fingerprint', async () => {
     const raw = readFileSync(join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json'), 'utf8');
     const manifest = parseRetrievalProofManifest(raw);
-    const result = await runRetrievalProof(engine, manifest);
+    const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
     expect(result.checks.production_mutations).toBe(0);
     expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
     expect(result.passed).toBe(retrievalProofPassed(0, 0, 0));
@@ -276,6 +342,74 @@ describe('retrieval proof', () => {
     expect(mutations).toBeGreaterThan(0);
     expect(retrievalProofPassed(0, 0, mutations)).toBe(false);
     expect(retrievalProofMutationCount(before, { ...before })).toBe(0);
+    expect(retrievalProofMutationCount(before, { ...before, sha256: 'ccc' })).toBe(1);
+  });
+
+  test('scores hits as (source_id, slug) and requires --source for bare slugs', async () => {
+    const bare = {
+      id: 'q',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note'],
+      forbidden_slugs: ['topics/secret'],
+    };
+    expect(() => scoreRetrievalQuestion(bare, [
+      { slug: 'topics/parent-note', source_id: 'wiki' },
+    ])).toThrow(SlugOnlyProofNeedsSourceError);
+
+    expect(scoreRetrievalQuestion(bare, [
+      { slug: 'topics/parent-note', source_id: 'other' },
+    ], 'wiki')).toBe('fail');
+    expect(scoreRetrievalQuestion(bare, [
+      { slug: 'topics/parent-note', source_id: 'wiki' },
+    ], 'wiki')).toBe('pass');
+    expect(scoreRetrievalQuestion(bare, [
+      { slug: 'topics/parent-note', source_id: 'wiki' },
+      { slug: 'topics/secret', source_id: 'other' },
+    ], 'wiki')).toBe('pass');
+    expect(scoreRetrievalQuestion(bare, [
+      { slug: 'topics/secret', source_id: 'wiki' },
+    ], 'wiki')).toBe('fail');
+
+    const qualified = {
+      id: 'q2',
+      query: 'parent',
+      relevant_pages: [{ source_id: 'wiki', slug: 'topics/parent-note' }],
+      forbidden_pages: [{ source_id: 'wiki', slug: 'topics/secret' }],
+    };
+    expect(scoreRetrievalQuestion(qualified, [
+      { slug: 'topics/parent-note', source_id: 'other' },
+    ])).toBe('fail');
+    expect(scoreRetrievalQuestion(qualified, [
+      { slug: 'topics/parent-note', source_id: 'wiki' },
+      { slug: 'topics/secret', source_id: 'other' },
+    ])).toBe('pass');
+
+    const raw = readFileSync(join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json'), 'utf8');
+    const manifest = parseRetrievalProofManifest(raw);
+    await expect(runRetrievalProof(engine, manifest)).rejects.toThrow(SlugOnlyProofNeedsSourceError);
+  });
+
+  test('--source before the subcommand still runs', async () => {
+    const proof = join(import.meta.dir, 'fixtures/graph-usefulness/sample-retrieval-proof.json');
+    const manifestPath = join(import.meta.dir, 'fixtures/graph-usefulness/sample-relation-manifest.json');
+    const origLog = console.log;
+    const origErr = console.error;
+    let stderr = '';
+    console.log = () => {};
+    console.error = (...a: unknown[]) => { stderr += a.map(String).join(' ') + '\n'; };
+    try {
+      await runGraphUsefulness(engine, ['--source', 'default', 'retrieval-proof', 'run', proof, '--json']);
+      expect(stderr).not.toContain('Usage:');
+      stderr = '';
+      await runGraphUsefulness(engine, ['--source', 'wiki', 'relations', 'verify', manifestPath, '--json']);
+      expect(stderr).not.toContain('Usage:');
+      expect(stderr).not.toContain('Unknown relations action');
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
   });
 
   test('fails the live proof when the graph changes mid-run', async () => {
@@ -303,7 +437,7 @@ describe('retrieval proof', () => {
       return original(sql, params, opts);
     };
     try {
-      const result = await runRetrievalProof(engine, manifest);
+      const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
       expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
       expect(result.passed).toBe(false);
       expect(result.checks.production_mutations).toBeGreaterThan(0);

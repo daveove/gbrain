@@ -16,8 +16,10 @@ import {
 import {
   loadRetrievalProofFile,
   runRetrievalProof,
+  SlugOnlyProofNeedsSourceError,
 } from '../core/graph-usefulness/retrieval-proof.ts';
 import { InvalidGraphLimitError, parseOptionalPositiveLimit } from '../core/graph-usefulness/limit.ts';
+import type { RetrievalProofResult } from '../core/graph-usefulness/types.ts';
 import { writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -46,14 +48,26 @@ export function isGraphUsefulnessSubcommand(firstPositional: string | undefined)
   return !!firstPositional && GRAPH_USEFULNESS_SUBCOMMANDS.has(firstPositional);
 }
 
-/** First positional token, skipping flags that take a value. */
-export function firstGraphPositional(args: string[]): string | undefined {
+/**
+ * Positional tokens, skipping values of flags in `FLAGS_WITH_VALUES`.
+ * `--source wiki retrieval-proof` yields `['retrieval-proof']`, not `['wiki', ...]`.
+ */
+export function graphPositionals(args: string[]): string[] {
+  const out: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (!a.startsWith('--')) return a;
+    if (!a.startsWith('--')) {
+      out.push(a);
+      continue;
+    }
     if (FLAGS_WITH_VALUES.has(a)) i++;
   }
-  return undefined;
+  return out;
+}
+
+/** First positional token, skipping flags that take a value. */
+export function firstGraphPositional(args: string[]): string | undefined {
+  return graphPositionals(args)[0];
 }
 
 /** Usefulness subcommand name, or undefined when this invocation is bare traversal. */
@@ -77,11 +91,29 @@ function parseSource(args: string[]): { sourceId?: string } {
   return sourceId ? { sourceId } : {};
 }
 
+export class MissingGraphLimitError extends Error {
+  constructor() {
+    super('--limit requires a value (positive integer)');
+    this.name = 'MissingGraphLimitError';
+  }
+}
+
+/**
+ * Raw `--limit` token, or undefined when the flag is omitted.
+ * A present flag with no following argument is a missing value, not an omit.
+ */
+export function readLimitFlag(args: string[]): string | undefined {
+  const i = args.indexOf('--limit');
+  if (i < 0) return undefined;
+  if (i + 1 >= args.length) throw new MissingGraphLimitError();
+  return args[i + 1];
+}
+
 function parseLimitArg(args: string[]): number | undefined {
   try {
-    return parseOptionalPositiveLimit(takeFlag(args, '--limit'));
+    return parseOptionalPositiveLimit(readLimitFlag(args));
   } catch (e) {
-    if (e instanceof InvalidGraphLimitError) {
+    if (e instanceof InvalidGraphLimitError || e instanceof MissingGraphLimitError) {
       console.error(e.message);
       setCliExitVerdict(2);
       process.exit(2);
@@ -135,7 +167,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
   }
 
   if (sub === 'relations') {
-    const positionals = args.filter(a => !a.startsWith('--'));
+    const positionals = graphPositionals(args);
     const action = positionals[1];
     const manifestPath = positionals[2];
     if (!action || !manifestPath) {
@@ -195,7 +227,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
   }
 
   if (sub === 'retrieval-proof') {
-    const positionals = args.filter(a => !a.startsWith('--'));
+    const positionals = graphPositionals(args);
     const action = positionals[1];
     const proofPath = positionals[2];
     if (action !== 'run' || !proofPath) {
@@ -206,7 +238,17 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     const manifest = loadRetrievalProofFile(proofPath);
     const scope = parseSource(args);
     const limit = parseLimitArg(args);
-    const result = await runRetrievalProof(engine, manifest, { ...scope, limit });
+    let result: RetrievalProofResult;
+    try {
+      result = await runRetrievalProof(engine, manifest, { ...scope, limit });
+    } catch (e) {
+      if (e instanceof SlugOnlyProofNeedsSourceError) {
+        console.error(e.message);
+        setCliExitVerdict(2);
+        return;
+      }
+      throw e;
+    }
     const outPath = takeFlag(args, '--out');
     if (outPath) {
       mkdirSync(dirname(outPath), { recursive: true });
@@ -248,5 +290,7 @@ DAV-6220 usefulness:
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
+      Bare relevant_slugs / forbidden_slugs require a single --source.
+      relevant_pages / forbidden_pages are already (source_id, slug).
 `);
 }
