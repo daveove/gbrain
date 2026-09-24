@@ -259,9 +259,9 @@ export function _setBeforeGuardedLinkInsertForTests(
 }
 
 /** @internal Fault injection for receipt-commit failure tests. */
-let beforeReceiptCommitForTests: (() => void) | null = null;
+let beforeReceiptCommitForTests: (() => void | Promise<void>) | null = null;
 
-export function _setBeforeReceiptCommitForTests(fn: (() => void) | null): void {
+export function _setBeforeReceiptCommitForTests(fn: (() => void | Promise<void>) | null): void {
   beforeReceiptCommitForTests = fn;
 }
 
@@ -323,26 +323,31 @@ function reserveMutationReceipt(path: string, body: string): void {
   fsyncDir(dirname(path));
 }
 
+interface AppliedManifestLink {
+  row: RelationManifestRow;
+  linkId: number;
+}
+
+/**
+ * Delete exactly the row this manifest inserted.
+ * `removeLink` matches endpoint, type, and source and would also delete a
+ * concurrent NULL-origin row that shares those fields.
+ */
 async function rollbackAppliedLinks(
   engine: BrainEngine,
-  rows: RelationManifestRow[],
+  applied: AppliedManifestLink[],
 ): Promise<void> {
   const failures: string[] = [];
-  for (const row of [...rows].reverse()) {
-    const fromSrc = row.from_source_id ?? 'default';
-    const toSrc = row.to_source_id ?? 'default';
+  for (const item of [...applied].reverse()) {
     try {
-      const removed = await engine.removeLink(
-        row.from_slug,
-        row.to_slug,
-        row.link_type,
-        row.link_source,
-        { fromSourceId: fromSrc, toSourceId: toSrc },
+      const removed = await engine.executeRaw<{ id: number }>(
+        `DELETE FROM links WHERE id = $1 RETURNING id`,
+        [item.linkId],
       );
-      if (removed < 1) failures.push(`${row.id}: link not removed`);
+      if (removed.length !== 1) failures.push(`${item.row.id}: link not removed`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      failures.push(`${row.id}: ${message}`);
+      failures.push(`${item.row.id}: ${message}`);
     }
   }
   if (failures.length > 0) throw new Error(failures.join('; '));
@@ -352,7 +357,7 @@ async function rollbackAppliedLinks(
 async function undoAppliedLinks(
   engine: BrainEngine,
   receiptPath: string,
-  appliedRows: RelationManifestRow[],
+  appliedRows: AppliedManifestLink[],
 ): Promise<string> {
   let undo = `rolled back ${appliedRows.length} applied link(s)`;
   try {
@@ -368,11 +373,11 @@ async function undoAppliedLinks(
 async function commitReceiptOrUndo(
   engine: BrainEngine,
   path: string,
-  appliedRows: RelationManifestRow[],
-  write: () => void,
+  appliedRows: AppliedManifestLink[],
+  write: () => void | Promise<void>,
 ): Promise<void> {
   try {
-    write();
+    await write();
   } catch (err) {
     const undo = await undoAppliedLinks(engine, path, appliedRows);
     const writeMessage = err instanceof Error ? err.message : String(err);
@@ -387,7 +392,7 @@ async function commitReceiptOrUndo(
 async function fingerprintAfterMutation(
   engine: BrainEngine,
   receiptPath: string | undefined,
-  appliedRows: RelationManifestRow[],
+  appliedRows: AppliedManifestLink[],
 ): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
   try {
     return await computeGraphFingerprint(engine);
@@ -399,7 +404,16 @@ async function fingerprintAfterMutation(
   }
 }
 
-type GuardedInsertResult = 'inserted' | 'already_linked' | 'conflict';
+type GuardedInsertResult =
+  | { status: 'inserted'; linkId: number }
+  | { status: 'already_linked' }
+  | { status: 'conflict' };
+
+function readInsertedLinkId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return Number(value);
+  return null;
+}
 
 /**
  * Recheck `no_incident_edge` and insert in one transaction.
@@ -452,7 +466,11 @@ async function insertNoIncidentEdge(
       await resolveSourceId(tx, id);
     }
 
-    const rows = await tx.executeRaw<{ incident_n: string; inserted_n: string }>(
+    const rows = await tx.executeRaw<{
+      incident_n: string;
+      inserted_n: string;
+      inserted_id: string | number | null;
+    }>(
       `WITH incident AS (
          SELECT 1 FROM links l
          WHERE l.from_page_id = $1 AND l.to_page_id = $2
@@ -466,18 +484,23 @@ async function insertNoIncidentEdge(
        )
        SELECT
          (SELECT count(*)::text FROM incident) AS incident_n,
-         (SELECT count(*)::text FROM inserted) AS inserted_n`,
+         (SELECT count(*)::text FROM inserted) AS inserted_n,
+         (SELECT id::text FROM inserted) AS inserted_id`,
       [from.id, to.id, linkType, context, linkSource],
     );
     const incidentN = Number(rows[0]?.incident_n ?? 0);
     const insertedN = Number(rows[0]?.inserted_n ?? 0);
-    if (incidentN > 0) return 'already_linked';
-    if (insertedN === 0) return 'conflict';
-    return 'inserted';
+    if (incidentN > 0) return { status: 'already_linked' };
+    if (insertedN === 0) return { status: 'conflict' };
+    const linkId = readInsertedLinkId(rows[0]?.inserted_id);
+    // Still inside the insert transaction. A missing id aborts that insert
+    // instead of recording a row this run cannot later delete by id.
+    if (linkId === null) throw new Error(`manifest row ${row.id}: inserted link id missing`);
+    return { status: 'inserted', linkId };
   });
 }
 
-function writeMutationReceipt(
+async function writeMutationReceipt(
   path: string,
   manifest: RelationManifest,
   sha: string,
@@ -487,7 +510,7 @@ function writeMutationReceipt(
   after: Awaited<ReturnType<typeof computeGraphFingerprint>>,
   outcomes: RelationRowOutcome[],
   extra?: { partial_failure?: boolean; error?: string },
-): void {
+): Promise<void> {
   const applied = outcomes.filter(o => o.status === 'applied').length;
   const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;
   const receipt: MutationReceipt = {
@@ -506,7 +529,7 @@ function writeMutationReceipt(
     outcomes,
     ...extra,
   };
-  beforeReceiptCommitForTests?.();
+  await beforeReceiptCommitForTests?.();
   // The path was exclusive-created by reserveMutationReceipt. Replace that
   // in-progress file with the final receipt. rename keeps a crash from
   // leaving it empty.
@@ -528,7 +551,7 @@ export async function applyRelationManifest(
   await assertActivePackLinkVocabulary(engine, slice);
   const createdAt = new Date().toISOString();
   const outcomes: RelationRowOutcome[] = [];
-  const appliedRows: RelationManifestRow[] = [];
+  const appliedLinks: AppliedManifestLink[] = [];
 
   const checkpointBody = (pendingId?: string): string => {
     const listed = pendingId
@@ -575,18 +598,18 @@ export async function applyRelationManifest(
       // insert leaves this pending_commit entry instead of an empty receipt.
       checkpoint(row.id);
       const inserted = await insertNoIncidentEdge(engine, row);
-      if (inserted !== 'inserted') {
+      if (inserted.status !== 'inserted') {
         outcomes.push({
           id: row.id,
           status: 'skipped_already_linked',
-          reason: inserted === 'conflict'
+          reason: inserted.status === 'conflict'
             ? 'identical edge conflict; not overwritten'
             : 'forward edge already exists',
         });
         checkpoint();
         continue;
       }
-      appliedRows.push(row);
+      appliedLinks.push({ row, linkId: inserted.linkId });
       outcomes.push({ id: row.id, status: 'applied' });
       checkpoint();
     }
@@ -597,15 +620,15 @@ export async function applyRelationManifest(
     }
     let after: Awaited<ReturnType<typeof computeGraphFingerprint>>;
     try {
-      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedRows);
+      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
     } catch (fpErr) {
       const fpMessage = fpErr instanceof Error ? fpErr.message : String(fpErr);
       throw new Error(`${message} (${fpMessage})`);
     }
     if (opts.receiptPath) {
       try {
-        await commitReceiptOrUndo(engine, opts.receiptPath, appliedRows, () => {
-          writeMutationReceipt(
+        await commitReceiptOrUndo(engine, opts.receiptPath, appliedLinks, async () => {
+          await writeMutationReceipt(
             opts.receiptPath!,
             manifest,
             sha,
@@ -625,7 +648,7 @@ export async function applyRelationManifest(
     throw err;
   }
 
-  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedRows);
+  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
   const applied = outcomes.filter(o => o.status === 'applied').length;
   const ready = outcomes.filter(o => o.status === 'dry_run' || o.status === 'applied').length;
   const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;
@@ -643,8 +666,8 @@ export async function applyRelationManifest(
   };
 
   if (opts.receiptPath) {
-    await commitReceiptOrUndo(engine, opts.receiptPath, appliedRows, () => {
-      writeMutationReceipt(
+    await commitReceiptOrUndo(engine, opts.receiptPath, appliedLinks, async () => {
+      await writeMutationReceipt(
         opts.receiptPath!,
         manifest,
         sha,

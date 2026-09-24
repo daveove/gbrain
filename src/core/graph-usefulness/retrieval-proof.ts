@@ -90,6 +90,18 @@ export function manifestUsesBareSlugs(manifest: RetrievalProofManifest): boolean
   );
 }
 
+/** First-seen order. Repeated relevant pages must not each count as a hit. */
+function distinctKeys(keys: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const key of keys) {
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
+}
+
 function expectationKeys(
   pages: RetrievalPageRef[] | undefined,
   slugs: string[] | undefined,
@@ -161,9 +173,9 @@ export function scoreRetrievalQuestion(
   );
   if (forbidden.some(s => slice.includes(s))) return 'fail';
 
-  const relevant = expectationKeys(
+  const relevant = distinctKeys(expectationKeys(
     q.relevant_pages, q.relevant_slugs, sourceId, questionId, 'relevant_pages', 'relevant_slugs',
-  );
+  ));
   if (relevant.length === 0) return 'partial';
 
   const matched = relevant.filter(s => slice.includes(s)).length;

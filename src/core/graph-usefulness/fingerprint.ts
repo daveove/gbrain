@@ -36,13 +36,18 @@ export async function computeGraphFingerprint(
   const params: unknown[] = scope ? [scope] : [];
   const inScope = (alias: string) =>
     scope ? `${alias}.source_id = ANY($1::text[])` : 'TRUE';
-  const linkInScope = scope
-    ? `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')})
-       AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')})`
-    : 'TRUE';
+  // Search hides every page on an archived source. The fingerprint uses the
+  // same predicate so an archive between questions changes the snapshot.
+  const pageVisible = (alias: string) =>
+    `EXISTS (SELECT 1 FROM sources s WHERE s.id = ${alias}.source_id AND NOT s.archived)`;
+  const linkInScope =
+    `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')} AND ${pageVisible('pf')})
+     AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})`;
+  const sourceInScope = scope ? 's.id = ANY($1::text[])' : 'TRUE';
 
   // One statement: Postgres assigns a single snapshot, so counts, page
-  // identities, and link identities cannot tear across a concurrent commit.
+  // identities, link identities, corpus revision, and source archive state
+  // cannot tear across a concurrent commit.
   const rows = await engine.executeRaw<{
     active_pages: string;
     link_rows: string;
@@ -51,9 +56,11 @@ export async function computeGraphFingerprint(
     page_identities: unknown;
     link_identities: unknown;
     corpus_revision: string | null;
+    source_archive: unknown;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
+       JOIN sources s ON s.id = p.source_id AND NOT s.archived
        WHERE p.deleted_at IS NULL AND ${inScope('p')}
      ),
      degrees AS (
@@ -133,7 +140,15 @@ export async function computeGraphFingerprint(
            FROM scoped_pages sp
            JOIN pages p ON p.id = sp.id
          ) corpus
-       ), '') AS corpus_revision`,
+       ), '') AS corpus_revision,
+       COALESCE((
+         SELECT json_agg(json_build_array(
+           s.id,
+           CASE WHEN s.archived THEN 'true' ELSE 'false' END
+         ) ORDER BY s.id)
+         FROM sources s
+         WHERE ${sourceInScope}
+       ), '[]'::json) AS source_archive`,
     params,
   );
 
@@ -142,9 +157,11 @@ export async function computeGraphFingerprint(
     page_identities: [],
     link_identities: [],
     corpus_revision: '',
+    source_archive: [],
   };
   const pages = identityMatrix(r.page_identities);
   const links = identityMatrix(r.link_identities);
+  const sourceArchive = identityMatrix(r.source_archive);
   const corpusRevision = typeof r.corpus_revision === 'string' ? r.corpus_revision : '';
 
   const fp: GraphFingerprint = {
@@ -154,13 +171,14 @@ export async function computeGraphFingerprint(
     zero_degree_pages: Number(r.zero_degree_pages),
     sha256: '',
   };
-  // Counts stay on the public receipt. The hash also covers identities and
-  // a content/chunk revision, so replacing one edge with another, or
-  // rewriting page content, chunks, or embeddings without changing
-  // (source_id, slug) or links, changes sha256. All of those inputs come
-  // from the same statement, so they share one snapshot.
+  // Counts stay on the public receipt. The hash also covers identities, a
+  // content/chunk revision, and each source's archived flag. Replacing one
+  // edge with another, rewriting page content, or archiving a source
+  // changes sha256. Archived sources are omitted from the page and link
+  // inputs, matching search. All of those inputs come from the same
+  // statement, so they share one snapshot.
   const hash = createHash('sha256');
-  hash.update('graph-fingerprint-v3\n');
+  hash.update('graph-fingerprint-v4\n');
   hash.update(JSON.stringify({
     active_pages: fp.active_pages,
     link_rows: fp.link_rows,
@@ -180,6 +198,10 @@ export async function computeGraphFingerprint(
   hash.update('\n');
   hash.update(corpusRevision);
   hash.update('\n');
+  for (const source of sourceArchive) {
+    hash.update(JSON.stringify(source));
+    hash.update('\n');
+  }
   fp.sha256 = hash.digest('hex');
   return fp;
 }

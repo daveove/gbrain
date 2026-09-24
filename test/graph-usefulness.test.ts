@@ -665,6 +665,61 @@ describe('relation manifest', () => {
     }
   });
 
+  test('receipt rollback deletes only the inserted link id', async () => {
+    await engine.putPage('topics/rb-id-a', { title: 'Rb A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/rb-id-b', { title: 'Rb B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'rb-id-1',
+        from_slug: 'topics/rb-id-a',
+        to_slug: 'topics/rb-id-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'manifest-row',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-id-'));
+    const receiptPath = join(dir, 'receipt.json');
+    _setBeforeReceiptCommitForTests(async () => {
+      await engine.addLink(
+        'topics/rb-id-a',
+        'topics/rb-id-b',
+        'other-writer',
+        'related_to',
+        'tana-relation-r2',
+      );
+      unlinkSync(receiptPath);
+      mkdirSync(receiptPath);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/rolled back 1 applied link/);
+      const rows = await engine.executeRaw<{ origin_null: boolean; context: string }>(
+        `SELECT (l.origin_page_id IS NULL) AS origin_null, l.context
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL
+          ORDER BY l.context`,
+        ['topics/rb-id-a', 'topics/rb-id-b'],
+      );
+      expect(rows).toEqual([{ origin_null: true, context: 'other-writer' }]);
+    } finally {
+      _setBeforeReceiptCommitForTests(null);
+      rmSync(receiptPath, { recursive: true, force: true });
+    }
+  });
+
   test('rolls back applied links when the post-apply fingerprint fails', async () => {
     await engine.putPage('topics/fp-fail-a', { title: 'Fp A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/fp-fail-b', { title: 'Fp B', compiled_truth: 'b', type: 'note' });
@@ -977,6 +1032,8 @@ describe('graph fingerprint identities', () => {
       expect(fpSql[0]).toContain('link_identities');
       expect(fpSql[0]).toContain('corpus_revision');
       expect(fpSql[0]).toContain('content_chunks');
+      expect(fpSql[0]).toContain('JOIN sources s ON s.id = p.source_id AND NOT s.archived');
+      expect(fpSql[0]).toContain('source_archive');
       expect(fp.active_pages).toBeGreaterThan(0);
       expect(fp.sha256).toHaveLength(64);
     } finally {
@@ -1041,6 +1098,61 @@ describe('graph fingerprint identities', () => {
     expect(afterEmbed.active_pages).toBe(before.active_pages);
     expect(afterEmbed.link_rows).toBe(before.link_rows);
     expect(retrievalProofMutationCount(afterChunk, afterEmbed)).toBeGreaterThan(0);
+  });
+
+  test('excludes archived-source pages and changes when a source is archived', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('archfp', 'archfp', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'archfp'`,
+    );
+    await engine.putPage('topics/arch-fp-a', {
+      title: 'Arch A', compiled_truth: 'archived corpus a', type: 'note',
+    }, { sourceId: 'archfp' });
+    await engine.putPage('topics/arch-fp-b', {
+      title: 'Arch B', compiled_truth: 'archived corpus b', type: 'note',
+    }, { sourceId: 'archfp' });
+    await engine.addLink(
+      'topics/arch-fp-a', 'topics/arch-fp-b', 'ctx', 'related_to', 'manual',
+      undefined, undefined,
+      { fromSourceId: 'archfp', toSourceId: 'archfp' },
+    );
+    const before = await computeGraphFingerprint(engine);
+    const scopedBefore = await computeGraphFingerprint(engine, { sourceId: 'archfp' });
+    const defaultBefore = await computeGraphFingerprint(engine, { sourceId: 'default' });
+    expect(scopedBefore.active_pages).toBe(2);
+    expect(scopedBefore.valid_links).toBeGreaterThan(0);
+    expect(scopedBefore.link_rows).toBe(scopedBefore.valid_links);
+
+    await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'archfp'`);
+    const after = await computeGraphFingerprint(engine);
+    const scopedAfter = await computeGraphFingerprint(engine, { sourceId: 'archfp' });
+    const defaultAfter = await computeGraphFingerprint(engine, { sourceId: 'default' });
+
+    expect(scopedAfter.active_pages).toBe(0);
+    expect(scopedAfter.link_rows).toBe(0);
+    expect(scopedAfter.valid_links).toBe(0);
+    expect(after.active_pages).toBe(before.active_pages - scopedBefore.active_pages);
+    expect(after.link_rows).toBe(before.link_rows - scopedBefore.link_rows);
+    expect(after.valid_links).toBe(before.valid_links - scopedBefore.valid_links);
+    expect(after.sha256).not.toBe(before.sha256);
+    expect(scopedAfter.sha256).not.toBe(scopedBefore.sha256);
+    expect(defaultAfter.sha256).toBe(defaultBefore.sha256);
+    expect(retrievalProofMutationCount(before, after)).toBeGreaterThan(0);
+  });
+
+  test('archiving an empty source changes sha256 without changing counts', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('emptysrc', 'emptysrc', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'emptysrc'`,
+    );
+    const before = await computeGraphFingerprint(engine);
+    await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = 'emptysrc'`);
+    const after = await computeGraphFingerprint(engine);
+    expect(after.active_pages).toBe(before.active_pages);
+    expect(after.link_rows).toBe(before.link_rows);
+    expect(after.valid_links).toBe(before.valid_links);
+    expect(after.zero_degree_pages).toBe(before.zero_degree_pages);
+    expect(after.sha256).not.toBe(before.sha256);
   });
 });
 
@@ -1349,6 +1461,41 @@ describe('retrieval proof', () => {
     expect(() => scoreRetrievalQuestion(zero, [
       { slug: 'topics/parent-note', source_id: 'default' },
     ], 'default')).toThrow(/positive integer/);
+  });
+
+  test('repeated relevant expectations count once toward min_hits_in_top_k', () => {
+    const oneHit = [{ slug: 'topics/parent-note', source_id: 'wiki' }];
+    expect(scoreRetrievalQuestion({
+      id: 'q-dup-slug',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note', 'topics/parent-note'],
+      min_hits_in_top_k: 2,
+    }, oneHit, 'wiki')).toBe('fail');
+    expect(scoreRetrievalQuestion({
+      id: 'q-dup-page',
+      query: 'parent',
+      relevant_pages: [
+        { source_id: 'wiki', slug: 'topics/parent-note' },
+        { source_id: 'wiki', slug: 'topics/parent-note' },
+      ],
+      min_hits_in_top_k: 2,
+    }, oneHit)).toBe('fail');
+    expect(scoreRetrievalQuestion({
+      id: 'q-dup-both',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note'],
+      relevant_pages: [{ source_id: 'wiki', slug: 'topics/parent-note' }],
+      min_hits_in_top_k: 2,
+    }, oneHit, 'wiki')).toBe('fail');
+    expect(scoreRetrievalQuestion({
+      id: 'q-two',
+      query: 'parent',
+      relevant_slugs: ['topics/parent-note', 'topics/child-note'],
+      min_hits_in_top_k: 2,
+    }, [
+      { slug: 'topics/parent-note', source_id: 'wiki' },
+      { slug: 'topics/child-note', source_id: 'wiki' },
+    ], 'wiki')).toBe('pass');
   });
 
   test('rejects a non-positive top_k before search or slice', async () => {
