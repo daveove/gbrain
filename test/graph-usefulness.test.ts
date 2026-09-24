@@ -4,8 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, w
 import { tmpdir } from 'os';
 import {
   GRAPH_USEFULNESS_SUBCOMMANDS,
+  argsBeforeOptionTerminator,
   graphPositionals,
   graphUsefulnessSubcommand,
+  graphUsefulnessWantsHelp,
   isGraphUsefulnessSubcommand,
   MissingGraphLimitError,
   findGraphUsefulnessFlagProblem,
@@ -13,6 +15,7 @@ import {
   rejectGraphUsefulnessFlagProblem,
   runGraphUsefulness,
 } from '../src/commands/graph-usefulness.ts';
+import { dispatchGraphUsefulness } from '../src/commands/graph-usefulness-dispatch.ts';
 import { _resetCliExitVerdictForTests, currentExitCode } from '../src/core/cli-force-exit.ts';
 import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/graph-usefulness/limit.ts';
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
@@ -101,6 +104,24 @@ describe('graph CLI routing', () => {
       .toEqual(['retrieval-proof', 'run', 'proof.json']);
     expect(graphPositionals(['relations', 'apply', '--limit=1', 'm.json', '--receipt-out=r.json']))
       .toEqual(['relations', 'apply', 'm.json']);
+    expect(argsBeforeOptionTerminator([
+      'relations', 'apply', 'm.json', '--apply', '--', '--yes', '--dry-run',
+    ])).toEqual(['relations', 'apply', 'm.json', '--apply']);
+    expect(graphPositionals([
+      'relations', 'apply', 'm.json', '--', '--apply', '--yes', '--dry-run',
+    ])).toEqual(['relations', 'apply', 'm.json', '--apply', '--yes', '--dry-run']);
+    expect(readLimitFlag(['relations', 'apply', 'm.json', '--', '--limit', '1'])).toBeUndefined();
+    expect(readLimitFlag(['--limit', '2', '--', '--limit', '9'])).toBe('2');
+    expect(graphUsefulnessWantsHelp(['measure', '--help'])).toBe(true);
+    expect(graphUsefulnessWantsHelp(['help'])).toBe(true);
+    expect(graphUsefulnessWantsHelp(['stats', '-h'])).toBe(true);
+    expect(graphUsefulnessWantsHelp(['measure', '--', '--help'])).toBe(false);
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--', '--apply', '--yes', '--dry-run',
+    ])).toBeNull();
+    expect(findGraphUsefulnessFlagProblem([
+      'relations', 'apply', 'm.json', '--dry-run', '--', '--help',
+    ])).toEqual({ kind: 'unknown', flag: '--dry-run' });
   });
 
   test('bare graph stays on the operation path', () => {
@@ -807,6 +828,232 @@ describe('retrieval proof', () => {
       expect(result.checks.production_mutations).toBeGreaterThan(0);
     } finally {
       engine.executeRaw = original;
+    }
+  });
+});
+
+const TRUE_GUARDS = {
+  exact_endpoint_match: true,
+  source_relation_current: true,
+  no_incident_edge: true,
+  readwise_clear: true,
+};
+
+function relationManifest(rows: Array<Record<string, unknown>>): string {
+  return JSON.stringify({ manifest_version: 1, rows });
+}
+
+describe('relation source scope and option terminator', () => {
+  test('--source fills omitted manifest endpoint sources', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('wiki', 'wiki') ON CONFLICT (id) DO NOTHING`,
+    );
+    const from = 'topics/src-scope-from';
+    const to = 'topics/src-scope-to';
+    for (const sourceId of ['default', 'wiki']) {
+      await engine.putPage(from, { title: 'From', compiled_truth: 'scope from', type: 'note' }, { sourceId });
+      await engine.putPage(to, { title: 'To', compiled_truth: 'scope to', type: 'note' }, { sourceId });
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rel-src-'));
+    const manifestPath = join(dir, 'manifest.json');
+    const receiptPath = join(dir, 'receipt.json');
+    writeFileSync(manifestPath, relationManifest([{
+      id: 'wiki-omit',
+      from_slug: from,
+      to_slug: to,
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]));
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--source', 'wiki', '--apply', '--yes',
+        '--receipt-out', receiptPath, '--json',
+      ]);
+      const links = await engine.executeRaw<{ from_source: string; to_source: string }>(
+        `SELECT fp.source_id AS from_source, tp.source_id AS to_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        [from, to],
+      );
+      expect(links).toEqual([{ from_source: 'wiki', to_source: 'wiki' }]);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('explicit row source ids win over --source', async () => {
+    const from = 'topics/src-explicit-from';
+    const to = 'topics/src-explicit-to';
+    for (const sourceId of ['default', 'wiki']) {
+      await engine.putPage(from, { title: 'From', compiled_truth: 'explicit from', type: 'note' }, { sourceId });
+      await engine.putPage(to, { title: 'To', compiled_truth: 'explicit to', type: 'note' }, { sourceId });
+    }
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rel-explicit-'));
+    const manifestPath = join(dir, 'manifest.json');
+    writeFileSync(manifestPath, relationManifest([{
+      id: 'keep-default',
+      from_slug: from,
+      to_slug: to,
+      from_source_id: 'default',
+      to_source_id: 'default',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]));
+    const origLog = console.log;
+    const origErr = console.error;
+    console.log = () => {};
+    console.error = () => {};
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--source', 'wiki', '--apply', '--yes',
+        '--receipt-out', join(dir, 'receipt.json'), '--json',
+      ]);
+      const links = await engine.executeRaw<{ from_source: string; to_source: string }>(
+        `SELECT fp.source_id AS from_source, tp.source_id AS to_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        [from, to],
+      );
+      expect(links).toEqual([{ from_source: 'default', to_source: 'default' }]);
+
+      const oneFrom = 'topics/src-one-from';
+      const oneTo = 'topics/src-one-to';
+      await engine.putPage(oneFrom, { title: 'From', compiled_truth: 'one from', type: 'note' }, { sourceId: 'default' });
+      await engine.putPage(oneTo, { title: 'To', compiled_truth: 'one to', type: 'note' }, { sourceId: 'wiki' });
+      const onePath = join(dir, 'one.json');
+      writeFileSync(onePath, relationManifest([{
+        id: 'one-side',
+        from_slug: oneFrom,
+        to_slug: oneTo,
+        from_source_id: 'default',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        guards: TRUE_GUARDS,
+      }]));
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', onePath, '--source', 'wiki', '--apply', '--yes',
+        '--receipt-out', join(dir, 'one-receipt.json'), '--json',
+      ]);
+      const oneLinks = await engine.executeRaw<{ from_source: string; to_source: string }>(
+        `SELECT fp.source_id AS from_source, tp.source_id AS to_source
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        [oneFrom, oneTo],
+      );
+      expect(oneLinks).toEqual([{ from_source: 'default', to_source: 'wiki' }]);
+    } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('flags after -- do not apply a relation manifest', async () => {
+    const from = 'topics/term-from';
+    const to = 'topics/term-to';
+    await engine.putPage(from, { title: 'From', compiled_truth: 'term from', type: 'note' });
+    await engine.putPage(to, { title: 'To', compiled_truth: 'term to', type: 'note' });
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rel-term-'));
+    const manifestPath = join(dir, 'manifest.json');
+    writeFileSync(manifestPath, relationManifest([{
+      id: 'term-1',
+      from_slug: from,
+      to_slug: to,
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]));
+    const origLog = console.log;
+    const origErr = console.error;
+    let stdout = '';
+    console.log = (...a: unknown[]) => { stdout += a.map(String).join(' ') + '\n'; };
+    console.error = () => {};
+    const original = engine.addLink.bind(engine);
+    let calls = 0;
+    engine.addLink = async (...args) => {
+      calls += 1;
+      return original(...args);
+    };
+    try {
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--receipt-out', join(dir, 'hidden.json'), '--json',
+        '--', '--apply', '--yes', '--dry-run',
+      ]);
+      expect(calls).toBe(0);
+      const hidden = JSON.parse(stdout);
+      expect(hidden.mode).toBe('dry-run');
+      expect(hidden.applied).toBe(0);
+
+      stdout = '';
+      await runGraphUsefulness(engine, [
+        'relations', 'apply', manifestPath, '--apply', '--yes', '--json',
+        '--receipt-out', join(dir, 'real.json'),
+        '--', '--dry-run',
+      ]);
+      expect(calls).toBe(1);
+      const applied = JSON.parse(stdout);
+      expect(applied.mode).toBe('apply');
+      expect(applied.applied).toBe(1);
+    } finally {
+      engine.addLink = original;
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+});
+
+describe('usefulness help before connect', () => {
+  test('prints help without loading a brain', async () => {
+    const dispatchSrc = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
+    const body = dispatchSrc.slice(dispatchSrc.indexOf('export async function dispatchGraphUsefulness'));
+    const helpAt = body.indexOf('graphUsefulnessWantsHelp');
+    const loadAt = body.indexOf('loadConfig()');
+    const connectAt = body.indexOf('connectEngine()');
+    expect(helpAt).toBeGreaterThan(-1);
+    expect(helpAt).toBeLessThan(loadAt);
+    expect(loadAt).toBeLessThan(connectAt);
+
+    const origLog = console.log;
+    const origExit = process.exit;
+    let out = '';
+    let connects = 0;
+    console.log = (...a: unknown[]) => { out += a.map(String).join(' ') + '\n'; };
+    process.exit = (() => { throw new Error('process.exit'); }) as typeof process.exit;
+    try {
+      for (const args of [['measure', '--help'], ['help'], ['--source', 'wiki', 'stats', '-h']]) {
+        out = '';
+        const handled = await dispatchGraphUsefulness(args, async () => {
+          connects += 1;
+          throw new Error('connect');
+        });
+        expect(handled).toBe(true);
+        expect(out).toContain('DAV-6220 usefulness');
+      }
+      expect(connects).toBe(0);
+    } finally {
+      console.log = origLog;
+      process.exit = origExit;
     }
   });
 });

@@ -49,14 +49,25 @@ export function isGraphUsefulnessSubcommand(firstPositional: string | undefined)
 }
 
 /**
+ * Tokens before the `--` option terminator. Flags after it are positionals,
+ * not mutations: `relations apply m.json -- --apply --yes` does not commit.
+ */
+export function argsBeforeOptionTerminator(args: string[]): string[] {
+  const term = args.indexOf('--');
+  return term === -1 ? args : args.slice(0, term);
+}
+
+/**
  * Positional tokens, skipping values of flags in `FLAGS_WITH_VALUES`.
  * `--source wiki retrieval-proof` yields `['retrieval-proof']`, not `['wiki', ...]`.
  * `--source=wiki` keeps the value on the flag token and does not swallow the next arg.
+ * Tokens after `--` are positionals even when they look like flags.
  */
 export function graphPositionals(args: string[]): string[] {
+  const optionArgs = argsBeforeOptionTerminator(args);
   const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
+  for (let i = 0; i < optionArgs.length; i++) {
+    const a = optionArgs[i];
     if (!a.startsWith('--')) {
       out.push(a);
       continue;
@@ -65,10 +76,12 @@ export function graphPositionals(args: string[]): string[] {
     const name = eq > 2 ? a.slice(0, eq) : a;
     // A following option is not a value. Leave it in place so flag checks see it.
     if (FLAGS_WITH_VALUES.has(name) && eq < 0) {
-      const next = args[i + 1];
+      const next = optionArgs[i + 1];
       if (next !== undefined && !next.startsWith('-')) i++;
     }
   }
+  const term = args.indexOf('--');
+  if (term !== -1) out.push(...args.slice(term + 1));
   return out;
 }
 
@@ -95,11 +108,12 @@ export class MissingGraphFlagValueError extends Error {
  * A present flag with no value (or an empty `--name=`) throws.
  */
 function readSeparatedOrInlineFlag(args: string[], name: string): string | undefined {
+  const scan = argsBeforeOptionTerminator(args);
   const prefix = `${name}=`;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
+  for (let i = 0; i < scan.length; i++) {
+    const a = scan[i];
     if (a === name) {
-      const next = args[i + 1];
+      const next = scan[i + 1];
       // `--receipt-out --apply` must not take `--apply` as the path.
       if (next === undefined || next.startsWith('-')) throw new MissingGraphFlagValueError(name);
       return next;
@@ -148,20 +162,31 @@ function legalGraphUsefulnessFlags(sub: string, action: string | undefined): { l
   return { legal, valued };
 }
 
+/** True for `help` and for `--help` / `-h` before the option terminator. */
+export function graphUsefulnessWantsHelp(args: string[]): boolean {
+  if (graphUsefulnessSubcommand(args) === 'help') return true;
+  const optionArgs = argsBeforeOptionTerminator(args);
+  return optionArgs.includes('--help') || optionArgs.includes('-h');
+}
+
+export function printGraphUsefulnessHelp(): void {
+  printGraphHelp();
+}
+
 /**
  * Subcommand whitelist for usefulness flags. Null when the invocation is bare
  * traversal, help, or a clean usefulness command. Unknown flags and valued
  * flags whose next token is another option are reported here so dispatch can
- * refuse before connecting.
+ * refuse before connecting. The scan stops at `--`.
  */
 export function findGraphUsefulnessFlagProblem(args: string[]): GraphUsefulnessFlagProblem | null {
   const sub = graphUsefulnessSubcommand(args);
   if (!sub || sub === 'help') return null;
-  if (args.includes('--help') || args.includes('-h')) return null;
+  const optionArgs = argsBeforeOptionTerminator(args);
+  if (optionArgs.includes('--help') || optionArgs.includes('-h')) return null;
   const { legal, valued } = legalGraphUsefulnessFlags(sub, graphPositionals(args)[1]);
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === '--') break;
+  for (let i = 0; i < optionArgs.length; i++) {
+    const a = optionArgs[i];
     const m = /^--([a-z0-9][a-z0-9-]*)(?:=(.*))?$/i.exec(a);
     if (!m) continue;
     if (/[A-Z]/.test(m[1])) return { kind: 'unknown', flag: `--${m[1]}` };
@@ -173,7 +198,7 @@ export function findGraphUsefulnessFlagProblem(args: string[]): GraphUsefulnessF
       if (inline.length === 0 || inline.startsWith('-')) return { kind: 'missing_value', flag: name };
       continue;
     }
-    const next = args[i + 1];
+    const next = optionArgs[i + 1];
     if (next === undefined || next.startsWith('-')) return { kind: 'missing_value', flag: name };
     i++;
   }
@@ -186,7 +211,8 @@ export function rejectGraphUsefulnessFlagProblem(args: string[]): void {
   if (!problem) return;
   if (problem.kind === 'unknown') {
     const message = `unknown flag ${problem.flag} for 'gbrain graph'`;
-    if (args.some(a => a === '--json' || (a.startsWith('--json=') && a !== '--json=false'))) {
+    const optionArgs = argsBeforeOptionTerminator(args);
+    if (optionArgs.some(a => a === '--json' || (a.startsWith('--json=') && a !== '--json=false'))) {
       process.stdout.write(JSON.stringify({ status: 'error', reason: 'invalid_flag', message }) + '\n');
     }
     console.error(`gbrain graph: ${message}`);
@@ -213,7 +239,7 @@ function takeFlag(args: string[], name: string): string | undefined {
 }
 
 function hasFlag(args: string[], name: string): boolean {
-  return args.includes(name);
+  return argsBeforeOptionTerminator(args).includes(name);
 }
 
 function parseSource(args: string[]): { sourceId?: string } {
@@ -255,7 +281,7 @@ function parseLimitArg(args: string[]): number | undefined {
 }
 
 export async function runGraphUsefulness(engine: BrainEngine, args: string[]): Promise<void> {
-  if (hasFlag(args, '--help') || hasFlag(args, '-h')) {
+  if (graphUsefulnessWantsHelp(args)) {
     printGraphHelp();
     return;
   }
@@ -312,6 +338,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       return;
     }
     const limit = parseLimitArg(args);
+    const defaultSourceId = parseSource(args).sourceId;
     const receiptOut = takeFlag(args, '--receipt-out')
       ?? `docs/progress/DAV-6220/mutation-receipt-${Date.now()}.json`;
     const { manifest, raw } = loadRelationManifestFile(manifestPath);
@@ -320,6 +347,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       const result = await applyRelationManifest(engine, manifest, raw, {
         apply: false,
         limit,
+        defaultSourceId,
         receiptPath: hasFlag(args, '--write-receipt') ? receiptOut : undefined,
       });
       if (json) {
@@ -342,6 +370,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       const result = await applyRelationManifest(engine, manifest, raw, {
         apply: apply && yes,
         limit,
+        defaultSourceId,
         receiptPath: receiptOut,
         operator: process.env.USER ?? 'gbrain',
       });
@@ -433,12 +462,15 @@ DAV-6220 usefulness:
   measure [--json] [--source <id>]
       Read-only connectivity + junk-slug samples.
 
-  relations verify <manifest.json> [--json] [--limit N] [--write-receipt]
+  relations verify <manifest.json> [--json] [--limit N] [--write-receipt] [--source <id>]
       Re-check manifest guards without writing links.
+      --source is the default for rows that omit from_source_id or to_source_id.
 
   relations apply <manifest.json> [--apply] [--yes] [--limit N]
-      [--receipt-out <path>] [--json]
+      [--receipt-out <path>] [--json] [--source <id>]
       Dry-run by default. --apply --yes writes manifest rows that still pass guards.
+      --source fills an omitted row source id. A row that sets from_source_id or
+      to_source_id keeps that value.
 
   retrieval-proof run <proof.json> [--out <path>] [--json] [--source <id>] [--limit N]
       Score a sealed question pack; fingerprints must stay identical (read-only).
@@ -450,6 +482,7 @@ Valued flags accept both --name value and --name=value
 (--limit, --source, --receipt-out, --out). An empty value, or a following
 token that starts with '-', is rejected before apply.
 Unknown flags are rejected before connect (for example --dry-run).
+Flags after -- are positional. They do not count as --apply, --yes, or --help.
 retrieval-proof --out refuses to overwrite an existing file.
 `);
 }

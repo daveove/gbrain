@@ -10,7 +10,12 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { finishCliTeardown } from '../core/cli-force-exit.ts';
 import { isThinClient, loadConfig } from '../core/config.ts';
-import { graphUsefulnessSubcommand, runGraphUsefulness } from './graph-usefulness.ts';
+import {
+  graphUsefulnessSubcommand,
+  graphUsefulnessWantsHelp,
+  printGraphUsefulnessHelp,
+  runGraphUsefulness,
+} from './graph-usefulness.ts';
 
 export async function dispatchGraphUsefulness(
   args: string[],
@@ -18,6 +23,13 @@ export async function dispatchGraphUsefulness(
 ): Promise<boolean> {
   const sub = graphUsefulnessSubcommand(args);
   if (!sub) return false;
+
+  // Help is local text. Do this before config load, thin-client refusal, and
+  // engine connect so `gbrain graph measure --help` works with no brain.
+  if (graphUsefulnessWantsHelp(args)) {
+    printGraphUsefulnessHelp();
+    return true;
+  }
 
   const cfg = loadConfig();
   if (isThinClient(cfg)) {

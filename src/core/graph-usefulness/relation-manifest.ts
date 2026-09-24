@@ -135,6 +135,24 @@ export interface ApplyRelationManifestOpts {
   limit?: number;
   receiptPath?: string;
   operator?: string;
+  /**
+   * Default for a row that omits `from_source_id` or `to_source_id`.
+   * An explicit id on the row wins. Omitted opts fall back to `default`.
+   */
+  defaultSourceId?: string;
+}
+
+function fallbackSourceId(defaultSourceId: string | undefined): string {
+  return defaultSourceId && defaultSourceId.length > 0 ? defaultSourceId : 'default';
+}
+
+/** Fill omitted endpoint source ids. Explicit row values are kept. */
+function resolveRowSources(row: RelationManifestRow, defaultSourceId: string | undefined): RelationManifestRow {
+  const fallback = fallbackSourceId(defaultSourceId);
+  const fromSrc = row.from_source_id ?? fallback;
+  const toSrc = row.to_source_id ?? fallback;
+  if (row.from_source_id === fromSrc && row.to_source_id === toSrc) return row;
+  return { ...row, from_source_id: fromSrc, to_source_id: toSrc };
 }
 
 /** Thrown when a receipt path already exists. The existing file is left untouched. */
@@ -295,7 +313,8 @@ export async function applyRelationManifest(
   if (opts.receiptPath) refuseExistingReceipt(opts.receiptPath);
   const before = await computeGraphFingerprint(engine);
   const sha = manifestSha256(manifestRaw);
-  const slice = opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows;
+  const slice = (opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows)
+    .map(row => resolveRowSources(row, opts.defaultSourceId));
   await assertActivePackLinkVocabulary(engine, slice);
   // Prove the receipt path can be created before the first addLink.
   if (opts.receiptPath) reserveMutationReceipt(opts.receiptPath);
