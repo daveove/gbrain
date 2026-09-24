@@ -272,7 +272,9 @@ describe('graph-usefulness measure', () => {
       expect(outgoing.zero_degree_pages).toBe(0);
       expect(outgoing.avg_degree).toBe(1);
       expect(outgoing.link_rows).toBe(before.link_rows + 1);
+      expect(outgoing.valid_links).toBe(before.valid_links + 1);
       expect(outgoing.fingerprint.link_rows).toBe(fpBefore.link_rows);
+      expect(outgoing.fingerprint.valid_links).toBe(fpBefore.valid_links);
       expect(outgoing.fingerprint.zero_degree_pages).toBe(fpBefore.zero_degree_pages);
       expect(fpOutgoing.sha256).toBe(fpBefore.sha256);
       expect(fpOutgoing.link_rows).toBe(fpBefore.link_rows);
@@ -280,6 +282,7 @@ describe('graph-usefulness measure', () => {
       expect(incomingSide.zero_degree_pages).toBe(0);
       expect(incomingSide.avg_degree).toBe(1);
       expect(incomingSide.link_rows).toBe(1);
+      expect(incomingSide.valid_links).toBe(1);
 
       await engine.executeRaw(
         `DELETE FROM links WHERE from_page_id IN (
@@ -296,7 +299,9 @@ describe('graph-usefulness measure', () => {
       expect(mention.zero_degree_pages).toBe(0);
       expect(mention.avg_degree).toBe(1);
       expect(mention.link_rows).toBe(before.link_rows + 1);
+      expect(mention.valid_links).toBe(before.valid_links + 1);
       expect(mention.fingerprint.link_rows).toBe(fpBefore.link_rows);
+      expect(mention.fingerprint.valid_links).toBe(fpBefore.valid_links);
       expect(fpMention.sha256).toBe(fpBefore.sha256);
       expect(fpMention.link_rows).toBe(fpBefore.link_rows);
     } finally {
@@ -1378,6 +1383,62 @@ describe('relation manifest', () => {
     } finally {
       _setBeforeGuardedLinkInsertForTests(null);
     }
+  });
+
+  test('rejects non-string relation fields before any write', async () => {
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const base = {
+      id: 'typed-1',
+      from_slug: 'topics/typed-a',
+      to_slug: 'topics/typed-b',
+      link_type: 'related_to',
+      link_source: 'manual',
+      guards,
+    };
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{ ...base, link_type: 123 }],
+    }))).toThrow(/link_type must be a non-empty string/);
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{ ...base, from_slug: 1 }],
+    }))).toThrow(/from_slug must be a non-empty string/);
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [base, { ...base, id: 'typed-2', from_source_id: 7 }],
+    }))).toThrow(/from_source_id must be a string/);
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{ ...base, context: true }],
+    }))).toThrow(/context must be a string/);
+
+    await engine.putPage('topics/typed-a', {
+      title: 'Typed A', compiled_truth: 'typed a', type: 'note',
+    });
+    await engine.putPage('topics/typed-b', {
+      title: 'Typed B', compiled_truth: 'typed b', type: 'note',
+    });
+    const bad = {
+      manifest_version: 1,
+      rows: [
+        base,
+        { ...base, id: 'typed-2', to_slug: 'topics/typed-c', link_type: 123 },
+      ],
+    };
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-typed-')), 'receipt.json');
+    await expect(applyRelationManifest(
+      engine,
+      bad as unknown as RelationManifest,
+      JSON.stringify(bad),
+      { apply: true, receiptPath },
+    )).rejects.toThrow(/link_type must be a non-empty string/);
+    expect(await linkCount(engine, 'topics/typed-a', 'topics/typed-b')).toBe(0);
+    expect(existsSync(receiptPath)).toBe(false);
   });
 
   test('rejects managed link_source in manifest', () => {

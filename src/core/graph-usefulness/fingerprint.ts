@@ -37,6 +37,13 @@ export interface GraphSnapshot {
    * requested. The fingerprint's `link_rows` stays on the retrieval predicate.
    */
   measure_link_rows: number;
+  /**
+   * Live incident links whose endpoints are both non-deleted pages.
+   * Same incident scope as `measure_link_rows` and degree. Zero when
+   * `measure` was not requested. The fingerprint's `valid_links` stays
+   * on the retrieval predicate.
+   */
+  measure_valid_links: number;
 }
 
 function resolveScope(opts?: ScopeOpts): string[] | null {
@@ -167,6 +174,10 @@ export async function computeGraphSnapshot(
   const measureSql = opts?.measure
     ? `,
        (SELECT count(*)::text FROM links l WHERE ${measureIncident}) AS measure_link_rows,
+       (SELECT count(*)::text FROM links l
+          JOIN pages fp ON fp.id = l.from_page_id AND fp.deleted_at IS NULL
+          JOIN pages tp ON tp.id = l.to_page_id AND tp.deleted_at IS NULL
+        WHERE ${measureIncident}) AS measure_valid_links,
        (SELECT COALESCE(avg(deg), 0)::text FROM measure_degrees) AS avg_degree,
        (SELECT COALESCE((percentile_cont(0.5) WITHIN GROUP (ORDER BY deg)), 0)::text FROM measure_degrees) AS median_degree,
        (SELECT count(*)::text FROM measure_degrees WHERE deg = 0) AS measure_zero_degree_pages,
@@ -185,6 +196,7 @@ export async function computeGraphSnapshot(
     slug_alias_revision: string | null;
     measure_zero_degree_pages?: string;
     measure_link_rows?: string;
+    measure_valid_links?: string;
   }>(
     `WITH scoped_pages AS (
        SELECT p.id, p.source_id, p.slug FROM pages p
@@ -399,5 +411,6 @@ export async function computeGraphSnapshot(
     junk_slug_samples,
     measure_zero_degree_pages: opts?.measure ? finiteNumber(r.measure_zero_degree_pages) : 0,
     measure_link_rows: opts?.measure ? finiteNumber(r.measure_link_rows) : 0,
+    measure_valid_links: opts?.measure ? finiteNumber(r.measure_valid_links) : 0,
   };
 }

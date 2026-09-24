@@ -62,6 +62,38 @@ function assertLiteralBooleanGuards(row: RelationManifestRow): void {
   }
 }
 
+const REQUIRED_RELATION_STRINGS = ['id', 'from_slug', 'to_slug', 'link_type', 'link_source'] as const;
+const OPTIONAL_RELATION_STRINGS = ['context', 'from_source_id', 'to_source_id'] as const;
+
+/**
+ * Hand-authored JSON can pass a truthy non-string (`link_type: 123`).
+ * Reject those while parsing, before a receipt or any link write. Required
+ * fields must be non-empty strings. Optional context and source ids, when
+ * present, must be strings.
+ */
+function assertRelationFieldStrings(row: unknown, index: number): RelationManifestRow {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) {
+    throw new Error(`Row ${index}: must be an object`);
+  }
+  const record = row as Record<string, unknown>;
+  const label = typeof record.id === 'string' && record.id.length > 0 ? record.id : String(index);
+  for (const field of REQUIRED_RELATION_STRINGS) {
+    const value = record[field];
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`Row ${label}: ${field} must be a non-empty string`);
+    }
+  }
+  for (const field of OPTIONAL_RELATION_STRINGS) {
+    if (!Object.prototype.hasOwnProperty.call(record, field)) continue;
+    const value = record[field];
+    if (value === undefined || value === null) continue;
+    if (typeof value !== 'string') {
+      throw new Error(`Row ${label}: ${field} must be a string`);
+    }
+  }
+  return row as RelationManifestRow;
+}
+
 export function parseRelationManifest(raw: string): RelationManifest {
   const parsed = JSON.parse(raw) as RelationManifest;
   if (parsed.manifest_version !== RELATION_MANIFEST_VERSION) {
@@ -70,10 +102,9 @@ export function parseRelationManifest(raw: string): RelationManifest {
   if (!Array.isArray(parsed.rows) || parsed.rows.length === 0) {
     throw new Error('Relation manifest must include a non-empty rows array');
   }
-  for (const row of parsed.rows) {
-    if (!row.id || !row.from_slug || !row.to_slug || !row.link_type || !row.link_source) {
-      throw new Error(`Row ${row.id ?? '(missing id)'} missing required slug/link fields`);
-    }
+  for (let i = 0; i < parsed.rows.length; i++) {
+    const row = assertRelationFieldStrings(parsed.rows[i], i);
+    parsed.rows[i] = row;
     if (MANAGED_LINK_SOURCES.includes(row.link_source)) {
       throw new Error(`Row ${row.id}: link_source '${row.link_source}' is reconciliation-managed`);
     }
@@ -600,6 +631,14 @@ export async function applyRelationManifest(
   manifestRaw: string,
   opts: ApplyRelationManifestOpts,
 ): Promise<RelationApplyResult> {
+  // Same string checks as parse. A caller that skips the parser still
+  // fails before the receipt is reserved or any row is written.
+  if (!Array.isArray(manifest.rows)) {
+    throw new Error('Relation manifest must include a non-empty rows array');
+  }
+  for (let i = 0; i < manifest.rows.length; i++) {
+    assertRelationFieldStrings(manifest.rows[i], i);
+  }
   if (opts.receiptPath) refuseExistingReceipt(opts.receiptPath);
   const sha = manifestSha256(manifestRaw);
   const slice = (opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows)

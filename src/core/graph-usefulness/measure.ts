@@ -12,7 +12,9 @@ export async function measureGraphUsefulness(
   return {
     active_pages: snap.fingerprint.active_pages,
     link_rows: snap.measure_link_rows,
-    valid_links: snap.fingerprint.valid_links,
+    // Incident scope, same as link_rows and degree. fingerprint.valid_links
+    // drops an outgoing edge whose target is outside this source.
+    valid_links: snap.measure_valid_links,
     zero_degree_pages: snap.measure_zero_degree_pages,
     avg_degree: snap.avg_degree,
     median_degree: snap.median_degree,
