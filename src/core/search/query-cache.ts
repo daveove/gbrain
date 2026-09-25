@@ -73,52 +73,6 @@ export interface QueryCacheConfig {
  * land in distinct rows. Empty-string knobsHash is accepted (preserves
  * existing test setups) but production calls always pass the resolved hash.
  */
-export type QueryCacheTouch = { kind: 'hit' | 'write'; id: string; signature?: string };
-
-/**
- * Content signature of one `query_cache` row. Hit counters are omitted: a
- * proof lookup bumps them without changing the payload a later lookup serves.
- * `alias` is a table qualifier (`qc`) or omitted for `RETURNING`.
- */
-export function queryCacheRowSignatureSql(alias?: string): string {
-  const c = (name: string) => (alias ? `${alias}.${name}` : name);
-  return `md5(concat_ws('|', ${c('query_text')}, ${c('source_id')}, coalesce(${c('knobs_hash')}, ''), ${c('ttl_seconds')}::text, ${c('results')}::text, ${c('meta')}::text, coalesce(${c('page_generations')}::text, ''), coalesce(${c('max_generation_at_store')}::text, ''), ${c('created_at')}::text, coalesce(${c('embedding')}::text, '')))`;
-}
-
-/**
- * Opening-snapshot pin for a retrieval proof. Lookups serve a row only
- * while its signature still matches and the snapshot recorded it inside
- * its TTL. Wall-clock expiry is not a content change: it leaves the
- * signature and the generation counter alone, so the proof must not
- * re-check TTL against live `now()`. Unset outside a proof. Not re-entrant.
- */
-export interface QueryCacheProofPin {
-  signatures: ReadonlyMap<string, string>;
-  /** Ids whose `created_at + ttl` was still after the snapshot clock. */
-  freshIds: ReadonlySet<string>;
-}
-
-/**
- * Retrieval proofs record cache hits and stores so their own writes are not
- * counted as external mutations. The pin is the opening snapshot.
- */
-let queryCacheTouchObserver: ((event: QueryCacheTouch) => void) | null = null;
-let queryCacheProofPin: QueryCacheProofPin | null = null;
-
-export function setQueryCacheTouchObserver(
-  observer: ((event: QueryCacheTouch) => void) | null,
-): void {
-  queryCacheTouchObserver = observer;
-}
-
-export function setQueryCacheProofPin(pin: QueryCacheProofPin | null): void {
-  queryCacheProofPin = pin;
-}
-
-function noteQueryCacheTouch(event: QueryCacheTouch): void {
-  queryCacheTouchObserver?.(event);
-}
-
 export function cacheRowId(queryText: string, sourceId: string, knobsHash = ''): string {
   const h = createHash('sha256');
   h.update(`${sourceId}::${queryText}::${knobsHash}`);
@@ -258,21 +212,11 @@ export class SemanticQueryCache {
     const knobsHash = opts.knobsHash ?? '';
     const distanceThreshold = 1 - this.similarityThreshold;
     const vec = embeddingToPgVector(queryEmbedding);
-    const proofPin = queryCacheProofPin;
-    // Opening snapshot had no rows, or none of them were inside their TTL.
-    // A row inserted during the proof, or one already expired at the
-    // snapshot, must not be scored. Freshness is the snapshot's set, not
-    // live now(): expiry does not change the signature.
-    if (proofPin && (proofPin.signatures.size === 0 || proofPin.freshIds.size === 0)) {
-      return { hit: false };
-    }
 
     try {
       // Find the closest cached query within the distance threshold and
-      // freshness window. Unpinned TTL is in-query (created_at +
-      // ttl_seconds > now) so we never return a stale row. A retrieval
-      // proof skips that predicate and uses the opening snapshot's
-      // fresh set instead.
+      // freshness window. The TTL check is done in-query (created_at +
+      // ttl_seconds > now) so we never return a stale row.
       //
       // v0.32.3 [CDX-4]: knobs_hash filter prevents cross-mode contamination.
       // A tokenmax write (expansion=on, limit=50) and a conservative read
@@ -289,47 +233,28 @@ export class SemanticQueryCache {
       // distance/age only). Shipping five full results+meta JSONB payloads
       // per lookup just to keep one was pure transfer overhead; the winner's
       // payload is fetched by id in the second query below.
-      const pinSelect = proofPin ? `, ${queryCacheRowSignatureSql('qc')} AS sig` : '';
-      const pinClause = proofPin ? `AND qc.id = ANY($5::text[])` : '';
-      // Unpinned lookups use live now(). A proof already decided freshness
-      // when it took the snapshot; repeating the TTL predicate here would
-      // let an early question hit and a later one miss without a mutation.
-      const ttlClause = proofPin
-        ? ''
-        : `AND qc.created_at + (qc.ttl_seconds || ' seconds')::interval > now()`;
-      const params: unknown[] = [vec, sourceId, distanceThreshold, knobsHash];
-      if (proofPin) params.push([...proofPin.freshIds]);
       const rows = await this.engine.executeRaw<{
         id: string;
         query_text: string;
         distance: number;
         age_seconds: number;
-        sig?: string;
       }>(
         `SELECT qc.id, qc.query_text,
                 qc.embedding <=> $1::vector AS distance,
                 EXTRACT(EPOCH FROM (now() - qc.created_at))::int AS age_seconds
-                ${pinSelect}
          FROM query_cache qc
          WHERE qc.source_id = $2
            AND qc.knobs_hash = $4
            AND qc.embedding IS NOT NULL
            AND qc.embedding <=> $1::vector < $3
-           ${ttlClause}
+           AND qc.created_at + (qc.ttl_seconds || ' seconds')::interval > now()
            AND ${CACHE_GATE_WHERE_CLAUSE}
-           ${pinClause}
          ORDER BY qc.embedding <=> $1::vector
          LIMIT 5`,
-        params,
+        [vec, sourceId, distanceThreshold, knobsHash],
       );
 
-      const visible = proofPin
-        ? rows.filter((row) =>
-            row.sig != null
-            && proofPin.signatures.get(row.id) === row.sig
-            && proofPin.freshIds.has(row.id))
-        : rows;
-      if (visible.length === 0) return { hit: false };
+      if (rows.length === 0) return { hit: false };
 
       // #1469: with a queryText, accept the FIRST (closest) candidate whose
       // stored text passes the guard; none passing → miss. Without one
@@ -337,10 +262,9 @@ export class SemanticQueryCache {
       const queryText = opts.queryText;
       const row =
         queryText == null
-          ? visible[0]
-          : visible.find((r) => cacheTextGuard(queryText, r.query_text ?? ''));
+          ? rows[0]
+          : rows.find((r) => cacheTextGuard(queryText, r.query_text ?? ''));
       if (!row) return { hit: false };
-      noteQueryCacheTouch({ kind: 'hit', id: row.id });
 
       // Second query: fetch ONLY the winner's heavy payload. A row deleted
       // between the two statements (concurrent prune/clear) is a miss — the
@@ -419,7 +343,7 @@ export class SemanticQueryCache {
       // sent as a JSON.stringify and cast to JSONB inside the SQL; pre-v91
       // brains store an empty `{}` + zero bookmark (legacy compat per
       // the v0.40.3.0 IRON-RULE).
-      const written = await this.engine.executeRaw<{ id: string; signature: string }>(
+      await this.engine.executeRaw(
         `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, embedding, results, meta, ttl_seconds, page_generations, max_generation_at_store, created_at)
          VALUES ($1, $2, $3, $4, $5::vector, $6::text::jsonb, $7::text::jsonb, $8, $9::text::jsonb, $10, now())
          ON CONFLICT (id) DO UPDATE SET
@@ -431,8 +355,7 @@ export class SemanticQueryCache {
            ttl_seconds = EXCLUDED.ttl_seconds,
            page_generations = EXCLUDED.page_generations,
            max_generation_at_store = EXCLUDED.max_generation_at_store,
-           created_at  = now()
-         RETURNING id, ${queryCacheRowSignatureSql()} AS signature`,
+           created_at  = now()`,
         [
           id,
           queryText,
@@ -446,10 +369,6 @@ export class SemanticQueryCache {
           snapshot.max_generation_at_store,
         ],
       );
-      const noted = written[0];
-      if (noted && typeof noted.id === 'string' && typeof noted.signature === 'string') {
-        noteQueryCacheTouch({ kind: 'write', id: noted.id, signature: noted.signature });
-      }
     } catch {
       // swallow \u2014 cache write must never break the search hot path.
     }

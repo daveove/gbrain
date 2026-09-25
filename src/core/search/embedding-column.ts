@@ -313,13 +313,27 @@ export function getEmbeddingColumnRegistry(
   //
   // try/catch covers the gateway-unconfigured case (rare but exists in
   // unit tests that exercise the registry without booting the gateway).
-  // Cache table space, before user registry overrides. A later
-  // `embedding_columns.embedding` entry can retarget search without
-  // resizing query_cache.embedding.
-  const cacheSpace = resolvedCacheEmbeddingSpace(cfg);
+  let gwModel: string | undefined;
+  let gwDims: number | undefined;
+  try {
+    // Dynamic import avoids a static cycle (gateway can transitively
+    // depend on this module via search/hybrid.ts → search/embedding-column.ts).
+    // require() is synchronous here because we're already on a hot path.
+    const gw = require('../ai/gateway.ts') as typeof import('../ai/gateway.ts');
+    gwModel = gw.getEmbeddingModel();
+    gwDims = gw.getEmbeddingDimensions();
+  } catch {
+    // Gateway unconfigured or import cycle — fall through to the
+    // canonical default in `ai/defaults.ts`.
+  }
+  const embedModel = cfg.embedding_model ?? gwModel ?? DEFAULT_EMBEDDING_MODEL;
+  const embedDims =
+    typeof cfg.embedding_dimensions === 'number' && cfg.embedding_dimensions > 0
+      ? cfg.embedding_dimensions
+      : (typeof gwDims === 'number' && gwDims > 0 ? gwDims : DEFAULT_EMBEDDING_DIMENSIONS);
   out['embedding'] = {
-    provider: cacheSpace.model,
-    dimensions: cacheSpace.dimensions,
+    provider: embedModel,
+    dimensions: embedDims,
     type: 'vector',
   };
 
@@ -446,33 +460,6 @@ export function isDefaultColumn(resolved: ResolvedColumn): boolean {
 }
 
 /**
- * Embedding space `query_cache.embedding` was sized for.
- * `cfg.embedding_model` / `cfg.embedding_dimensions`, then the gateway,
- * then the defaults. A registry override of the `embedding` builtin is
- * not part of this space: search may use that override while the cache
- * stays on the original model.
- */
-export function resolvedCacheEmbeddingSpace(cfg: GBrainConfig): { model: string; dimensions: number } {
-  let gwModel: string | undefined;
-  let gwDims: number | undefined;
-  try {
-    // Dynamic import avoids a static cycle (gateway can transitively
-    // depend on this module via search/hybrid.ts → search/embedding-column.ts).
-    const gw = require('../ai/gateway.ts') as typeof import('../ai/gateway.ts');
-    gwModel = gw.getEmbeddingModel();
-    gwDims = gw.getEmbeddingDimensions();
-  } catch {
-    // Gateway unconfigured or import cycle — fall through to the
-    // canonical default in `ai/defaults.ts`.
-  }
-  const dimensions = (typeof cfg.embedding_dimensions === 'number' && cfg.embedding_dimensions > 0)
-    ? cfg.embedding_dimensions
-    : (typeof gwDims === 'number' && gwDims > 0 ? gwDims : DEFAULT_EMBEDDING_DIMENSIONS);
-  const model = cfg.embedding_model ?? gwModel ?? DEFAULT_EMBEDDING_MODEL;
-  return { model, dimensions };
-}
-
-/**
  * True when the resolved column's embedding space matches the
  * `query_cache.embedding` column's space — i.e., it's safe to read
  * from / write to the semantic query cache without dimension or
@@ -501,9 +488,19 @@ export function resolvedCacheEmbeddingSpace(cfg: GBrainConfig): { model: string;
 export function isCacheSafe(resolved: ResolvedColumn, cfg: GBrainConfig): boolean {
   if (resolved.name !== DEFAULT_COLUMN_NAME) return false;
   // v0.37 fix wave: same resolution chain as the registry — cfg > gateway > default.
-  const space = resolvedCacheEmbeddingSpace(cfg);
-  if (resolved.dimensions !== space.dimensions) return false;
-  if (resolved.embeddingModel !== space.model) return false;
+  let gwModel: string | undefined;
+  let gwDims: number | undefined;
+  try {
+    const gw = require('../ai/gateway.ts') as typeof import('../ai/gateway.ts');
+    gwModel = gw.getEmbeddingModel();
+    gwDims = gw.getEmbeddingDimensions();
+  } catch { /* gateway unconfigured — fall through to constants */ }
+  const cfgDims = (typeof cfg.embedding_dimensions === 'number' && cfg.embedding_dimensions > 0)
+    ? cfg.embedding_dimensions
+    : (typeof gwDims === 'number' && gwDims > 0 ? gwDims : DEFAULT_EMBEDDING_DIMENSIONS);
+  if (resolved.dimensions !== cfgDims) return false;
+  const cfgModel = cfg.embedding_model ?? gwModel ?? DEFAULT_EMBEDDING_MODEL;
+  if (resolved.embeddingModel !== cfgModel) return false;
   return true;
 }
 

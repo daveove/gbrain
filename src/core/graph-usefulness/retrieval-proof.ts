@@ -379,7 +379,7 @@ type RetrievalProofSearch = (
     expandFn?: (query: string) => Promise<string[]>;
     _pinnedSearch?: Pick<
       PinnedProofSearch,
-      'mode' | 'overrides' | 'embeddingColumn' | 'cacheEmbeddingModel' | 'cacheEmbeddingDimensions' | 'adaptiveReturn' | 'intentPatterns' | 'embeddingMultimodalModel'
+      'mode' | 'overrides' | 'embeddingColumn' | 'adaptiveReturn' | 'intentPatterns' | 'embeddingMultimodalModel'
     >;
   },
 ) => Promise<Array<{ slug: string; source_id?: string }>>;
@@ -448,8 +448,6 @@ export async function runRetrievalProof(
     mode: pin.mode,
     overrides: pin.overrides,
     embeddingColumn: pin.embeddingColumn,
-    cacheEmbeddingModel: pin.cacheEmbeddingModel,
-    cacheEmbeddingDimensions: pin.cacheEmbeddingDimensions,
     adaptiveReturn: pin.adaptiveReturn,
     intentPatterns: pin.intentPatterns,
     embeddingMultimodalModel: pin.embeddingMultimodalModel,

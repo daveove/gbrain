@@ -6440,52 +6440,6 @@ export const MIGRATIONS: Migration[] = [
       END $$;
     `,
   },
-  {
-    version: 146,
-    name: 'query_cache_generation',
-    // Monotonic counter for query_cache content changes. Hit-count bumps do
-    // not advance it. A retrieval proof compares the counter to its own
-    // stores so an insert that is deleted inside one question still shows.
-    idempotent: true,
-    sql: `
-      CREATE TABLE IF NOT EXISTS query_cache_generation (
-        id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
-        n BIGINT NOT NULL DEFAULT 0
-      );
-      INSERT INTO query_cache_generation (id, n)
-      SELECT TRUE, 0
-      WHERE NOT EXISTS (SELECT 1 FROM query_cache_generation);
-
-      CREATE OR REPLACE FUNCTION bump_query_cache_generation() RETURNS trigger AS $func$
-      BEGIN
-        IF TG_OP = 'UPDATE'
-           AND OLD.query_text IS NOT DISTINCT FROM NEW.query_text
-           AND OLD.source_id IS NOT DISTINCT FROM NEW.source_id
-           AND OLD.knobs_hash IS NOT DISTINCT FROM NEW.knobs_hash
-           AND OLD.embedding IS NOT DISTINCT FROM NEW.embedding
-           AND OLD.results IS NOT DISTINCT FROM NEW.results
-           AND OLD.meta IS NOT DISTINCT FROM NEW.meta
-           AND OLD.ttl_seconds IS NOT DISTINCT FROM NEW.ttl_seconds
-           AND OLD.created_at IS NOT DISTINCT FROM NEW.created_at
-           AND OLD.page_generations IS NOT DISTINCT FROM NEW.page_generations
-           AND OLD.max_generation_at_store IS NOT DISTINCT FROM NEW.max_generation_at_store
-        THEN
-          RETURN NEW;
-        END IF;
-        UPDATE query_cache_generation SET n = n + 1 WHERE id;
-        IF TG_OP = 'DELETE' THEN
-          RETURN OLD;
-        END IF;
-        RETURN NEW;
-      END;
-      $func$ LANGUAGE plpgsql;
-
-      DROP TRIGGER IF EXISTS query_cache_generation_trg ON query_cache;
-      CREATE TRIGGER query_cache_generation_trg
-        AFTER INSERT OR UPDATE OR DELETE ON query_cache
-        FOR EACH ROW EXECUTE FUNCTION bump_query_cache_generation();
-    `,
-  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
