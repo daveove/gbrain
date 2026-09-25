@@ -25,16 +25,15 @@ import type { ResolvedColumn } from '../types.ts';
 
 /**
  * Stable id for `expandQuery` (`src/core/search/expansion.ts`), the expander
- * the query operation passes as `expandFn`. Proofs fingerprint this id when
- * the pinned mode enables expansion, and null when it does not.
+ * the query operation passes as `expandFn`. The query op defaults to
+ * `expand !== false`, so proofs wire this expander even when the pinned
+ * mode's expansion knob is off.
  */
 export const PROOF_EXPANSION_EXPANDER_ID = 'expandQuery';
 
-/** Null when resolved knobs leave expansion off. Otherwise the production expander id. */
-export function proofExpansionExpander(
-  knobs: { expansion: boolean },
-): typeof PROOF_EXPANSION_EXPANDER_ID | null {
-  return knobs.expansion ? PROOF_EXPANSION_EXPANDER_ID : null;
+/** The production query expander. Proofs always wire it (query default). */
+export function proofExpansionExpander(): typeof PROOF_EXPANSION_EXPANDER_ID {
+  return PROOF_EXPANSION_EXPANDER_ID;
 }
 
 /** Config-table keys hybrid search reads that are not folded into mode knobs. */
@@ -109,7 +108,7 @@ export function canonicalSearchConfig(
     intent_patterns: live?.intentPatterns ?? null,
     embedding_multimodal_model: live?.embeddingMultimodalModel ?? null,
     raw,
-    expansion_expander: proofExpansionExpander(knobs),
+    expansion_expander: proofExpansionExpander(),
   });
 }
 

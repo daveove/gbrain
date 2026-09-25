@@ -13,7 +13,7 @@ export interface SnapshotOpts extends ScopeOpts {
   /**
    * Canonical retrieval config from `readProofSearchPin`. When set, it is
    * part of sha256 (graph-fingerprint-v5), including `expansion_expander`
-   * (`expandQuery` when the pinned mode enables expansion, otherwise null).
+   * (`expandQuery`, the query operation's default expander).
    * Omitted on graph-only receipts.
    */
   searchConfig?: string;

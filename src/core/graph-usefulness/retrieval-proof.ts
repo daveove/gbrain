@@ -7,14 +7,11 @@ import {
   setQueryCacheProofPin,
   setQueryCacheTouchObserver,
 } from '../search/query-cache.ts';
-import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
 import {
-  PROOF_EXPANSION_EXPANDER_ID,
-  proofExpansionExpander,
   readProofSearchPin,
   type PinnedProofSearch,
 } from './search-pin.ts';
@@ -421,7 +418,12 @@ type RetrievalProofSearch = (
   opts: {
     limit?: number;
     sourceId?: string;
-    /** Production `expandQuery` when the pinned mode enables expansion. */
+    /**
+     * Query operation default (`expand !== false`). Forces expansion on
+     * even when the pinned mode's expansion knob is off.
+     */
+    expansion?: boolean;
+    /** Production `expandQuery`, wired with that default. */
     expandFn?: (query: string) => Promise<string[]>;
     _pinnedSearch?: Pick<
       PinnedProofSearch,
@@ -498,14 +500,10 @@ export async function runRetrievalProof(
     intentPatterns: pin.intentPatterns,
     embeddingMultimodalModel: pin.embeddingMultimodalModel,
   };
-  // Same resolution hybridSearch applies to the pin. Decided once so a
-  // config write between questions cannot turn expansion on or off.
-  // hybridSearch runs expandFn only when that resolution enables expansion.
-  const expansionExpander = proofExpansionExpander(resolveSearchMode({
-    mode: pin.mode,
-    overrides: pin.overrides,
-  }));
-  const expandFn = expansionExpander === PROOF_EXPANSION_EXPANDER_ID ? expandQuery : undefined;
+  // Query operation default: `expand = p.expand !== false`, which passes
+  // expansion:true and expandQuery. That per-call override wins over the
+  // mode bundle, so conservative and balanced still expand. Decided once
+  // so a config write between questions cannot turn it off.
   // Watermark first, fingerprint last on the way out, so every question
   // sits inside the window. A reverted write still moves the watermark.
   const watermarkBefore = await readCorpusMutationWatermark(engine);
@@ -544,8 +542,9 @@ export async function runRetrievalProof(
       const topK = positiveTopK(q.top_k, questionLabel(q));
       const searchOpts = {
         limit: topK,
+        expansion: true,
+        expandFn: expandQuery,
         ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
-        ...(expandFn ? { expandFn } : {}),
         _pinnedSearch: pinnedSearch,
       };
       // Production query and search go through hybridSearchCached. Bare

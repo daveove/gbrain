@@ -927,6 +927,64 @@ describe('relation manifest', () => {
     }
   });
 
+  test('receipt rollback keeps a concurrent same-value addLink upsert', async () => {
+    await engine.putPage('topics/same-a', { title: 'Same A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/same-b', { title: 'Same B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'same-1',
+        from_slug: 'topics/same-a',
+        to_slug: 'topics/same-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'same-value',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-same-'));
+    const receiptPath = join(dir, 'receipt.json');
+    _setBeforeReceiptCommitForTests(async () => {
+      await engine.addLink(
+        'topics/same-a',
+        'topics/same-b',
+        'same-value',
+        'related_to',
+        'tana-relation-r2',
+        'topics/same-a',
+        undefined,
+        { fromSourceId: 'default', toSourceId: 'default', originSourceId: 'default' },
+      );
+      unlinkSync(receiptPath);
+      mkdirSync(receiptPath);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/left 1 concurrently updated link/);
+      expect(await linkCount(engine, 'topics/same-a', 'topics/same-b')).toBe(1);
+      const rows = await engine.executeRaw<{ context: string; origin_field: string | null }>(
+        `SELECT l.context, l.origin_field
+           FROM links l
+           JOIN pages fp ON fp.id = l.from_page_id
+           JOIN pages tp ON tp.id = l.to_page_id
+          WHERE fp.slug = $1 AND tp.slug = $2
+            AND fp.deleted_at IS NULL AND tp.deleted_at IS NULL`,
+        ['topics/same-a', 'topics/same-b'],
+      );
+      expect(rows).toEqual([{ context: 'same-value', origin_field: null }]);
+    } finally {
+      _setBeforeReceiptCommitForTests(null);
+      rmSync(receiptPath, { recursive: true, force: true });
+    }
+  });
+
   test('receipt rollback deletes only the inserted link id', async () => {
     await engine.putPage('topics/rb-id-a', { title: 'Rb A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/rb-id-b', { title: 'Rb B', compiled_truth: 'b', type: 'note' });
@@ -1927,10 +1985,11 @@ describe('graph fingerprint identities', () => {
     expect(canonicalSearchConfig(knobs, column)).not.toBe(
       canonicalSearchConfig(resolveSearchMode({ mode: 'balanced', overrides: { expansion: true } }), column),
     );
-    expect(canonicalSearchConfig(resolveSearchMode({ mode: 'conservative' }), column))
-      .toContain('"expansion_expander":null');
-    expect(canonicalSearchConfig(resolveSearchMode({ mode: 'tokenmax' }), column))
-      .toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+    const conservativeConfig = canonicalSearchConfig(resolveSearchMode({ mode: 'conservative' }), column);
+    const tokenmaxConfig = canonicalSearchConfig(resolveSearchMode({ mode: 'tokenmax' }), column);
+    expect(conservativeConfig).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+    expect(tokenmaxConfig).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+    expect(conservativeConfig).not.toBe(tokenmaxConfig);
     expect(expandQuery.name).toBe(PROOF_EXPANSION_EXPANDER_ID);
   });
 });
@@ -2593,7 +2652,7 @@ describe('retrieval proof', () => {
     }
   });
 
-  test('wires expandQuery when pinned retrieval enables expansion and omits it when expansion is off', async () => {
+  test('uses the query operation default expansion even when the mode leaves it off', async () => {
     const manifest = {
       proof_version: 2,
       questions: [
@@ -2601,18 +2660,20 @@ describe('retrieval proof', () => {
         { id: 'q2', query: 'child note topic', relevant_slugs: ['topics/child-note'] },
       ],
     };
-    const seen: Array<typeof expandQuery | undefined> = [];
+    const wired = { expansion: true, expandFn: expandQuery };
+    const seen: Array<{ expansion?: boolean; expandFn?: typeof expandQuery }> = [];
     _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
-      seen.push(opts.expandFn);
+      seen.push({ expansion: opts.expansion, expandFn: opts.expandFn });
       return [{ slug: 'topics/parent-note', source_id: 'default' }];
     });
     try {
       await engine.setConfig('search.mode', 'conservative');
       await engine.unsetConfig('search.expansion');
       const offPin = await readProofSearchPin(engine);
-      expect(offPin.canonical).toContain('"expansion_expander":null');
+      expect(offPin.canonical).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+      expect(offPin.canonical).toContain('"expansion":false');
       await runRetrievalProof(engine, manifest, { sourceId: 'default' });
-      expect(seen).toEqual([undefined, undefined]);
+      expect(seen).toEqual([wired, wired]);
 
       await engine.setConfig('search.mode', 'tokenmax');
       const modePin = await readProofSearchPin(engine);
@@ -2622,14 +2683,19 @@ describe('retrieval proof', () => {
         .not.toBe((await computeGraphFingerprint(engine, { searchConfig: modePin.canonical })).sha256);
       seen.length = 0;
       await runRetrievalProof(engine, manifest, { sourceId: 'default' });
-      expect(seen).toEqual([expandQuery, expandQuery]);
+      expect(seen).toEqual([wired, wired]);
 
       await engine.setConfig('search.mode', 'conservative');
+      await engine.setConfig('search.expansion', 'false');
+      seen.length = 0;
+      await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(seen).toEqual([wired, wired]);
+
       await engine.setConfig('search.expansion', 'true');
       seen.length = 0;
       let flipped = false;
       _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
-        seen.push(opts.expandFn);
+        seen.push({ expansion: opts.expansion, expandFn: opts.expandFn });
         if (!flipped) {
           flipped = true;
           await engine.setConfig('search.expansion', 'false');
@@ -2639,9 +2705,11 @@ describe('retrieval proof', () => {
       const before = await readProofSearchPin(engine);
       const result = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
       const after = await readProofSearchPin(engine);
-      expect(seen).toEqual([expandQuery, expandQuery]);
+      expect(seen).toEqual([wired, wired]);
       expect(before.canonical).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
-      expect(after.canonical).toContain('"expansion_expander":null');
+      expect(after.canonical).toContain(`"expansion_expander":"${PROOF_EXPANSION_EXPANDER_ID}"`);
+      expect(before.canonical).toContain('"expansion":true');
+      expect(after.canonical).toContain('"expansion":false');
       expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
       expect(result.passed).toBe(false);
     } finally {
