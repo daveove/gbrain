@@ -73,18 +73,35 @@ export interface QueryCacheConfig {
  * land in distinct rows. Empty-string knobsHash is accepted (preserves
  * existing test setups) but production calls always pass the resolved hash.
  */
-export type QueryCacheTouch = { kind: 'hit' | 'write'; id: string };
+export type QueryCacheTouch = { kind: 'hit' | 'write'; id: string; signature?: string };
+
+/**
+ * Content signature of one `query_cache` row. Hit counters are omitted: a
+ * proof lookup bumps them without changing the payload a later lookup serves.
+ * `alias` is a table qualifier (`qc`) or omitted for `RETURNING`.
+ */
+export function queryCacheRowSignatureSql(alias?: string): string {
+  const c = (name: string) => (alias ? `${alias}.${name}` : name);
+  return `md5(concat_ws('|', ${c('query_text')}, ${c('source_id')}, coalesce(${c('knobs_hash')}, ''), ${c('ttl_seconds')}::text, ${c('results')}::text, ${c('meta')}::text, coalesce(${c('page_generations')}::text, ''), coalesce(${c('max_generation_at_store')}::text, ''), ${c('created_at')}::text, coalesce(${c('embedding')}::text, '')))`;
+}
 
 /**
  * Retrieval proofs record cache hits and stores so their own writes are not
- * counted as external mutations. Unset outside a proof. Not re-entrant.
+ * counted as external mutations. The pin is the opening snapshot: lookups
+ * serve a row only while its signature still matches. Unset outside a proof.
+ * Not re-entrant.
  */
 let queryCacheTouchObserver: ((event: QueryCacheTouch) => void) | null = null;
+let queryCacheProofPin: ReadonlyMap<string, string> | null = null;
 
 export function setQueryCacheTouchObserver(
   observer: ((event: QueryCacheTouch) => void) | null,
 ): void {
   queryCacheTouchObserver = observer;
+}
+
+export function setQueryCacheProofPin(pin: ReadonlyMap<string, string> | null): void {
+  queryCacheProofPin = pin;
 }
 
 function noteQueryCacheTouch(event: QueryCacheTouch): void {
@@ -230,6 +247,10 @@ export class SemanticQueryCache {
     const knobsHash = opts.knobsHash ?? '';
     const distanceThreshold = 1 - this.similarityThreshold;
     const vec = embeddingToPgVector(queryEmbedding);
+    const proofPin = queryCacheProofPin;
+    // Opening snapshot had no rows. A row inserted during the proof must
+    // not be scored.
+    if (proofPin && proofPin.size === 0) return { hit: false };
 
     try {
       // Find the closest cached query within the distance threshold and
@@ -251,15 +272,21 @@ export class SemanticQueryCache {
       // distance/age only). Shipping five full results+meta JSONB payloads
       // per lookup just to keep one was pure transfer overhead; the winner's
       // payload is fetched by id in the second query below.
+      const pinSelect = proofPin ? `, ${queryCacheRowSignatureSql('qc')} AS sig` : '';
+      const pinClause = proofPin ? `AND qc.id = ANY($5::text[])` : '';
+      const params: unknown[] = [vec, sourceId, distanceThreshold, knobsHash];
+      if (proofPin) params.push([...proofPin.keys()]);
       const rows = await this.engine.executeRaw<{
         id: string;
         query_text: string;
         distance: number;
         age_seconds: number;
+        sig?: string;
       }>(
         `SELECT qc.id, qc.query_text,
                 qc.embedding <=> $1::vector AS distance,
                 EXTRACT(EPOCH FROM (now() - qc.created_at))::int AS age_seconds
+                ${pinSelect}
          FROM query_cache qc
          WHERE qc.source_id = $2
            AND qc.knobs_hash = $4
@@ -267,12 +294,16 @@ export class SemanticQueryCache {
            AND qc.embedding <=> $1::vector < $3
            AND qc.created_at + (qc.ttl_seconds || ' seconds')::interval > now()
            AND ${CACHE_GATE_WHERE_CLAUSE}
+           ${pinClause}
          ORDER BY qc.embedding <=> $1::vector
          LIMIT 5`,
-        [vec, sourceId, distanceThreshold, knobsHash],
+        params,
       );
 
-      if (rows.length === 0) return { hit: false };
+      const visible = proofPin
+        ? rows.filter((row) => row.sig != null && proofPin.get(row.id) === row.sig)
+        : rows;
+      if (visible.length === 0) return { hit: false };
 
       // #1469: with a queryText, accept the FIRST (closest) candidate whose
       // stored text passes the guard; none passing → miss. Without one
@@ -280,8 +311,8 @@ export class SemanticQueryCache {
       const queryText = opts.queryText;
       const row =
         queryText == null
-          ? rows[0]
-          : rows.find((r) => cacheTextGuard(queryText, r.query_text ?? ''));
+          ? visible[0]
+          : visible.find((r) => cacheTextGuard(queryText, r.query_text ?? ''));
       if (!row) return { hit: false };
       noteQueryCacheTouch({ kind: 'hit', id: row.id });
 
@@ -340,7 +371,6 @@ export class SemanticQueryCache {
     const knobsHash = opts.knobsHash ?? '';
     const ttl = clampTtl(opts.ttlSeconds ?? this.ttlSeconds);
     const id = cacheRowId(queryText, sourceId, knobsHash);
-    noteQueryCacheTouch({ kind: 'write', id });
     const vec = embeddingToPgVector(queryEmbedding);
 
     // v0.40.3.0: capture the per-page snapshot + corpus-state bookmark
@@ -363,7 +393,7 @@ export class SemanticQueryCache {
       // sent as a JSON.stringify and cast to JSONB inside the SQL; pre-v91
       // brains store an empty `{}` + zero bookmark (legacy compat per
       // the v0.40.3.0 IRON-RULE).
-      await this.engine.executeRaw(
+      const written = await this.engine.executeRaw<{ id: string; signature: string }>(
         `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, embedding, results, meta, ttl_seconds, page_generations, max_generation_at_store, created_at)
          VALUES ($1, $2, $3, $4, $5::vector, $6::text::jsonb, $7::text::jsonb, $8, $9::text::jsonb, $10, now())
          ON CONFLICT (id) DO UPDATE SET
@@ -375,7 +405,8 @@ export class SemanticQueryCache {
            ttl_seconds = EXCLUDED.ttl_seconds,
            page_generations = EXCLUDED.page_generations,
            max_generation_at_store = EXCLUDED.max_generation_at_store,
-           created_at  = now()`,
+           created_at  = now()
+         RETURNING id, ${queryCacheRowSignatureSql()} AS signature`,
         [
           id,
           queryText,
@@ -389,6 +420,10 @@ export class SemanticQueryCache {
           snapshot.max_generation_at_store,
         ],
       );
+      const noted = written[0];
+      if (noted && typeof noted.id === 'string' && typeof noted.signature === 'string') {
+        noteQueryCacheTouch({ kind: 'write', id: noted.id, signature: noted.signature });
+      }
     } catch {
       // swallow \u2014 cache write must never break the search hot path.
     }

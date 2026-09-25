@@ -2,7 +2,11 @@ import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { expandQuery } from '../search/expansion.ts';
 import { awaitPendingSearchCacheWrites, hybridSearchCached } from '../search/hybrid.ts';
-import { setQueryCacheTouchObserver } from '../search/query-cache.ts';
+import {
+  queryCacheRowSignatureSql,
+  setQueryCacheProofPin,
+  setQueryCacheTouchObserver,
+} from '../search/query-cache.ts';
 import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
@@ -328,19 +332,7 @@ type QueryCacheSnapshot = Map<string, string>;
  */
 async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSnapshot> {
   const rows = await engine.executeRaw<{ id: string; sig: string }>(
-    `SELECT id,
-            md5(concat_ws('|',
-              query_text,
-              source_id,
-              coalesce(knobs_hash, ''),
-              ttl_seconds::text,
-              results::text,
-              meta::text,
-              coalesce(page_generations::text, ''),
-              coalesce(max_generation_at_store::text, ''),
-              created_at::text,
-              coalesce(embedding::text, '')
-            )) AS sig
+    `SELECT id, ${queryCacheRowSignatureSql('query_cache')} AS sig
        FROM query_cache
       ORDER BY id`,
   );
@@ -362,22 +354,21 @@ async function readQueryCacheGeneration(engine: BrainEngine): Promise<bigint> {
 }
 
 /**
- * True when cache rows changed aside from ids this proof stored.
- * Deletes always count: a hit that is cleared before the next sample is
- * not a proof write.
+ * True when cache content changed aside from rows this proof stored.
+ * `proofWrites` is the signature returned by each successful store.
+ * A later overwrite or delete of that row still counts. Deletes of rows
+ * the proof only read always count.
  */
 function queryCacheDiverged(
   before: QueryCacheSnapshot,
   after: QueryCacheSnapshot,
-  proofWriteIds: ReadonlySet<string>,
+  proofWrites: ReadonlyMap<string, string>,
 ): boolean {
-  for (const [id, sig] of before) {
-    const next = after.get(id);
-    if (next === undefined) return true;
-    if (next !== sig && !proofWriteIds.has(id)) return true;
-  }
-  for (const id of after.keys()) {
-    if (!before.has(id) && !proofWriteIds.has(id)) return true;
+  const expected = new Map(before);
+  for (const [id, signature] of proofWrites) expected.set(id, signature);
+  if (expected.size !== after.size) return true;
+  for (const [id, signature] of expected) {
+    if (after.get(id) !== signature) return true;
   }
   return false;
 }
@@ -520,24 +511,31 @@ export async function runRetrievalProof(
   const watermarkBefore = await readCorpusMutationWatermark(engine);
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
-  const proofCacheWriteIds = new Set<string>();
-  let proofCacheWrites = 0;
+  const proofCacheWrites = new Map<string, string>();
+  let proofCacheWriteCount = 0;
   let cacheMutated = false;
+  // Drain in-flight stores, then freeze that snapshot for lookups. A row
+  // inserted later, or an existing row whose payload changes, is not scored.
+  await awaitPendingSearchCacheWrites();
   let cacheCursor = await readQueryCacheSnapshot(engine);
   const cacheGenerationAtStart = await readQueryCacheGeneration(engine);
+  setQueryCacheProofPin(cacheCursor);
   setQueryCacheTouchObserver((event) => {
-    if (event.kind === 'write') {
-      proofCacheWriteIds.add(event.id);
-      proofCacheWrites += 1;
+    if (event.kind === 'write' && event.signature) {
+      proofCacheWrites.set(event.id, event.signature);
+      proofCacheWriteCount += 1;
     }
   });
 
   const noteCache = async (): Promise<void> => {
+    // Stores are async. Wait so a proof write is both visible and recorded
+    // before it is compared, and an overwrite after that write is not.
+    await awaitPendingSearchCacheWrites();
     const now = await readQueryCacheSnapshot(engine);
-    if (queryCacheDiverged(cacheCursor, now, proofCacheWriteIds)) cacheMutated = true;
+    if (queryCacheDiverged(cacheCursor, now, proofCacheWrites)) cacheMutated = true;
     cacheCursor = now;
     const generation = await readQueryCacheGeneration(engine);
-    if (generation - cacheGenerationAtStart > BigInt(proofCacheWrites)) cacheMutated = true;
+    if (generation - cacheGenerationAtStart > BigInt(proofCacheWriteCount)) cacheMutated = true;
   };
 
   try {
@@ -552,10 +550,11 @@ export async function runRetrievalProof(
       };
       // Production query and search go through hybridSearchCached. Bare
       // hybridSearch recomputes live and can pass while a warm cache still
-      // serves a different set. The pin drives the cache key (mode, column,
-      // adaptive return, intent-pattern banks) and the inner search, so a
-      // warm bank cannot store or serve a different classification than the
-      // sealed settings. A hit is the row a production caller would get.
+      // serves a different set. Lookups are limited to the opening cache
+      // snapshot, so a row populated during the proof cannot be scored.
+      // The search pin drives the cache key (mode, column, adaptive return,
+      // intent-pattern banks) and the inner search, so a warm bank cannot
+      // store or serve a different classification than the sealed settings.
       const hits = retrievalSearchForTests
         ? await retrievalSearchForTests(engine, q.query, searchOpts)
         : await hybridSearchCached(engine, q.query, searchOpts);
@@ -576,6 +575,7 @@ export async function runRetrievalProof(
     }
   } finally {
     setQueryCacheTouchObserver(null);
+    setQueryCacheProofPin(null);
   }
 
   // Proof stores are asynchronous. Wait so their generation bumps are
