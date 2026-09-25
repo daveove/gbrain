@@ -25,12 +25,15 @@ import { isCacheSafe, resolvedCacheEmbeddingSpace } from '../src/core/search/emb
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { expandQuery } from '../src/core/search/expansion.ts';
 import { awaitPendingSearchCacheWrites, hybridSearch, hybridSearchCached } from '../src/core/search/hybrid.ts';
-import { SemanticQueryCache, queryCacheRowSignatureSql, setQueryCacheProofPin } from '../src/core/search/query-cache.ts';
+import { SemanticQueryCache, cacheTextGuard, queryCacheRowSignatureSql, setQueryCacheProofPin } from '../src/core/search/query-cache.ts';
 import {
   clearIntentPatternConfigForTests,
   loadEngineIntentPatterns,
 } from '../src/core/search/query-intent.ts';
 import { resolveSearchMode } from '../src/core/search/mode.ts';
+import { federatedSearchScope } from '../src/core/ops/context.ts';
+import type { OperationContext } from '../src/core/ops/contract.ts';
+import { localFederatedSourceIds, resolveSourceWithTier } from '../src/core/source-resolver.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
@@ -2376,7 +2379,78 @@ describe('retrieval proof', () => {
     }
   });
 
-  test('lookups during a proof serve only the opening cache snapshot', async () => {
+  test('a later question scores a cache row stored earlier in the proof', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = new Float32Array(1536);
+    for (let i = 0; i < emb.length; i++) emb[i] = i % 7 === 0 ? 0.21 : 0.01;
+    const coldQuery = 'proof owned cache alpha beta gamma';
+    const warmQuery = 'proof owned cache alpha beta gamma delta';
+    const cachedSlug = 'topics/proof-owned-cache-payload';
+    const liveSlug = 'topics/child-note';
+    expect(cacheTextGuard(warmQuery, coldQuery)).toBe(true);
+    const meta: HybridSearchMeta = {
+      vector_enabled: true,
+      detail_resolved: 'medium',
+      expansion_applied: false,
+      intent: 'general',
+    };
+    const hit = (slug: string): SearchResult => ({
+      slug,
+      page_id: 1,
+      title: slug,
+      type: 'note',
+      chunk_text: slug,
+      chunk_source: 'compiled_truth',
+      chunk_id: 1,
+      chunk_index: 0,
+      score: 1,
+      stale: false,
+    });
+    const served: string[] = [];
+    _setRetrievalProofSearchForTests(async (_eng, query) => {
+      const lookup = await cache.lookup(emb, {
+        sourceId: 'default',
+        knobsHash: '',
+        queryText: query,
+      });
+      if (lookup.hit && lookup.results?.[0]) {
+        served.push(`cache:${lookup.results[0].slug}`);
+        return [{ slug: lookup.results[0].slug, source_id: 'default' }];
+      }
+      if (query === coldQuery) await cache.store(coldQuery, emb, [hit(cachedSlug)], meta);
+      served.push(`live:${liveSlug}`);
+      return [{ slug: liveSlug, source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'owned-q1', query: coldQuery, relevant_slugs: [liveSlug] },
+          { id: 'owned-q2', query: warmQuery, relevant_slugs: [liveSlug] },
+        ],
+      }, { sourceId: 'default' });
+      expect(served).toEqual([`live:${liveSlug}`, `cache:${cachedSlug}`]);
+      expect(result.questions.map(q => q.score)).toEqual(['pass', 'fail']);
+      expect(result.checks.production_mutations).toBe(0);
+      expect(result.passed).toBe(false);
+      const warm = await cache.lookup(emb, {
+        sourceId: 'default',
+        knobsHash: '',
+        queryText: warmQuery,
+      });
+      expect(warm.hit).toBe(true);
+      expect(warm.results?.[0]?.slug).toBe(cachedSlug);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      setQueryCacheProofPin(null);
+      await engine.executeRaw(
+        `DELETE FROM query_cache WHERE query_text = $1 OR query_text = $2`,
+        [coldQuery, warmQuery],
+      );
+    }
+  });
+
+  test('lookups during a proof serve the opening snapshot plus proof-owned rows', async () => {
     const cache = new SemanticQueryCache(engine);
     const emb = new Float32Array(1536);
     for (let i = 0; i < emb.length; i++) emb[i] = 0.02;
@@ -2421,7 +2495,9 @@ describe('retrieval proof', () => {
           { id: 'pin-q2', query: 'opening snapshot two', relevant_slugs: ['topics/child-note'] },
         ],
       }, { sourceId: 'default' });
-      expect(served).toEqual([false, false]);
+      // Question 1 stores, then looks up, before that store joins the pin.
+      // Question 2 scores the proof-owned row.
+      expect(served).toEqual([false, true]);
       expect(result.questions.map(q => q.score)).toEqual(['pass', 'pass']);
       expect(result.checks.production_mutations).toBe(0);
       expect(result.passed).toBe(true);
@@ -3562,6 +3638,110 @@ describe('retrieval proof', () => {
       expect(parsed.passed).toBe(false);
       expect(currentExitCode()).toBe(1);
     } finally {
+      console.log = origLog;
+      console.error = origErr;
+      process.exitCode = undefined;
+      _resetCliExitVerdictForTests();
+    }
+  });
+
+  test('an omitted --source searches the production federated set, not isolated sources', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived, config) VALUES
+         ('fed6220', 'fed6220', false, $1::text::jsonb),
+         ('iso6220', 'iso6220', false, $2::text::jsonb)
+       ON CONFLICT (id) DO UPDATE
+         SET archived = false, name = EXCLUDED.name, config = EXCLUDED.config`,
+      [JSON.stringify({ federated: true }), JSON.stringify({ federated: false })],
+    );
+    const resolved = await withEnv({ GBRAIN_SOURCE: undefined }, () => resolveSourceWithTier(engine, null));
+    const localFederated = await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
+    const production = federatedSearchScope({
+      engine,
+      remote: false,
+      sourceId: resolved.source_id,
+      ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
+    } as OperationContext);
+    expect(production.sourceIds).toContain('fed6220');
+    expect(production.sourceIds ?? []).not.toContain('iso6220');
+
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-proof-scope-'));
+    const proof = join(dir, 'proof.json');
+    writeFileSync(proof, JSON.stringify({
+      proof_version: 2,
+      questions: [
+        {
+          id: 'isolated-page',
+          query: 'isolated page an ordinary query must not return',
+          relevant_pages: [{ source_id: 'iso6220', slug: 'topics/isolated-only' }],
+        },
+        {
+          id: 'federated-page',
+          query: 'federated page an ordinary query does return',
+          relevant_pages: [{ source_id: 'fed6220', slug: 'topics/federated-wiki' }],
+        },
+      ],
+    }));
+    const isolatedOnly = join(dir, 'isolated.json');
+    writeFileSync(isolatedOnly, JSON.stringify({
+      proof_version: 2,
+      questions: [{
+        id: 'isolated-explicit',
+        query: 'isolated page under an explicit source',
+        relevant_pages: [{ source_id: 'iso6220', slug: 'topics/isolated-only' }],
+      }],
+    }));
+    const catalog = [
+      { slug: 'topics/isolated-only', source_id: 'iso6220' },
+      { slug: 'topics/federated-wiki', source_id: 'fed6220' },
+    ];
+    const seen: Array<{ sourceId?: string; sourceIds?: string[] }> = [];
+    _setRetrievalProofSearchForTests(async (_eng, _query, opts) => {
+      seen.push({
+        sourceId: opts.sourceId,
+        sourceIds: opts.sourceIds ? [...opts.sourceIds] : undefined,
+      });
+      if (opts.sourceIds && opts.sourceIds.length > 0) {
+        const allow = new Set(opts.sourceIds);
+        return catalog.filter(hit => allow.has(hit.source_id));
+      }
+      if (opts.sourceId) return catalog.filter(hit => hit.source_id === opts.sourceId);
+      return catalog;
+    });
+    const origLog = console.log;
+    const origErr = console.error;
+    let stdout = '';
+    console.log = (...a: unknown[]) => { stdout += a.map(String).join(' ') + '\n'; };
+    console.error = () => {};
+    try {
+      await withEnv({ GBRAIN_SOURCE: undefined }, () => runGraphUsefulness(engine, [
+        'retrieval-proof', 'run', proof, '--json',
+      ]));
+      const unscoped = JSON.parse(stdout) as {
+        passed: boolean;
+        questions: Array<{ id: string; score: string }>;
+      };
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen[0]?.sourceIds).toEqual(production.sourceIds);
+      expect(seen[0]?.sourceId).toBeUndefined();
+      expect(seen.every(call => call.sourceIds?.includes('iso6220') !== true)).toBe(true);
+      expect(unscoped.questions.find(q => q.id === 'isolated-page')?.score).toBe('fail');
+      expect(unscoped.questions.find(q => q.id === 'federated-page')?.score).toBe('pass');
+      expect(unscoped.passed).toBe(false);
+
+      seen.length = 0;
+      stdout = '';
+      _resetCliExitVerdictForTests();
+      await withEnv({ GBRAIN_SOURCE: undefined }, () => runGraphUsefulness(engine, [
+        '--source', 'iso6220', 'retrieval-proof', 'run', isolatedOnly, '--json',
+      ]));
+      const explicit = JSON.parse(stdout) as { passed: boolean; questions: Array<{ score: string }> };
+      expect(seen[0]?.sourceId).toBe('iso6220');
+      expect(seen[0]?.sourceIds).toBeUndefined();
+      expect(explicit.questions.map(q => q.score)).toEqual(['pass']);
+      expect(explicit.passed).toBe(true);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
       console.log = origLog;
       console.error = origErr;
       process.exitCode = undefined;

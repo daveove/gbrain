@@ -237,7 +237,13 @@ export function scoreRetrievalQuestion(
 }
 
 export interface RunRetrievalProofOpts {
+  /** Scalar scope. Bare slugs are scored in this source. */
   sourceId?: string;
+  /**
+   * Production federated set (`federatedSearchScope`). Wins over `sourceId`
+   * for the search call. Isolated sources are not members.
+   */
+  sourceIds?: string[];
   limit?: number;
 }
 
@@ -392,6 +398,23 @@ function queryCacheDiverged(
   return false;
 }
 
+/**
+ * A row this proof stored joins the lookup pin before the next question.
+ * Production would serve that payload to a later text-guard-compatible
+ * query. The opening snapshot still hides a foreign insert. Store sets
+ * `created_at` to now, so the row is fresh for the rest of the proof.
+ */
+function admitProofOwnedCacheRows(
+  signatures: Map<string, string>,
+  freshIds: Set<string>,
+  proofWrites: ReadonlyMap<string, string>,
+): void {
+  for (const [id, signature] of proofWrites) {
+    signatures.set(id, signature);
+    freshIds.add(id);
+  }
+}
+
 /** Pass requires no failed questions, no Readwise cites, and an unchanged graph. */
 export function retrievalProofPassed(
   failCount: number,
@@ -440,6 +463,7 @@ type RetrievalProofSearch = (
   opts: {
     limit?: number;
     sourceId?: string;
+    sourceIds?: string[];
     /**
      * Query operation default (`expand !== false`). Forces expansion on
      * even when the pinned mode's expansion knob is off.
@@ -536,10 +560,11 @@ export async function runRetrievalProof(
   const proofCacheWrites = new Map<string, string>();
   let proofCacheWriteCount = 0;
   let cacheMutated = false;
-  // Drain in-flight stores, then freeze that snapshot for lookups. A row
-  // inserted later, or an existing row whose payload changes, is not scored.
-  // TTL membership is frozen in the same read. A row that expires before
-  // the last question is still served, and that expiry is not a mutation.
+  // Drain in-flight stores, then freeze that snapshot for lookups. A foreign
+  // insert, or an existing row whose payload changes, is not scored. A row
+  // this proof stores is added to the pin before the next question. TTL
+  // membership is frozen in the same read. A row that expires before the
+  // last question is still served, and that expiry is not a mutation.
   await awaitPendingSearchCacheWrites();
   const cacheOpening = await readQueryCacheOpening(engine);
   let cacheCursor = cacheOpening.signatures;
@@ -559,7 +584,10 @@ export async function runRetrievalProof(
   const noteCache = async (): Promise<void> => {
     // Stores are async. Wait so a proof write is both visible and recorded
     // before it is compared, and an overwrite after that write is not.
+    // Admit those stores before the next lookup. A later question must be
+    // scored against the payload a warm production query would serve.
     await awaitPendingSearchCacheWrites();
+    admitProofOwnedCacheRows(cacheOpening.signatures, cacheOpening.freshIds, proofCacheWrites);
     const now = await readQueryCacheSnapshot(engine);
     if (queryCacheDiverged(cacheCursor, now, proofCacheWrites)) cacheMutated = true;
     cacheCursor = now;
@@ -575,15 +603,20 @@ export async function runRetrievalProof(
         limit: topK,
         expansion: true,
         expandFn: expandQuery,
-        ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+        ...(opts.sourceIds && opts.sourceIds.length > 0
+          ? { sourceIds: opts.sourceIds }
+          : opts.sourceId
+            ? { sourceId: opts.sourceId }
+            : {}),
         _pinnedSearch: pinnedSearch,
       };
       // Production query and search go through hybridSearchCached. Bare
       // hybridSearch recomputes live and can pass while a warm cache still
       // serves a different set. Lookups are limited to the opening cache
-      // snapshot, including the TTL membership recorded then, so a row
-      // populated during the proof cannot be scored and a row that expires
-      // mid-proof is still served.
+      // snapshot plus rows this proof has stored, including the TTL
+      // membership recorded at open, so a foreign row cannot be scored, a
+      // row this proof stored is scored on the next question, and a row
+      // that expires mid-proof is still served.
       // The search pin drives the cache key (mode, column, adaptive return,
       // intent-pattern banks) and the inner search, so a warm bank cannot
       // store or serve a different classification than the sealed settings.

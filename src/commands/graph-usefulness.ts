@@ -24,7 +24,15 @@ import type { RelationApplyResult, RelationManifest, RetrievalProofResult } from
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
-import { ALL_SOURCES, isResolverUserError, resolveSourceId } from '../core/source-resolver.ts';
+import { federatedSearchScope } from '../core/ops/context.ts';
+import type { OperationContext } from '../core/ops/contract.ts';
+import {
+  ALL_SOURCES,
+  isResolverUserError,
+  localFederatedSourceIds,
+  resolveSourceId,
+  resolveSourceWithTier,
+} from '../core/source-resolver.ts';
 
 /** Subcommands handled here. Bare slugs stay on the traverse_graph operation. */
 export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
@@ -272,11 +280,12 @@ function parseSource(args: string[]): { sourceId?: string } {
 }
 
 /**
- * Explicit `--source` for usefulness reads. Same resolver as relations:
+ * Explicit `--source` for measure and stats. Same resolver as relations:
  * the id must match the source-id grammar and name an active source.
- * An omitted flag stays unscoped (whole-brain measure / proof). `__all__`
- * is that unscoped sentinel, not a SQL filter. Returns undefined after a
- * user-facing resolver error (stderr + exit 1) so the caller does not read.
+ * An omitted flag stays unscoped (whole-brain measure). `__all__` is that
+ * unscoped sentinel, not a SQL filter. Retrieval proofs do not use this
+ * helper. Returns undefined after a user-facing resolver error (stderr +
+ * exit 1) so the caller does not read.
  */
 async function resolveUsefulnessReadScope(
   engine: BrainEngine,
@@ -288,6 +297,42 @@ async function resolveUsefulnessReadScope(
     const resolved = await resolveSourceId(engine, explicit);
     if (resolved === ALL_SOURCES) return {};
     return { sourceId: resolved };
+  } catch (e) {
+    if (isResolverUserError(e)) {
+      console.error(e instanceof Error ? e.message : String(e));
+      setCliExitVerdict(1);
+      return undefined;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Source scope for a retrieval proof, the same one an unqualified local
+ * `query` uses. Resolution follows `makeContext` (flag, env, dotfile, path,
+ * brain default, seed). `federatedSearchScope` then widens only through
+ * `localFederatedSourceIds`: a `federated: false` source stays out, so a
+ * proof cannot pass on an isolated page an ordinary query never returns.
+ * `__all__` stays unscoped for this trusted local caller. Returns undefined
+ * after a user-facing resolver error (stderr + exit 1).
+ */
+async function resolveRetrievalProofScope(
+  engine: BrainEngine,
+  args: string[],
+): Promise<{ sourceId?: string; sourceIds?: string[] } | undefined> {
+  const explicit = parseSource(args).sourceId ?? null;
+  try {
+    const resolved = await resolveSourceWithTier(engine, explicit);
+    const localFederated = resolved.source_id === ALL_SOURCES
+      ? undefined
+      : await localFederatedSourceIds(engine, resolved.source_id, resolved.tier);
+    const ctx = {
+      engine,
+      remote: false,
+      sourceId: resolved.source_id,
+      ...(localFederated ? { localFederatedSourceIds: localFederated } : {}),
+    } as OperationContext;
+    return federatedSearchScope(ctx);
   } catch (e) {
     if (isResolverUserError(e)) {
       console.error(e instanceof Error ? e.message : String(e));
@@ -480,7 +525,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
       setCliExitVerdict(2);
       return;
     }
-    const scope = await resolveUsefulnessReadScope(engine, args);
+    const scope = await resolveRetrievalProofScope(engine, args);
     if (!scope) return;
     const outPath = takeFlag(args, '--out');
     if (outPath && existsSync(outPath)) {
@@ -571,7 +616,11 @@ DAV-6220 usefulness:
       a question and removed before the final snapshot still fails the proof.
       --out writes the full result, including fingerprint_before and fingerprint_after.
       An explicit --source is resolved and must name an active source.
-      Bare relevant_slugs / forbidden_slugs require a single --source.
+      An omitted --source uses the same scope as an unqualified query:
+      the resolved source, widened only to its federated set.
+      A source with federated set to false stays out of that widening.
+      --source __all__ spans every source, matching a trusted local query.
+      Bare relevant_slugs / forbidden_slugs require a single source scope.
       relevant_pages / forbidden_pages are already (source_id, slug).
       Each question needs at least one distinct relevant slug or page.
       When the pinned search mode enables expansion, search uses the production query expander.
