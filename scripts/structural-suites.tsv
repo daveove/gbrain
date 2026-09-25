@@ -166,7 +166,7 @@ test/graph-usefulness.test.ts	graph CLI routing	4	readFileSync
 test/graph-usefulness.test.ts	graph-usefulness measure	5	readFileSync
 test/graph-usefulness.test.ts	relation manifest	26	readFileSync
 test/graph-usefulness.test.ts	relation source scope and option terminator	7	readFileSync
-test/graph-usefulness.test.ts	retrieval proof	25	readFileSync
+test/graph-usefulness.test.ts	retrieval proof	26	readFileSync
 test/graph-usefulness.test.ts	usefulness help before connect	1	readFileSync
 test/graph-usefulness.test.ts	usefulness read source resolution	1	readFileSync
 test/hook-command.serial.test.ts	user-prompt	14	readFileSync
