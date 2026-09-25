@@ -5,7 +5,7 @@ import { hybridSearch } from '../search/hybrid.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
-import { computeGraphFingerprint } from './fingerprint.ts';
+import { computeGraphFingerprint, type ScopeOpts } from './fingerprint.ts';
 import {
   readProofSearchPin,
   type PinnedProofSearch,
@@ -290,12 +290,102 @@ const CORPUS_WATERMARK_SEQUENCES = [
 ] as const;
 
 /**
+ * Search scope for mutation checks. Federated `sourceIds` win, matching
+ * the search call. Empty means the whole brain (`--source __all__`).
+ */
+function proofMutationScope(opts: RunRetrievalProofOpts): ScopeOpts {
+  if (opts.sourceIds && opts.sourceIds.length > 0) return { sourceIds: opts.sourceIds };
+  if (opts.sourceId) return { sourceId: opts.sourceId };
+  return {};
+}
+
+function mutationScopeIds(scope: ScopeOpts): string[] | null {
+  if (scope.sourceIds && scope.sourceIds.length > 0) return scope.sourceIds;
+  if (scope.sourceId) return [scope.sourceId];
+  return null;
+}
+
+/**
+ * Ranking-link predicate for a scoped watermark. Same edges as
+ * `fingerprint.ts` `linkInScope`: both endpoints in the search set, or a
+ * non-mention inbound edge whose target is in the set (cross-source
+ * backlinks still rank). `l` is the links alias.
+ */
+function rankingLinkSql(): string {
+  const inScope = (alias: string) => `${alias}.source_id = ANY($1::text[])`;
+  const pageVisible = (alias: string) =>
+    `EXISTS (SELECT 1 FROM sources s WHERE s.id = ${alias}.source_id AND NOT s.archived)`;
+  const bothEnds =
+    `EXISTS (SELECT 1 FROM pages pf WHERE pf.id = l.from_page_id AND ${inScope('pf')} AND ${pageVisible('pf')})
+     AND EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})`;
+  const inbound =
+    `EXISTS (SELECT 1 FROM pages pt WHERE pt.id = l.to_page_id AND ${inScope('pt')} AND ${pageVisible('pt')})
+     AND l.link_source IS DISTINCT FROM 'mentions'`;
+  return `((${bothEnds}) OR (${inbound}))`;
+}
+
+/**
  * Monotonic corpus-mutation watermark. Endpoint fingerprints miss a
  * backlink that is committed during a question and removed before the
  * final snapshot: the hashes match, but the sequence or the row xmin
  * does not return to its earlier value.
+ *
+ * Unscoped proofs keep brain-wide sequences and row xmins. Scoped proofs
+ * read xmin only for rows in the search set, plus global `config` (search
+ * configuration is not per-source). Brain-wide page and chunk sequences
+ * stay out of that watermark: an upsert in another source consumes them
+ * on conflict. The links sequence is kept as last_value minus the count
+ * of live links outside the ranking predicate, so a ranking link that is
+ * inserted and removed still moves the watermark, and a link that remains
+ * entirely outside the set does not.
  */
-async function readCorpusMutationWatermark(engine: BrainEngine): Promise<string> {
+async function readCorpusMutationWatermark(engine: BrainEngine, scope: ScopeOpts = {}): Promise<string> {
+  const ids = mutationScopeIds(scope);
+  if (!ids) return readUnscopedCorpusMutationWatermark(engine);
+  const linkInScope = rankingLinkSql();
+  const rows = await engine.executeRaw<{ watermark: string | null }>(
+    `SELECT
+       (
+         COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'links_id_seq'), 0)
+         - COALESCE((SELECT count(*) FROM links l WHERE NOT ${linkInScope}), 0)
+       )::text
+       || '|' ||
+       COALESCE((SELECT max(p.xmin::text::bigint) FROM pages p WHERE p.source_id = ANY($1::text[])), 0)::text
+       || ',' ||
+       COALESCE((SELECT max(l.xmin::text::bigint) FROM links l WHERE ${linkInScope}), 0)::text
+       || ',' ||
+       COALESCE((
+         SELECT max(c.xmin::text::bigint)
+         FROM content_chunks c
+         JOIN pages p ON p.id = c.page_id
+         WHERE p.source_id = ANY($1::text[])
+       ), 0)::text
+       || ',' ||
+       COALESCE((SELECT max(s.xmin::text::bigint) FROM sources s WHERE s.id = ANY($1::text[])), 0)::text
+       || ',' ||
+       COALESCE((SELECT max(pa.xmin::text::bigint) FROM page_aliases pa WHERE pa.source_id = ANY($1::text[])), 0)::text
+       || ',' ||
+       COALESCE((SELECT max(sa.xmin::text::bigint) FROM slug_aliases sa WHERE sa.source_id = ANY($1::text[])), 0)::text
+       || ',' ||
+       COALESCE((
+         SELECT max(t.xmin::text::bigint)
+         FROM takes t
+         JOIN pages p ON p.id = t.page_id
+         WHERE p.source_id = ANY($1::text[])
+       ), 0)::text
+       || ',' ||
+       COALESCE((SELECT max(xmin::text::bigint) FROM config), 0)::text
+       AS watermark`,
+    [ids],
+  );
+  const watermark = rows[0]?.watermark;
+  if (typeof watermark !== 'string' || watermark.length === 0) {
+    throw new Error('Corpus mutation watermark returned no row');
+  }
+  return watermark;
+}
+
+async function readUnscopedCorpusMutationWatermark(engine: BrainEngine): Promise<string> {
   const xidSql = CORPUS_WATERMARK_TABLES
     .map((table) => `COALESCE((SELECT max(xmin::text::bigint) FROM ${table}), 0)::text`)
     .join(` || ',' || `);
@@ -458,8 +548,14 @@ export async function runRetrievalProof(
   // so a config write between questions cannot turn it off.
   // Watermark first, fingerprint last on the way out, so every question
   // sits inside the window. A reverted write still moves the watermark.
-  const watermarkBefore = await readCorpusMutationWatermark(engine);
-  const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
+  // Both use the proof's search scope. Ranking-relevant cross-source edges
+  // and global search configuration stay in the check.
+  const mutationScope = proofMutationScope(opts);
+  const watermarkBefore = await readCorpusMutationWatermark(engine, mutationScope);
+  const before = await computeGraphFingerprint(engine, {
+    ...mutationScope,
+    searchConfig: pin.canonical,
+  });
   const results: RetrievalProofQuestionResult[] = [];
   for (const q of questions) {
     const topK = positiveTopK(q.top_k, questionLabel(q));
@@ -501,8 +597,11 @@ export async function runRetrievalProof(
   // The watermark covers the case the hashes miss: a write during a
   // question that is undone before this snapshot.
   const afterPin = await readProofSearchPin(engine);
-  const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
-  const watermarkAfter = await readCorpusMutationWatermark(engine);
+  const after = await computeGraphFingerprint(engine, {
+    ...mutationScope,
+    searchConfig: afterPin.canonical,
+  });
+  const watermarkAfter = await readCorpusMutationWatermark(engine, mutationScope);
   const scores = { pass: 0, partial: 0, fail: 0 };
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = citedReadwisePageCount(results, opts.sourceId);

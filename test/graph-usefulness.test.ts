@@ -2318,6 +2318,144 @@ describe('retrieval proof', () => {
     }
   });
 
+  test('scoped proof ignores mutations outside the search set', async () => {
+    for (const id of ['proof-a', 'proof-b', 'proof-fed']) {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, archived) VALUES ($1, $1, false)
+         ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+        [id],
+      );
+    }
+    const put = (sourceId: string, slug: string, body: string) => engine.putPage(slug, {
+      title: slug,
+      compiled_truth: body,
+      type: 'note',
+    }, { sourceId });
+    await put('proof-a', 'topics/scope-a', 'alpha scope page');
+    await put('proof-b', 'topics/scope-b', 'beta scope page');
+    await put('proof-fed', 'topics/scope-fed', 'federated scope page');
+    await engine.upsertChunks('topics/scope-a', [
+      { chunk_index: 0, chunk_text: 'alpha chunk', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'proof-a' });
+    await engine.upsertChunks('topics/scope-b', [
+      { chunk_index: 0, chunk_text: 'beta chunk', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'proof-b' });
+    const manifest = {
+      proof_version: 2 as const,
+      questions: [{
+        id: 'q-scope',
+        query: 'alpha scope',
+        relevant_pages: [{ source_id: 'proof-a', slug: 'topics/scope-a' }],
+      }],
+    };
+    const hitA = [{ slug: 'topics/scope-a', source_id: 'proof-a' }];
+    try {
+      _setRetrievalProofSearchForTests(async () => {
+        await put('proof-b', 'topics/scope-b-new', 'inserted in an isolated source during the proof');
+        await put('proof-b', 'topics/scope-b', 'beta rewritten outside the proof');
+        await engine.upsertChunks('topics/scope-b', [
+          { chunk_index: 0, chunk_text: 'beta chunk rewritten outside the proof', chunk_source: 'compiled_truth' },
+        ], { sourceId: 'proof-b' });
+        await engine.addLink(
+          'topics/scope-b', 'topics/scope-b-new', 'local', 'related_to', 'manual',
+          undefined, undefined,
+          { fromSourceId: 'proof-b', toSourceId: 'proof-b' },
+        );
+        return hitA;
+      });
+      const outside = await runRetrievalProof(engine, manifest, { sourceId: 'proof-a' });
+      expect(outside.questions[0]?.score).toBe('pass');
+      expect(outside.fingerprint_before.sha256).toBe(outside.fingerprint_after.sha256);
+      expect(outside.checks.production_mutations).toBe(0);
+      expect(outside.passed).toBe(true);
+
+      _setRetrievalProofSearchForTests(async () => {
+        await put('proof-a', 'topics/scope-a', 'alpha rewritten inside the proof');
+        return hitA;
+      });
+      const inside = await runRetrievalProof(engine, manifest, { sourceId: 'proof-a' });
+      expect(inside.questions[0]?.score).toBe('pass');
+      expect(inside.fingerprint_before.sha256).not.toBe(inside.fingerprint_after.sha256);
+      expect(inside.checks.production_mutations).toBeGreaterThan(0);
+      expect(inside.passed).toBe(false);
+
+      _setRetrievalProofSearchForTests(async () => {
+        await engine.upsertChunks('topics/scope-a', [
+          { chunk_index: 0, chunk_text: 'alpha chunk rewritten inside the proof', chunk_source: 'compiled_truth' },
+        ], { sourceId: 'proof-a' });
+        return hitA;
+      });
+      const insideChunk = await runRetrievalProof(engine, manifest, { sourceId: 'proof-a' });
+      expect(insideChunk.checks.production_mutations).toBeGreaterThan(0);
+      expect(insideChunk.passed).toBe(false);
+
+      _setRetrievalProofSearchForTests(async () => {
+        await put('proof-b', 'topics/scope-b', 'beta rewritten outside a federated proof');
+        return hitA;
+      });
+      const fedQuiet = await runRetrievalProof(engine, manifest, {
+        sourceId: 'proof-b',
+        sourceIds: ['proof-a', 'proof-fed'],
+      });
+      expect(fedQuiet.checks.production_mutations).toBe(0);
+      expect(fedQuiet.passed).toBe(true);
+
+      _setRetrievalProofSearchForTests(async () => {
+        await put('proof-fed', 'topics/scope-fed', 'federated member rewritten during the proof');
+        return hitA;
+      });
+      const fedHit = await runRetrievalProof(engine, manifest, { sourceIds: ['proof-a', 'proof-fed'] });
+      expect(fedHit.checks.production_mutations).toBeGreaterThan(0);
+      expect(fedHit.passed).toBe(false);
+
+      _setRetrievalProofSearchForTests(async () => {
+        await engine.addLink(
+          'topics/scope-b', 'topics/scope-a', 'cross', 'related_to', 'manual',
+          undefined, undefined,
+          { fromSourceId: 'proof-b', toSourceId: 'proof-a' },
+        );
+        return hitA;
+      });
+      const cross = await runRetrievalProof(engine, manifest, { sourceId: 'proof-a' });
+      expect(cross.fingerprint_before.sha256).not.toBe(cross.fingerprint_after.sha256);
+      expect(cross.checks.production_mutations).toBeGreaterThan(0);
+      expect(cross.passed).toBe(false);
+
+      await engine.removeLink(
+        'topics/scope-b', 'topics/scope-a', 'related_to', 'manual',
+        { fromSourceId: 'proof-b', toSourceId: 'proof-a' },
+      );
+      _setRetrievalProofSearchForTests(async () => {
+        await engine.addLink(
+          'topics/scope-b', 'topics/scope-a', 'cross', 'related_to', 'manual',
+          undefined, undefined,
+          { fromSourceId: 'proof-b', toSourceId: 'proof-a' },
+        );
+        const removed = await engine.removeLink(
+          'topics/scope-b', 'topics/scope-a', 'related_to', 'manual',
+          { fromSourceId: 'proof-b', toSourceId: 'proof-a' },
+        );
+        expect(removed).toBe(1);
+        return hitA;
+      });
+      const revertedCross = await runRetrievalProof(engine, manifest, { sourceId: 'proof-a' });
+      expect(revertedCross.questions[0]?.score).toBe('pass');
+      expect(revertedCross.fingerprint_before.sha256).toBe(revertedCross.fingerprint_after.sha256);
+      expect(revertedCross.checks.production_mutations).toBeGreaterThan(0);
+      expect(revertedCross.passed).toBe(false);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.removeLink(
+        'topics/scope-b', 'topics/scope-a', 'related_to', 'manual',
+        { fromSourceId: 'proof-b', toSourceId: 'proof-a' },
+      );
+      await engine.removeLink(
+        'topics/scope-b', 'topics/scope-b-new', 'related_to', 'manual',
+        { fromSourceId: 'proof-b', toSourceId: 'proof-b' },
+      );
+    }
+  });
+
   test('a content rewrite during the proof counts as a mutation when identities stay put', async () => {
     const slug = 'topics/proof-corpus';
     await engine.putPage(slug, { title: 'Proof corpus', compiled_truth: 'before rewrite', type: 'note' });
@@ -2398,10 +2536,16 @@ describe('retrieval proof', () => {
       expect(result.questions.map(q => q.score)).toEqual(['pass', 'pass']);
       expect(result.fingerprint_before.sha256).not.toBe(result.fingerprint_after.sha256);
       expect(result.fingerprint_before.sha256).toBe(
-        (await computeGraphFingerprint(engine, { searchConfig: beforePin.canonical })).sha256,
+        (await computeGraphFingerprint(engine, {
+          sourceId: 'default',
+          searchConfig: beforePin.canonical,
+        })).sha256,
       );
       expect(result.fingerprint_after.sha256).toBe(
-        (await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical })).sha256,
+        (await computeGraphFingerprint(engine, {
+          sourceId: 'default',
+          searchConfig: afterPin.canonical,
+        })).sha256,
       );
       expect(result.checks.production_mutations).toBeGreaterThan(0);
       expect(result.passed).toBe(false);
@@ -3636,6 +3780,9 @@ describe('usefulness help before connect', () => {
         });
         expect(handled).toBe(true);
         expect(out).toContain('DAV-6220 usefulness');
+        expect(out).toContain("Every proof uses the query operation's default expansion (expandQuery)");
+        expect(out).toContain('regardless of the pinned search mode');
+        expect(out).not.toContain('When the pinned search mode enables expansion');
       }
       expect(connects).toBe(0);
     } finally {

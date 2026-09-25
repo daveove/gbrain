@@ -623,8 +623,9 @@ DAV-6220 usefulness:
       Bare relevant_slugs / forbidden_slugs require a single source scope.
       relevant_pages / forbidden_pages are already (source_id, slug).
       Each question needs at least one distinct relevant slug or page.
-      When the pinned search mode enables expansion, search uses the production query expander.
-      The proof verifies live retrieval under those pinned settings.
+      Every proof uses the query operation's default expansion (expandQuery),
+      regardless of the pinned search mode.
+      The proof verifies live retrieval under the other pinned settings.
       Exits nonzero when a question fails, a hit cites Readwise, the fingerprint
       changes, or the corpus mutation watermark changes.
 
