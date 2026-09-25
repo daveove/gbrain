@@ -974,6 +974,9 @@ export interface HybridSearchOpts extends SearchOpts {
     mode?: string;
     overrides?: import('./mode.ts').SearchKeyOverrides;
     embeddingColumn: import('../types.ts').ResolvedColumn;
+    /** Cache-table model/dimensions. Not the resolved column's own space. */
+    cacheEmbeddingModel: string;
+    cacheEmbeddingDimensions: number;
     adaptiveReturn: Partial<import('./return-policy.ts').AdaptiveReturnConfig>;
     intentPatterns: string | null;
     embeddingMultimodalModel: string | null;
@@ -2477,12 +2480,14 @@ export async function hybridSearchCached(
   // provider/dim. isCacheSafe compares the resolved column's full
   // embedding space (name + dim + model) against cfg and returns true
   // only when ALL match. Otherwise skip.
+  // A proof pin must keep that comparison. Building cfg from the resolved
+  // column makes a same-dimension model override look cache-safe.
   const mergedCfgCached = pinned ? null : await loadConfigWithEngine(engine).catch(() => null);
   const cfgCached = pinned
     ? {
         engine: 'pglite' as const,
-        embedding_model: pinned.embeddingColumn.embeddingModel,
-        embedding_dimensions: pinned.embeddingColumn.dimensions,
+        embedding_model: pinned.cacheEmbeddingModel,
+        embedding_dimensions: pinned.cacheEmbeddingDimensions,
       }
     : (mergedCfgCached ?? ((await import('../config.ts')).loadConfig()) ?? { engine: 'pglite' as const });
   const resolvedColCached = pinned

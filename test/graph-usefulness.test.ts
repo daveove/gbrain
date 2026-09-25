@@ -21,6 +21,7 @@ import { parseOptionalPositiveLimit, InvalidGraphLimitError } from '../src/core/
 import { hitsIncludeReadwiseLineage } from '../src/core/graph-usefulness/retrieval-proof.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
 import { canonicalSearchConfig, PROOF_EXPANSION_EXPANDER_ID, readProofSearchPin } from '../src/core/graph-usefulness/search-pin.ts';
+import { isCacheSafe, resolvedCacheEmbeddingSpace } from '../src/core/search/embedding-column.ts';
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { expandQuery } from '../src/core/search/expansion.ts';
 import { awaitPendingSearchCacheWrites, hybridSearch, hybridSearchCached } from '../src/core/search/hybrid.ts';
@@ -2849,6 +2850,8 @@ describe('retrieval proof', () => {
           mode: pin.mode,
           overrides: pin.overrides,
           embeddingColumn: pin.embeddingColumn,
+          cacheEmbeddingModel: pin.cacheEmbeddingModel,
+          cacheEmbeddingDimensions: pin.cacheEmbeddingDimensions,
           adaptiveReturn: pin.adaptiveReturn,
           intentPatterns: pin.intentPatterns,
           embeddingMultimodalModel: pin.embeddingMultimodalModel,
@@ -3092,6 +3095,8 @@ describe('retrieval proof', () => {
         mode: mode ?? pin.mode,
         overrides: pin.overrides,
         embeddingColumn: pin.embeddingColumn,
+        cacheEmbeddingModel: pin.cacheEmbeddingModel,
+        cacheEmbeddingDimensions: pin.cacheEmbeddingDimensions,
         adaptiveReturn: pin.adaptiveReturn,
         intentPatterns,
         embeddingMultimodalModel: pin.embeddingMultimodalModel,
@@ -3146,6 +3151,113 @@ describe('retrieval proof', () => {
       resetGateway();
       clearIntentPatternConfigForTests();
       await engine.unsetConfig('search.intent_patterns');
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+      await engine.executeRaw(
+        `DELETE FROM pages WHERE slug = $1 AND source_id = 'default'`,
+        [slug],
+      );
+    }
+  });
+
+  test('a same-dimension embedding override stays cache-unsafe under the proof pin', async () => {
+    const slug = 'topics/cache-space-page';
+    const query = 'cache space override sealed unique phrase';
+    const dim = 1536;
+    const overrideModel = 'voyage:voyage-3-large';
+    configureGateway({
+      embedding_model: 'openai:text-embedding-3-large',
+      embedding_dimensions: dim,
+      env: { OPENAI_API_KEY: 'sk-test-cache-space' },
+    });
+    await engine.setConfig('embedding_columns', JSON.stringify({
+      embedding: { provider: overrideModel, dimensions: dim, type: 'vector' },
+    }));
+    const pin = await readProofSearchPin(engine);
+    const space = resolvedCacheEmbeddingSpace({ engine: 'pglite' });
+    expect(pin.embeddingColumn.name).toBe('embedding');
+    expect(pin.embeddingColumn.dimensions).toBe(dim);
+    expect(pin.embeddingColumn.embeddingModel).toBe(overrideModel);
+    expect(pin.cacheEmbeddingModel).toBe(space.model);
+    expect(pin.cacheEmbeddingModel).toBe('openai:text-embedding-3-large');
+    expect(pin.cacheEmbeddingDimensions).toBe(space.dimensions);
+    expect(pin.cacheEmbeddingDimensions).toBe(dim);
+    expect(isCacheSafe(pin.embeddingColumn, {
+      engine: 'pglite',
+      embedding_model: pin.cacheEmbeddingModel,
+      embedding_dimensions: pin.cacheEmbeddingDimensions,
+    })).toBe(false);
+    expect(pin.canonical).toContain(overrideModel);
+    expect(pin.canonical).toContain(pin.cacheEmbeddingModel);
+
+    await engine.putPage(slug, {
+      title: 'Cache Space Page',
+      compiled_truth: query,
+      type: 'note',
+    });
+    await engine.upsertChunks(slug, [
+      { chunk_index: 0, chunk_text: query, chunk_source: 'compiled_truth' },
+    ], { sourceId: 'default' });
+    await engine.executeRaw(
+      `UPDATE content_chunks
+          SET embedding = array_fill(0.25, ARRAY[${dim}])::vector,
+              embedded_at = now()
+        WHERE page_id = (SELECT id FROM pages WHERE slug = $1 AND source_id = 'default' AND deleted_at IS NULL)
+          AND chunk_index = 0`,
+      [slug],
+    );
+    configureGateway({
+      embedding_model: pin.cacheEmbeddingModel,
+      embedding_dimensions: pin.cacheEmbeddingDimensions,
+      env: { OPENAI_API_KEY: 'sk-test-cache-space' },
+    });
+    __setEmbedTransportForTests((async (opts: { values: string[] }) => ({
+      embeddings: opts.values.map(() => new Array(pin.cacheEmbeddingDimensions).fill(0.25)),
+    })) as never);
+    const countRows = async () => {
+      const rows = await engine.executeRaw<{ n: string }>(
+        `SELECT count(*)::text AS n FROM query_cache WHERE query_text = $1`,
+        [query],
+      );
+      return Number(rows[0]?.n ?? 0);
+    };
+    const pinnedOpts = {
+      limit: 3,
+      sourceId: 'default' as const,
+      _pinnedSearch: {
+        mode: pin.mode,
+        overrides: pin.overrides,
+        embeddingColumn: pin.embeddingColumn,
+        cacheEmbeddingModel: pin.cacheEmbeddingModel,
+        cacheEmbeddingDimensions: pin.cacheEmbeddingDimensions,
+        adaptiveReturn: pin.adaptiveReturn,
+        intentPatterns: pin.intentPatterns,
+        embeddingMultimodalModel: pin.embeddingMultimodalModel,
+      },
+    };
+    try {
+      await hybridSearchCached(engine, query, pinnedOpts);
+      await awaitPendingSearchCacheWrites();
+      expect(await countRows()).toBe(0);
+      await hybridSearchCached(engine, query, { limit: 3, sourceId: 'default' });
+      await awaitPendingSearchCacheWrites();
+      expect(await countRows()).toBe(0);
+      await hybridSearchCached(engine, query, {
+        ...pinnedOpts,
+        _pinnedSearch: {
+          ...pinnedOpts._pinnedSearch,
+          embeddingColumn: {
+            ...pin.embeddingColumn,
+            embeddingModel: pin.cacheEmbeddingModel,
+            dimensions: pin.cacheEmbeddingDimensions,
+          },
+        },
+      });
+      await awaitPendingSearchCacheWrites();
+      expect(await countRows()).toBeGreaterThan(0);
+    } finally {
+      __setEmbedTransportForTests(null);
+      resetGateway();
+      await engine.unsetConfig('embedding_columns');
       await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
       await engine.executeRaw(
         `DELETE FROM pages WHERE slug = $1 AND source_id = 'default'`,

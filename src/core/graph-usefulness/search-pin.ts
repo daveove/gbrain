@@ -10,7 +10,7 @@
 
 import { loadConfig, loadConfigWithEngine } from '../config.ts';
 import type { BrainEngine } from '../engine.ts';
-import { resolveEmbeddingColumn } from '../search/embedding-column.ts';
+import { resolveEmbeddingColumn, resolvedCacheEmbeddingSpace } from '../search/embedding-column.ts';
 import {
   loadSearchModeConfig,
   resolveSearchMode,
@@ -51,6 +51,13 @@ export interface PinnedProofSearch {
   mode?: string;
   overrides: SearchKeyOverrides;
   embeddingColumn: ResolvedColumn;
+  /**
+   * Model `query_cache.embedding` is sized for. Independent of a registry
+   * override of the `embedding` builtin, which can change `embeddingColumn`
+   * without changing this space.
+   */
+  cacheEmbeddingModel: string;
+  cacheEmbeddingDimensions: number;
   /** Resolved adaptive-return partial hybridSearch would apply. */
   adaptiveReturn: Partial<AdaptiveReturnConfig>;
   /** Raw `search.intent_patterns` value, or null when unset. */
@@ -76,6 +83,8 @@ export interface ProofSearchLive {
   adaptiveReturn?: Partial<AdaptiveReturnConfig>;
   intentPatterns?: string | null;
   embeddingMultimodalModel?: string | null;
+  /** Cache-table embedding space, before a registry override of `embedding`. */
+  cacheEmbedding?: { model: string; dimensions: number };
   /** Raw config-table values for PROOF_SEARCH_RAW_KEYS. Missing keys are null. */
   raw?: Record<string, string | null>;
 }
@@ -104,6 +113,9 @@ export function canonicalSearchConfig(
       dimensions: column.dimensions,
       embeddingModel: column.embeddingModel,
     },
+    cache_embedding: live?.cacheEmbedding
+      ? { model: live.cacheEmbedding.model, dimensions: live.cacheEmbedding.dimensions }
+      : null,
     adaptive_return: stableRecord(live?.adaptiveReturn),
     intent_patterns: live?.intentPatterns ?? null,
     embedding_multimodal_model: live?.embeddingMultimodalModel ?? null,
@@ -128,9 +140,9 @@ export async function readProofSearchPin(engine: BrainEngine): Promise<PinnedPro
   });
   const mergedCfg = await loadConfigWithEngine(reader).catch(() => null);
   const cfgForColumn = mergedCfg ?? loadConfig() ?? null;
-  const embeddingColumn = cfgForColumn
-    ? resolveEmbeddingColumn(undefined, cfgForColumn)
-    : resolveEmbeddingColumn(undefined, { engine: 'pglite' });
+  const columnCfg = cfgForColumn ?? { engine: 'pglite' as const };
+  const embeddingColumn = resolveEmbeddingColumn(undefined, columnCfg);
+  const cacheSpace = resolvedCacheEmbeddingSpace(columnCfg);
   const adaptiveReturn = adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null);
   const intentPatterns = Object.prototype.hasOwnProperty.call(snapshot, 'search.intent_patterns')
     ? snapshot['search.intent_patterns']!
@@ -144,6 +156,8 @@ export async function readProofSearchPin(engine: BrainEngine): Promise<PinnedPro
     mode: modeInput.mode,
     overrides: modeInput.overrides ?? {},
     embeddingColumn,
+    cacheEmbeddingModel: cacheSpace.model,
+    cacheEmbeddingDimensions: cacheSpace.dimensions,
     adaptiveReturn,
     intentPatterns,
     embeddingMultimodalModel,
@@ -151,6 +165,7 @@ export async function readProofSearchPin(engine: BrainEngine): Promise<PinnedPro
       adaptiveReturn,
       intentPatterns,
       embeddingMultimodalModel,
+      cacheEmbedding: cacheSpace,
       raw,
     }),
   };
