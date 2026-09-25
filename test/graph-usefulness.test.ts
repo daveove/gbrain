@@ -24,7 +24,7 @@ import { canonicalSearchConfig, PROOF_EXPANSION_EXPANDER_ID, readProofSearchPin 
 import { __setEmbedTransportForTests, configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { expandQuery } from '../src/core/search/expansion.ts';
 import { awaitPendingSearchCacheWrites, hybridSearch, hybridSearchCached } from '../src/core/search/hybrid.ts';
-import { SemanticQueryCache } from '../src/core/search/query-cache.ts';
+import { SemanticQueryCache, queryCacheRowSignatureSql, setQueryCacheProofPin } from '../src/core/search/query-cache.ts';
 import {
   clearIntentPatternConfigForTests,
   loadEngineIntentPatterns,
@@ -1643,6 +1643,82 @@ describe('relation manifest', () => {
       .toThrow(/reconciliation-managed/);
   });
 
+  test('rejects a link_source the links table would reject', () => {
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const row = (linkSource: string) => ({
+      id: 'fmt',
+      from_slug: 'a',
+      to_slug: 'b',
+      link_type: 't',
+      link_source: linkSource,
+      guards,
+    });
+    for (const bad of ['Bad Tag', 'Bad_Tag', '9abc', '-leading', 'trail-', 'a--b', 'A', 'a'.repeat(65)]) {
+      expect(() => parseRelationManifest(JSON.stringify({ manifest_version: 1, rows: [row(bad)] })))
+        .toThrow(/link_source must match/);
+    }
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [row('a'.repeat(64))],
+    }))).not.toThrow();
+    expect(() => parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [row('citation-graph')],
+    }))).not.toThrow();
+  });
+
+  test('rejects an invalid link_source before any apply write', async () => {
+    await engine.putPage('topics/fmt-a', {
+      title: 'Fmt A', compiled_truth: 'fmt a', type: 'note',
+    });
+    await engine.putPage('topics/fmt-b', {
+      title: 'Fmt B', compiled_truth: 'fmt b', type: 'note',
+    });
+    await engine.putPage('topics/fmt-c', {
+      title: 'Fmt C', compiled_truth: 'fmt c', type: 'note',
+    });
+    const guards = {
+      exact_endpoint_match: true,
+      source_relation_current: true,
+      no_incident_edge: true,
+      readwise_clear: true,
+    };
+    const manifest = {
+      manifest_version: 1,
+      rows: [
+        {
+          id: 'fmt-ok',
+          from_slug: 'topics/fmt-a',
+          to_slug: 'topics/fmt-b',
+          link_type: 'related_to',
+          link_source: 'manual',
+          guards,
+        },
+        {
+          id: 'fmt-bad',
+          from_slug: 'topics/fmt-a',
+          to_slug: 'topics/fmt-c',
+          link_type: 'related_to',
+          link_source: 'Bad Tag',
+          guards,
+        },
+      ],
+    } as RelationManifest;
+    const receiptPath = join(mkdtempSync(join(tmpdir(), 'gbrain-fmt-')), 'receipt.json');
+    await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+      apply: true,
+      receiptPath,
+    })).rejects.toThrow(/link_source must match/);
+    expect(await linkCount(engine, 'topics/fmt-a', 'topics/fmt-b')).toBe(0);
+    expect(await linkCount(engine, 'topics/fmt-a', 'topics/fmt-c')).toBe(0);
+    expect(existsSync(receiptPath)).toBe(false);
+  });
+
   test('rejects a managed link_source at the apply boundary before any write', async () => {
     await engine.putPage('topics/managed-a', {
       title: 'Managed A', compiled_truth: 'managed a', type: 'note',
@@ -2432,6 +2508,145 @@ describe('retrieval proof', () => {
     } finally {
       _setRetrievalProofSearchForTests(null);
       await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+    }
+  });
+
+  test('pinned lookup serves a snapshot-fresh row after its TTL expires', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = new Float32Array(1536);
+    for (let i = 0; i < emb.length; i++) emb[i] = 0.04;
+    const query = 'proof expired cache row still pinned';
+    const sentinel = 'topics/proof-expired-pinned';
+    const meta: HybridSearchMeta = {
+      vector_enabled: true,
+      detail_resolved: 'medium',
+      expansion_applied: false,
+      intent: 'general',
+    };
+    const hit = (slug: string): SearchResult => ({
+      slug,
+      page_id: 1,
+      title: slug,
+      type: 'note',
+      chunk_text: slug,
+      chunk_source: 'compiled_truth',
+      chunk_id: 1,
+      chunk_index: 0,
+      score: 1,
+      stale: false,
+    });
+    const lookup = () => cache.lookup(emb, {
+      sourceId: 'default',
+      knobsHash: '',
+      queryText: query,
+    });
+    await cache.store(query, emb, [hit(sentinel)], meta);
+    try {
+      expect((await lookup()).hit).toBe(true);
+      // Expiry moves the clock, not the row signature. Backdating created_at
+      // does change the signature, so the pin below is the signature after
+      // that write — the same pair a snapshot would have recorded had the
+      // row already been inside its TTL then and the clock moved later.
+      await engine.executeRaw(
+        `UPDATE query_cache SET created_at = now() - interval '2 hours' WHERE query_text = $1`,
+        [query],
+      );
+      expect((await lookup()).hit).toBe(false);
+      const rows = await engine.executeRaw<{ id: string; sig: string }>(
+        `SELECT id, ${queryCacheRowSignatureSql('query_cache')} AS sig
+           FROM query_cache WHERE query_text = $1`,
+        [query],
+      );
+      const id = rows[0]?.id;
+      const sig = rows[0]?.sig;
+      expect(typeof id).toBe('string');
+      expect(typeof sig).toBe('string');
+      setQueryCacheProofPin({
+        signatures: new Map([[id!, sig!]]),
+        freshIds: new Set([id!]),
+      });
+      const pinned = await lookup();
+      expect(pinned.hit).toBe(true);
+      expect(pinned.results?.[0]?.slug).toBe(sentinel);
+      setQueryCacheProofPin({
+        signatures: new Map([[id!, sig!]]),
+        freshIds: new Set(),
+      });
+      expect((await lookup()).hit).toBe(false);
+    } finally {
+      setQueryCacheProofPin(null);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
+    }
+    expect((await lookup()).hit).toBe(false);
+  });
+
+  test('a retrieval proof freezes cache freshness from the opening snapshot', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const freshEmb = new Float32Array(1536);
+    const staleEmb = new Float32Array(1536);
+    for (let i = 0; i < freshEmb.length; i++) {
+      freshEmb[i] = i % 2 === 0 ? 0.05 : 0;
+      staleEmb[i] = i % 2 === 0 ? 0 : 0.05;
+    }
+    const freshQuery = 'proof snapshot fresh cache row';
+    const staleQuery = 'proof snapshot stale cache row';
+    const meta: HybridSearchMeta = {
+      vector_enabled: true,
+      detail_resolved: 'medium',
+      expansion_applied: false,
+      intent: 'general',
+    };
+    const hit = (slug: string): SearchResult => ({
+      slug,
+      page_id: 1,
+      title: slug,
+      type: 'note',
+      chunk_text: slug,
+      chunk_source: 'compiled_truth',
+      chunk_id: 1,
+      chunk_index: 0,
+      score: 1,
+      stale: false,
+    });
+    await cache.store(freshQuery, freshEmb, [hit('topics/proof-fresh-cache')], meta);
+    await cache.store(staleQuery, staleEmb, [hit('topics/proof-stale-cache')], meta);
+    await engine.executeRaw(
+      `UPDATE query_cache SET created_at = now() - interval '2 hours' WHERE query_text = $1`,
+      [staleQuery],
+    );
+    const seen: boolean[] = [];
+    _setRetrievalProofSearchForTests(async () => {
+      const fresh = await cache.lookup(freshEmb, {
+        sourceId: 'default',
+        knobsHash: '',
+        queryText: freshQuery,
+      });
+      const stale = await cache.lookup(staleEmb, {
+        sourceId: 'default',
+        knobsHash: '',
+        queryText: staleQuery,
+      });
+      seen.push(fresh.hit, stale.hit);
+      return [{ slug: 'topics/child-note', source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'freshness-q', query: 'snapshot freshness', relevant_slugs: ['topics/child-note'] },
+        ],
+      }, { sourceId: 'default' });
+      expect(seen).toEqual([true, false]);
+      expect(result.questions.map(q => q.score)).toEqual(['pass']);
+      expect(result.checks.production_mutations).toBe(0);
+      expect(result.passed).toBe(true);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      setQueryCacheProofPin(null);
+      await engine.executeRaw(
+        `DELETE FROM query_cache WHERE query_text = $1 OR query_text = $2`,
+        [freshQuery, staleQuery],
+      );
     }
   });
 

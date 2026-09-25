@@ -86,13 +86,24 @@ export function queryCacheRowSignatureSql(alias?: string): string {
 }
 
 /**
+ * Opening-snapshot pin for a retrieval proof. Lookups serve a row only
+ * while its signature still matches and the snapshot recorded it inside
+ * its TTL. Wall-clock expiry is not a content change: it leaves the
+ * signature and the generation counter alone, so the proof must not
+ * re-check TTL against live `now()`. Unset outside a proof. Not re-entrant.
+ */
+export interface QueryCacheProofPin {
+  signatures: ReadonlyMap<string, string>;
+  /** Ids whose `created_at + ttl` was still after the snapshot clock. */
+  freshIds: ReadonlySet<string>;
+}
+
+/**
  * Retrieval proofs record cache hits and stores so their own writes are not
- * counted as external mutations. The pin is the opening snapshot: lookups
- * serve a row only while its signature still matches. Unset outside a proof.
- * Not re-entrant.
+ * counted as external mutations. The pin is the opening snapshot.
  */
 let queryCacheTouchObserver: ((event: QueryCacheTouch) => void) | null = null;
-let queryCacheProofPin: ReadonlyMap<string, string> | null = null;
+let queryCacheProofPin: QueryCacheProofPin | null = null;
 
 export function setQueryCacheTouchObserver(
   observer: ((event: QueryCacheTouch) => void) | null,
@@ -100,7 +111,7 @@ export function setQueryCacheTouchObserver(
   queryCacheTouchObserver = observer;
 }
 
-export function setQueryCacheProofPin(pin: ReadonlyMap<string, string> | null): void {
+export function setQueryCacheProofPin(pin: QueryCacheProofPin | null): void {
   queryCacheProofPin = pin;
 }
 
@@ -248,14 +259,20 @@ export class SemanticQueryCache {
     const distanceThreshold = 1 - this.similarityThreshold;
     const vec = embeddingToPgVector(queryEmbedding);
     const proofPin = queryCacheProofPin;
-    // Opening snapshot had no rows. A row inserted during the proof must
-    // not be scored.
-    if (proofPin && proofPin.size === 0) return { hit: false };
+    // Opening snapshot had no rows, or none of them were inside their TTL.
+    // A row inserted during the proof, or one already expired at the
+    // snapshot, must not be scored. Freshness is the snapshot's set, not
+    // live now(): expiry does not change the signature.
+    if (proofPin && (proofPin.signatures.size === 0 || proofPin.freshIds.size === 0)) {
+      return { hit: false };
+    }
 
     try {
       // Find the closest cached query within the distance threshold and
-      // freshness window. The TTL check is done in-query (created_at +
-      // ttl_seconds > now) so we never return a stale row.
+      // freshness window. Unpinned TTL is in-query (created_at +
+      // ttl_seconds > now) so we never return a stale row. A retrieval
+      // proof skips that predicate and uses the opening snapshot's
+      // fresh set instead.
       //
       // v0.32.3 [CDX-4]: knobs_hash filter prevents cross-mode contamination.
       // A tokenmax write (expansion=on, limit=50) and a conservative read
@@ -274,8 +291,14 @@ export class SemanticQueryCache {
       // payload is fetched by id in the second query below.
       const pinSelect = proofPin ? `, ${queryCacheRowSignatureSql('qc')} AS sig` : '';
       const pinClause = proofPin ? `AND qc.id = ANY($5::text[])` : '';
+      // Unpinned lookups use live now(). A proof already decided freshness
+      // when it took the snapshot; repeating the TTL predicate here would
+      // let an early question hit and a later one miss without a mutation.
+      const ttlClause = proofPin
+        ? ''
+        : `AND qc.created_at + (qc.ttl_seconds || ' seconds')::interval > now()`;
       const params: unknown[] = [vec, sourceId, distanceThreshold, knobsHash];
-      if (proofPin) params.push([...proofPin.keys()]);
+      if (proofPin) params.push([...proofPin.freshIds]);
       const rows = await this.engine.executeRaw<{
         id: string;
         query_text: string;
@@ -292,7 +315,7 @@ export class SemanticQueryCache {
            AND qc.knobs_hash = $4
            AND qc.embedding IS NOT NULL
            AND qc.embedding <=> $1::vector < $3
-           AND qc.created_at + (qc.ttl_seconds || ' seconds')::interval > now()
+           ${ttlClause}
            AND ${CACHE_GATE_WHERE_CLAUSE}
            ${pinClause}
          ORDER BY qc.embedding <=> $1::vector
@@ -301,7 +324,10 @@ export class SemanticQueryCache {
       );
 
       const visible = proofPin
-        ? rows.filter((row) => row.sig != null && proofPin.get(row.id) === row.sig)
+        ? rows.filter((row) =>
+            row.sig != null
+            && proofPin.signatures.get(row.id) === row.sig
+            && proofPin.freshIds.has(row.id))
         : rows;
       if (visible.length === 0) return { hit: false };
 

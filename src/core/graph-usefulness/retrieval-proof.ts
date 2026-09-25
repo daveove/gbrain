@@ -6,6 +6,7 @@ import {
   queryCacheRowSignatureSql,
   setQueryCacheProofPin,
   setQueryCacheTouchObserver,
+  type QueryCacheProofPin,
 } from '../search/query-cache.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
@@ -323,19 +324,40 @@ async function readCorpusMutationWatermark(engine: BrainEngine): Promise<string>
 
 type QueryCacheSnapshot = Map<string, string>;
 
+interface QueryCacheOpening {
+  signatures: QueryCacheSnapshot;
+  freshIds: Set<string>;
+}
+
 /**
- * Content signature of `query_cache`, excluding hit_count and last_hit_at.
- * A proof hit bumps those columns; the served payload does not change.
+ * Content signature of `query_cache`, excluding hit_count and last_hit_at,
+ * plus whether each row was inside its TTL at this statement's `now()`.
+ * A proof hit bumps hit counters; the served payload does not change.
+ * Freshness is recorded here and reused for every later lookup. Wall-clock
+ * expiry does not change the signature or the generation counter.
  */
-async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSnapshot> {
-  const rows = await engine.executeRaw<{ id: string; sig: string }>(
-    `SELECT id, ${queryCacheRowSignatureSql('query_cache')} AS sig
+async function readQueryCacheOpening(engine: BrainEngine): Promise<QueryCacheOpening> {
+  const rows = await engine.executeRaw<{ id: string; sig: string; fresh: number | string }>(
+    `SELECT id,
+            ${queryCacheRowSignatureSql('query_cache')} AS sig,
+            CASE
+              WHEN created_at + (ttl_seconds || ' seconds')::interval > now() THEN 1
+              ELSE 0
+            END AS fresh
        FROM query_cache
       ORDER BY id`,
   );
-  const snapshot: QueryCacheSnapshot = new Map();
-  for (const row of rows) snapshot.set(row.id, row.sig);
-  return snapshot;
+  const signatures: QueryCacheSnapshot = new Map();
+  const freshIds = new Set<string>();
+  for (const row of rows) {
+    signatures.set(row.id, row.sig);
+    if (Number(row.fresh) === 1) freshIds.add(row.id);
+  }
+  return { signatures, freshIds };
+}
+
+async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSnapshot> {
+  return (await readQueryCacheOpening(engine)).signatures;
 }
 
 /** Monotonic content-change counter. Hit-count bumps do not advance it. */
@@ -514,10 +536,17 @@ export async function runRetrievalProof(
   let cacheMutated = false;
   // Drain in-flight stores, then freeze that snapshot for lookups. A row
   // inserted later, or an existing row whose payload changes, is not scored.
+  // TTL membership is frozen in the same read. A row that expires before
+  // the last question is still served, and that expiry is not a mutation.
   await awaitPendingSearchCacheWrites();
-  let cacheCursor = await readQueryCacheSnapshot(engine);
+  const cacheOpening = await readQueryCacheOpening(engine);
+  let cacheCursor = cacheOpening.signatures;
+  const cachePin: QueryCacheProofPin = {
+    signatures: cacheOpening.signatures,
+    freshIds: cacheOpening.freshIds,
+  };
   const cacheGenerationAtStart = await readQueryCacheGeneration(engine);
-  setQueryCacheProofPin(cacheCursor);
+  setQueryCacheProofPin(cachePin);
   setQueryCacheTouchObserver((event) => {
     if (event.kind === 'write' && event.signature) {
       proofCacheWrites.set(event.id, event.signature);
@@ -550,7 +579,9 @@ export async function runRetrievalProof(
       // Production query and search go through hybridSearchCached. Bare
       // hybridSearch recomputes live and can pass while a warm cache still
       // serves a different set. Lookups are limited to the opening cache
-      // snapshot, so a row populated during the proof cannot be scored.
+      // snapshot, including the TTL membership recorded then, so a row
+      // populated during the proof cannot be scored and a row that expires
+      // mid-proof is still served.
       // The search pin drives the cache key (mode, column, adaptive return,
       // intent-pattern banks) and the inner search, so a warm bank cannot
       // store or serve a different classification than the sealed settings.

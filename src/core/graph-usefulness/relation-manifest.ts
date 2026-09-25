@@ -66,10 +66,27 @@ const REQUIRED_RELATION_STRINGS = ['id', 'from_slug', 'to_slug', 'link_type', 'l
 const OPTIONAL_RELATION_STRINGS = ['context', 'from_source_id', 'to_source_id'] as const;
 
 /**
+ * Same CHECK as `links.link_source`: lowercase kebab, at most 64 characters.
+ * Managed names are a separate rejection. A spaced or oversized tag must
+ * fail here, before verify can report ready or apply writes a receipt.
+ */
+const LINK_SOURCE_PATTERN = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
+const LINK_SOURCE_MAX_LENGTH = 64;
+
+function assertLinkSourceFormat(label: string, linkSource: string): void {
+  if (linkSource.length > LINK_SOURCE_MAX_LENGTH || !LINK_SOURCE_PATTERN.test(linkSource)) {
+    throw new Error(
+      `Row ${label}: link_source must match ${LINK_SOURCE_PATTERN.source} and be at most ${LINK_SOURCE_MAX_LENGTH} characters`,
+    );
+  }
+}
+
+/**
  * Hand-authored JSON can pass a truthy non-string (`link_type: 123`).
  * Reject those while parsing, before a receipt or any link write. Required
  * fields must be non-empty strings. Optional context and source ids, when
- * present, must be strings.
+ * present, must be strings. `link_source` must also be the kebab-case
+ * value the links table accepts.
  */
 function assertRelationFieldStrings(row: unknown, index: number): RelationManifestRow {
   if (!row || typeof row !== 'object' || Array.isArray(row)) {
@@ -91,6 +108,7 @@ function assertRelationFieldStrings(row: unknown, index: number): RelationManife
       throw new Error(`Row ${label}: ${field} must be a string`);
     }
   }
+  assertLinkSourceFormat(label, record.link_source as string);
   return row as RelationManifestRow;
 }
 
