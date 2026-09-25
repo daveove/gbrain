@@ -2295,299 +2295,6 @@ describe('retrieval proof', () => {
     }
   });
 
-  test('a query cache clear during a question fails the proof', async () => {
-    await engine.executeRaw(
-      `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
-       VALUES ('proof-cache-clear', 'proof cache clear sentinel', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
-    );
-    _setRetrievalProofSearchForTests(async () => {
-      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-clear'`);
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'cache-clear', query: 'cache clear sentinel', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      expect(result.questions.map(q => q.score)).toEqual(['pass']);
-      expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
-      expect(result.checks.production_mutations).toBeGreaterThan(0);
-      expect(result.passed).toBe(false);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-clear'`);
-    }
-  });
-
-  test('a foreign query cache row inserted between questions fails the proof', async () => {
-    let calls = 0;
-    _setRetrievalProofSearchForTests(async () => {
-      calls += 1;
-      if (calls === 2) {
-        await engine.executeRaw(
-          `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
-           VALUES ('proof-cache-foreign', 'foreign cache row', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
-        );
-      }
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'cache-q1', query: 'cache foreign one', relevant_slugs: ['topics/child-note'] },
-          { id: 'cache-q2', query: 'cache foreign two', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      expect(result.checks.production_mutations).toBeGreaterThan(0);
-      expect(result.passed).toBe(false);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-foreign'`);
-    }
-  });
-
-  test('a query cache row inserted and deleted inside a question fails the proof', async () => {
-    _setRetrievalProofSearchForTests(async () => {
-      await engine.executeRaw(
-        `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
-         VALUES ('proof-cache-transient', 'transient cache row', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
-      );
-      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-transient'`);
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'cache-transient', query: 'cache transient sentinel', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      expect(result.questions.map(q => q.score)).toEqual(['pass']);
-      expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
-      expect(result.checks.production_mutations).toBeGreaterThan(0);
-      expect(result.passed).toBe(false);
-      const left = await engine.executeRaw<{ n: string }>(
-        `SELECT count(*)::text AS n FROM query_cache WHERE id = 'proof-cache-transient'`,
-      );
-      expect(Number(left[0]?.n ?? 0)).toBe(0);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-transient'`);
-    }
-  });
-
-  test('a later question scores a cache row stored earlier in the proof', async () => {
-    const cache = new SemanticQueryCache(engine);
-    const emb = new Float32Array(1536);
-    for (let i = 0; i < emb.length; i++) emb[i] = i % 7 === 0 ? 0.21 : 0.01;
-    const coldQuery = 'proof owned cache alpha beta gamma';
-    const warmQuery = 'proof owned cache alpha beta gamma delta';
-    const cachedSlug = 'topics/proof-owned-cache-payload';
-    const liveSlug = 'topics/child-note';
-    expect(cacheTextGuard(warmQuery, coldQuery)).toBe(true);
-    const meta: HybridSearchMeta = {
-      vector_enabled: true,
-      detail_resolved: 'medium',
-      expansion_applied: false,
-      intent: 'general',
-    };
-    const hit = (slug: string): SearchResult => ({
-      slug,
-      page_id: 1,
-      title: slug,
-      type: 'note',
-      chunk_text: slug,
-      chunk_source: 'compiled_truth',
-      chunk_id: 1,
-      chunk_index: 0,
-      score: 1,
-      stale: false,
-    });
-    const served: string[] = [];
-    _setRetrievalProofSearchForTests(async (_eng, query) => {
-      const lookup = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      if (lookup.hit && lookup.results?.[0]) {
-        served.push(`cache:${lookup.results[0].slug}`);
-        return [{ slug: lookup.results[0].slug, source_id: 'default' }];
-      }
-      if (query === coldQuery) await cache.store(coldQuery, emb, [hit(cachedSlug)], meta);
-      served.push(`live:${liveSlug}`);
-      return [{ slug: liveSlug, source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'owned-q1', query: coldQuery, relevant_slugs: [liveSlug] },
-          { id: 'owned-q2', query: warmQuery, relevant_slugs: [liveSlug] },
-        ],
-      }, { sourceId: 'default' });
-      expect(served).toEqual([`live:${liveSlug}`, `cache:${cachedSlug}`]);
-      expect(result.questions.map(q => q.score)).toEqual(['pass', 'fail']);
-      expect(result.checks.production_mutations).toBe(0);
-      expect(result.passed).toBe(false);
-      const warm = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: warmQuery,
-      });
-      expect(warm.hit).toBe(true);
-      expect(warm.results?.[0]?.slug).toBe(cachedSlug);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      setQueryCacheProofPin(null);
-      await engine.executeRaw(
-        `DELETE FROM query_cache WHERE query_text = $1 OR query_text = $2`,
-        [coldQuery, warmQuery],
-      );
-    }
-  });
-
-  test('lookups during a proof serve the opening snapshot plus proof-owned rows', async () => {
-    const cache = new SemanticQueryCache(engine);
-    const emb = new Float32Array(1536);
-    for (let i = 0; i < emb.length; i++) emb[i] = 0.02;
-    const query = 'proof opening snapshot sentinel';
-    const sentinel = 'topics/proof-opening-sentinel';
-    const meta: HybridSearchMeta = {
-      vector_enabled: true,
-      detail_resolved: 'medium',
-      expansion_applied: false,
-      intent: 'general',
-    };
-    const hit = (slug: string): SearchResult => ({
-      slug,
-      page_id: 1,
-      title: slug,
-      type: 'note',
-      chunk_text: slug,
-      chunk_source: 'compiled_truth',
-      chunk_id: 1,
-      chunk_index: 0,
-      score: 1,
-      stale: false,
-    });
-    const served: boolean[] = [];
-    let calls = 0;
-    _setRetrievalProofSearchForTests(async () => {
-      calls += 1;
-      if (calls === 1) await cache.store(query, emb, [hit(sentinel)], meta);
-      const lookup = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      served.push(lookup.hit);
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'pin-q1', query: 'opening snapshot one', relevant_slugs: ['topics/child-note'] },
-          { id: 'pin-q2', query: 'opening snapshot two', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      // Question 1 stores, then looks up, before that store joins the pin.
-      // Question 2 scores the proof-owned row.
-      expect(served).toEqual([false, true]);
-      expect(result.questions.map(q => q.score)).toEqual(['pass', 'pass']);
-      expect(result.checks.production_mutations).toBe(0);
-      expect(result.passed).toBe(true);
-      const after = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      expect(after.hit).toBe(true);
-      expect(after.results?.[0]?.slug).toBe(sentinel);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
-    }
-  });
-
-  test('a cached row rewritten during a question is not scored and fails the proof', async () => {
-    const cache = new SemanticQueryCache(engine);
-    const emb = new Float32Array(1536);
-    for (let i = 0; i < emb.length; i++) emb[i] = 0.03;
-    const query = 'proof rewritten cache row';
-    const original = 'topics/proof-cache-original';
-    const rewritten = 'topics/proof-cache-rewritten';
-    const meta: HybridSearchMeta = {
-      vector_enabled: true,
-      detail_resolved: 'medium',
-      expansion_applied: false,
-      intent: 'general',
-    };
-    const hit = (slug: string): SearchResult => ({
-      slug,
-      page_id: 1,
-      title: slug,
-      type: 'note',
-      chunk_text: slug,
-      chunk_source: 'compiled_truth',
-      chunk_id: 1,
-      chunk_index: 0,
-      score: 1,
-      stale: false,
-    });
-    await cache.store(query, emb, [hit(original)], meta);
-    let duringHit = true;
-    let duringSlug: string | undefined;
-    _setRetrievalProofSearchForTests(async () => {
-      const pinned = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      expect(pinned.hit).toBe(true);
-      expect(pinned.results?.[0]?.slug).toBe(original);
-      await engine.executeRaw(
-        `UPDATE query_cache SET results = $1::text::jsonb WHERE query_text = $2`,
-        [JSON.stringify([hit(rewritten)]), query],
-      );
-      const during = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      duringHit = during.hit;
-      duringSlug = during.results?.[0]?.slug;
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'cache-rewrite', query: 'rewritten cache row', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      expect(duringHit).toBe(false);
-      expect(duringSlug).toBeUndefined();
-      expect(result.questions.map(q => q.score)).toEqual(['pass']);
-      expect(result.checks.production_mutations).toBeGreaterThan(0);
-      expect(result.passed).toBe(false);
-      const after = await cache.lookup(emb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: query,
-      });
-      expect(after.hit).toBe(true);
-      expect(after.results?.[0]?.slug).toBe(rewritten);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
-    }
-  });
-
   test('pinned lookup serves a snapshot-fresh row after its TTL expires', async () => {
     const cache = new SemanticQueryCache(engine);
     const emb = new Float32Array(1536);
@@ -2655,76 +2362,6 @@ describe('retrieval proof', () => {
       await engine.executeRaw(`DELETE FROM query_cache WHERE query_text = $1`, [query]);
     }
     expect((await lookup()).hit).toBe(false);
-  });
-
-  test('a retrieval proof freezes cache freshness from the opening snapshot', async () => {
-    const cache = new SemanticQueryCache(engine);
-    const freshEmb = new Float32Array(1536);
-    const staleEmb = new Float32Array(1536);
-    for (let i = 0; i < freshEmb.length; i++) {
-      freshEmb[i] = i % 2 === 0 ? 0.05 : 0;
-      staleEmb[i] = i % 2 === 0 ? 0 : 0.05;
-    }
-    const freshQuery = 'proof snapshot fresh cache row';
-    const staleQuery = 'proof snapshot stale cache row';
-    const meta: HybridSearchMeta = {
-      vector_enabled: true,
-      detail_resolved: 'medium',
-      expansion_applied: false,
-      intent: 'general',
-    };
-    const hit = (slug: string): SearchResult => ({
-      slug,
-      page_id: 1,
-      title: slug,
-      type: 'note',
-      chunk_text: slug,
-      chunk_source: 'compiled_truth',
-      chunk_id: 1,
-      chunk_index: 0,
-      score: 1,
-      stale: false,
-    });
-    await cache.store(freshQuery, freshEmb, [hit('topics/proof-fresh-cache')], meta);
-    await cache.store(staleQuery, staleEmb, [hit('topics/proof-stale-cache')], meta);
-    await engine.executeRaw(
-      `UPDATE query_cache SET created_at = now() - interval '2 hours' WHERE query_text = $1`,
-      [staleQuery],
-    );
-    const seen: boolean[] = [];
-    _setRetrievalProofSearchForTests(async () => {
-      const fresh = await cache.lookup(freshEmb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: freshQuery,
-      });
-      const stale = await cache.lookup(staleEmb, {
-        sourceId: 'default',
-        knobsHash: '',
-        queryText: staleQuery,
-      });
-      seen.push(fresh.hit, stale.hit);
-      return [{ slug: 'topics/child-note', source_id: 'default' }];
-    });
-    try {
-      const result = await runRetrievalProof(engine, {
-        proof_version: 2,
-        questions: [
-          { id: 'freshness-q', query: 'snapshot freshness', relevant_slugs: ['topics/child-note'] },
-        ],
-      }, { sourceId: 'default' });
-      expect(seen).toEqual([true, false]);
-      expect(result.questions.map(q => q.score)).toEqual(['pass']);
-      expect(result.checks.production_mutations).toBe(0);
-      expect(result.passed).toBe(true);
-    } finally {
-      _setRetrievalProofSearchForTests(null);
-      setQueryCacheProofPin(null);
-      await engine.executeRaw(
-        `DELETE FROM query_cache WHERE query_text = $1 OR query_text = $2`,
-        [freshQuery, staleQuery],
-      );
-    }
   });
 
   test('a backlink added and removed during a question fails the proof', async () => {
@@ -3048,7 +2685,7 @@ describe('retrieval proof', () => {
     }
   });
 
-  test('scores a warm production cache hit instead of a live recompute', async () => {
+  test('scores live search and leaves query_cache untouched', async () => {
     const slug = 'topics/cache-proof-page';
     const query = 'cache proof sealed unique phrase';
     const dim = 1536;
@@ -3082,16 +2719,25 @@ describe('retrieval proof', () => {
       proof_version: 2 as const,
       questions: [{ id: 'q-cache', query, relevant_slugs: [slug] }],
     };
+    const cacheRows = async (): Promise<string[]> => (await engine.executeRaw<{ sig: string }>(
+      `SELECT md5(concat_ws('|', id, results::text, hit_count::text)) AS sig
+         FROM query_cache WHERE query_text = $1 ORDER BY id`,
+      [query],
+    )).map(r => r.sig);
     try {
-      const first = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
-      expect(first.questions[0]?.score).toBe('pass');
-      expect(first.passed).toBe(true);
+      const cold = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
+      expect(cold.questions[0]?.score).toBe('pass');
+      expect(cold.passed).toBe(true);
       await awaitPendingSearchCacheWrites();
-      const cached = await engine.executeRaw<{ n: string }>(
-        `SELECT count(*)::text AS n FROM query_cache WHERE query_text = $1`,
-        [query],
-      );
-      expect(Number(cached[0]?.n ?? 0)).toBeGreaterThan(0);
+      expect(await cacheRows()).toEqual([]);
+
+      await hybridSearchCached(engine, query, {
+        limit: 10,
+        sourceId: 'default',
+        expansion: true,
+        expandFn: expandQuery,
+      });
+      await awaitPendingSearchCacheWrites();
       await engine.executeRaw(
         `UPDATE query_cache
             SET results = $1::text::jsonb
@@ -3106,11 +2752,17 @@ describe('retrieval proof', () => {
           chunk_id: 0,
         }]), query],
       );
+      const warm = await cacheRows();
+      expect(warm.length).toBe(1);
+
       const second = await runRetrievalProof(engine, manifest, { sourceId: 'default' });
-      expect(second.questions[0]?.top_slugs).toEqual(['topics/cache-decoy']);
-      expect(second.questions[0]?.score).toBe('fail');
+      expect(second.questions[0]?.top_slugs[0]).toBe(slug);
+      expect(second.questions[0]?.top_slugs).not.toContain('topics/cache-decoy');
+      expect(second.questions[0]?.score).toBe('pass');
       expect(second.checks.production_mutations).toBe(0);
-      expect(second.passed).toBe(false);
+      expect(second.passed).toBe(true);
+      await awaitPendingSearchCacheWrites();
+      expect(await cacheRows()).toEqual(warm);
     } finally {
       __setEmbedTransportForTests(null);
       resetGateway();

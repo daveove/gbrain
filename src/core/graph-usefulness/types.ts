@@ -144,6 +144,8 @@ export interface RetrievalProofResult {
     scores: { pass: number; partial: number; fail: number };
     cited_readwise_pages: number;
     production_mutations: number;
+    /** Proofs score live hybrid search. They never read or write query_cache. */
+    search_path: 'live';
   };
   questions: RetrievalProofQuestionResult[];
   fingerprint_before: GraphFingerprint;

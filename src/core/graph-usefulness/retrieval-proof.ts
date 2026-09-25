@@ -1,13 +1,7 @@
 import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { expandQuery } from '../search/expansion.ts';
-import { awaitPendingSearchCacheWrites, hybridSearchCached } from '../search/hybrid.ts';
-import {
-  queryCacheRowSignatureSql,
-  setQueryCacheProofPin,
-  setQueryCacheTouchObserver,
-  type QueryCacheProofPin,
-} from '../search/query-cache.ts';
+import { hybridSearch } from '../search/hybrid.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
@@ -249,9 +243,8 @@ export interface RunRetrievalProofOpts {
 
 /**
  * Non-zero when the graph fingerprint changed during the proof, or when
- * `watermarkChanged` is set. The flag covers corpus sequence/xmin movement
- * and a `query_cache` change that the proof itself did not store. A
- * matching sha256 with a stable watermark is the only zero. Any difference
+ * `watermarkChanged` is set. The flag covers corpus sequence/xmin movement.
+ * A matching sha256 with a stable watermark is the only zero. Any difference
  * is at least 1 so a changing graph cannot be reported as
  * production_mutations: 0.
  */
@@ -326,93 +319,6 @@ async function readCorpusMutationWatermark(engine: BrainEngine): Promise<string>
     throw new Error('Corpus mutation watermark returned no row');
   }
   return watermark;
-}
-
-type QueryCacheSnapshot = Map<string, string>;
-
-interface QueryCacheOpening {
-  signatures: QueryCacheSnapshot;
-  freshIds: Set<string>;
-}
-
-/**
- * Content signature of `query_cache`, excluding hit_count and last_hit_at,
- * plus whether each row was inside its TTL at this statement's `now()`.
- * A proof hit bumps hit counters; the served payload does not change.
- * Freshness is recorded here and reused for every later lookup. Wall-clock
- * expiry does not change the signature or the generation counter.
- */
-async function readQueryCacheOpening(engine: BrainEngine): Promise<QueryCacheOpening> {
-  const rows = await engine.executeRaw<{ id: string; sig: string; fresh: number | string }>(
-    `SELECT id,
-            ${queryCacheRowSignatureSql('query_cache')} AS sig,
-            CASE
-              WHEN created_at + (ttl_seconds || ' seconds')::interval > now() THEN 1
-              ELSE 0
-            END AS fresh
-       FROM query_cache
-      ORDER BY id`,
-  );
-  const signatures: QueryCacheSnapshot = new Map();
-  const freshIds = new Set<string>();
-  for (const row of rows) {
-    signatures.set(row.id, row.sig);
-    if (Number(row.fresh) === 1) freshIds.add(row.id);
-  }
-  return { signatures, freshIds };
-}
-
-async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSnapshot> {
-  return (await readQueryCacheOpening(engine)).signatures;
-}
-
-/** Monotonic content-change counter. Hit-count bumps do not advance it. */
-async function readQueryCacheGeneration(engine: BrainEngine): Promise<bigint> {
-  const rows = await engine.executeRaw<{ n: string | number | null }>(
-    `SELECT n::text AS n FROM query_cache_generation WHERE id`,
-  );
-  const raw = rows[0]?.n;
-  if (typeof raw === 'bigint') return raw;
-  if (typeof raw === 'number' && Number.isFinite(raw)) return BigInt(raw);
-  if (typeof raw === 'string' && /^\d+$/.test(raw)) return BigInt(raw);
-  throw new Error('query_cache generation returned no counter');
-}
-
-/**
- * True when cache content changed aside from rows this proof stored.
- * `proofWrites` is the signature returned by each successful store.
- * A later overwrite or delete of that row still counts. Deletes of rows
- * the proof only read always count.
- */
-function queryCacheDiverged(
-  before: QueryCacheSnapshot,
-  after: QueryCacheSnapshot,
-  proofWrites: ReadonlyMap<string, string>,
-): boolean {
-  const expected = new Map(before);
-  for (const [id, signature] of proofWrites) expected.set(id, signature);
-  if (expected.size !== after.size) return true;
-  for (const [id, signature] of expected) {
-    if (after.get(id) !== signature) return true;
-  }
-  return false;
-}
-
-/**
- * A row this proof stored joins the lookup pin before the next question.
- * Production would serve that payload to a later text-guard-compatible
- * query. The opening snapshot still hides a foreign insert. Store sets
- * `created_at` to now, so the row is fresh for the rest of the proof.
- */
-function admitProofOwnedCacheRows(
-  signatures: Map<string, string>,
-  freshIds: Set<string>,
-  proofWrites: ReadonlyMap<string, string>,
-): void {
-  for (const [id, signature] of proofWrites) {
-    signatures.set(id, signature);
-    freshIds.add(id);
-  }
 }
 
 /** Pass requires no failed questions, no Readwise cites, and an unchanged graph. */
@@ -557,104 +463,45 @@ export async function runRetrievalProof(
   const watermarkBefore = await readCorpusMutationWatermark(engine);
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
-  const proofCacheWrites = new Map<string, string>();
-  let proofCacheWriteCount = 0;
-  let cacheMutated = false;
-  // Drain in-flight stores, then freeze that snapshot for lookups. A foreign
-  // insert, or an existing row whose payload changes, is not scored. A row
-  // this proof stores is added to the pin before the next question. TTL
-  // membership is frozen in the same read. A row that expires before the
-  // last question is still served, and that expiry is not a mutation.
-  await awaitPendingSearchCacheWrites();
-  const cacheOpening = await readQueryCacheOpening(engine);
-  let cacheCursor = cacheOpening.signatures;
-  const cachePin: QueryCacheProofPin = {
-    signatures: cacheOpening.signatures,
-    freshIds: cacheOpening.freshIds,
-  };
-  const cacheGenerationAtStart = await readQueryCacheGeneration(engine);
-  setQueryCacheProofPin(cachePin);
-  setQueryCacheTouchObserver((event) => {
-    if (event.kind === 'write' && event.signature) {
-      proofCacheWrites.set(event.id, event.signature);
-      proofCacheWriteCount += 1;
-    }
-  });
-
-  const noteCache = async (): Promise<void> => {
-    // Stores are async. Wait so a proof write is both visible and recorded
-    // before it is compared, and an overwrite after that write is not.
-    // Admit those stores before the next lookup. A later question must be
-    // scored against the payload a warm production query would serve.
-    await awaitPendingSearchCacheWrites();
-    admitProofOwnedCacheRows(cacheOpening.signatures, cacheOpening.freshIds, proofCacheWrites);
-    const now = await readQueryCacheSnapshot(engine);
-    if (queryCacheDiverged(cacheCursor, now, proofCacheWrites)) cacheMutated = true;
-    cacheCursor = now;
-    const generation = await readQueryCacheGeneration(engine);
-    if (generation - cacheGenerationAtStart > BigInt(proofCacheWriteCount)) cacheMutated = true;
-  };
-
-  try {
-    for (const q of questions) {
-      await noteCache();
-      const topK = positiveTopK(q.top_k, questionLabel(q));
-      const searchOpts = {
-        limit: topK,
-        expansion: true,
-        expandFn: expandQuery,
-        ...(opts.sourceIds && opts.sourceIds.length > 0
-          ? { sourceIds: opts.sourceIds }
-          : opts.sourceId
-            ? { sourceId: opts.sourceId }
-            : {}),
-        _pinnedSearch: pinnedSearch,
-      };
-      // Production query and search go through hybridSearchCached. Bare
-      // hybridSearch recomputes live and can pass while a warm cache still
-      // serves a different set. Lookups are limited to the opening cache
-      // snapshot plus rows this proof has stored, including the TTL
-      // membership recorded at open, so a foreign row cannot be scored, a
-      // row this proof stored is scored on the next question, and a row
-      // that expires mid-proof is still served.
-      // The search pin drives the cache key (mode, column, adaptive return,
-      // intent-pattern banks) and the inner search, so a warm bank cannot
-      // store or serve a different classification than the sealed settings.
-      const hits = retrievalSearchForTests
-        ? await retrievalSearchForTests(engine, q.query, searchOpts)
-        : await hybridSearchCached(engine, q.query, searchOpts);
-      const topPages: RetrievalPageRef[] = hits.map(h => ({
-        source_id: h.source_id ?? opts.sourceId ?? 'default',
-        slug: h.slug,
-      }));
-      const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
-      results.push({
-        id: q.id,
-        query: q.query,
-        score: scoreRetrievalQuestion(q, topPages, opts.sourceId),
-        top_slugs: topPages.map(p => p.slug),
-        top_pages: topPages,
-        cited_readwise: citedReadwise,
-      });
-      await noteCache();
-    }
-  } finally {
-    setQueryCacheTouchObserver(null);
-    setQueryCacheProofPin(null);
+  for (const q of questions) {
+    const topK = positiveTopK(q.top_k, questionLabel(q));
+    const searchOpts = {
+      limit: topK,
+      expansion: true,
+      expandFn: expandQuery,
+      ...(opts.sourceIds && opts.sourceIds.length > 0
+        ? { sourceIds: opts.sourceIds }
+        : opts.sourceId
+          ? { sourceId: opts.sourceId }
+          : {}),
+      _pinnedSearch: pinnedSearch,
+    };
+    // Live hybridSearch, never hybridSearchCached. The cache gate advances
+    // only on page writes, so a cached row can replay the ranking from
+    // before a link apply for its whole TTL, and a cache store would write
+    // production rows during a read-only proof.
+    const hits = retrievalSearchForTests
+      ? await retrievalSearchForTests(engine, q.query, searchOpts)
+      : await hybridSearch(engine, q.query, searchOpts);
+    const topPages: RetrievalPageRef[] = hits.map(h => ({
+      source_id: h.source_id ?? opts.sourceId ?? 'default',
+      slug: h.slug,
+    }));
+    const citedReadwise = hitsIncludeReadwiseLineage(hits, opts.sourceId);
+    results.push({
+      id: q.id,
+      query: q.query,
+      score: scoreRetrievalQuestion(q, topPages, opts.sourceId),
+      top_slugs: topPages.map(p => p.slug),
+      top_pages: topPages,
+      cited_readwise: citedReadwise,
+    });
   }
-
-  // Proof stores are asynchronous. Wait so their generation bumps are
-  // visible, then sample once more. An insert and delete inside one
-  // question advances the counter even when the row is gone again.
-  await awaitPendingSearchCacheWrites();
-  await noteCache();
 
   // Live config again. A change since the pin makes sha256 differ even
   // when the graph counts did not, so production_mutations cannot stay 0.
   // The watermark covers the case the hashes miss: a write during a
-  // question that is undone before this snapshot. query_cache is sampled
-  // around every question so a clear, prune, or foreign insert is visible
-  // even when the row is gone again by the time the graph fingerprint matches.
+  // question that is undone before this snapshot.
   const afterPin = await readProofSearchPin(engine);
   const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
   const watermarkAfter = await readCorpusMutationWatermark(engine);
@@ -662,7 +509,7 @@ export async function runRetrievalProof(
   for (const r of results) scores[r.score] += 1;
   const citedReadwise = citedReadwisePageCount(results, opts.sourceId);
   const productionMutations = retrievalProofMutationCount(before, after, {
-    watermarkChanged: watermarkBefore !== watermarkAfter || cacheMutated,
+    watermarkChanged: watermarkBefore !== watermarkAfter,
   });
 
   return {
@@ -672,6 +519,7 @@ export async function runRetrievalProof(
       scores,
       cited_readwise_pages: citedReadwise,
       production_mutations: productionMutations,
+      search_path: 'live',
     },
     questions: results,
     fingerprint_before: before,
