@@ -878,6 +878,53 @@ describe('relation manifest', () => {
     }
   });
 
+  test('receipt rollback keeps a link whose xmin moved', async () => {
+    await engine.putPage('topics/xmin-a', { title: 'Xmin A', compiled_truth: 'a', type: 'note' });
+    await engine.putPage('topics/xmin-b', { title: 'Xmin B', compiled_truth: 'b', type: 'note' });
+    const manifest = parseRelationManifest(JSON.stringify({
+      manifest_version: 1,
+      rows: [{
+        id: 'xmin-1',
+        from_slug: 'topics/xmin-a',
+        to_slug: 'topics/xmin-b',
+        link_type: 'related_to',
+        link_source: 'tana-relation-r2',
+        context: 'same context',
+        guards: {
+          exact_endpoint_match: true,
+          source_relation_current: true,
+          no_incident_edge: true,
+          readwise_clear: true,
+        },
+      }],
+    }));
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-rcpt-xmin-'));
+    const receiptPath = join(dir, 'receipt.json');
+    _setBeforeReceiptCommitForTests(async () => {
+      await engine.executeRaw(
+        `UPDATE links AS l
+            SET context = l.context
+           FROM pages fp, pages tp
+          WHERE fp.id = l.from_page_id
+            AND tp.id = l.to_page_id
+            AND fp.slug = 'topics/xmin-a'
+            AND tp.slug = 'topics/xmin-b'`,
+      );
+      unlinkSync(receiptPath);
+      mkdirSync(receiptPath);
+    });
+    try {
+      await expect(applyRelationManifest(engine, manifest, JSON.stringify(manifest), {
+        apply: true,
+        receiptPath,
+      })).rejects.toThrow(/left 1 concurrently updated link/);
+      expect(await linkCount(engine, 'topics/xmin-a', 'topics/xmin-b')).toBe(1);
+    } finally {
+      _setBeforeReceiptCommitForTests(null);
+      rmSync(receiptPath, { recursive: true, force: true });
+    }
+  });
+
   test('receipt rollback deletes only the inserted link id', async () => {
     await engine.putPage('topics/rb-id-a', { title: 'Rb A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/rb-id-b', { title: 'Rb B', compiled_truth: 'b', type: 'note' });
@@ -2158,6 +2205,36 @@ describe('retrieval proof', () => {
     } finally {
       _setRetrievalProofSearchForTests(null);
       await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-foreign'`);
+    }
+  });
+
+  test('a query cache row inserted and deleted inside a question fails the proof', async () => {
+    _setRetrievalProofSearchForTests(async () => {
+      await engine.executeRaw(
+        `INSERT INTO query_cache (id, query_text, source_id, knobs_hash, results, meta, ttl_seconds)
+         VALUES ('proof-cache-transient', 'transient cache row', 'default', 'proof-k', '[]'::jsonb, '{}'::jsonb, 3600)`,
+      );
+      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-transient'`);
+      return [{ slug: 'topics/child-note', source_id: 'default' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, {
+        proof_version: 2,
+        questions: [
+          { id: 'cache-transient', query: 'cache transient sentinel', relevant_slugs: ['topics/child-note'] },
+        ],
+      }, { sourceId: 'default' });
+      expect(result.questions.map(q => q.score)).toEqual(['pass']);
+      expect(result.fingerprint_before.sha256).toBe(result.fingerprint_after.sha256);
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+      const left = await engine.executeRaw<{ n: string }>(
+        `SELECT count(*)::text AS n FROM query_cache WHERE id = 'proof-cache-transient'`,
+      );
+      expect(Number(left[0]?.n ?? 0)).toBe(0);
+    } finally {
+      _setRetrievalProofSearchForTests(null);
+      await engine.executeRaw(`DELETE FROM query_cache WHERE id = 'proof-cache-transient'`);
     }
   });
 

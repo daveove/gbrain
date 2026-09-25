@@ -1,7 +1,7 @@
 import { readFileSync } from 'fs';
 import type { BrainEngine } from '../engine.ts';
 import { expandQuery } from '../search/expansion.ts';
-import { hybridSearchCached } from '../search/hybrid.ts';
+import { awaitPendingSearchCacheWrites, hybridSearchCached } from '../search/hybrid.ts';
 import { setQueryCacheTouchObserver } from '../search/query-cache.ts';
 import { resolveSearchMode } from '../search/mode.ts';
 import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
@@ -349,6 +349,18 @@ async function readQueryCacheSnapshot(engine: BrainEngine): Promise<QueryCacheSn
   return snapshot;
 }
 
+/** Monotonic content-change counter. Hit-count bumps do not advance it. */
+async function readQueryCacheGeneration(engine: BrainEngine): Promise<bigint> {
+  const rows = await engine.executeRaw<{ n: string | number | null }>(
+    `SELECT n::text AS n FROM query_cache_generation WHERE id`,
+  );
+  const raw = rows[0]?.n;
+  if (typeof raw === 'bigint') return raw;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return BigInt(raw);
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) return BigInt(raw);
+  throw new Error('query_cache generation returned no counter');
+}
+
 /**
  * True when cache rows changed aside from ids this proof stored.
  * Deletes always count: a hit that is cleared before the next sample is
@@ -509,16 +521,23 @@ export async function runRetrievalProof(
   const before = await computeGraphFingerprint(engine, { searchConfig: pin.canonical });
   const results: RetrievalProofQuestionResult[] = [];
   const proofCacheWriteIds = new Set<string>();
+  let proofCacheWrites = 0;
   let cacheMutated = false;
   let cacheCursor = await readQueryCacheSnapshot(engine);
+  const cacheGenerationAtStart = await readQueryCacheGeneration(engine);
   setQueryCacheTouchObserver((event) => {
-    if (event.kind === 'write') proofCacheWriteIds.add(event.id);
+    if (event.kind === 'write') {
+      proofCacheWriteIds.add(event.id);
+      proofCacheWrites += 1;
+    }
   });
 
   const noteCache = async (): Promise<void> => {
     const now = await readQueryCacheSnapshot(engine);
     if (queryCacheDiverged(cacheCursor, now, proofCacheWriteIds)) cacheMutated = true;
     cacheCursor = now;
+    const generation = await readQueryCacheGeneration(engine);
+    if (generation - cacheGenerationAtStart > BigInt(proofCacheWrites)) cacheMutated = true;
   };
 
   try {
@@ -559,13 +578,18 @@ export async function runRetrievalProof(
     setQueryCacheTouchObserver(null);
   }
 
+  // Proof stores are asynchronous. Wait so their generation bumps are
+  // visible, then sample once more. An insert and delete inside one
+  // question advances the counter even when the row is gone again.
+  await awaitPendingSearchCacheWrites();
+  await noteCache();
+
   // Live config again. A change since the pin makes sha256 differ even
   // when the graph counts did not, so production_mutations cannot stay 0.
   // The watermark covers the case the hashes miss: a write during a
   // question that is undone before this snapshot. query_cache is sampled
   // around every question so a clear, prune, or foreign insert is visible
   // even when the row is gone again by the time the graph fingerprint matches.
-  await noteCache();
   const afterPin = await readProofSearchPin(engine);
   const after = await computeGraphFingerprint(engine, { searchConfig: afterPin.canonical });
   const watermarkAfter = await readCorpusMutationWatermark(engine);

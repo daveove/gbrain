@@ -406,6 +406,8 @@ interface ManifestOwnedLink {
   linkSource: string;
   originPageId: number;
   context: string;
+  /** xmin captured at insert. An identical upsert still advances it. */
+  xmin: string;
 }
 
 interface AppliedManifestLink {
@@ -416,11 +418,12 @@ interface AppliedManifestLink {
 
 /**
  * Delete a row only while it is still the version this manifest inserted.
- * addLink's ON CONFLICT DO UPDATE can change context and origin_field on
- * that same id after the insert commits. Deleting by id alone would remove
- * the other writer's committed update. A row that no longer matches is left
- * in place. A row that is already gone counts as rolled back.
- * Returns how many rows were left because another writer owns them.
+ * addLink's ON CONFLICT DO UPDATE rewrites the row even when context and
+ * origin_field stay the same, which advances xmin. Deleting by column
+ * values alone would remove that other writer's committed upsert. A row
+ * whose xmin moved is left in place. A row that is already gone counts as
+ * rolled back. Returns how many rows were left because another writer owns
+ * them.
  */
 async function rollbackAppliedLinks(
   engine: BrainEngine,
@@ -442,6 +445,7 @@ async function rollbackAppliedLinks(
             AND origin_field IS NULL
             AND link_kind IS NULL
             AND resolution_type IS NULL
+            AND xmin::text::bigint = $8::bigint
           RETURNING id`,
         [
           item.linkId,
@@ -451,6 +455,7 @@ async function rollbackAppliedLinks(
           item.owned.linkSource,
           item.owned.originPageId,
           item.owned.context,
+          item.owned.xmin,
         ],
       );
       if (removed.length === 1) continue;
@@ -534,6 +539,12 @@ function readInsertedLinkId(value: unknown): number | null {
   return null;
 }
 
+function readInsertedXmin(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) return String(value);
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) return value;
+  return null;
+}
+
 /**
  * Recheck `no_incident_edge` and insert in one transaction.
  *
@@ -590,6 +601,7 @@ async function insertNoIncidentEdge(
       incident_n: string;
       inserted_n: string;
       inserted_id: string | number | null;
+      inserted_xmin: string | number | null;
     }>(
       `WITH incident AS (
          SELECT 1 FROM links l
@@ -600,12 +612,13 @@ async function insertNoIncidentEdge(
          SELECT $1, $2, $3, $4, $5, $1
          WHERE NOT EXISTS (SELECT 1 FROM incident)
          ON CONFLICT ON CONSTRAINT links_from_to_type_source_origin_unique DO NOTHING
-         RETURNING id
+         RETURNING id, xmin::text::bigint AS row_xmin
        )
        SELECT
          (SELECT count(*)::text FROM incident) AS incident_n,
          (SELECT count(*)::text FROM inserted) AS inserted_n,
-         (SELECT id::text FROM inserted) AS inserted_id`,
+         (SELECT id::text FROM inserted) AS inserted_id,
+         (SELECT row_xmin::text FROM inserted) AS inserted_xmin`,
       [from.id, to.id, linkType, context, linkSource],
     );
     const incidentN = Number(rows[0]?.incident_n ?? 0);
@@ -616,6 +629,8 @@ async function insertNoIncidentEdge(
     // Still inside the insert transaction. A missing id aborts that insert
     // instead of recording a row this run cannot later delete by id.
     if (linkId === null) throw new Error(`manifest row ${row.id}: inserted link id missing`);
+    const xmin = readInsertedXmin(rows[0]?.inserted_xmin);
+    if (xmin === null) throw new Error(`manifest row ${row.id}: inserted link xmin missing`);
     return {
       status: 'inserted',
       linkId,
@@ -626,6 +641,7 @@ async function insertNoIncidentEdge(
         linkSource,
         originPageId: from.id,
         context,
+        xmin,
       },
     };
   });
