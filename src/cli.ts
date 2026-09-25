@@ -562,14 +562,9 @@ async function main() {
   }
 
   // DAV-6220 usefulness only. Bare `gbrain graph <slug>` stays on traverse_graph.
-  // This branch runs before validateCommandFlags, so an unknown flag such as
-  // `--dry-run` (or a valued flag whose next token is another option) must be
-  // rejected here, before dispatch connects or applies.
-  if (command === 'graph') {
-    const { rejectGraphUsefulnessFlagProblem } = await import('./commands/graph-usefulness.ts');
-    rejectGraphUsefulnessFlagProblem(subArgs);
-    if (await (await import('./commands/graph-usefulness-dispatch.ts')).dispatchGraphUsefulness(subArgs, connectEngine)) return;
-  }
+  // This runs before validateCommandFlags, so dispatch rejects bad usefulness
+  // flags itself before it connects or applies.
+  if (command === 'graph' && await (await import('./commands/graph-usefulness-dispatch.ts')).dispatchGraphUsefulness(subArgs, connectEngine)) return;
 
   // Per-command --help. For `agent`, the scan STOPS at the `--` terminator:
   // everything after it is literal prompt text, so `agent run -- --help`

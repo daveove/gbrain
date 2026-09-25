@@ -14,6 +14,7 @@ import {
   graphUsefulnessSubcommand,
   graphUsefulnessWantsHelp,
   printGraphUsefulnessHelp,
+  rejectGraphUsefulnessFlagProblem,
   runGraphUsefulness,
 } from './graph-usefulness.ts';
 
@@ -23,6 +24,7 @@ export async function dispatchGraphUsefulness(
 ): Promise<boolean> {
   const sub = graphUsefulnessSubcommand(args);
   if (!sub) return false;
+  rejectGraphUsefulnessFlagProblem(args);
 
   // Help is local text. Do this before config load, thin-client refusal, and
   // engine connect so `gbrain graph measure --help` works with no brain.

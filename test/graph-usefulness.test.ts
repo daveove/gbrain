@@ -365,11 +365,10 @@ describe('graph CLI routing', () => {
     const usefulness = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness.ts'), 'utf8');
     expect(cli).not.toContain("'graph', 'graph-query'");
     expect(cli).toContain('dispatchGraphUsefulness');
-    expect(cli).toContain('rejectGraphUsefulnessFlagProblem');
-    const rejectAt = cli.indexOf('rejectGraphUsefulnessFlagProblem');
-    const dispatchAt = cli.indexOf('dispatchGraphUsefulness');
+    const dispatch = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
+    const rejectAt = dispatch.indexOf('rejectGraphUsefulnessFlagProblem(args)');
     expect(rejectAt).toBeGreaterThan(-1);
-    expect(rejectAt).toBeLessThan(dispatchAt);
+    expect(rejectAt).toBeLessThan(dispatch.indexOf('await connectEngine()'));
     expect(cli).not.toContain("case 'graph':");
     expect(usefulness).not.toContain('runGraphQuery');
   });
