@@ -72,6 +72,42 @@ function clampInt(v: unknown, fallback: number, min: number): number {
   return Number.isFinite(n) && n >= min ? n : fallback;
 }
 
+/**
+ * Fold flat DB-plane `search.adaptive_return*` keys onto `target.search`.
+ * File-plane values already on `target.search` win per key. `gbrain config set`
+ * stores these as strings; hybrid search reads them through
+ * `adaptiveReturnFromConfig`.
+ */
+export async function mergeAdaptiveReturnFromDb(
+  target: Record<string, unknown>,
+  dbStr: (key: string) => Promise<string | undefined>,
+): Promise<void> {
+  const existing = (target.search && typeof target.search === 'object' && !Array.isArray(target.search))
+    ? { ...(target.search as Record<string, unknown>) }
+    : {};
+  let filled = false;
+  const enabled = await dbStr('search.adaptive_return');
+  if (existing.adaptive_return === undefined && (enabled === 'true' || enabled === 'false')) {
+    existing.adaptive_return = enabled === 'true';
+    filled = true;
+  }
+  const ints: Array<[string, string]> = [
+    ['adaptive_return_entity_max', 'search.adaptive_return_entity_max'],
+    ['adaptive_return_other_max', 'search.adaptive_return_other_max'],
+    ['adaptive_return_min_keep', 'search.adaptive_return_min_keep'],
+  ];
+  for (const [field, key] of ints) {
+    if (existing[field] !== undefined) continue;
+    const raw = await dbStr(key);
+    if (raw === undefined) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    existing[field] = n;
+    filled = true;
+  }
+  if (filled || Object.keys(existing).length > 0) target.search = existing;
+}
+
 /** Read adaptive-return defaults from a loaded config object (DB or file plane). */
 export function adaptiveReturnFromConfig(
   cfg: Record<string, unknown> | null | undefined,

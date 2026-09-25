@@ -561,6 +561,11 @@ async function main() {
     return;
   }
 
+  // DAV-6220 usefulness only. Bare `gbrain graph <slug>` stays on traverse_graph.
+  // This runs before validateCommandFlags, so dispatch rejects bad usefulness
+  // flags itself before it connects or applies.
+  if (command === 'graph' && await (await import('./commands/graph-usefulness-dispatch.ts')).dispatchGraphUsefulness(subArgs, connectEngine)) return;
+
   // Per-command --help. For `agent`, the scan STOPS at the `--` terminator:
   // everything after it is literal prompt text, so `agent run -- --help`
   // must submit the prompt, never print help (cathedral-6 eng review).
@@ -3848,6 +3853,7 @@ LINKS
   link-sources                       List provenances in use, with edge counts
   backlinks <slug>                   Incoming links
   graph <slug> [--depth N]           Traverse link graph (nodes locally; remote MCP defaults to bidirectional edges)
+  graph measure|relations|retrieval-proof   DAV-6220 graph usefulness (read-only + receipted applies)
   graph-query <slug> [--type T]      Edge-based traversal with type/direction filters
         [--depth N] [--direction in|out|both]
 

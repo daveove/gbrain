@@ -371,6 +371,15 @@ function compileIntentPatternConfig(
   return errors;
 }
 
+/** Fresh bank set for one raw `search.intent_patterns` value. Does not touch process or engine caches. */
+export function intentBanksFromRaw(
+  raw: string | null | undefined,
+): Record<IntentPatternBank, RegExp[]> {
+  const banks = emptyBankSet();
+  compileIntentPatternConfig(raw, banks);
+  return banks;
+}
+
 /**
  * Compile + install the `search.intent_patterns` config value (raw string
  * from engine.getConfig; null/undefined/'' clears the extensions). Returns
