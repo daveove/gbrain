@@ -387,6 +387,8 @@ link_types:
   - name: authored
     inverse: authored_by
   - name: attributed_to
+  # Write vocabulary only. No inference, so extraction does not emit this verb.
+  - name: contains
 
 mapping_rules:
   # All retype rules write frontmatter.legacy_type per D8 (unless

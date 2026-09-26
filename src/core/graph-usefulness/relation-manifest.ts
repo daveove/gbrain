@@ -25,6 +25,7 @@ import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
+import { runPagedMeasure, type PagedMeasureResult, type PagedScanOpts } from './paged-runner.ts';
 import type {
   MutationReceipt,
   RelationApplyResult,
@@ -247,6 +248,12 @@ export interface ApplyRelationManifestOpts {
    * An explicit id on the row wins. Omitted opts fall back to `default`.
    */
   defaultSourceId?: string;
+  /**
+   * When set, before/after fingerprints walk by page id instead of scanning
+   * the whole brain in one statement. The walk covers every resolved
+   * endpoint source, not only `sourceId`.
+   */
+  pageScan?: PagedScanOpts;
 }
 
 function fallbackSourceId(defaultSourceId: string | undefined): string {
@@ -260,6 +267,17 @@ function resolveRowSources(row: RelationManifestRow, defaultSourceId: string | u
   const toSrc = row.to_source_id ?? fallback;
   if (row.from_source_id === fromSrc && row.to_source_id === toSrc) return row;
   return { ...row, from_source_id: fromSrc, to_source_id: toSrc };
+}
+
+/** Distinct endpoint sources after row resolution, sorted for a stable hash. */
+function endpointSourceIds(rows: RelationManifestRow[], fallback: string): string[] {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    ids.add(row.from_source_id ?? fallback);
+    ids.add(row.to_source_id ?? fallback);
+  }
+  if (ids.size === 0) ids.add(fallback);
+  return [...ids].sort();
 }
 
 /**
@@ -527,6 +545,87 @@ async function commitReceiptOrUndo(
   }
 }
 
+function combinePagedFingerprints(
+  parts: Array<{
+    sourceId: string;
+    fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
+    seen_link_ids: number[];
+  }>,
+): Awaited<ReturnType<typeof computeGraphFingerprint>> {
+  const ordered = [...parts].sort((a, b) => a.sourceId.localeCompare(b.sourceId));
+  if (ordered.length === 1) return ordered[0]!.fingerprint;
+  // Cross-source edges are incident to both walks. Deduplicate link ids before
+  // summing link_rows / valid_links so an A-to-B apply bumps counts by 1.
+  const linkIds = new Set<number>();
+  for (const part of ordered) {
+    for (const id of part.seen_link_ids) linkIds.add(id);
+  }
+  const sha256 = createHash('sha256')
+    .update('paged-measure-sources-v1\n')
+    .update(JSON.stringify(ordered.map(part => ({
+      source_id: part.sourceId,
+      sha256: part.fingerprint.sha256,
+    }))))
+    .digest('hex');
+  const sum = (key: 'active_pages' | 'zero_degree_pages') =>
+    ordered.reduce((total, part) => total + part.fingerprint[key], 0);
+  return {
+    active_pages: sum('active_pages'),
+    link_rows: linkIds.size,
+    valid_links: linkIds.size,
+    zero_degree_pages: sum('zero_degree_pages'),
+    sha256,
+  };
+}
+
+/** Phase checkpoint path bound to this apply's receipt so a reused --checkpoint
+ * cannot return another run's completed before/after fingerprints. */
+function applyPhaseCheckpointPath(
+  base: string,
+  phase: 'before' | 'after',
+  sourceId: string,
+  receiptPath: string | undefined,
+): string {
+  const runId = receiptPath
+    ? createHash('sha256').update(receiptPath).digest('hex').slice(0, 16)
+    : 'no-receipt';
+  return `${base}.${phase}.${sourceId}.${runId}`;
+}
+
+async function fingerprintForApply(
+  engine: BrainEngine,
+  opts: ApplyRelationManifestOpts,
+  phase: 'before' | 'after',
+  sourceIds: string[],
+): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
+  if (!opts.pageScan) return computeGraphFingerprint(engine);
+  const ids = sourceIds.length > 0 ? sourceIds : [opts.pageScan.sourceId];
+  const parts: Array<{
+    sourceId: string;
+    fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
+    seen_link_ids: number[];
+  }> = [];
+  for (const sourceId of ids) {
+    const report: PagedMeasureResult = await runPagedMeasure(engine, {
+      sourceId,
+      cursor: opts.pageScan.cursor,
+      limit: opts.pageScan.limit,
+      checkpointPath: applyPhaseCheckpointPath(
+        opts.pageScan.checkpointPath,
+        phase,
+        sourceId,
+        opts.receiptPath,
+      ),
+    });
+    parts.push({
+      sourceId,
+      fingerprint: report.fingerprint,
+      seen_link_ids: report.seen_link_ids,
+    });
+  }
+  return combinePagedFingerprints(parts);
+}
+
 /**
  * Post-mutation fingerprint. When a receipt was reserved, a failed read
  * rolls committed rows back so they are not left applied beside an empty file.
@@ -535,9 +634,11 @@ async function fingerprintAfterMutation(
   engine: BrainEngine,
   receiptPath: string | undefined,
   appliedRows: AppliedManifestLink[],
+  opts: ApplyRelationManifestOpts,
+  sourceIds: string[],
 ): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
   try {
-    return await computeGraphFingerprint(engine);
+    return await fingerprintForApply(engine, opts, 'after', sourceIds);
   } catch (err) {
     const fpMessage = err instanceof Error ? err.message : String(err);
     if (!receiptPath) throw err;
@@ -722,8 +823,12 @@ export async function applyRelationManifest(
   const sha = manifestSha256(manifestRaw);
   const slice = (opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows)
     .map(row => resolveRowSources(row, opts.defaultSourceId));
+  const sourceIds = endpointSourceIds(
+    slice,
+    opts.pageScan?.sourceId ?? fallbackSourceId(opts.defaultSourceId),
+  );
   await assertActiveConcreteRowSources(engine, slice);
-  const before = await computeGraphFingerprint(engine);
+  const before = await fingerprintForApply(engine, opts, 'before', sourceIds);
   await assertActivePackLinkVocabulary(engine, slice);
   const createdAt = new Date().toISOString();
   const outcomes: RelationRowOutcome[] = [];
@@ -796,7 +901,7 @@ export async function applyRelationManifest(
     }
     let after: Awaited<ReturnType<typeof computeGraphFingerprint>>;
     try {
-      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
+      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks, opts, sourceIds);
     } catch (fpErr) {
       const fpMessage = fpErr instanceof Error ? fpErr.message : String(fpErr);
       throw new Error(`${message} (${fpMessage})`);
@@ -824,7 +929,7 @@ export async function applyRelationManifest(
     throw err;
   }
 
-  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
+  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks, opts, sourceIds);
   const applied = outcomes.filter(o => o.status === 'applied').length;
   const ready = outcomes.filter(o => o.status === 'dry_run' || o.status === 'applied').length;
   const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;

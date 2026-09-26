@@ -361,6 +361,9 @@ link_types:
 
   - name: mentions
 
+  # Write vocabulary only. No inference, so extraction does not emit this verb.
+  - name: contains
+
 # Frontmatter field → link verb mapping (FRONTMATTER_LINK_MAP).
 # Page-typed: the source page's type determines which verb applies.
 # Untyped: applies to any page type (e.g. `sources:` → discussed_in).

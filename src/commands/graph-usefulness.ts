@@ -7,7 +7,7 @@
  */
 
 import type { BrainEngine } from '../core/engine.ts';
-import { measureGraphUsefulness } from '../core/graph-usefulness/measure.ts';
+import { runPagedMeasure } from '../core/graph-usefulness/paged-runner.ts';
 import {
   applyRelationManifest,
   loadRelationManifestFile,
@@ -46,6 +46,8 @@ export const GRAPH_USEFULNESS_SUBCOMMANDS = new Set([
 const FLAGS_WITH_VALUES = new Set([
   '--source',
   '--limit',
+  '--cursor',
+  '--checkpoint',
   '--receipt-out',
   '--out',
   '--depth',
@@ -145,12 +147,24 @@ export interface GraphUsefulnessFlagProblem {
 function legalGraphUsefulnessFlags(sub: string, action: string | undefined): { legal: Set<string>; valued: Set<string> } {
   const legal = new Set<string>(['--help', '--json', '--source']);
   const valued = new Set<string>(['--source']);
-  if (sub === 'measure' || sub === 'stats') return { legal, valued };
+  if (sub === 'measure' || sub === 'stats') {
+    legal.add('--cursor');
+    legal.add('--checkpoint');
+    legal.add('--limit');
+    valued.add('--cursor');
+    valued.add('--checkpoint');
+    valued.add('--limit');
+    return { legal, valued };
+  }
   if (sub === 'relations') {
     legal.add('--limit');
     legal.add('--receipt-out');
+    legal.add('--cursor');
+    legal.add('--checkpoint');
     valued.add('--limit');
     valued.add('--receipt-out');
+    valued.add('--cursor');
+    valued.add('--checkpoint');
     if (action === 'verify') {
       legal.add('--write-receipt');
     } else if (action === 'apply') {
@@ -272,6 +286,27 @@ async function applyManifestOrRejectSource(
     }
     throw e;
   }
+}
+
+function parseCursorFlag(args: string[]): { ok: true; value: number | undefined } | { ok: false } {
+  let raw: string | undefined;
+  try {
+    raw = readSeparatedOrInlineFlag(args, '--cursor');
+  } catch (e) {
+    if (e instanceof MissingGraphFlagValueError) {
+      console.error(e.message);
+      setCliExitVerdict(2);
+      return { ok: false };
+    }
+    throw e;
+  }
+  if (raw === undefined) return { ok: true, value: undefined };
+  if (!/^\d+$/.test(raw)) {
+    console.error('--cursor requires a non-negative integer');
+    setCliExitVerdict(2);
+    return { ok: false };
+  }
+  return { ok: true, value: Number(raw) };
 }
 
 function parseSource(args: string[]): { sourceId?: string } {
@@ -401,9 +436,34 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
   }
 
   if (sub === 'measure' || sub === 'stats') {
+    const explicit = parseSource(args).sourceId ?? null;
     const scope = await resolveUsefulnessReadScope(engine, args);
     if (!scope) return;
-    const report = await measureGraphUsefulness(engine, scope);
+    if (!explicit || explicit === ALL_SOURCES || !scope.sourceId) {
+      console.error('graph measure requires --source naming one active source');
+      setCliExitVerdict(2);
+      return;
+    }
+    const cursor = parseCursorFlag(args);
+    if (!cursor.ok) return;
+    if (cursor.value === undefined) {
+      console.error('graph measure requires --cursor (0 starts at the first page id)');
+      setCliExitVerdict(2);
+      return;
+    }
+    const checkpointPath = takeFlag(args, '--checkpoint');
+    if (!checkpointPath) {
+      console.error('graph measure requires --checkpoint');
+      setCliExitVerdict(2);
+      return;
+    }
+    const limit = parseLimitArg(args);
+    const report = await runPagedMeasure(engine, {
+      sourceId: scope.sourceId,
+      cursor: cursor.value,
+      limit: limit ?? 2000,
+      checkpointPath,
+    });
     if (json) {
       console.log(JSON.stringify(report, null, 2));
       return;
@@ -457,6 +517,20 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
     }
     const receiptOut = takeFlag(args, '--receipt-out')
       ?? `docs/progress/DAV-6220/mutation-receipt-${Date.now()}.json`;
+    const cursor = parseCursorFlag(args);
+    if (!cursor.ok) return;
+    if (action === 'apply' && cursor.value === undefined) {
+      console.error('relations apply requires --cursor (0 starts at the first page id)');
+      setCliExitVerdict(2);
+      return;
+    }
+    const checkpointPath = takeFlag(args, '--checkpoint') ?? receiptOut;
+    const pageScan = cursor.value === undefined ? undefined : {
+      sourceId: defaultSourceId,
+      cursor: cursor.value,
+      limit: limit ?? 2000,
+      checkpointPath,
+    };
     const { manifest, raw } = loadRelationManifestFile(manifestPath);
 
     if (action === 'verify') {
@@ -465,6 +539,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
         limit,
         defaultSourceId,
         receiptPath: hasFlag(args, '--write-receipt') ? receiptOut : undefined,
+        pageScan,
       });
       if (!result) return;
       if (json) {
@@ -490,6 +565,7 @@ export async function runGraphUsefulness(engine: BrainEngine, args: string[]): P
         defaultSourceId,
         receiptPath: receiptOut,
         operator: process.env.USER ?? 'gbrain',
+        pageScan,
       });
       if (!result) return;
       if (json) {
@@ -592,10 +668,13 @@ Traverse (traverse_graph operation; source scope and thin-client routing apply):
   gbrain graph <slug> [--depth N] [--link-type T] [--direction in|out|both] [--source <id>]
 
 DAV-6220 usefulness:
-  measure [--json] [--source <id>]
-      Read-only connectivity + junk-slug samples.
-      An explicit --source is resolved and must name an active source.
-      An omitted --source measures the whole brain.
+  measure [--json] --source <id> --cursor <id> --checkpoint <path> [--limit N]
+      Read-only connectivity + junk-slug samples for one source.
+      --source is required and must name an active source. __all__ is rejected.
+      --cursor is the last finished page id. 0 starts at the first page.
+      A nonzero --cursor requires a checkpoint that already counted the prefix.
+      Each page statement is source_id = $1 AND id > $2 ORDER BY id LIMIT $3.
+      --checkpoint stores partial counts so a killed run does not rescan a finished source.
 
   relations verify <manifest.json> [--json] [--limit N] [--write-receipt] [--source <id>]
       Re-check manifest guards without writing links.
@@ -603,8 +682,10 @@ DAV-6220 usefulness:
       (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
 
   relations apply <manifest.json> [--apply] [--yes] [--limit N]
-      [--receipt-out <path>] [--json] [--source <id>]
+      [--receipt-out <path>] [--json] --source <id> --cursor <id> [--checkpoint <path>]
       Dry-run by default. --apply --yes writes manifest rows that still pass guards.
+      --cursor is required. Before and after fingerprints walk every resolved endpoint source by page id.
+      --limit bounds both the manifest slice and the page-id page size (default 2000).
       Omitted row source ids use the resolved CLI source
       (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
       A row that sets from_source_id or to_source_id keeps that value.
@@ -630,7 +711,7 @@ DAV-6220 usefulness:
       changes, or the corpus mutation watermark changes.
 
 Valued flags accept both --name value and --name=value
-(--limit, --source, --receipt-out, --out). An empty value, or a following
+(--limit, --source, --cursor, --checkpoint, --receipt-out, --out). An empty value, or a following
 token that starts with '-', is rejected before apply.
 Unknown flags are rejected before connect (for example --dry-run).
 Flags after -- are positional. They do not count as --apply, --yes, or --help.
