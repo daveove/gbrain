@@ -98,6 +98,7 @@ describe('paged measure cursor and archived endpoints', () => {
       degree_counts: { '0': 1 },
       junk: {},
       seen_link_ids: [],
+      identity_hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     }) + '\n');
 
     const report = await runPagedMeasure(engine, {
@@ -356,6 +357,30 @@ describe('paged fingerprint identities and degree', () => {
     expect(report.median_degree).toBe(1);
     expect(report.zero_degree_pages).toBe(0);
   });
+  test('chunk rewrite changes the paged fingerprint sha256', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('chunk-src', 'chunk-src', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'chunk-src'`,
+    );
+    await engine.putPage('topics/chunk-page', {
+      title: 'Chunk', compiled_truth: 'chunk body', type: 'note',
+    }, { sourceId: 'chunk-src' });
+    await engine.upsertChunks('topics/chunk-page', [
+      { chunk_index: 0, chunk_text: 'chunk body v1', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'chunk-src' });
+    const before = await runPagedMeasure(engine, {
+      sourceId: 'chunk-src', cursor: 0, limit: 50, checkpointPath: join(dir, 'chunk-before.json'),
+    });
+    await engine.upsertChunks('topics/chunk-page', [
+      { chunk_index: 0, chunk_text: 'chunk body v2 rewritten', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'chunk-src' });
+    const after = await runPagedMeasure(engine, {
+      sourceId: 'chunk-src', cursor: 0, limit: 50, checkpointPath: join(dir, 'chunk-after.json'),
+    });
+    expect(after.active_pages).toBe(before.active_pages);
+    expect(after.fingerprint.sha256).not.toBe(before.fingerprint.sha256);
+  });
+
 });
 
 describe('paged multi-source fingerprint combine', () => {
