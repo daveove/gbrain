@@ -578,6 +578,20 @@ function combinePagedFingerprints(
   };
 }
 
+/** Phase checkpoint path bound to this apply's receipt so a reused --checkpoint
+ * cannot return another run's completed before/after fingerprints. */
+function applyPhaseCheckpointPath(
+  base: string,
+  phase: 'before' | 'after',
+  sourceId: string,
+  receiptPath: string | undefined,
+): string {
+  const runId = receiptPath
+    ? createHash('sha256').update(receiptPath).digest('hex').slice(0, 16)
+    : 'no-receipt';
+  return `${base}.${phase}.${sourceId}.${runId}`;
+}
+
 async function fingerprintForApply(
   engine: BrainEngine,
   opts: ApplyRelationManifestOpts,
@@ -596,7 +610,12 @@ async function fingerprintForApply(
       sourceId,
       cursor: opts.pageScan.cursor,
       limit: opts.pageScan.limit,
-      checkpointPath: `${opts.pageScan.checkpointPath}.${phase}.${sourceId}`,
+      checkpointPath: applyPhaseCheckpointPath(
+        opts.pageScan.checkpointPath,
+        phase,
+        sourceId,
+        opts.receiptPath,
+      ),
     });
     parts.push({
       sourceId,

@@ -21,7 +21,7 @@ gbrain graph relations verify /path/to/relation-manifest.json --json
 # Dry-run by default; bounded apply requires --apply --yes.
 # --source and --cursor are required. Fingerprints walk every resolved endpoint source.
 gbrain graph relations apply /path/to/relation-manifest.json \
-  --source <source-id> --cursor 0 \
+  --source <source-id> --cursor 0 --apply --yes \
   --receipt-out docs/progress/DAV-6220/mutation-receipt-<id>.json
 
 # Ten-question (or smaller) retrieval proof (read-only)

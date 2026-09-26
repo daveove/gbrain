@@ -262,6 +262,13 @@ export async function runPagedMeasure(
     throw new Error('--limit requires a positive integer');
   }
   const existing = readCheckpoint(opts.checkpointPath, opts.sourceId);
+  // Gap check before the done fast path: a completed checkpoint only covers
+  // rows through its cursor, so a higher --cursor must not return it.
+  if (existing && existing.cursor < opts.cursor) {
+    throw new Error(
+      `Checkpoint cursor ${existing.cursor} is behind --cursor ${opts.cursor}; refusing to skip a gap`,
+    );
+  }
   if (existing?.done) return resultFromCheckpoint(existing);
   // A nonzero --cursor with no checkpoint would zero every aggregate and
   // silently omit earlier pages. Resume only from a compatible checkpoint.
@@ -272,11 +279,6 @@ export async function runPagedMeasure(
     );
   }
   const checkpoint = existing ?? emptyCheckpoint(opts.sourceId, opts.cursor);
-  if (existing && existing.cursor < opts.cursor) {
-    throw new Error(
-      `Checkpoint cursor ${existing.cursor} is behind --cursor ${opts.cursor}; refusing to skip a gap`,
-    );
-  }
   const seen = new Set(checkpoint.seen_link_ids);
 
   for (;;) {

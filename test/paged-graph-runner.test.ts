@@ -114,6 +114,30 @@ describe('paged measure cursor and archived endpoints', () => {
     expect(saved.cursor).toBe(lateId);
   });
 
+  test('rejects a higher --cursor against a completed checkpoint', async () => {
+    const checkpointPath = join(dir, 'done-gap-checkpoint.json');
+    writeFileSync(checkpointPath, JSON.stringify({
+      source_id: 'paged-resume',
+      cursor: 10,
+      done: true,
+      active_pages: 1,
+      link_rows: 0,
+      valid_links: 0,
+      degree_sum: 0,
+      zero_degree_pages: 1,
+      degree_counts: { '0': 1 },
+      junk: {},
+      seen_link_ids: [],
+      identity_hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    }) + '\n');
+    await expect(runPagedMeasure(engine, {
+      sourceId: 'paged-resume',
+      cursor: 999,
+      limit: 10,
+      checkpointPath,
+    })).rejects.toThrow(/behind --cursor 999/);
+  });
+
   test('excludes links whose endpoint source is archived from live_edge counts', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, archived) VALUES
@@ -439,5 +463,57 @@ describe('paged multi-source fingerprint combine', () => {
     expect(result.after.link_rows).toBe(result.before.link_rows + 1);
     expect(result.after.valid_links).toBe(result.before.valid_links + 1);
     expect(result.before.sha256).not.toBe(result.after.sha256);
+  });
+
+  test('reused --checkpoint with a new receipt does not return the prior run fingerprints', async () => {
+    await engine.putPage('topics/bind-from', {
+      title: 'Bind from', compiled_truth: 'bind from', type: 'note',
+    }, { sourceId: 'xa' });
+    await engine.putPage('topics/bind-to', {
+      title: 'Bind to', compiled_truth: 'bind to', type: 'note',
+    }, { sourceId: 'xa' });
+    const raw = relationManifest([{
+      id: 'bind-xa',
+      from_slug: 'topics/bind-from',
+      to_slug: 'topics/bind-to',
+      from_source_id: 'xa',
+      to_source_id: 'xa',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const manifest = parseRelationManifest(raw);
+    const sharedCheckpoint = join(dir, 'shared-apply-checkpoint.json');
+    const first = await applyRelationManifest(engine, manifest, raw, {
+      apply: true,
+      receiptPath: join(dir, 'bind-receipt-1.json'),
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: 0,
+        limit: 50,
+        checkpointPath: sharedCheckpoint,
+      },
+    });
+    expect(first.applied).toBe(1);
+    expect(first.before.sha256).not.toBe(first.after.sha256);
+
+    // Second run shares the checkpoint base but uses a different receipt.
+    // Dry-run must fingerprint the live graph (link already present), not the
+    // first run's completed before/after pair.
+    const second = await applyRelationManifest(engine, manifest, raw, {
+      apply: false,
+      receiptPath: join(dir, 'bind-receipt-2.json'),
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: 0,
+        limit: 50,
+        checkpointPath: sharedCheckpoint,
+      },
+    });
+    expect(second.applied).toBe(0);
+    expect(second.before.sha256).toBe(second.after.sha256);
+    expect(second.before.sha256).toBe(first.after.sha256);
   });
 });
