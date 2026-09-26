@@ -157,7 +157,10 @@ function mergeJunk(checkpoint: Checkpoint, slugs: string[]): void {
 
 /**
  * Walk one source from the checkpoint cursor, or from `opts.cursor` when
- * the checkpoint is absent. A finished checkpoint is returned as-is.
+ * the checkpoint is absent. A nonzero initial cursor without a checkpoint
+ * is rejected so aggregates cannot silently omit earlier pages. A finished
+ * checkpoint is returned as-is. Live edges require both endpoint pages
+ * undeleted and both endpoint sources not archived.
  */
 export async function runPagedMeasure(
   engine: BrainEngine,
@@ -171,6 +174,14 @@ export async function runPagedMeasure(
   }
   const existing = readCheckpoint(opts.checkpointPath, opts.sourceId);
   if (existing?.done) return resultFromCheckpoint(existing);
+  // A nonzero --cursor with no checkpoint would zero every aggregate and
+  // silently omit earlier pages. Resume only from a compatible checkpoint.
+  if (!existing && opts.cursor !== 0) {
+    throw new Error(
+      `--cursor ${opts.cursor} requires an existing checkpoint with accumulated counts; ` +
+      `use --cursor 0 to start, or pass --checkpoint naming a prior partial run`,
+    );
+  }
   const checkpoint = existing ?? emptyCheckpoint(opts.sourceId, opts.cursor);
   if (existing && existing.cursor < opts.cursor) {
     throw new Error(
@@ -202,10 +213,13 @@ export async function runPagedMeasure(
     if (liveIds.length > 0) {
       const links = await engine.executeRaw<LinkRow>(
         `SELECT l.id, l.from_page_id, l.to_page_id,
-                (fp.deleted_at IS NULL AND tp.deleted_at IS NULL) AS live_edge
+                (fp.deleted_at IS NULL AND tp.deleted_at IS NULL
+                 AND NOT fs.archived AND NOT ts.archived) AS live_edge
            FROM links l
            JOIN pages fp ON fp.id = l.from_page_id
            JOIN pages tp ON tp.id = l.to_page_id
+           JOIN sources fs ON fs.id = fp.source_id
+           JOIN sources ts ON ts.id = tp.source_id
           WHERE l.from_page_id = ANY($1::int[]) OR l.to_page_id = ANY($1::int[])`,
         [liveIds],
       );

@@ -672,6 +672,7 @@ DAV-6220 usefulness:
       Read-only connectivity + junk-slug samples for one source.
       --source is required and must name an active source. __all__ is rejected.
       --cursor is the last finished page id. 0 starts at the first page.
+      A nonzero --cursor requires a checkpoint that already counted the prefix.
       Each page statement is source_id = $1 AND id > $2 ORDER BY id LIMIT $3.
       --checkpoint stores partial counts so a killed run does not rescan a finished source.
 
@@ -683,7 +684,7 @@ DAV-6220 usefulness:
   relations apply <manifest.json> [--apply] [--yes] [--limit N]
       [--receipt-out <path>] [--json] --source <id> --cursor <id> [--checkpoint <path>]
       Dry-run by default. --apply --yes writes manifest rows that still pass guards.
-      --cursor is required. Before and after fingerprints walk that source by page id.
+      --cursor is required. Before and after fingerprints walk every resolved endpoint source by page id.
       --limit bounds both the manifest slice and the page-id page size (default 2000).
       Omitted row source ids use the resolved CLI source
       (--source, GBRAIN_SOURCE, .gbrain-source, registered path, or brain default).
