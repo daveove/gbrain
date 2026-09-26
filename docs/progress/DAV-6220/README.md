@@ -9,18 +9,22 @@ This directory holds **immutable receipts** for bounded graph-reconnection work 
 `gbrain graph <slug>` still runs **graph traversal** (`traverse_graph`). DAV-6220 subcommands are explicit: `measure`, `relations`, `retrieval-proof`.
 
 ```bash
-# Read-only baseline (pages, links, zero-degree count, junk-slug samples).
-# Archived sources are excluded from degree and junk samples.
-gbrain graph measure --json
+# Read-only baseline for one source (pages, links, zero-degree, junk samples).
+# --source, --cursor, and --checkpoint are required. 0 starts at the first page id.
+# Archived endpoint sources are excluded from degree and link counts.
+gbrain graph measure --source <source-id> --cursor 0 \
+  --checkpoint docs/progress/DAV-6220/measure-checkpoint-<source-id>.json --json
 
 # Verify a sealed relation manifest (no writes)
 gbrain graph relations verify /path/to/relation-manifest.json --json
 
-# Dry-run by default; bounded apply requires --apply --yes
+# Dry-run by default; bounded apply requires --apply --yes.
+# --source and --cursor are required. Fingerprints walk every resolved endpoint source.
 gbrain graph relations apply /path/to/relation-manifest.json \
+  --source <source-id> --cursor 0 \
   --receipt-out docs/progress/DAV-6220/mutation-receipt-<id>.json
 
-# Ten-question (or smaller) retrieval proof — read-only
+# Ten-question (or smaller) retrieval proof (read-only)
 gbrain graph retrieval-proof run /path/to/retrieval-proof.json \
   --out docs/progress/DAV-6220/retrieval-proof-live/independent-verification.json
 ```

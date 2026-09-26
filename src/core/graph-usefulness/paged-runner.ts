@@ -20,6 +20,24 @@ export interface PagedScanOpts {
   checkpointPath: string;
 }
 
+/** Paged measure result plus the link ids counted in this walk. */
+export interface PagedMeasureResult extends GraphMeasureResult {
+  seen_link_ids: number[];
+}
+
+/** Ordered page identity: `[source_id, slug]`. */
+type PageIdentity = [string, string];
+
+/**
+ * Ordered link identity matching `computeGraphFingerprint` link inputs:
+ * from source/slug, to source/slug, type, context, link_source, link_kind,
+ * origin source/slug.
+ */
+type LinkIdentity = [string, string, string, string, string, string, string, string, string, string];
+
+/** Page content revision inputs folded into the paged fingerprint. */
+type PageRevision = [string, string, string, string, string];
+
 interface Checkpoint {
   source_id: string;
   cursor: number;
@@ -32,12 +50,18 @@ interface Checkpoint {
   degree_counts: Record<string, number>;
   junk: Record<string, { count: number; examples: string[] }>;
   seen_link_ids: number[];
+  page_identities: PageIdentity[];
+  link_identities: LinkIdentity[];
+  page_revisions: PageRevision[];
 }
 
 interface PageRow {
   id: number | string;
   slug: string;
   live: boolean;
+  generation: number | string | null;
+  content_hash: string | null;
+  truth_md5: string | null;
 }
 
 interface LinkRow {
@@ -45,12 +69,33 @@ interface LinkRow {
   from_page_id: number | string;
   to_page_id: number | string;
   live_edge: boolean;
+  from_source_id: string;
+  from_slug: string;
+  to_source_id: string;
+  to_slug: string;
+  link_type: string;
+  context: string | null;
+  link_source: string | null;
+  link_kind: string | null;
+  origin_source_id: string | null;
+  origin_slug: string | null;
 }
 
 function intId(value: number | string): number {
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isSafeInteger(n)) throw new Error(`page id is not an integer: ${String(value)}`);
   return n;
+}
+
+function cmpTuple(a: string[], b: string[]): number {
+  const n = Math.max(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const left = a[i] ?? '';
+    const right = b[i] ?? '';
+    if (left < right) return -1;
+    if (left > right) return 1;
+  }
+  return 0;
 }
 
 function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
@@ -66,6 +111,20 @@ function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
     degree_counts: {},
     junk: {},
     seen_link_ids: [],
+    page_identities: [],
+    link_identities: [],
+    page_revisions: [],
+  };
+}
+
+function normalizeCheckpoint(parsed: Checkpoint): Checkpoint {
+  return {
+    ...emptyCheckpoint(parsed.source_id, parsed.cursor),
+    ...parsed,
+    page_identities: Array.isArray(parsed.page_identities) ? parsed.page_identities : [],
+    link_identities: Array.isArray(parsed.link_identities) ? parsed.link_identities : [],
+    page_revisions: Array.isArray(parsed.page_revisions) ? parsed.page_revisions : [],
+    seen_link_ids: Array.isArray(parsed.seen_link_ids) ? parsed.seen_link_ids : [],
   };
 }
 
@@ -75,7 +134,7 @@ function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
   if (parsed.source_id !== sourceId) {
     throw new Error(`Checkpoint ${path} is for source ${parsed.source_id}, not ${sourceId}`);
   }
-  return parsed;
+  return normalizeCheckpoint(parsed);
 }
 
 function writeCheckpoint(path: string, checkpoint: Checkpoint): void {
@@ -108,7 +167,7 @@ export function medianFromHistogram(counts: Record<string, number>): number {
   return at(lower) + (at(upper) - at(lower)) * (rank - lower);
 }
 
-function resultFromCheckpoint(checkpoint: Checkpoint): GraphMeasureResult {
+function resultFromCheckpoint(checkpoint: Checkpoint): PagedMeasureResult {
   const avg = checkpoint.active_pages === 0 ? 0 : checkpoint.degree_sum / checkpoint.active_pages;
   const median = medianFromHistogram(checkpoint.degree_counts);
   const junk_slug_samples: JunkSlugSample[] = Object.entries(checkpoint.junk)
@@ -125,22 +184,42 @@ function resultFromCheckpoint(checkpoint: Checkpoint): GraphMeasureResult {
     valid_links: checkpoint.valid_links,
     zero_degree_pages: checkpoint.zero_degree_pages,
   };
-  const sha256 = createHash('sha256')
-    .update('paged-measure-v1\n')
-    .update(JSON.stringify({
-      source_id: checkpoint.source_id,
-      ...counts,
-      degree_sum: checkpoint.degree_sum,
-      median_degree: median,
-    }))
-    .digest('hex');
-  const fingerprint: GraphFingerprint = { ...counts, sha256 };
+  const pages = [...checkpoint.page_identities].sort(cmpTuple);
+  const links = [...checkpoint.link_identities].sort(cmpTuple);
+  const revisions = [...checkpoint.page_revisions].sort(cmpTuple);
+  const hash = createHash('sha256');
+  // v2 folds ordered page/link identities and page revisions so same-cardinality
+  // edge rewrites change sha256, matching GraphFingerprint's contract.
+  hash.update('paged-measure-v2\n');
+  hash.update(JSON.stringify({
+    source_id: checkpoint.source_id,
+    ...counts,
+    degree_sum: checkpoint.degree_sum,
+    median_degree: median,
+  }));
+  hash.update('\n');
+  for (const page of pages) {
+    hash.update(JSON.stringify(page));
+    hash.update('\n');
+  }
+  hash.update('\n');
+  for (const link of links) {
+    hash.update(JSON.stringify(link));
+    hash.update('\n');
+  }
+  hash.update('\n');
+  for (const rev of revisions) {
+    hash.update(JSON.stringify(rev));
+    hash.update('\n');
+  }
+  const fingerprint: GraphFingerprint = { ...counts, sha256: hash.digest('hex') };
   return {
     ...counts,
     avg_degree: avg,
     median_degree: median,
     junk_slug_samples,
     fingerprint,
+    seen_link_ids: [...checkpoint.seen_link_ids],
   };
 }
 
@@ -155,17 +234,33 @@ function mergeJunk(checkpoint: Checkpoint, slugs: string[]): void {
   }
 }
 
+function linkIdentityOf(link: LinkRow): LinkIdentity {
+  return [
+    link.from_source_id,
+    link.from_slug,
+    link.to_source_id,
+    link.to_slug,
+    link.link_type,
+    link.context ?? '',
+    link.link_source ?? '',
+    link.link_kind ?? '',
+    link.origin_source_id ?? '',
+    link.origin_slug ?? '',
+  ];
+}
+
 /**
  * Walk one source from the checkpoint cursor, or from `opts.cursor` when
  * the checkpoint is absent. A nonzero initial cursor without a checkpoint
  * is rejected so aggregates cannot silently omit earlier pages. A finished
  * checkpoint is returned as-is. Live edges require both endpoint pages
- * undeleted and both endpoint sources not archived.
+ * undeleted and both endpoint sources not archived. The fingerprint hashes
+ * ordered page/link identities and page revisions, not aggregates alone.
  */
 export async function runPagedMeasure(
   engine: BrainEngine,
   opts: PagedScanOpts,
-): Promise<GraphMeasureResult> {
+): Promise<PagedMeasureResult> {
   if (!Number.isSafeInteger(opts.cursor) || opts.cursor < 0) {
     throw new Error('--cursor requires a non-negative integer');
   }
@@ -192,7 +287,9 @@ export async function runPagedMeasure(
 
   for (;;) {
     const pages = await engine.executeRaw<PageRow>(
-      `SELECT id, slug, (deleted_at IS NULL) AS live
+      `SELECT id, slug, (deleted_at IS NULL) AS live,
+              generation, content_hash,
+              md5(COALESCE(compiled_truth, '')) AS truth_md5
          FROM pages
         WHERE source_id = $1 AND id > $2
         ORDER BY id
@@ -209,10 +306,24 @@ export async function runPagedMeasure(
     const liveIds = live.map(page => intId(page.id));
     checkpoint.active_pages += live.length;
     mergeJunk(checkpoint, live.map(page => page.slug));
+    for (const page of live) {
+      checkpoint.page_identities.push([opts.sourceId, page.slug]);
+      checkpoint.page_revisions.push([
+        opts.sourceId,
+        page.slug,
+        String(page.generation ?? ''),
+        page.content_hash ?? '',
+        page.truth_md5 ?? '',
+      ]);
+    }
 
     if (liveIds.length > 0) {
       const links = await engine.executeRaw<LinkRow>(
         `SELECT l.id, l.from_page_id, l.to_page_id,
+                fp.source_id AS from_source_id, fp.slug AS from_slug,
+                tp.source_id AS to_source_id, tp.slug AS to_slug,
+                l.link_type, l.context, l.link_source, l.link_kind,
+                op.source_id AS origin_source_id, op.slug AS origin_slug,
                 (fp.deleted_at IS NULL AND tp.deleted_at IS NULL
                  AND NOT fs.archived AND NOT ts.archived) AS live_edge
            FROM links l
@@ -220,6 +331,7 @@ export async function runPagedMeasure(
            JOIN pages tp ON tp.id = l.to_page_id
            JOIN sources fs ON fs.id = fp.source_id
            JOIN sources ts ON ts.id = tp.source_id
+           LEFT JOIN pages op ON op.id = l.origin_page_id
           WHERE l.from_page_id = ANY($1::int[]) OR l.to_page_id = ANY($1::int[])`,
         [liveIds],
       );
@@ -230,12 +342,18 @@ export async function runPagedMeasure(
         const linkId = intId(link.id);
         const fromId = intId(link.from_page_id);
         const toId = intId(link.to_page_id);
-        if (degree.has(fromId)) degree.set(fromId, (degree.get(fromId) ?? 0) + 1);
-        if (degree.has(toId)) degree.set(toId, (degree.get(toId) ?? 0) + 1);
+        // Self-links are one incident row; count them once like measure SQL.
+        if (fromId === toId) {
+          if (degree.has(fromId)) degree.set(fromId, (degree.get(fromId) ?? 0) + 1);
+        } else {
+          if (degree.has(fromId)) degree.set(fromId, (degree.get(fromId) ?? 0) + 1);
+          if (degree.has(toId)) degree.set(toId, (degree.get(toId) ?? 0) + 1);
+        }
         if (seen.has(linkId)) continue;
         seen.add(linkId);
         checkpoint.link_rows += 1;
         checkpoint.valid_links += 1;
+        checkpoint.link_identities.push(linkIdentityOf(link));
       }
       for (const deg of degree.values()) {
         checkpoint.degree_sum += deg;

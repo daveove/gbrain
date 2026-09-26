@@ -259,3 +259,160 @@ describe('paged relation apply scan scope', () => {
     expect(result.after.link_rows).toBe(result.before.link_rows + 1);
   });
 });
+
+
+describe('paged fingerprint identities and degree', () => {
+  let engine: BrainEngine;
+  let dir: string;
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    dir = mkdtempSync(join(tmpdir(), 'gbrain-paged-id-'));
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('id-src', 'id-src', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'id-src'`,
+    );
+  });
+
+  afterAll(async () => {
+    await engine.disconnect();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('same-cardinality edge rewrite changes the paged fingerprint sha256', async () => {
+    await engine.putPage('topics/id-a', { title: 'A', compiled_truth: 'a', type: 'note' }, { sourceId: 'id-src' });
+    await engine.putPage('topics/id-b', { title: 'B', compiled_truth: 'b', type: 'note' }, { sourceId: 'id-src' });
+    await engine.putPage('topics/id-c', { title: 'C', compiled_truth: 'c', type: 'note' }, { sourceId: 'id-src' });
+    await engine.putPage('topics/id-d', { title: 'D', compiled_truth: 'd', type: 'note' }, { sourceId: 'id-src' });
+    await engine.addLink(
+      'topics/id-a', 'topics/id-b', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'id-src', toSourceId: 'id-src' },
+    );
+    await engine.addLink(
+      'topics/id-c', 'topics/id-d', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'id-src', toSourceId: 'id-src' },
+    );
+    const beforePath = join(dir, 'id-before.json');
+    const before = await runPagedMeasure(engine, {
+      sourceId: 'id-src', cursor: 0, limit: 50, checkpointPath: beforePath,
+    });
+    expect(before.link_rows).toBe(2);
+
+    // Swap to A-C and B-D: same counts, different identities.
+    await engine.executeRaw(
+      `DELETE FROM links WHERE from_page_id IN (
+         SELECT id FROM pages WHERE source_id = 'id-src'
+       ) OR to_page_id IN (
+         SELECT id FROM pages WHERE source_id = 'id-src'
+       )`,
+    );
+    await engine.addLink(
+      'topics/id-a', 'topics/id-c', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'id-src', toSourceId: 'id-src' },
+    );
+    await engine.addLink(
+      'topics/id-b', 'topics/id-d', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'id-src', toSourceId: 'id-src' },
+    );
+    const afterPath = join(dir, 'id-after.json');
+    const after = await runPagedMeasure(engine, {
+      sourceId: 'id-src', cursor: 0, limit: 50, checkpointPath: afterPath,
+    });
+    expect(after.link_rows).toBe(before.link_rows);
+    expect(after.active_pages).toBe(before.active_pages);
+    expect(after.fingerprint.sha256).not.toBe(before.fingerprint.sha256);
+  });
+
+  test('counts a self-link once in degree', async () => {
+    await engine.putPage('topics/id-self', {
+      title: 'Self', compiled_truth: 'self', type: 'note',
+    }, { sourceId: 'id-src' });
+    await engine.addLink(
+      'topics/id-self', 'topics/id-self', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'id-src', toSourceId: 'id-src' },
+    );
+    const checkpointPath = join(dir, 'self-degree.json');
+    // Isolate: measure only after truncating other id-src pages would be heavy.
+    // Instead assert the self page contributes degree 1 via a dedicated source.
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('self-src', 'self-src', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'self-src'`,
+    );
+    await engine.putPage('topics/only-self', {
+      title: 'OnlySelf', compiled_truth: 'only self', type: 'note',
+    }, { sourceId: 'self-src' });
+    await engine.addLink(
+      'topics/only-self', 'topics/only-self', 'ctx', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: 'self-src', toSourceId: 'self-src' },
+    );
+    const report = await runPagedMeasure(engine, {
+      sourceId: 'self-src', cursor: 0, limit: 50, checkpointPath: join(dir, 'only-self.json'),
+    });
+    expect(report.active_pages).toBe(1);
+    expect(report.link_rows).toBe(1);
+    expect(report.avg_degree).toBe(1);
+    expect(report.median_degree).toBe(1);
+    expect(report.zero_degree_pages).toBe(0);
+  });
+});
+
+describe('paged multi-source fingerprint combine', () => {
+  let engine: BrainEngine;
+  let dir: string;
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    dir = mkdtempSync(join(tmpdir(), 'gbrain-paged-xsrc-'));
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('xa', 'xa', false),
+         ('xb', 'xb', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/xa-page', {
+      title: 'XA', compiled_truth: 'xa', type: 'note',
+    }, { sourceId: 'xa' });
+    await engine.putPage('topics/xb-page', {
+      title: 'XB', compiled_truth: 'xb', type: 'note',
+    }, { sourceId: 'xb' });
+  });
+
+  afterAll(async () => {
+    await engine.disconnect();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('cross-source apply bumps combined link_rows by one, not two', async () => {
+    const raw = relationManifest([{
+      id: 'xa-xb',
+      from_slug: 'topics/xa-page',
+      to_slug: 'topics/xb-page',
+      from_source_id: 'xa',
+      to_source_id: 'xb',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const manifest = parseRelationManifest(raw);
+    const receiptPath = join(dir, 'xsrc-receipt.json');
+    const result = await applyRelationManifest(engine, manifest, raw, {
+      apply: true,
+      receiptPath,
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: 0,
+        limit: 50,
+        checkpointPath: receiptPath,
+      },
+    });
+    expect(result.applied).toBe(1);
+    expect(result.after.link_rows).toBe(result.before.link_rows + 1);
+    expect(result.after.valid_links).toBe(result.before.valid_links + 1);
+    expect(result.before.sha256).not.toBe(result.after.sha256);
+  });
+});

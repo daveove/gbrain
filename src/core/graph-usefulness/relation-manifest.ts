@@ -25,7 +25,7 @@ import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
-import { runPagedMeasure, type PagedScanOpts } from './paged-runner.ts';
+import { runPagedMeasure, type PagedMeasureResult, type PagedScanOpts } from './paged-runner.ts';
 import type {
   MutationReceipt,
   RelationApplyResult,
@@ -546,10 +546,20 @@ async function commitReceiptOrUndo(
 }
 
 function combinePagedFingerprints(
-  parts: Array<{ sourceId: string; fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>> }>,
+  parts: Array<{
+    sourceId: string;
+    fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
+    seen_link_ids: number[];
+  }>,
 ): Awaited<ReturnType<typeof computeGraphFingerprint>> {
   const ordered = [...parts].sort((a, b) => a.sourceId.localeCompare(b.sourceId));
   if (ordered.length === 1) return ordered[0]!.fingerprint;
+  // Cross-source edges are incident to both walks. Deduplicate link ids before
+  // summing link_rows / valid_links so an A-to-B apply bumps counts by 1.
+  const linkIds = new Set<number>();
+  for (const part of ordered) {
+    for (const id of part.seen_link_ids) linkIds.add(id);
+  }
   const sha256 = createHash('sha256')
     .update('paged-measure-sources-v1\n')
     .update(JSON.stringify(ordered.map(part => ({
@@ -557,12 +567,12 @@ function combinePagedFingerprints(
       sha256: part.fingerprint.sha256,
     }))))
     .digest('hex');
-  const sum = (key: 'active_pages' | 'link_rows' | 'valid_links' | 'zero_degree_pages') =>
+  const sum = (key: 'active_pages' | 'zero_degree_pages') =>
     ordered.reduce((total, part) => total + part.fingerprint[key], 0);
   return {
     active_pages: sum('active_pages'),
-    link_rows: sum('link_rows'),
-    valid_links: sum('valid_links'),
+    link_rows: linkIds.size,
+    valid_links: linkIds.size,
     zero_degree_pages: sum('zero_degree_pages'),
     sha256,
   };
@@ -576,15 +586,23 @@ async function fingerprintForApply(
 ): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
   if (!opts.pageScan) return computeGraphFingerprint(engine);
   const ids = sourceIds.length > 0 ? sourceIds : [opts.pageScan.sourceId];
-  const parts = [];
+  const parts: Array<{
+    sourceId: string;
+    fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
+    seen_link_ids: number[];
+  }> = [];
   for (const sourceId of ids) {
-    const report = await runPagedMeasure(engine, {
+    const report: PagedMeasureResult = await runPagedMeasure(engine, {
       sourceId,
       cursor: opts.pageScan.cursor,
       limit: opts.pageScan.limit,
       checkpointPath: `${opts.pageScan.checkpointPath}.${phase}.${sourceId}`,
     });
-    parts.push({ sourceId, fingerprint: report.fingerprint });
+    parts.push({
+      sourceId,
+      fingerprint: report.fingerprint,
+      seen_link_ids: report.seen_link_ids,
+    });
   }
   return combinePagedFingerprints(parts);
 }
