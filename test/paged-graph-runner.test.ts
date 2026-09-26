@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -7,6 +7,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
 import {
   medianFromHistogram,
+  readPagedSourceMutationWatermark,
   runPagedMeasure,
 } from '../src/core/graph-usefulness/paged-runner.ts';
 import {
@@ -86,6 +87,7 @@ describe('paged measure cursor and archived endpoints', () => {
     const earlyId = Number(ids[0]!.id);
     const lateId = Number(ids[1]!.id);
     const checkpointPath = join(dir, 'resume-checkpoint.json');
+    const resumeWatermark = await readPagedSourceMutationWatermark(engine, 'paged-resume');
     writeFileSync(checkpointPath, JSON.stringify({
       source_id: 'paged-resume',
       cursor: earlyId,
@@ -99,6 +101,7 @@ describe('paged measure cursor and archived endpoints', () => {
       junk: {},
       seen_link_ids: [],
       identity_hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      mutation_watermark: resumeWatermark,
     }) + '\n');
 
     const report = await runPagedMeasure(engine, {
@@ -116,6 +119,7 @@ describe('paged measure cursor and archived endpoints', () => {
 
   test('rejects a higher --cursor against a completed checkpoint', async () => {
     const checkpointPath = join(dir, 'done-gap-checkpoint.json');
+    const gapWatermark = await readPagedSourceMutationWatermark(engine, 'paged-resume');
     writeFileSync(checkpointPath, JSON.stringify({
       source_id: 'paged-resume',
       cursor: 10,
@@ -129,6 +133,7 @@ describe('paged measure cursor and archived endpoints', () => {
       junk: {},
       seen_link_ids: [],
       identity_hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      mutation_watermark: gapWatermark,
     }) + '\n');
     await expect(runPagedMeasure(engine, {
       sourceId: 'paged-resume',
@@ -136,6 +141,49 @@ describe('paged measure cursor and archived endpoints', () => {
       limit: 10,
       checkpointPath,
     })).rejects.toThrow(/behind --cursor 999/);
+  });
+
+  test('refuses a checkpoint after the source corpus mutates', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('wm-src', 'wm-src', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'wm-src'`,
+    );
+    await engine.putPage('topics/wm-early', {
+      title: 'WM early', compiled_truth: 'early', type: 'note',
+    }, { sourceId: 'wm-src' });
+    await engine.putPage('topics/wm-late', {
+      title: 'WM late', compiled_truth: 'late', type: 'note',
+    }, { sourceId: 'wm-src' });
+    const ids = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM pages WHERE source_id = 'wm-src' ORDER BY id`,
+    );
+    const earlyId = Number(ids[0]!.id);
+    const checkpointPath = join(dir, 'wm-checkpoint.json');
+    const watermark = await readPagedSourceMutationWatermark(engine, 'wm-src');
+    writeFileSync(checkpointPath, JSON.stringify({
+      source_id: 'wm-src',
+      cursor: earlyId,
+      done: false,
+      active_pages: 1,
+      link_rows: 0,
+      valid_links: 0,
+      degree_sum: 0,
+      zero_degree_pages: 1,
+      degree_counts: { '0': 1 },
+      junk: {},
+      seen_link_ids: [],
+      identity_hash: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+      mutation_watermark: watermark,
+    }) + '\n');
+    await engine.putPage('topics/wm-late', {
+      title: 'WM late', compiled_truth: 'late mutated', type: 'note',
+    }, { sourceId: 'wm-src' });
+    await expect(runPagedMeasure(engine, {
+      sourceId: 'wm-src',
+      cursor: earlyId,
+      limit: 50,
+      checkpointPath,
+    })).rejects.toThrow(/Corpus mutated during paged measure/);
   });
 
   test('excludes links whose endpoint source is archived from live_edge counts', async () => {
@@ -405,6 +453,37 @@ describe('paged fingerprint identities and degree', () => {
     expect(after.fingerprint.sha256).not.toBe(before.fingerprint.sha256);
   });
 
+  test('multimodal embedding revision changes the paged fingerprint sha256', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('mm-src', 'mm-src', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'mm-src'`,
+    );
+    await engine.putPage('topics/mm-page', {
+      title: 'MM', compiled_truth: 'mm body', type: 'note',
+    }, { sourceId: 'mm-src' });
+    await engine.upsertChunks('topics/mm-page', [
+      { chunk_index: 0, chunk_text: 'mm body', chunk_source: 'compiled_truth' },
+    ], { sourceId: 'mm-src' });
+    const before = await runPagedMeasure(engine, {
+      sourceId: 'mm-src', cursor: 0, limit: 50, checkpointPath: join(dir, 'mm-before.json'),
+    });
+    await engine.executeRaw(
+      `UPDATE content_chunks
+          SET embedding_image = array_fill(0.5, ARRAY[1024])::vector,
+              modality = 'image',
+              embedded_at = now()
+        WHERE page_id = (
+          SELECT id FROM pages WHERE slug = 'topics/mm-page' AND source_id = 'mm-src' AND deleted_at IS NULL
+        )
+          AND chunk_index = 0`,
+    );
+    const after = await runPagedMeasure(engine, {
+      sourceId: 'mm-src', cursor: 0, limit: 50, checkpointPath: join(dir, 'mm-after.json'),
+    });
+    expect(after.active_pages).toBe(before.active_pages);
+    expect(after.fingerprint.sha256).not.toBe(before.fingerprint.sha256);
+  });
+
 });
 
 describe('paged multi-source fingerprint combine', () => {
@@ -512,6 +591,70 @@ describe('paged multi-source fingerprint combine', () => {
         checkpointPath: sharedCheckpoint,
       },
     });
+    expect(second.applied).toBe(0);
+    expect(second.before.sha256).toBe(second.after.sha256);
+    expect(second.before.sha256).toBe(first.after.sha256);
+  });
+
+  test('same receipt path with a different manifest does not reuse phase checkpoints', async () => {
+    await engine.putPage('topics/mani-from', {
+      title: 'Mani from', compiled_truth: 'mani from', type: 'note',
+    }, { sourceId: 'xa' });
+    await engine.putPage('topics/mani-to', {
+      title: 'Mani to', compiled_truth: 'mani to', type: 'note',
+    }, { sourceId: 'xa' });
+    await engine.putPage('topics/mani-to-b', {
+      title: 'Mani to B', compiled_truth: 'mani to b', type: 'note',
+    }, { sourceId: 'xa' });
+    const rawA = relationManifest([{
+      id: 'mani-a',
+      from_slug: 'topics/mani-from',
+      to_slug: 'topics/mani-to',
+      from_source_id: 'xa',
+      to_source_id: 'xa',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const rawB = relationManifest([{
+      id: 'mani-b',
+      from_slug: 'topics/mani-from',
+      to_slug: 'topics/mani-to-b',
+      from_source_id: 'xa',
+      to_source_id: 'xa',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const sharedCheckpoint = join(dir, 'shared-mani-checkpoint.json');
+    const receiptPath = join(dir, 'mani-receipt.json');
+    const first = await applyRelationManifest(engine, parseRelationManifest(rawA), rawA, {
+      apply: true,
+      receiptPath,
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: 0,
+        limit: 50,
+        checkpointPath: sharedCheckpoint,
+      },
+    });
+    expect(first.applied).toBe(1);
+    // Second apply uses a different manifest under the same receipt/checkpoint bases
+    // after removing the first receipt file so refuseExistingReceipt does not trip.
+    unlinkSync(receiptPath);
+    const second = await applyRelationManifest(engine, parseRelationManifest(rawB), rawB, {
+      apply: false,
+      receiptPath,
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: 0,
+        limit: 50,
+        checkpointPath: sharedCheckpoint,
+      },
+    });
+    // Dry-run of B must see current graph (with A applied), not A's before/after pair.
     expect(second.applied).toBe(0);
     expect(second.before.sha256).toBe(second.after.sha256);
     expect(second.before.sha256).toBe(first.after.sha256);
