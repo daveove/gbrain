@@ -25,6 +25,7 @@ import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
+import { runPagedMeasure, type PagedScanOpts } from './paged-runner.ts';
 import type {
   MutationReceipt,
   RelationApplyResult,
@@ -247,6 +248,11 @@ export interface ApplyRelationManifestOpts {
    * An explicit id on the row wins. Omitted opts fall back to `default`.
    */
   defaultSourceId?: string;
+  /**
+   * When set, before/after fingerprints walk this source by page id instead
+   * of scanning the whole brain in one statement.
+   */
+  pageScan?: PagedScanOpts;
 }
 
 function fallbackSourceId(defaultSourceId: string | undefined): string {
@@ -531,13 +537,27 @@ async function commitReceiptOrUndo(
  * Post-mutation fingerprint. When a receipt was reserved, a failed read
  * rolls committed rows back so they are not left applied beside an empty file.
  */
+async function fingerprintForApply(
+  engine: BrainEngine,
+  opts: ApplyRelationManifestOpts,
+  phase: 'before' | 'after',
+): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
+  if (!opts.pageScan) return computeGraphFingerprint(engine);
+  const report = await runPagedMeasure(engine, {
+    ...opts.pageScan,
+    checkpointPath: `${opts.pageScan.checkpointPath}.${phase}`,
+  });
+  return report.fingerprint;
+}
+
 async function fingerprintAfterMutation(
   engine: BrainEngine,
   receiptPath: string | undefined,
   appliedRows: AppliedManifestLink[],
+  opts: ApplyRelationManifestOpts,
 ): Promise<Awaited<ReturnType<typeof computeGraphFingerprint>>> {
   try {
-    return await computeGraphFingerprint(engine);
+    return await fingerprintForApply(engine, opts, 'after');
   } catch (err) {
     const fpMessage = err instanceof Error ? err.message : String(err);
     if (!receiptPath) throw err;
@@ -723,7 +743,7 @@ export async function applyRelationManifest(
   const slice = (opts.limit ? manifest.rows.slice(0, opts.limit) : manifest.rows)
     .map(row => resolveRowSources(row, opts.defaultSourceId));
   await assertActiveConcreteRowSources(engine, slice);
-  const before = await computeGraphFingerprint(engine);
+  const before = await fingerprintForApply(engine, opts, 'before');
   await assertActivePackLinkVocabulary(engine, slice);
   const createdAt = new Date().toISOString();
   const outcomes: RelationRowOutcome[] = [];
@@ -796,7 +816,7 @@ export async function applyRelationManifest(
     }
     let after: Awaited<ReturnType<typeof computeGraphFingerprint>>;
     try {
-      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
+      after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks, opts);
     } catch (fpErr) {
       const fpMessage = fpErr instanceof Error ? fpErr.message : String(fpErr);
       throw new Error(`${message} (${fpMessage})`);
@@ -824,7 +844,7 @@ export async function applyRelationManifest(
     throw err;
   }
 
-  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks);
+  const after = await fingerprintAfterMutation(engine, opts.receiptPath, appliedLinks, opts);
   const applied = outcomes.filter(o => o.status === 'applied').length;
   const ready = outcomes.filter(o => o.status === 'dry_run' || o.status === 'applied').length;
   const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;

@@ -525,7 +525,7 @@ describe('limit parsing', () => {
     console.log = () => {};
     try {
       await runGraphUsefulness(engine, [
-        'relations', 'apply', '--limit=1', manifestPath, '--apply', '--yes', `--receipt-out=${receiptPath}`,
+        'relations', 'apply', '--limit=1', manifestPath, '--apply', '--yes', '--cursor', '0', `--receipt-out=${receiptPath}`,
       ]);
       expect(await linkCount(engine, 'topics/lim-a', 'topics/lim-b')).toBe(1);
       expect(await linkCount(engine, 'topics/lim-a', 'topics/lim-c')).toBe(0);
@@ -3291,7 +3291,7 @@ describe('relation source scope and option terminator', () => {
     try {
       await runGraphUsefulness(engine, [
         'relations', 'apply', manifestPath, '--source', 'wiki', '--apply', '--yes',
-        '--receipt-out', receiptPath, '--json',
+        '--cursor', '0', '--receipt-out', receiptPath, '--json',
       ]);
       const links = await engine.executeRaw<{ from_source: string; to_source: string }>(
         `SELECT fp.source_id AS from_source, tp.source_id AS to_source
@@ -3337,7 +3337,7 @@ describe('relation source scope and option terminator', () => {
     try {
       await runGraphUsefulness(engine, [
         'relations', 'apply', manifestPath, '--source', 'wiki', '--apply', '--yes',
-        '--receipt-out', join(dir, 'receipt.json'), '--json',
+        '--cursor', '0', '--receipt-out', join(dir, 'receipt.json'), '--json',
       ]);
       const links = await engine.executeRaw<{ from_source: string; to_source: string }>(
         `SELECT fp.source_id AS from_source, tp.source_id AS to_source
@@ -3366,7 +3366,7 @@ describe('relation source scope and option terminator', () => {
       }]));
       await runGraphUsefulness(engine, [
         'relations', 'apply', onePath, '--source', 'wiki', '--apply', '--yes',
-        '--receipt-out', join(dir, 'one-receipt.json'), '--json',
+        '--cursor', '0', '--receipt-out', join(dir, 'one-receipt.json'), '--json',
       ]);
       const oneLinks = await engine.executeRaw<{ from_source: string; to_source: string }>(
         `SELECT fp.source_id AS from_source, tp.source_id AS to_source
@@ -3418,7 +3418,7 @@ describe('relation source scope and option terminator', () => {
       stdout = '';
       _resetCliExitVerdictForTests();
       await runGraphUsefulness(engine, [
-        'relations', 'apply', manifestPath, '--apply', '--yes', '--json',
+        'relations', 'apply', manifestPath, '--apply', '--yes', '--cursor', '0', '--json',
         '--receipt-out', join(dir, 'real.json'),
       ]);
       expect(await linkCount(engine, from, to)).toBe(1);
@@ -3508,7 +3508,7 @@ describe('relation source scope and option terminator', () => {
       }]));
       await withEnv({ GBRAIN_SOURCE: 'wiki' }, async () => {
         await runGraphUsefulness(engine, [
-          'relations', 'apply', manifestPath, '--apply', '--yes',
+          'relations', 'apply', manifestPath, '--apply', '--yes', '--cursor', '0',
           '--receipt-out', join(dir, 'env-receipt.json'), '--json',
         ]);
       });
@@ -3539,7 +3539,7 @@ describe('relation source scope and option terminator', () => {
       await engine.setConfig('sources.default', 'wiki');
       await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
         await runGraphUsefulness(engine, [
-          'relations', 'apply', cfgPath, '--apply', '--yes',
+          'relations', 'apply', cfgPath, '--apply', '--yes', '--cursor', '0',
           '--receipt-out', join(dir, 'cfg-receipt.json'), '--json',
         ]);
       });
@@ -3625,7 +3625,7 @@ describe('relation source scope and option terminator', () => {
       expect(calls).toBe(0);
 
       await runGraphUsefulness(engine, [
-        'relations', 'apply', manifestPath, '--apply', '--yes', '--json',
+        'relations', 'apply', manifestPath, '--apply', '--yes', '--cursor', '0', '--json',
         '--receipt-out', join(dir, 'cli-receipt.json'),
       ]);
       expect(currentExitCode()).toBe(1);
@@ -3734,17 +3734,21 @@ describe('usefulness read source resolution', () => {
       _resetCliExitVerdictForTests();
       stdout = '';
       errors.length = 0;
-      await runGraphUsefulness(engine, ['measure', '--source', 'src-read', '--json']);
+      const checkpoint = join(dir, 'measure-checkpoint.json');
+      await runGraphUsefulness(engine, [
+        'measure', '--source', 'src-read', '--cursor', '0', '--checkpoint', checkpoint, '--json',
+      ]);
       expect(currentExitCode()).toBe(0);
       const scoped = JSON.parse(stdout) as { active_pages: number };
       expect(scoped.active_pages).toBeGreaterThanOrEqual(1);
 
       _resetCliExitVerdictForTests();
       stdout = '';
+      errors.length = 0;
       await runGraphUsefulness(engine, ['measure', '--source', '__all__', '--json']);
-      expect(currentExitCode()).toBe(0);
-      const all = JSON.parse(stdout) as { active_pages: number };
-      expect(all.active_pages).toBeGreaterThan(scoped.active_pages);
+      expect(currentExitCode()).toBe(2);
+      expect(stdout).toBe('');
+      expect(errors.some(line => line.includes('graph measure requires --source'))).toBe(true);
     } finally {
       console.log = origLog;
       console.error = origErr;
