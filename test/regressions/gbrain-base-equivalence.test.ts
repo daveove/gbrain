@@ -89,6 +89,11 @@ describe('gbrain-base v0.38 parity gate', () => {
     expect(verbs.get('works_at')?.inference?.regex).toContain('works');
     // mentions is the fallback (declared but no inference rule)
     expect(verbs.has('mentions')).toBe(true);
+    // contains is write vocabulary only. An inference rule would invent edges.
+    const contains = verbs.get('contains');
+    expect(contains).toBeDefined();
+    expect(contains?.inference).toBeUndefined();
+    expect(contains?.inverse).toBeUndefined();
   });
 
   test('alias graph is EMPTY by default (E8 codex F8)', () => {
