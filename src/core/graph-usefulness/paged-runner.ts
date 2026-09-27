@@ -115,7 +115,9 @@ function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
 /**
  * Source-scoped mutation watermark for paged measure. Links sequence is
  * adjusted so inserts outside this source do not move it; page/chunk/source
- * xmins stay inside the source. A changed value means the walk mixed states.
+ * xmins stay inside the source. Scoped page, link, and chunk counts sit
+ * beside each max xmin so deleting a non-maximal row still moves the value.
+ * A changed value means the walk mixed states.
  */
 export async function readPagedSourceMutationWatermark(
   engine: BrainEngine,
@@ -123,40 +125,52 @@ export async function readPagedSourceMutationWatermark(
 ): Promise<string> {
   const rows = await engine.executeRaw<{ watermark: string | null }>(
     `SELECT
+       (seq.last_value - outside_links.n)::text
+       || '|' || page_rev.mx::text || ':' || page_rev.n::text
+       || ',' || link_rev.mx::text || ':' || link_rev.n::text
+       || ',' || chunk_rev.mx::text || ':' || chunk_rev.n::text
+       || ',' || source_rev.mx::text
+       AS watermark
+     FROM
        (
-         COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'links_id_seq'), 0)
-         - COALESCE((
-             SELECT count(*) FROM links l
-             WHERE NOT (
-               EXISTS (
-                 SELECT 1 FROM pages fp
-                 WHERE fp.id = l.from_page_id AND fp.source_id = $1
-               )
-               OR EXISTS (
-                 SELECT 1 FROM pages tp
-                 WHERE tp.id = l.to_page_id AND tp.source_id = $1
-               )
-             )
-           ), 0)
-       )::text
-       || '|' ||
-       COALESCE((SELECT max(p.xmin::text::bigint) FROM pages p WHERE p.source_id = $1), 0)::text
-       || ',' ||
-       COALESCE((
-         SELECT max(l.xmin::text::bigint) FROM links l
-         WHERE EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = $1)
-            OR EXISTS (SELECT 1 FROM pages tp WHERE tp.id = l.to_page_id AND tp.source_id = $1)
-       ), 0)::text
-       || ',' ||
-       COALESCE((
-         SELECT max(c.xmin::text::bigint)
-         FROM content_chunks c
-         JOIN pages p ON p.id = c.page_id
-         WHERE p.source_id = $1
-       ), 0)::text
-       || ',' ||
-       COALESCE((SELECT max(s.xmin::text::bigint) FROM sources s WHERE s.id = $1), 0)::text
-       AS watermark`,
+         SELECT COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'links_id_seq'), 0) AS last_value
+       ) seq,
+       (
+         SELECT count(*)::bigint AS n
+           FROM links l
+          WHERE NOT (
+            EXISTS (
+              SELECT 1 FROM pages fp
+               WHERE fp.id = l.from_page_id AND fp.source_id = $1
+            )
+            OR EXISTS (
+              SELECT 1 FROM pages tp
+               WHERE tp.id = l.to_page_id AND tp.source_id = $1
+            )
+          )
+       ) outside_links,
+       (
+         SELECT COALESCE(max(p.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
+           FROM pages p
+          WHERE p.source_id = $1
+       ) page_rev,
+       (
+         SELECT COALESCE(max(l.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
+           FROM links l
+          WHERE EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = $1)
+             OR EXISTS (SELECT 1 FROM pages tp WHERE tp.id = l.to_page_id AND tp.source_id = $1)
+       ) link_rev,
+       (
+         SELECT COALESCE(max(c.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
+           FROM content_chunks c
+           JOIN pages p ON p.id = c.page_id
+          WHERE p.source_id = $1
+       ) chunk_rev,
+       (
+         SELECT COALESCE(max(s.xmin::text::bigint), 0) AS mx
+           FROM sources s
+          WHERE s.id = $1
+       ) source_rev`,
     [sourceId],
   );
   const watermark = rows[0]?.watermark;
@@ -177,6 +191,25 @@ async function assertCheckpointWatermark(
       `delete the checkpoint and rerun with --cursor 0`,
     );
   }
+}
+
+/**
+ * Compare a finished source checkpoint to the live watermark. Multi-source
+ * walks call this again after every source has been scanned, so a mutation
+ * of an earlier source during a later source's walk is refused.
+ */
+export async function revalidatePagedCheckpoint(
+  engine: BrainEngine,
+  checkpointPath: string,
+  sourceId: string,
+): Promise<void> {
+  const checkpoint = readCheckpoint(checkpointPath, sourceId);
+  if (!checkpoint) {
+    throw new Error(
+      `Checkpoint ${checkpointPath} missing after paged measure for source ${sourceId}`,
+    );
+  }
+  await assertCheckpointWatermark(engine, checkpoint);
 }
 
 function readCheckpoint(path: string, sourceId: string): Checkpoint | null {

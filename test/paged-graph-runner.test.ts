@@ -660,3 +660,307 @@ describe('paged multi-source fingerprint combine', () => {
     expect(second.before.sha256).toBe(first.after.sha256);
   });
 });
+
+/** `seq|pageMax:pageN,linkMax:linkN,chunkMax:chunkN,sourceMax` */
+function watermarkPart(watermark: string, index: 0 | 1 | 2): { max: number; count: number } {
+  const body = watermark.split('|')[1] ?? '';
+  const part = body.split(',')[index] ?? '';
+  const [maxRaw, countRaw] = part.split(':');
+  const max = Number(maxRaw);
+  const count = Number(countRaw);
+  if (!Number.isSafeInteger(max) || !Number.isSafeInteger(count)) {
+    throw new Error(`watermark part ${index} is not max:count in ${watermark}`);
+  }
+  return { max, count };
+}
+
+function writeStalePrefixCheckpoint(
+  checkpointPath: string,
+  sourceId: string,
+  cursor: number,
+  watermark: string,
+): void {
+  writeFileSync(checkpointPath, JSON.stringify({
+    source_id: sourceId,
+    cursor,
+    done: false,
+    active_pages: 1,
+    link_rows: 1,
+    valid_links: 1,
+    degree_sum: 1,
+    zero_degree_pages: 0,
+    degree_counts: { '1': 1 },
+    junk: {},
+    seen_link_ids: [],
+    identity_hash: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+    mutation_watermark: watermark,
+  }) + '\n');
+}
+
+describe('paged source watermark deletions', () => {
+  let engine: BrainEngine;
+  let dir: string;
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    dir = mkdtempSync(join(tmpdir(), 'gbrain-paged-del-'));
+  });
+
+  afterAll(async () => {
+    await engine.disconnect();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function scopedMax(sql: string, sourceId: string): Promise<number> {
+    const rows = await engine.executeRaw<{ mx: number | string | null }>(sql, [sourceId]);
+    return Number(rows[0]?.mx ?? 0);
+  }
+
+  test('deleting a non-maximal in-scope link moves the watermark and refuses resume', async () => {
+    const sourceId = 'del-link';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('del-link', 'del-link', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'del-link'`,
+    );
+    await engine.putPage('topics/del-a', { title: 'A', compiled_truth: 'a', type: 'note' }, { sourceId });
+    await engine.putPage('topics/del-b', { title: 'B', compiled_truth: 'b', type: 'note' }, { sourceId });
+    await engine.putPage('topics/del-c', { title: 'C', compiled_truth: 'c', type: 'note' }, { sourceId });
+    await engine.putPage('topics/del-d', { title: 'D', compiled_truth: 'd', type: 'note' }, { sourceId });
+    await engine.addLink(
+      'topics/del-a', 'topics/del-b', 'older', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: sourceId, toSourceId: sourceId },
+    );
+    await engine.addLink(
+      'topics/del-c', 'topics/del-d', 'newer', 'related_to', 'manual',
+      undefined, undefined, { fromSourceId: sourceId, toSourceId: sourceId },
+    );
+    const pages = await engine.executeRaw<{ id: number | string }>(
+      `SELECT id FROM pages WHERE source_id = $1 ORDER BY id`,
+      [sourceId],
+    );
+    const cursor = Number(pages[0]!.id);
+    const links = await engine.executeRaw<{
+      xmin: number | string;
+      from_slug: string;
+      to_slug: string;
+    }>(
+      `SELECT l.xmin::text::bigint AS xmin, fp.slug AS from_slug, tp.slug AS to_slug
+         FROM links l
+         JOIN pages fp ON fp.id = l.from_page_id
+         JOIN pages tp ON tp.id = l.to_page_id
+        WHERE fp.source_id = $1
+        ORDER BY l.xmin::text::bigint ASC, l.id ASC`,
+      [sourceId],
+    );
+    expect(links.length).toBe(2);
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    const beforeLinks = watermarkPart(before, 1);
+    const linkMaxSql = `SELECT COALESCE(max(l.xmin::text::bigint), 0) AS mx
+      FROM links l
+      WHERE EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = $1)
+         OR EXISTS (SELECT 1 FROM pages tp WHERE tp.id = l.to_page_id AND tp.source_id = $1)`;
+    const maxBefore = await scopedMax(linkMaxSql, sourceId);
+    expect(beforeLinks.max).toBe(maxBefore);
+    expect(beforeLinks.count).toBe(2);
+    writeStalePrefixCheckpoint(join(dir, 'del-link.json'), sourceId, cursor, before);
+
+    const victim = links[0]!;
+    const removed = await engine.removeLink(
+      victim.from_slug, victim.to_slug, 'related_to', 'manual',
+      { fromSourceId: sourceId, toSourceId: sourceId },
+    );
+    expect(removed).toBe(1);
+    const maxAfter = await scopedMax(linkMaxSql, sourceId);
+    expect(maxAfter).toBe(maxBefore);
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    const afterLinks = watermarkPart(after, 1);
+    expect(afterLinks.max).toBe(beforeLinks.max);
+    expect(afterLinks.count).toBe(beforeLinks.count - 1);
+    expect(after).not.toBe(before);
+
+    await expect(runPagedMeasure(engine, {
+      sourceId,
+      cursor,
+      limit: 10,
+      checkpointPath: join(dir, 'del-link.json'),
+    })).rejects.toThrow(/Corpus mutated during paged measure for source del-link/);
+  });
+
+  test('deleting a non-maximal page moves the watermark and refuses resume', async () => {
+    const sourceId = 'del-page';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('del-page', 'del-page', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'del-page'`,
+    );
+    await engine.putPage('topics/del-page-old', {
+      title: 'Old', compiled_truth: 'old page', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/del-page-new', {
+      title: 'New', compiled_truth: 'new page', type: 'note',
+    }, { sourceId });
+    const pages = await engine.executeRaw<{ id: number | string; xmin: number | string }>(
+      `SELECT id, xmin::text::bigint AS xmin FROM pages WHERE source_id = $1 ORDER BY xmin::text::bigint ASC, id ASC`,
+      [sourceId],
+    );
+    expect(pages.length).toBe(2);
+    const older = pages[0]!;
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    const beforePages = watermarkPart(before, 0);
+    const pageMaxSql = `SELECT COALESCE(max(p.xmin::text::bigint), 0) AS mx FROM pages p WHERE p.source_id = $1`;
+    const maxBefore = await scopedMax(pageMaxSql, sourceId);
+    expect(beforePages.max).toBe(maxBefore);
+    expect(beforePages.count).toBe(2);
+    const survivor = pages[1]!;
+    writeStalePrefixCheckpoint(join(dir, 'del-page.json'), sourceId, Number(survivor.id), before);
+
+    await engine.executeRaw(`DELETE FROM pages WHERE id = $1`, [Number(older.id)]);
+    const maxAfter = await scopedMax(pageMaxSql, sourceId);
+    expect(maxAfter).toBe(maxBefore);
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    const afterPages = watermarkPart(after, 0);
+    expect(afterPages.max).toBe(beforePages.max);
+    expect(afterPages.count).toBe(beforePages.count - 1);
+
+    await expect(runPagedMeasure(engine, {
+      sourceId,
+      cursor: Number(survivor.id),
+      limit: 10,
+      checkpointPath: join(dir, 'del-page.json'),
+    })).rejects.toThrow(/Corpus mutated during paged measure for source del-page/);
+  });
+
+  test('deleting a non-maximal chunk moves the watermark and refuses resume', async () => {
+    const sourceId = 'del-chunk';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('del-chunk', 'del-chunk', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'del-chunk'`,
+    );
+    await engine.putPage('topics/del-chunk-page', {
+      title: 'Chunked', compiled_truth: 'chunked', type: 'note',
+    }, { sourceId });
+    await engine.upsertChunks('topics/del-chunk-page', [
+      { chunk_index: 0, chunk_text: 'older chunk', chunk_source: 'compiled_truth' },
+      { chunk_index: 1, chunk_text: 'newer chunk', chunk_source: 'compiled_truth' },
+    ], { sourceId });
+    const chunks = await engine.executeRaw<{ id: number | string }>(
+      `SELECT c.id
+         FROM content_chunks c
+         JOIN pages p ON p.id = c.page_id
+        WHERE p.source_id = $1
+        ORDER BY c.xmin::text::bigint ASC, c.id ASC`,
+      [sourceId],
+    );
+    expect(chunks.length).toBe(2);
+    const pages = await engine.executeRaw<{ id: number | string }>(
+      `SELECT id FROM pages WHERE source_id = $1`,
+      [sourceId],
+    );
+    const cursor = Number(pages[0]!.id);
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    const beforeChunks = watermarkPart(before, 2);
+    const chunkMaxSql = `SELECT COALESCE(max(c.xmin::text::bigint), 0) AS mx
+      FROM content_chunks c
+      JOIN pages p ON p.id = c.page_id
+      WHERE p.source_id = $1`;
+    const maxBefore = await scopedMax(chunkMaxSql, sourceId);
+    expect(beforeChunks.max).toBe(maxBefore);
+    expect(beforeChunks.count).toBe(2);
+    writeStalePrefixCheckpoint(join(dir, 'del-chunk.json'), sourceId, cursor, before);
+
+    await engine.executeRaw(`DELETE FROM content_chunks WHERE id = $1`, [Number(chunks[0]!.id)]);
+    const maxAfter = await scopedMax(chunkMaxSql, sourceId);
+    expect(maxAfter).toBe(maxBefore);
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    const afterChunks = watermarkPart(after, 2);
+    expect(afterChunks.max).toBe(beforeChunks.max);
+    expect(afterChunks.count).toBe(beforeChunks.count - 1);
+
+    await expect(runPagedMeasure(engine, {
+      sourceId,
+      cursor,
+      limit: 10,
+      checkpointPath: join(dir, 'del-chunk.json'),
+    })).rejects.toThrow(/Corpus mutated during paged measure for source del-chunk/);
+  });
+});
+
+describe('paged multi-source revalidation', () => {
+  let engine: BrainEngine;
+  let dir: string;
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    dir = mkdtempSync(join(tmpdir(), 'gbrain-paged-reval-'));
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('reval-a', 'reval-a', false),
+         ('reval-b', 'reval-b', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/reval-a-page', {
+      title: 'A', compiled_truth: 'a before', type: 'note',
+    }, { sourceId: 'reval-a' });
+    await engine.putPage('topics/reval-b-page', {
+      title: 'B', compiled_truth: 'b before', type: 'note',
+    }, { sourceId: 'reval-b' });
+  });
+
+  afterAll(async () => {
+    await engine.disconnect();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('refuses the combined fingerprint when an earlier source changes during a later walk', async () => {
+    const raw = relationManifest([{
+      id: 'reval-a-b',
+      from_slug: 'topics/reval-a-page',
+      to_slug: 'topics/reval-b-page',
+      from_source_id: 'reval-a',
+      to_source_id: 'reval-b',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const manifest = parseRelationManifest(raw);
+    let mutated = false;
+    const executeRaw: BrainEngine['executeRaw'] = async (sql, params, opts) => {
+      // Source ids are sorted, so reval-b's page scan starts only after
+      // reval-a has finished and stored its watermark.
+      if (
+        !mutated
+        && typeof sql === 'string'
+        && sql.includes('id > $2')
+        && params?.[0] === 'reval-b'
+      ) {
+        mutated = true;
+        await engine.putPage('topics/reval-a-page', {
+          title: 'A', compiled_truth: 'changed while b scans', type: 'note',
+        }, { sourceId: 'reval-a' });
+      }
+      return engine.executeRaw(sql, params, opts);
+    };
+    const hooked = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'executeRaw') return executeRaw;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    await expect(applyRelationManifest(hooked, manifest, raw, {
+      apply: false,
+      defaultSourceId: 'reval-a',
+      pageScan: {
+        sourceId: 'reval-a',
+        cursor: 0,
+        limit: 10,
+        checkpointPath: join(dir, 'reval-checkpoint.json'),
+      },
+    })).rejects.toThrow(/Corpus mutated during paged measure for source reval-a/);
+    expect(mutated).toBe(true);
+  });
+});

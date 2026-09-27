@@ -25,7 +25,12 @@ import { isValidSourceId, ALL_SOURCES } from '../source-id.ts';
 import { resolveSourceId, SourceTargetError } from '../source-resolver.ts';
 import { slugLooksReadwise } from './junk-classify.ts';
 import { computeGraphFingerprint } from './fingerprint.ts';
-import { runPagedMeasure, type PagedMeasureResult, type PagedScanOpts } from './paged-runner.ts';
+import {
+  revalidatePagedCheckpoint,
+  runPagedMeasure,
+  type PagedMeasureResult,
+  type PagedScanOpts,
+} from './paged-runner.ts';
 import type {
   MutationReceipt,
   RelationApplyResult,
@@ -608,27 +613,36 @@ async function fingerprintForApply(
   const ids = sourceIds.length > 0 ? sourceIds : [opts.pageScan.sourceId];
   const parts: Array<{
     sourceId: string;
+    checkpointPath: string;
     fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
     seen_link_ids: number[];
   }> = [];
   for (const sourceId of ids) {
+    const checkpointPath = applyPhaseCheckpointPath(
+      opts.pageScan.checkpointPath,
+      phase,
+      sourceId,
+      opts.receiptPath,
+      manifestSha,
+    );
     const report: PagedMeasureResult = await runPagedMeasure(engine, {
       sourceId,
       cursor: opts.pageScan.cursor,
       limit: opts.pageScan.limit,
-      checkpointPath: applyPhaseCheckpointPath(
-        opts.pageScan.checkpointPath,
-        phase,
-        sourceId,
-        opts.receiptPath,
-        manifestSha,
-      ),
+      checkpointPath,
     });
     parts.push({
       sourceId,
+      checkpointPath,
       fingerprint: report.fingerprint,
       seen_link_ids: report.seen_link_ids,
     });
+  }
+  // Each source is checked only through the end of its own walk. Recheck
+  // every checkpoint after the last source so an earlier source cannot
+  // change while a later one is still scanning.
+  for (const part of parts) {
+    await revalidatePagedCheckpoint(engine, part.checkpointPath, part.sourceId);
   }
   return combinePagedFingerprints(parts);
 }
