@@ -113,71 +113,32 @@ function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
 }
 
 /**
- * Source-scoped mutation watermark for paged measure. Links sequence is
- * adjusted so inserts outside this source do not move it; page/chunk/source
- * xmins stay inside the source. Scoped page, link, and chunk counts sit
- * beside each max xmin so deleting a non-maximal row still moves the value.
+ * Commit-ordered mutation generation for one source. Statement triggers
+ * record the sources a page, chunk, or link write touched; a deferred
+ * trigger increments `source_mutation_generation` when that transaction
+ * commits. The value is a primary-key read: it does not scan the corpus,
+ * it does not move when a link's pages are both outside this source, and
+ * it advances even when a late commit carries a lower XID than `max(xmin)`.
  * A changed value means the walk mixed states.
  */
+export const PAGED_SOURCE_MUTATION_WATERMARK_SQL = `SELECT COALESCE(
+         (SELECT generation FROM source_mutation_generation WHERE source_id = $1),
+         0
+       )::text AS watermark`;
+
 export async function readPagedSourceMutationWatermark(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<string> {
-  const rows = await engine.executeRaw<{ watermark: string | null }>(
-    `SELECT
-       (seq.last_value - outside_links.n)::text
-       || '|' || page_rev.mx::text || ':' || page_rev.n::text
-       || ',' || link_rev.mx::text || ':' || link_rev.n::text
-       || ',' || chunk_rev.mx::text || ':' || chunk_rev.n::text
-       || ',' || source_rev.mx::text
-       AS watermark
-     FROM
-       (
-         SELECT COALESCE((SELECT last_value FROM pg_sequences WHERE sequencename = 'links_id_seq'), 0) AS last_value
-       ) seq,
-       (
-         SELECT count(*)::bigint AS n
-           FROM links l
-          WHERE NOT (
-            EXISTS (
-              SELECT 1 FROM pages fp
-               WHERE fp.id = l.from_page_id AND fp.source_id = $1
-            )
-            OR EXISTS (
-              SELECT 1 FROM pages tp
-               WHERE tp.id = l.to_page_id AND tp.source_id = $1
-            )
-          )
-       ) outside_links,
-       (
-         SELECT COALESCE(max(p.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
-           FROM pages p
-          WHERE p.source_id = $1
-       ) page_rev,
-       (
-         SELECT COALESCE(max(l.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
-           FROM links l
-          WHERE EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = $1)
-             OR EXISTS (SELECT 1 FROM pages tp WHERE tp.id = l.to_page_id AND tp.source_id = $1)
-       ) link_rev,
-       (
-         SELECT COALESCE(max(c.xmin::text::bigint), 0) AS mx, count(*)::bigint AS n
-           FROM content_chunks c
-           JOIN pages p ON p.id = c.page_id
-          WHERE p.source_id = $1
-       ) chunk_rev,
-       (
-         SELECT COALESCE(max(s.xmin::text::bigint), 0) AS mx
-           FROM sources s
-          WHERE s.id = $1
-       ) source_rev`,
+  const rows = await engine.executeRaw<{ watermark: string | number | null }>(
+    PAGED_SOURCE_MUTATION_WATERMARK_SQL,
     [sourceId],
   );
   const watermark = rows[0]?.watermark;
-  if (typeof watermark !== 'string' || watermark.length === 0) {
+  if (watermark == null || String(watermark).length === 0) {
     throw new Error(`Paged measure watermark returned no row for source ${sourceId}`);
   }
-  return watermark;
+  return String(watermark);
 }
 
 async function assertCheckpointWatermark(

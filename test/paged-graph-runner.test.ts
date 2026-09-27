@@ -7,6 +7,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
 import {
   medianFromHistogram,
+  PAGED_SOURCE_MUTATION_WATERMARK_SQL,
   readPagedSourceMutationWatermark,
   runPagedMeasure,
 } from '../src/core/graph-usefulness/paged-runner.ts';
@@ -661,19 +662,6 @@ describe('paged multi-source fingerprint combine', () => {
   });
 });
 
-/** `seq|pageMax:pageN,linkMax:linkN,chunkMax:chunkN,sourceMax` */
-function watermarkPart(watermark: string, index: 0 | 1 | 2): { max: number; count: number } {
-  const body = watermark.split('|')[1] ?? '';
-  const part = body.split(',')[index] ?? '';
-  const [maxRaw, countRaw] = part.split(':');
-  const max = Number(maxRaw);
-  const count = Number(countRaw);
-  if (!Number.isSafeInteger(max) || !Number.isSafeInteger(count)) {
-    throw new Error(`watermark part ${index} is not max:count in ${watermark}`);
-  }
-  return { max, count };
-}
-
 function writeStalePrefixCheckpoint(
   checkpointPath: string,
   sourceId: string,
@@ -718,6 +706,76 @@ describe('paged source watermark deletions', () => {
     return Number(rows[0]?.mx ?? 0);
   }
 
+  test('the watermark read is the source generation primary key', async () => {
+    expect(PAGED_SOURCE_MUTATION_WATERMARK_SQL).not.toMatch(/xmin|links_id_seq|count\s*\(|pg_sequences/i);
+    const plan = await engine.executeRaw<Record<string, string>>(
+      `EXPLAIN ${PAGED_SOURCE_MUTATION_WATERMARK_SQL}`,
+      ['default'],
+    );
+    const text = plan.map(row => Object.values(row).join(' ')).join('\n');
+    expect(text).toMatch(/Index Scan using source_mutation_generation_pkey/);
+    expect(text).not.toMatch(/Seq Scan on (pages|links|content_chunks)/);
+  });
+
+  test('an in-place rewrite of an older page moves the watermark and refuses resume', async () => {
+    const sourceId = 'upd-page';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('upd-page', 'upd-page', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'upd-page'`,
+    );
+    await engine.putPage('topics/upd-old', {
+      title: 'Old', compiled_truth: 'old body', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/upd-new', {
+      title: 'New', compiled_truth: 'new body', type: 'note',
+    }, { sourceId });
+    const pages = await engine.executeRaw<{ id: number | string }>(
+      `SELECT id FROM pages WHERE source_id = $1 ORDER BY id ASC`,
+      [sourceId],
+    );
+    expect(pages.length).toBe(2);
+    const olderId = Number(pages[0]!.id);
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    const countBefore = await engine.executeRaw<{ n: number | string }>(
+      `SELECT count(*)::int AS n FROM pages WHERE source_id = $1`,
+      [sourceId],
+    );
+    writeStalePrefixCheckpoint(join(dir, 'upd-page.json'), sourceId, olderId, before);
+
+    await engine.executeRaw(
+      `UPDATE pages SET compiled_truth = 'rewritten body' WHERE id = $1`,
+      [olderId],
+    );
+    const countAfter = await engine.executeRaw<{ n: number | string }>(
+      `SELECT count(*)::int AS n FROM pages WHERE source_id = $1`,
+      [sourceId],
+    );
+    expect(Number(countAfter[0]?.n)).toBe(Number(countBefore[0]?.n));
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    expect(BigInt(after)).toBeGreaterThan(BigInt(before));
+
+    await expect(runPagedMeasure(engine, {
+      sourceId,
+      cursor: olderId,
+      limit: 10,
+      checkpointPath: join(dir, 'upd-page.json'),
+    })).rejects.toThrow(/Corpus mutated during paged measure for source upd-page/);
+  });
+
+  test('a rolled-back page rewrite leaves the watermark unchanged', async () => {
+    const sourceId = 'upd-page';
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    await expect(engine.transaction(async (tx) => {
+      await tx.executeRaw(
+        `UPDATE pages SET compiled_truth = 'should roll back' WHERE source_id = $1`,
+        [sourceId],
+      );
+      throw new Error('rollback watermark write');
+    })).rejects.toThrow(/rollback watermark write/);
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    expect(after).toBe(before);
+  });
+
   test('deleting a non-maximal in-scope link moves the watermark and refuses resume', async () => {
     const sourceId = 'del-link';
     await engine.executeRaw(
@@ -756,14 +814,11 @@ describe('paged source watermark deletions', () => {
     );
     expect(links.length).toBe(2);
     const before = await readPagedSourceMutationWatermark(engine, sourceId);
-    const beforeLinks = watermarkPart(before, 1);
     const linkMaxSql = `SELECT COALESCE(max(l.xmin::text::bigint), 0) AS mx
       FROM links l
       WHERE EXISTS (SELECT 1 FROM pages fp WHERE fp.id = l.from_page_id AND fp.source_id = $1)
          OR EXISTS (SELECT 1 FROM pages tp WHERE tp.id = l.to_page_id AND tp.source_id = $1)`;
     const maxBefore = await scopedMax(linkMaxSql, sourceId);
-    expect(beforeLinks.max).toBe(maxBefore);
-    expect(beforeLinks.count).toBe(2);
     writeStalePrefixCheckpoint(join(dir, 'del-link.json'), sourceId, cursor, before);
 
     const victim = links[0]!;
@@ -775,10 +830,7 @@ describe('paged source watermark deletions', () => {
     const maxAfter = await scopedMax(linkMaxSql, sourceId);
     expect(maxAfter).toBe(maxBefore);
     const after = await readPagedSourceMutationWatermark(engine, sourceId);
-    const afterLinks = watermarkPart(after, 1);
-    expect(afterLinks.max).toBe(beforeLinks.max);
-    expect(afterLinks.count).toBe(beforeLinks.count - 1);
-    expect(after).not.toBe(before);
+    expect(BigInt(after)).toBeGreaterThan(BigInt(before));
 
     await expect(runPagedMeasure(engine, {
       sourceId,
@@ -807,11 +859,8 @@ describe('paged source watermark deletions', () => {
     expect(pages.length).toBe(2);
     const older = pages[0]!;
     const before = await readPagedSourceMutationWatermark(engine, sourceId);
-    const beforePages = watermarkPart(before, 0);
     const pageMaxSql = `SELECT COALESCE(max(p.xmin::text::bigint), 0) AS mx FROM pages p WHERE p.source_id = $1`;
     const maxBefore = await scopedMax(pageMaxSql, sourceId);
-    expect(beforePages.max).toBe(maxBefore);
-    expect(beforePages.count).toBe(2);
     const survivor = pages[1]!;
     writeStalePrefixCheckpoint(join(dir, 'del-page.json'), sourceId, Number(survivor.id), before);
 
@@ -819,9 +868,7 @@ describe('paged source watermark deletions', () => {
     const maxAfter = await scopedMax(pageMaxSql, sourceId);
     expect(maxAfter).toBe(maxBefore);
     const after = await readPagedSourceMutationWatermark(engine, sourceId);
-    const afterPages = watermarkPart(after, 0);
-    expect(afterPages.max).toBe(beforePages.max);
-    expect(afterPages.count).toBe(beforePages.count - 1);
+    expect(BigInt(after)).toBeGreaterThan(BigInt(before));
 
     await expect(runPagedMeasure(engine, {
       sourceId,
@@ -859,23 +906,18 @@ describe('paged source watermark deletions', () => {
     );
     const cursor = Number(pages[0]!.id);
     const before = await readPagedSourceMutationWatermark(engine, sourceId);
-    const beforeChunks = watermarkPart(before, 2);
     const chunkMaxSql = `SELECT COALESCE(max(c.xmin::text::bigint), 0) AS mx
       FROM content_chunks c
       JOIN pages p ON p.id = c.page_id
       WHERE p.source_id = $1`;
     const maxBefore = await scopedMax(chunkMaxSql, sourceId);
-    expect(beforeChunks.max).toBe(maxBefore);
-    expect(beforeChunks.count).toBe(2);
     writeStalePrefixCheckpoint(join(dir, 'del-chunk.json'), sourceId, cursor, before);
 
     await engine.executeRaw(`DELETE FROM content_chunks WHERE id = $1`, [Number(chunks[0]!.id)]);
     const maxAfter = await scopedMax(chunkMaxSql, sourceId);
     expect(maxAfter).toBe(maxBefore);
     const after = await readPagedSourceMutationWatermark(engine, sourceId);
-    const afterChunks = watermarkPart(after, 2);
-    expect(afterChunks.max).toBe(beforeChunks.max);
-    expect(afterChunks.count).toBe(beforeChunks.count - 1);
+    expect(BigInt(after)).toBeGreaterThan(BigInt(before));
 
     await expect(runPagedMeasure(engine, {
       sourceId,
@@ -883,6 +925,118 @@ describe('paged source watermark deletions', () => {
       limit: 10,
       checkpointPath: join(dir, 'del-chunk.json'),
     })).rejects.toThrow(/Corpus mutated during paged measure for source del-chunk/);
+  });
+
+  test('link churn outside the source leaves the watermark unchanged', async () => {
+    const sourceId = 'scoped-quiet';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('scoped-quiet', 'scoped-quiet', false),
+         ('scoped-other', 'scoped-other', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/quiet-a', {
+      title: 'Quiet A', compiled_truth: 'quiet a', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/quiet-b', {
+      title: 'Quiet B', compiled_truth: 'quiet b', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/other-a', {
+      title: 'Other A', compiled_truth: 'other a', type: 'note',
+    }, { sourceId: 'scoped-other' });
+    await engine.putPage('topics/other-b', {
+      title: 'Other B', compiled_truth: 'other b', type: 'note',
+    }, { sourceId: 'scoped-other' });
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    await engine.addLink(
+      'topics/other-a', 'topics/other-b', 'outside', 'related_to', 'manual',
+      undefined, undefined,
+      { fromSourceId: 'scoped-other', toSourceId: 'scoped-other' },
+    );
+    expect(await readPagedSourceMutationWatermark(engine, sourceId)).toBe(before);
+    const removed = await engine.removeLink(
+      'topics/other-a', 'topics/other-b', 'related_to', 'manual',
+      { fromSourceId: 'scoped-other', toSourceId: 'scoped-other' },
+    );
+    expect(removed).toBe(1);
+    expect(await readPagedSourceMutationWatermark(engine, sourceId)).toBe(before);
+    const otherAfter = await readPagedSourceMutationWatermark(engine, 'scoped-other');
+    expect(BigInt(otherAfter)).toBeGreaterThan(0n);
+
+    const ids = await engine.executeRaw<{ id: number | string }>(
+      `SELECT id FROM pages WHERE source_id = $1 ORDER BY id`,
+      [sourceId],
+    );
+    const report = await runPagedMeasure(engine, {
+      sourceId,
+      cursor: 0,
+      limit: 1,
+      checkpointPath: join(dir, 'scoped-quiet.json'),
+    });
+    expect(report.active_pages).toBe(2);
+    expect(report.seen_link_ids).toEqual([]);
+    const saved = JSON.parse(readFileSync(join(dir, 'scoped-quiet.json'), 'utf8')) as {
+      mutation_watermark: string;
+      cursor: number;
+    };
+    expect(saved.mutation_watermark).toBe(before);
+    expect(saved.cursor).toBe(Number(ids[1]!.id));
+  });
+
+  test('per-batch watermark checks do not aggregate the corpus', async () => {
+    const sourceId = 'batch-cost';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('batch-cost', 'batch-cost', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'batch-cost'`,
+    );
+    await engine.putPage('topics/batch-a', {
+      title: 'Batch A', compiled_truth: 'batch a', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/batch-b', {
+      title: 'Batch B', compiled_truth: 'batch b', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/batch-c', {
+      title: 'Batch C', compiled_truth: 'batch c', type: 'note',
+    }, { sourceId });
+    let corpusScans = 0;
+    const executeRaw: BrainEngine['executeRaw'] = async (sql, params, opts) => {
+      if (typeof sql === 'string' && /xmin|links_id_seq|count\s*\(|pg_sequences/i.test(sql)) {
+        corpusScans += 1;
+      }
+      return engine.executeRaw(sql, params, opts);
+    };
+    const hooked = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'executeRaw') return executeRaw;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const report = await runPagedMeasure(hooked, {
+      sourceId,
+      cursor: 0,
+      limit: 1,
+      checkpointPath: join(dir, 'batch-cost.json'),
+    });
+    expect(report.active_pages).toBe(3);
+    expect(corpusScans).toBe(0);
+  });
+
+  test('archiving the source moves the watermark and a name change does not', async () => {
+    const sourceId = 'arch-wm';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('arch-wm', 'arch-wm', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'arch-wm'`,
+    );
+    await engine.putPage('topics/arch-wm', {
+      title: 'Arch', compiled_truth: 'arch body', type: 'note',
+    }, { sourceId });
+    const before = await readPagedSourceMutationWatermark(engine, sourceId);
+    await engine.executeRaw(`UPDATE sources SET name = 'arch-wm-renamed' WHERE id = $1`, [sourceId]);
+    expect(await readPagedSourceMutationWatermark(engine, sourceId)).toBe(before);
+    await engine.executeRaw(`UPDATE sources SET archived = true WHERE id = $1`, [sourceId]);
+    const after = await readPagedSourceMutationWatermark(engine, sourceId);
+    expect(BigInt(after)).toBeGreaterThan(BigInt(before));
   });
 });
 
