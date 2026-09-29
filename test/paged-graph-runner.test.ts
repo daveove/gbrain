@@ -762,6 +762,101 @@ describe('paged source watermark deletions', () => {
     })).rejects.toThrow(/Corpus mutated during paged measure for source upd-page/);
   });
 
+  test('a last_retrieved_at write does not move the watermark and resume completes', async () => {
+    const sourceId = 'ret-page';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('ret-page', 'ret-page', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = 'ret-page'`,
+    );
+    await engine.putPage('topics/ret-old', {
+      title: 'Old', compiled_truth: 'old retrieval', type: 'note',
+    }, { sourceId });
+    await engine.putPage('topics/ret-new', {
+      title: 'New', compiled_truth: 'new retrieval', type: 'note',
+    }, { sourceId });
+    const checkpointPath = join(dir, 'ret-page.json');
+    let pageReads = 0;
+    const executeRaw: BrainEngine['executeRaw'] = async (sql, params, opts) => {
+      if (typeof sql === 'string' && sql.includes('id > $2') && sql.includes('FROM pages')) {
+        pageReads += 1;
+        if (pageReads === 2) throw new Error('killed between page batches');
+      }
+      return engine.executeRaw(sql, params, opts);
+    };
+    const hooked = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'executeRaw') return executeRaw;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    await expect(runPagedMeasure(hooked, {
+      sourceId,
+      cursor: 0,
+      limit: 1,
+      checkpointPath,
+    })).rejects.toThrow(/killed between page batches/);
+    const partial = JSON.parse(readFileSync(checkpointPath, 'utf8')) as {
+      done: boolean;
+      active_pages: number;
+      mutation_watermark: string;
+    };
+    expect(partial.done).toBe(false);
+    expect(partial.active_pages).toBe(1);
+    const before = partial.mutation_watermark;
+
+    await engine.executeRaw(
+      `UPDATE pages SET last_retrieved_at = now() WHERE source_id = $1`,
+      [sourceId],
+    );
+    expect(await readPagedSourceMutationWatermark(engine, sourceId)).toBe(before);
+
+    const resumed = await runPagedMeasure(engine, {
+      sourceId,
+      cursor: 0,
+      limit: 1,
+      checkpointPath,
+    });
+    expect(resumed.active_pages).toBe(2);
+    const saved = JSON.parse(readFileSync(checkpointPath, 'utf8')) as {
+      done: boolean;
+      mutation_watermark: string;
+    };
+    expect(saved.done).toBe(true);
+    expect(saved.mutation_watermark).toBe(before);
+
+    const fresh = await runPagedMeasure(engine, {
+      sourceId,
+      cursor: 0,
+      limit: 10,
+      checkpointPath: join(dir, 'ret-page-fresh.json'),
+    });
+    expect(fresh.active_pages).toBe(2);
+    expect(fresh.fingerprint.sha256).toBe(resumed.fingerprint.sha256);
+  });
+
+  test('moving a page records the old source and the new source', async () => {
+    const fromId = 'move-from';
+    const toId = 'move-to';
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('move-from', 'move-from', false),
+         ('move-to', 'move-to', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/move-me', {
+      title: 'Move', compiled_truth: 'move body', type: 'note',
+    }, { sourceId: fromId });
+    const beforeFrom = await readPagedSourceMutationWatermark(engine, fromId);
+    const beforeTo = await readPagedSourceMutationWatermark(engine, toId);
+    await engine.executeRaw(
+      `UPDATE pages SET source_id = $2 WHERE source_id = $1 AND slug = 'topics/move-me'`,
+      [fromId, toId],
+    );
+    expect(BigInt(await readPagedSourceMutationWatermark(engine, fromId))).toBeGreaterThan(BigInt(beforeFrom));
+    expect(BigInt(await readPagedSourceMutationWatermark(engine, toId))).toBeGreaterThan(BigInt(beforeTo));
+  });
+
   test('a rolled-back page rewrite leaves the watermark unchanged', async () => {
     const sourceId = 'upd-page';
     const before = await readPagedSourceMutationWatermark(engine, sourceId);

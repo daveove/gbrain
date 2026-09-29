@@ -511,7 +511,9 @@ CREATE INDEX IF NOT EXISTS idx_links_origin ON links(origin_page_id);
 -- late commit whose XID is below max(xmin) still moves it. Pending rows are
 -- per statement and carry no unique key, so writers do not lock each other
 -- until the deferred increment at commit. A link bumps only its endpoint
--- pages' sources.
+-- pages' sources. A pages update bumps a source only when source_id, slug,
+-- deleted_at, generation, content_hash, or compiled_truth changes. A
+-- source_id move records both ids. last_retrieved_at does not.
 CREATE TABLE IF NOT EXISTS source_mutation_generation (
   source_id  TEXT PRIMARY KEY,
   generation BIGINT NOT NULL
@@ -533,9 +535,20 @@ BEGIN
   ELSE
     INSERT INTO source_mutation_pending (source_id)
     SELECT DISTINCT s.source_id FROM (
-      SELECT source_id FROM new_pages
+      SELECT n.source_id
+        FROM new_pages n
+        JOIN old_pages o ON o.id = n.id
+       WHERE n.source_id IS DISTINCT FROM o.source_id
+          OR n.slug IS DISTINCT FROM o.slug
+          OR n.deleted_at IS DISTINCT FROM o.deleted_at
+          OR n.generation IS DISTINCT FROM o.generation
+          OR n.content_hash IS DISTINCT FROM o.content_hash
+          OR n.compiled_truth IS DISTINCT FROM o.compiled_truth
       UNION
-      SELECT source_id FROM old_pages
+      SELECT o.source_id
+        FROM new_pages n
+        JOIN old_pages o ON o.id = n.id
+       WHERE n.source_id IS DISTINCT FROM o.source_id
     ) s WHERE s.source_id IS NOT NULL;
   END IF;
   RETURN NULL;
