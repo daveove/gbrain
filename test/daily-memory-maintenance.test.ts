@@ -13,7 +13,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
-import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 
 describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
@@ -77,4 +77,63 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).not.toContain('Dream cycle noise');
     expect(page!.compiled_truth).not.toContain('talked about the rollout');
   }, 120_000);
+
+  async function seedTodayPage(): Promise<void> {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ($1, $1)`,
+      ['notes'],
+    );
+    await engine.putPage('meetings/standup', {
+      type: 'meeting',
+      title: 'Standup',
+      compiled_truth: 'talked about the rollout',
+    }, { sourceId: 'notes' });
+  }
+
+  test('a live human page at the daily slug is unchanged', async () => {
+    await seedTodayPage();
+    const slug = dailyMemorySlug(await resolveCycleDate(engine));
+    const body = 'human wrote this day note by hand';
+    await engine.putPage(slug, {
+      type: 'note',
+      title: 'My day',
+      compiled_truth: body,
+      frontmatter: { author: 'human' },
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+
+    const result = await writeDailyMemoryFromSources(engine);
+    expect(result.written).toBe(false);
+    expect(result.reason).toBe('human_page');
+
+    const page = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page).not.toBeNull();
+    expect(page!.compiled_truth).toBe(body);
+    expect(page!.title).toBe('My day');
+    expect(page!.frontmatter.dream_generated).not.toBe(true);
+    expect(page!.deleted_at ?? null).toBeNull();
+  });
+
+  test('a soft-deleted human page at the daily slug stays deleted and its body is unchanged', async () => {
+    await seedTodayPage();
+    const slug = dailyMemorySlug(await resolveCycleDate(engine));
+    const body = 'human note that was removed';
+    await engine.putPage(slug, {
+      type: 'note',
+      title: 'Removed day',
+      compiled_truth: body,
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
+
+    const result = await writeDailyMemoryFromSources(engine);
+    expect(result.written).toBe(false);
+    expect(result.reason).toBe('human_page');
+
+    expect(await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+    const deleted = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true });
+    expect(deleted).not.toBeNull();
+    expect(deleted!.deleted_at).toBeTruthy();
+    expect(deleted!.compiled_truth).toBe(body);
+    expect(deleted!.title).toBe('Removed day');
+    expect(deleted!.frontmatter.dream_generated).not.toBe(true);
+  });
 });

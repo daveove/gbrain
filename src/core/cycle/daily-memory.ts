@@ -70,9 +70,12 @@ function renderNote(day: string, rows: SourcePageRow[], total: number): string {
 
 /**
  * Write `daily-memory/YYYY-MM-DD` when any source already has a page for the
- * cycle day. A human-owned page at that slug is left in place. Errors are
- * logged and swallowed so a note failure does not cancel the rest of the
- * maintenance job; an abort still propagates.
+ * cycle day. A human-owned page at that slug is left in place, including one
+ * that is soft-deleted: `getPage` hides those rows, and `putPage` clears
+ * `deleted_at` on conflict, which would resurrect the page. A soft-deleted
+ * dream note (`dream_generated: true`) may still refresh. Errors are logged
+ * and swallowed so a note failure does not cancel the rest of the maintenance
+ * job; an abort still propagates.
  */
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
@@ -103,7 +106,10 @@ export async function writeDailyMemoryFromSources(
       return { written: false, day, slug, pages: 0, reason: 'no_source_activity' };
     }
 
-    const existing = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const existing = await engine.getPage(slug, {
+      sourceId: DAILY_MEMORY_SOURCE_ID,
+      includeDeleted: true,
+    });
     if (existing && existing.frontmatter?.dream_generated !== true) {
       return { written: false, day, slug, pages: rows.length, reason: 'human_page' };
     }
