@@ -43,6 +43,11 @@ interface Checkpoint {
    * Updated once per row. The checkpoint does not store the identity list.
    */
   identity_hash: string;
+  /**
+   * Source-scoped corpus mutation watermark when this prefix was scanned.
+   * A later change refuses resume so prefix and suffix never mix DB states.
+   */
+  mutation_watermark: string;
 }
 
 interface PageRow {
@@ -103,7 +108,69 @@ function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
     junk: {},
     seen_link_ids: [],
     identity_hash: initialIdentityHash(sourceId),
+    mutation_watermark: '',
   };
+}
+
+/**
+ * Commit-ordered mutation generation for one source. Statement triggers
+ * record the sources a page, chunk, or link write touched; a deferred
+ * trigger increments `source_mutation_generation` when that transaction
+ * commits. The value is a primary-key read: it does not scan the corpus,
+ * it does not move when a link's pages are both outside this source, and
+ * it advances even when a late commit carries a lower XID than `max(xmin)`.
+ * A changed value means the walk mixed states.
+ */
+export const PAGED_SOURCE_MUTATION_WATERMARK_SQL = `SELECT COALESCE(
+         (SELECT generation FROM source_mutation_generation WHERE source_id = $1),
+         0
+       )::text AS watermark`;
+
+export async function readPagedSourceMutationWatermark(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<string> {
+  const rows = await engine.executeRaw<{ watermark: string | number | null }>(
+    PAGED_SOURCE_MUTATION_WATERMARK_SQL,
+    [sourceId],
+  );
+  const watermark = rows[0]?.watermark;
+  if (watermark == null || String(watermark).length === 0) {
+    throw new Error(`Paged measure watermark returned no row for source ${sourceId}`);
+  }
+  return String(watermark);
+}
+
+async function assertCheckpointWatermark(
+  engine: BrainEngine,
+  checkpoint: Checkpoint,
+): Promise<void> {
+  const live = await readPagedSourceMutationWatermark(engine, checkpoint.source_id);
+  if (live !== checkpoint.mutation_watermark) {
+    throw new Error(
+      `Corpus mutated during paged measure for source ${checkpoint.source_id}; ` +
+      `delete the checkpoint and rerun with --cursor 0`,
+    );
+  }
+}
+
+/**
+ * Compare a finished source checkpoint to the live watermark. Multi-source
+ * walks call this again after every source has been scanned, so a mutation
+ * of an earlier source during a later source's walk is refused.
+ */
+export async function revalidatePagedCheckpoint(
+  engine: BrainEngine,
+  checkpointPath: string,
+  sourceId: string,
+): Promise<void> {
+  const checkpoint = readCheckpoint(checkpointPath, sourceId);
+  if (!checkpoint) {
+    throw new Error(
+      `Checkpoint ${checkpointPath} missing after paged measure for source ${sourceId}`,
+    );
+  }
+  await assertCheckpointWatermark(engine, checkpoint);
 }
 
 function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
@@ -119,12 +186,18 @@ function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
       `Checkpoint ${path} has no identity_hash; delete it and rerun with --cursor 0`,
     );
   }
+  if (typeof parsed.mutation_watermark !== 'string' || parsed.mutation_watermark.length === 0) {
+    throw new Error(
+      `Checkpoint ${path} has no mutation_watermark; delete it and rerun with --cursor 0`,
+    );
+  }
   const base = emptyCheckpoint(sourceId, parsed.cursor ?? 0);
   return {
     ...base,
     ...parsed,
     source_id: sourceId,
     identity_hash: parsed.identity_hash,
+    mutation_watermark: parsed.mutation_watermark,
     seen_link_ids: Array.isArray(parsed.seen_link_ids) ? parsed.seen_link_ids : [],
     degree_counts: parsed.degree_counts ?? {},
     junk: parsed.junk ?? {},
@@ -244,8 +317,9 @@ function linkLine(link: LinkRow): string {
  * Walk one source from the checkpoint cursor, or from `opts.cursor` when
  * the checkpoint is absent. A nonzero initial cursor without a checkpoint
  * is rejected so aggregates cannot silently omit earlier pages. A finished
- * checkpoint is returned as-is. Live edges require both endpoint pages
- * undeleted and both endpoint sources not archived.
+ * checkpoint is returned as-is only when the source mutation watermark still
+ * matches. Live edges require both endpoint pages undeleted and both
+ * endpoint sources not archived.
  *
  * The fingerprint rolls a sha256 once per live page and once per newly seen
  * live link. Page and chunk revisions are read for the current id batch
@@ -269,6 +343,7 @@ export async function runPagedMeasure(
       `Checkpoint cursor ${existing.cursor} is behind --cursor ${opts.cursor}; refusing to skip a gap`,
     );
   }
+  if (existing) await assertCheckpointWatermark(engine, existing);
   if (existing?.done) return resultFromCheckpoint(existing);
   // A nonzero --cursor with no checkpoint would zero every aggregate and
   // silently omit earlier pages. Resume only from a compatible checkpoint.
@@ -279,6 +354,12 @@ export async function runPagedMeasure(
     );
   }
   const checkpoint = existing ?? emptyCheckpoint(opts.sourceId, opts.cursor);
+  if (!existing) {
+    checkpoint.mutation_watermark = await readPagedSourceMutationWatermark(
+      engine,
+      opts.sourceId,
+    );
+  }
   const seen = new Set(checkpoint.seen_link_ids);
 
   for (;;) {
@@ -293,6 +374,7 @@ export async function runPagedMeasure(
       [opts.sourceId, checkpoint.cursor, opts.limit],
     );
     if (pages.length === 0) {
+      await assertCheckpointWatermark(engine, checkpoint);
       checkpoint.done = true;
       writeCheckpoint(opts.checkpointPath, checkpoint);
       return resultFromCheckpoint(checkpoint);
@@ -311,9 +393,14 @@ export async function runPagedMeasure(
                 md5(string_agg(
                   c.chunk_index::text || E'\\n' ||
                   md5(c.chunk_text) || E'\\n' ||
-                  COALESCE(c.chunk_source, '') || E'\\n' ||
                   COALESCE(c.embedded_text_hash, '') || E'\\n' ||
-                  COALESCE(md5(c.embedding::text), '')
+                  COALESCE(c.embedded_at::text, '') || E'\\n' ||
+                  COALESCE(md5(c.embedding::text), '') || E'\\n' ||
+                  COALESCE(md5(c.embedding_image::text), '') || E'\\n' ||
+                  COALESCE(md5(c.embedding_multimodal::text), '') || E'\\n' ||
+                  COALESCE(c.model, '') || E'\\n' ||
+                  COALESCE(c.modality, '') || E'\\n' ||
+                  COALESCE(c.chunk_source, '')
                 , E'\\n' ORDER BY c.chunk_index, c.id)) AS chunk_rev
            FROM content_chunks c
           WHERE c.page_id = ANY($1::int[])
@@ -392,6 +479,7 @@ export async function runPagedMeasure(
 
     checkpoint.cursor = intId(pages[pages.length - 1].id);
     checkpoint.seen_link_ids = [...seen];
+    await assertCheckpointWatermark(engine, checkpoint);
     writeCheckpoint(opts.checkpointPath, checkpoint);
   }
 }
