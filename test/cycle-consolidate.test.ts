@@ -144,15 +144,16 @@ describe('runPhaseConsolidate', () => {
     ];
     for (const [sourceId, slug, claim] of clusters) {
       await engine.executeRaw(
-        `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at)
-         VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.95, $5::vector, $4::timestamptz)`,
+        `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at, embedding_model, embedded_text_hash)
+         VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.95, $5::vector, $4::timestamptz, 'openai:text-embedding-3-large', md5($3))`,
         [sourceId, slug, claim, oldDate(), unitVec()],
       );
       for (let i = 0; i < 3; i++) {
+        const support = `${claim} support ${i}`;
         await engine.executeRaw(
-          `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at)
-           VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.5, $5::vector, $4::timestamptz)`,
-          [sourceId, slug, `${claim} support ${i}`, oldDate(), unitVec()],
+          `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at, embedding_model, embedded_text_hash)
+           VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.5, $5::vector, $4::timestamptz, 'openai:text-embedding-3-large', md5($3))`,
+          [sourceId, slug, support, oldDate(), unitVec()],
         );
       }
     }
