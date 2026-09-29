@@ -746,6 +746,38 @@ export async function runImport(
     info(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
   }
 
+  // Import writes pages and stops. A markdown link between two of those
+  // pages does not become a row in `links` until the existing DB-source
+  // stale sweep runs (`gbrain extract --stale`, the cycle drain). Run it
+  // here, scoped to the source this import wrote, so the graph connects
+  // as soon as the pages exist — including pages an earlier import left
+  // with a null links_extracted_at. Quiet: `import --json` must stay one
+  // stdout document. Best-effort: a sweep failure must not fail the import.
+  let structuralLinks = 0;
+  if (allFiles.length > 0) {
+    try {
+      const { extractStaleFromDB } = await import('./extract.ts');
+      const extracted = await extractStaleFromDB(engine, {
+        dryRun: false,
+        jsonMode: false,
+        includeFrontmatter: false,
+        sourceIdFilter: sourceId ?? 'default',
+        catchUp: false,
+        quiet: true,
+      });
+      structuralLinks = extracted.linksCreated;
+      if (extracted.staleRemaining > 0) {
+        console.error(
+          `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `  Link extraction skipped: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   if (jsonOutput) {
     console.log(JSON.stringify({
@@ -758,6 +790,9 @@ export async function runImport(
     console.log(`  ${imported} pages imported`);
     console.log(`  ${skipped} pages skipped (${skipped - errors} unchanged, ${errors} errors)`);
     console.log(`  ${chunksCreated} chunks created`);
+    if (structuralLinks > 0) {
+      console.log(`  ${structuralLinks} links created`);
+    }
   }
 
   // v0.39 T7 — end-of-run schema mismatch warn. Fires ONCE per import,

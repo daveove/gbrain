@@ -2020,6 +2020,11 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
+    /**
+     * Skip the human/JSON summary. Progress still goes to stderr. Import
+     * sets this so `gbrain import --json` keeps a single stdout document.
+     */
+    quiet?: boolean;
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number }> {
   const { dryRun, jsonMode, includeFrontmatter, sourceIdFilter, catchUp } = opts;
@@ -2029,15 +2034,17 @@ export async function extractStaleFromDB(
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
   const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   if (dryRun) {
-    if (jsonMode) {
-      process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale }) + '\n');
-    } else {
-      console.log(`(dry run) ${totalStale} page(s) need link/timeline extraction. Run without --dry-run to extract.`);
+    if (!opts.quiet) {
+      if (jsonMode) {
+        process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale }) + '\n');
+      } else {
+        console.log(`(dry run) ${totalStale} page(s) need link/timeline extraction. Run without --dry-run to extract.`);
+      }
     }
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
   }
   if (totalStale === 0) {
-    if (!jsonMode) console.log('No stale pages — extraction is up to date.');
+    if (!jsonMode && !opts.quiet) console.log('No stale pages — extraction is up to date.');
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
   }
 
@@ -2184,23 +2191,25 @@ export async function extractStaleFromDB(
   progress.finish();
   const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
 
-  if (!jsonMode) {
-    console.log(`Extract --stale: ${linksCreated} link(s) + ${timelineCreated} timeline entr(ies) from ${pagesProcessed} page(s).`);
-    if (skippedMissingTarget > 0) {
-      console.log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
+  if (!opts.quiet) {
+    if (!jsonMode) {
+      console.log(`Extract --stale: ${linksCreated} link(s) + ${timelineCreated} timeline entr(ies) from ${pagesProcessed} page(s).`);
+      if (skippedMissingTarget > 0) {
+        console.log(`Skipped ${skippedMissingTarget} candidate(s) whose target page doesn't exist (references to non-pages are never persisted).`);
+      }
+      if (skippedCrossSource > 0) {
+        console.log(`Skipped ${skippedCrossSource} cross-source candidate(s) — target exists only in another source. Enable with \`gbrain config set link_resolution.cross_source true\`, then run \`gbrain extract links --source db\` — a --stale re-run will NOT revisit these pages (their extraction watermark is already stamped) — see docs/architecture/brains-and-sources.md (#2589).`);
+      }
+      if (budgetHit && staleRemaining > 0) {
+        console.log(`Time budget reached — ${staleRemaining} page(s) still stale. Re-run 'gbrain extract --stale' (or pass --catch-up) to continue.`);
+      }
+    } else {
+      process.stdout.write(JSON.stringify({
+        action: 'extract_stale_done', links_created: linksCreated, timeline_created: timelineCreated,
+        pages_processed: pagesProcessed, stale_remaining: staleRemaining, budget_hit: budgetHit,
+        skipped_missing_target: skippedMissingTarget, skipped_cross_source: skippedCrossSource,
+      }) + '\n');
     }
-    if (skippedCrossSource > 0) {
-      console.log(`Skipped ${skippedCrossSource} cross-source candidate(s) — target exists only in another source. Enable with \`gbrain config set link_resolution.cross_source true\`, then run \`gbrain extract links --source db\` — a --stale re-run will NOT revisit these pages (their extraction watermark is already stamped) — see docs/architecture/brains-and-sources.md (#2589).`);
-    }
-    if (budgetHit && staleRemaining > 0) {
-      console.log(`Time budget reached — ${staleRemaining} page(s) still stale. Re-run 'gbrain extract --stale' (or pass --catch-up) to continue.`);
-    }
-  } else {
-    process.stdout.write(JSON.stringify({
-      action: 'extract_stale_done', links_created: linksCreated, timeline_created: timelineCreated,
-      pages_processed: pagesProcessed, stale_remaining: staleRemaining, budget_hit: budgetHit,
-      skipped_missing_target: skippedMissingTarget, skipped_cross_source: skippedCrossSource,
-    }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource };
 }
