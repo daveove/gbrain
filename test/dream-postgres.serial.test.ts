@@ -6,7 +6,8 @@
  * found" when neither --dir nor an on-disk sync.repo_path existed — so the
  * DB-only maintenance phases (notably resolve_symbol_edges, the call-graph
  * builder) could never run on a Supabase brain. Now brainDir can be null: the
- * 6 filesystem phases skip with reason `no_brain_dir` and the DB phases run.
+ * Filesystem phases skip with reason `no_brain_dir` and the DB phases run.
+ * Extract skips its walk and still drains stale links from the database.
  *
  * Covers: the null-brainDir path, A1 (the --source per-source scope fix),
  * A7 (deriveStatus reports `ok` not `clean` when edges resolve), and the

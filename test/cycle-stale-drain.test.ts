@@ -95,6 +95,30 @@ describe('cycle extract phase stale drain (#4062)', () => {
     expect(Number(stale[0]?.n ?? -1)).toBe(0);
   });
 
+  test('no checkout drains stale pages into a links row and skips the filesystem walk', async () => {
+    await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'wiki'`);
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const report = await runCycle(engine, {
+        brainDir: null,
+        sourceId: 'wiki',
+        phases: ['extract'],
+      });
+      const extractPhase = report.phases.find(p => p.phase === 'extract');
+      expect(extractPhase?.status).toBe('ok');
+      expect(extractPhase?.details?.reason).not.toBe('no_brain_dir');
+      expect(Number(extractPhase?.details?.pages_processed ?? -1)).toBe(0);
+      expect(Number(extractPhase?.details?.stale_pages_drained ?? -1)).toBe(2);
+    });
+
+    const links = await engine.executeRaw<{ from_slug: string; to_slug: string }>(
+      `SELECT pf.slug AS from_slug, pt.slug AS to_slug
+       FROM links l
+       JOIN pages pf ON pf.id = l.from_page_id
+       JOIN pages pt ON pt.id = l.to_page_id`,
+    );
+    expect(links.some(l => l.from_slug === 'people/alice' && l.to_slug === 'people/bob')).toBe(true);
+  });
+
   test('second cycle is a no-op drain (nothing stale, staleRemaining 0)', async () => {
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
       await runCycle(engine, { brainDir, sourceId: 'wiki', phases: ['extract'] });
