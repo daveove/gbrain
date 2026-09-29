@@ -156,6 +156,8 @@ export interface RunImportResult {
   errors: number;
   chunksCreated: number;
   failures: Array<{ path: string; error: string }>;
+  /** Set when the post-import link sweep threw. Pages are imported; edges are not. */
+  linkExtractionError?: string;
   /** Files dropped by the malformed-filename gate (walker + per-file defense). */
   malformedSkipped?: number;
   /** Aggregated alias/undeclared explicit-type warnings (schema.type_warnings). */
@@ -752,8 +754,10 @@ export async function runImport(
   // here, scoped to the source this import wrote, so the graph connects
   // as soon as the pages exist — including pages an earlier import left
   // with a null links_extracted_at. Quiet: `import --json` must stay one
-  // stdout document. Best-effort: a sweep failure must not fail the import.
+  // stdout document. A thrown sweep still returns (pages are imported) but
+  // must not be reported as a clean success.
   let structuralLinks = 0;
+  let linkExtractionError: string | undefined;
   if (allFiles.length > 0) {
     try {
       const { extractStaleFromDB } = await import('./extract.ts');
@@ -772,18 +776,19 @@ export async function runImport(
         );
       }
     } catch (e) {
-      console.error(
-        `  Link extraction skipped: ${e instanceof Error ? e.message : String(e)}`,
-      );
+      linkExtractionError = e instanceof Error ? e.message : String(e);
+      console.error(`  Link extraction skipped: ${linkExtractionError}`);
     }
   }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   if (jsonOutput) {
     console.log(JSON.stringify({
-      status: 'success', duration_s: parseFloat(totalTime),
+      status: linkExtractionError ? 'link_extraction_failed' : 'success',
+      duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       total_files: allFiles.length,
+      ...(linkExtractionError ? { link_extraction_error: linkExtractionError } : {}),
     }));
   } else {
     console.log(`\nImport complete (${totalTime}s):`);
@@ -1015,6 +1020,7 @@ export async function runImport(
 
   return {
     imported, skipped, errors, chunksCreated, failures,
+    ...(linkExtractionError ? { linkExtractionError } : {}),
     ...(totalMalformed > 0 ? { malformedSkipped: totalMalformed } : {}),
     ...(typeWarningCounts.size > 0 && typeWarningsEnabled
       ? { type_warnings: [...typeWarningCounts.values()] }

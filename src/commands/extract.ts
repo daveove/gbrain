@@ -397,7 +397,7 @@ export function walkMarkdownFiles(dir: string): { path: string; relPath: string 
 export function extractMarkdownLinks(content: string): { name: string; relTarget: string }[] {
   const results: { name: string; relTarget: string }[] = [];
 
-  const mdPattern = /\[([^\]]+)\]\(([^)]+\.md)\)/g;
+  const mdPattern = /\[([^\]]+)\]\(([^)]+?\.md)(?:#[^)]*)?\)/g;
   let match;
   while ((match = mdPattern.exec(content)) !== null) {
     let target = match[2];
@@ -2118,6 +2118,11 @@ export async function extractStaleFromDB(
         page.slug, fullContent, page.frontmatter, page.type, resolver,
         { skipFrontmatter: !includeFrontmatter, globalBasename, pack },
       );
+      // A target that is not a page yet must leave this page unstamped.
+      // Importing that page later re-enters the sweep and creates the edge.
+      // Stamping here made the miss permanent until the extractor version
+      // bumped or the page was edited.
+      let holdStamp = false;
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(
           c, page.slug, page.source_id, allSlugs, slugToSources,
@@ -2127,6 +2132,7 @@ export async function extractStaleFromDB(
         if (!r.ok) {
           if (r.reason === 'cross_source') skippedCrossSource++;
           else skippedMissingTarget++;
+          if (r.reason === 'missing_target') holdStamp = true;
           continue;
         }
         linkRows.push({
@@ -2143,7 +2149,8 @@ export async function extractStaleFromDB(
         // summary, source) dedup index.
         timelineRows.push({ slug: page.slug, date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail || '', source_id: page.source_id });
       }
-      // EVERY processed page is stamped (incl. zero-link pages). D4 race fix:
+      // Pages with no held target are stamped (incl. zero-link pages).
+      // A missing_target hold skips the stamp. D4 race fix:
       // stamp with the row's READ updated_at, NOT now() — a concurrent edit
       // landing between this SELECT and the stamp advances updated_at past the
       // stamped value, so the page stays stale and re-extracts next run instead
@@ -2161,10 +2168,12 @@ export async function extractStaleFromDB(
       // GREATEST(updated_at, versionTs) preserves the race semantics (a real
       // future edit advances updated_at > versionTs >= stamp → re-extracts)
       // while lifting old pages to the threshold so they clear.
-      const stampIso = page.updated_at.getTime() >= Date.parse(versionTs)
-        ? page.updated_at_iso
-        : versionTs;
-      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: stampIso });
+      if (!holdStamp) {
+        const stampIso = page.updated_at.getTime() >= Date.parse(versionTs)
+          ? page.updated_at_iso
+          : versionTs;
+        processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: stampIso });
+      }
     }
 
     // Flush NON-swallowing (CDX-4): a throw here propagates out of the sweep so

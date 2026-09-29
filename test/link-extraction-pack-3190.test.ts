@@ -57,9 +57,16 @@ describe('#3190 gate 1 — same-directory markdown links', () => {
     expect(refs[0].sameDir).toBe(true);
   });
 
-  test('scheme/anchor/dir targets never match the sameDir pass', () => {
+  test('scheme and dir targets never match the sameDir pass; #fragment is stripped', () => {
     expect(extractEntityRefs('[x](https://example.com/a.md)').filter(r => r.sameDir)).toEqual([]);
-    expect(extractEntityRefs('[x](beta.md#section)').filter(r => r.sameDir)).toEqual([]);
+    const anchored = extractEntityRefs('[x](beta.md#section)');
+    expect(anchored.filter(r => r.sameDir)).toEqual([
+      { name: 'x', slug: 'beta', dir: '', sameDir: true },
+    ]);
+    const dirAnchored = extractEntityRefs('[Alice](people/alice.md#bio)');
+    expect(dirAnchored).toHaveLength(1);
+    expect(dirAnchored[0].slug).toBe('people/alice');
+    expect(dirAnchored[0].sameDir).toBeUndefined();
     // dir-shaped targets belong to pass 1, not the sameDir pass
     const dirRefs = extractEntityRefs('[x](people/beta.md)');
     expect(dirRefs).toHaveLength(1);
