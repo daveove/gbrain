@@ -206,10 +206,10 @@ export const ALL_PHASES: CyclePhase[] = [
  * cannot safely fan out by source: synthesize reads the global transcript
  * corpus, and patterns reads cross-source reflections. They join the
  * brain-wide phases in the single maintenance job instead of being repeated
- * into every source. SOURCE_BACKGROUND_PHASES have no automatic lane on
- * multi-source brains yet — they run on explicit invocation
- * (`gbrain dream --source X --phase extract_atoms`) until the background
- * lane lands (see TODOS).
+ * into every source. consolidate, conversation_facts_backfill, and
+ * enrich_thin walk every source in one call (mixed; daily maintenance
+ * runs each once). extract_atoms, propose_takes, and schema-suggest
+ * still have no automatic lane (see TODOS).
  *
  * SOURCE_PHASES ∪ MIXED_PHASES ∪ GLOBAL_PHASES == ALL_PHASES, with no overlap.
  * MAINTENANCE_PHASES is MIXED ∪ GLOBAL in original cycle order.

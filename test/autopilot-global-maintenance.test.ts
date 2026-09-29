@@ -55,10 +55,23 @@ describe('cycle phase partition (#2194 fix #3)', () => {
     expect(SOURCE_PHASES).toContain('lint');
     expect(SOURCE_PHASES).toContain('sync');
     expect(SOURCE_PHASES).not.toContain('embed');
-    expect(MIXED_PHASES).toEqual(['synthesize', 'patterns']);
+    expect(MIXED_PHASES).toEqual([
+      'synthesize',
+      'patterns',
+      'consolidate',
+      'conversation_facts_backfill',
+      'enrich_thin',
+    ]);
     expect(MAINTENANCE_PHASES).toContain('synthesize');
     expect(MAINTENANCE_PHASES).toContain('patterns');
+    expect(MAINTENANCE_PHASES).toContain('consolidate');
+    expect(MAINTENANCE_PHASES).toContain('conversation_facts_backfill');
+    expect(MAINTENANCE_PHASES).toContain('enrich_thin');
     expect(MAINTENANCE_PHASES).toContain('embed');
+    // Once per day, not once per source.
+    expect(SOURCE_FRESHNESS_PHASES).not.toContain('consolidate');
+    expect(SOURCE_FRESHNESS_PHASES).not.toContain('conversation_facts_backfill');
+    expect(SOURCE_FRESHNESS_PHASES).not.toContain('enrich_thin');
   });
 
   test('source freshness excludes LLM-backed/background source work', () => {
@@ -66,9 +79,10 @@ describe('cycle phase partition (#2194 fix #3)', () => {
     expect(SOURCE_FRESHNESS_PHASES).toContain('sync');
     expect(SOURCE_FRESHNESS_PHASES).toContain('extract_facts');
     expect(SOURCE_BACKGROUND_PHASES).toContain('extract_atoms');
-    expect(SOURCE_BACKGROUND_PHASES).toContain('consolidate');
     expect(SOURCE_BACKGROUND_PHASES).toContain('propose_takes');
-    expect(SOURCE_BACKGROUND_PHASES).toContain('enrich_thin');
+    expect(SOURCE_BACKGROUND_PHASES).toContain('schema-suggest');
+    expect(SOURCE_BACKGROUND_PHASES).not.toContain('consolidate');
+    expect(SOURCE_BACKGROUND_PHASES).not.toContain('enrich_thin');
     expect(SOURCE_FRESHNESS_PHASES).not.toContain('extract_atoms');
   });
 
@@ -331,6 +345,10 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     for (const p of MAINTENANCE_PHASES) expect(ranPhases).toContain(p);
     expect(ranPhases).toContain('synthesize');
     expect(ranPhases).toContain('patterns');
+    expect(ranPhases).toContain('consolidate');
+    const consolidate = result.report.phases.find((p: { phase: string }) => p.phase === 'consolidate');
+    expect(consolidate.status).toBe('ok');
+    expect(consolidate.details.takes_written).toBe(0);
     expect(ranPhases).not.toContain('sync');
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).not.toBeNull();
   }, 60_000);
