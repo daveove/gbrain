@@ -164,6 +164,8 @@ export interface RunImportResult {
   errors: number;
   chunksCreated: number;
   failures: Array<{ path: string; error: string }>;
+  /** Set when the post-import link sweep threw. Pages are imported; edges are not. */
+  linkExtractionError?: string;
   /** Files dropped by the malformed-filename gate (walker + per-file defense). */
   malformedSkipped?: number;
   /** Aggregated alias/undeclared explicit-type warnings (schema.type_warnings). */
@@ -1072,6 +1074,39 @@ export async function runImport(
   if (errors === 0 && !company) clearCheckpoint(checkpointPath);
   else if (existsSync(checkpointPath)) info(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
 
+  // Import writes pages and stops. A markdown link between two of those
+  // pages does not become a row in `links` until the existing DB-source
+  // stale sweep runs (`gbrain extract --stale`, the cycle drain). Run it
+  // here, scoped to the source this import wrote, so the graph connects
+  // as soon as the pages exist — including pages an earlier import left
+  // with a null links_extracted_at. Quiet: `import --json` must stay one
+  // stdout document. A thrown sweep still returns (pages are imported) but
+  // must not be reported as a clean success.
+  let structuralLinks = 0;
+  let linkExtractionError: string | undefined;
+  if (allFiles.length > 0) {
+    try {
+      const { extractStaleFromDB } = await import('./extract.ts');
+      const extracted = await extractStaleFromDB(engine, {
+        dryRun: false,
+        jsonMode: false,
+        includeFrontmatter: false,
+        sourceIdFilter: sourceId ?? 'default',
+        catchUp: false,
+        quiet: true,
+      });
+      structuralLinks = extracted.linksCreated;
+      if (extracted.staleRemaining > 0) {
+        console.error(
+          `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
+        );
+      }
+    } catch (e) {
+      linkExtractionError = e instanceof Error ? e.message : String(e);
+      console.error(`  Link extraction skipped: ${linkExtractionError}`);
+    }
+  }
+
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   if (jsonOutput) {
     // `skipped` includes every per-file failure importFile RETURNS (invalid
@@ -1082,12 +1117,14 @@ export async function runImport(
     // importing a scratch directory has no other channel. Emit the per-file
     // list so state can be gated per file.
     console.log(JSON.stringify({
-      status: errors > 0 ? 'partial' : 'success', duration_s: parseFloat(totalTime),
+      status: linkExtractionError ? 'link_extraction_failed' : (errors > 0 ? 'partial' : 'success'),
+      duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       total_files: allFiles.length,
       unchanged: skipped - failures.length - malformedFileSkips,
       malformed_skipped: malformedFileSkips,
       failures,
+      ...(linkExtractionError ? { link_extraction_error: linkExtractionError } : {}),
       // Effective destination — same expression as the import-file write (import-file.ts) and the ingest_log row below.
       source_id: sourceId ?? 'default',
     }));
@@ -1096,11 +1133,15 @@ export async function runImport(
     slog(`  ${imported} pages imported`);
     slog(`  ${skipped} pages skipped (${skipped - failures.length - malformedFileSkips} unchanged, ${errors} errors, ${malformedFileSkips} malformed filenames)`);
     slog(`  ${chunksCreated} chunks created`);
+    if (structuralLinks > 0) {
+      slog(`  ${structuralLinks} links created`);
+    }
   }
 
   if (imported > 0 && !opts.managedBookmark) await refreshProjectionStatistics(engine);
   return {
     imported, skipped, errors, chunksCreated, failures,
+    ...(linkExtractionError ? { linkExtractionError } : {}),
     ...(totalMalformed > 0 ? { malformedSkipped: totalMalformed } : {}),
     ...(typeWarningCounts.size > 0 && typeWarningsEnabled
       ? { type_warnings: [...typeWarningCounts.values()] }

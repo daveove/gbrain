@@ -3085,7 +3085,7 @@ async function handleCliOnly(command: string, args: string[]) {
         // so wrappers (sync, CI scripts, `&& gbrain doctor`) propagate.
         try {
           const importResult = await runImport(engine, args);
-          if (importResult.errors > 0) {
+          if (importResult.errors > 0 || importResult.linkExtractionError) {
             setCliExitVerdict(1);
           }
         } catch (e) {
