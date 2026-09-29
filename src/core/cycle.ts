@@ -459,9 +459,9 @@ export interface CycleOpts {
   phases?: CyclePhase[];
   /**
    * Brain directory (git repo). Required for filesystem phases (lint,
-   * backlinks, sync, synthesize, extract, patterns). `null` when the brain has
+   * backlinks, sync, synthesize, patterns). `null` when the brain has
    * no on-disk checkout (postgres/remote engine) — those phases are skipped
-   * with reason `no_brain_dir` and the DB-only phases still run.
+   * with reason `no_brain_dir`. Extract still drains stale links from the DB.
    */
   brainDir: string | null;
   /** Whether sync should run `git pull`. Default false (cron-safe). */
@@ -1343,7 +1343,7 @@ async function runPhaseSync(
 
 async function runPhaseExtract(
   engine: BrainEngine,
-  brainDir: string,
+  brainDir: string | null,
   dryRun: boolean,
   changedSlugs?: string[],
   signal?: AbortSignal,
@@ -1373,9 +1373,9 @@ async function runPhaseExtract(
         details: { dryRun: true, reason: 'no_dry_run_support' },
       };
     }
-    // Incremental path: if sync told us which slugs changed, only extract those.
-    // On a 54K-page brain this turns a 10-minute full walk into a sub-second pass.
-    const result = await runExtractCore(engine, {
+    // No checkout: skip the walk; the stale drain below still runs.
+    // A checkout walks changed slugs only (undefined = full walk).
+    const result = brainDir === null ? null : await runExtractCore(engine, {
       mode: 'all',
       jsonMode: false, // batch errors stay human-readable on stderr, as in a plain `gbrain extract`
       quiet: true, // the cycle owns the report — no helper summary on stdout (keeps dream --json pure)
@@ -2286,7 +2286,7 @@ export async function runCycle(
           summary: 'no database connected',
           details: { reason: 'no_database' },
         });
-      } else if (brainDir === null) {
+      } else if (brainDir === null && dryRun) {
         phaseResults.push(skipNoBrainDir('extract'));
       } else {
         // Pass changed slugs from sync for incremental extract.
