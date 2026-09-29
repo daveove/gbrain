@@ -1082,11 +1082,12 @@ deferred M-effort issues above are NOT repeated here.
 
 - [ ] **P2 — automatic background lane for `SOURCE_BACKGROUND_PHASES`.**
   **What:** a per-source scheduled lane for the LLM-backed/unbounded source
-  phases (extract_atoms, consolidate, propose_takes, enrich_thin,
-  schema-suggest, conversation_facts_backfill) that the v0.46.20.0 freshness
-  split removed from automatic scheduling on multi-source brains. **Why:**
-  today those phases run only on explicit `gbrain dream --source X --phase …`
-  invocation; backlogs (atoms, consolidation) grow silently between manual
+  phases that still have no automatic lane (`extract_atoms`, `propose_takes`,
+  `schema-suggest`). `consolidate`, `conversation_facts_backfill`, and
+  `enrich_thin` already walk every source inside one call and now run once
+  on the daily maintenance job (`PHASE_SCOPE=mixed`). **Why:** the remaining
+  phases run only on explicit `gbrain dream --source X --phase …`
+  invocation; atom and proposal backlogs grow silently between manual
   runs. **Design constraints (verified against code during the #4250
   review):** MUST be per-source jobs — background phases scope to ONE source
   per cycle (`cycle.ts` extract_atoms uses `cycleSourceId ?? 'default'`), and
