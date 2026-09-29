@@ -156,6 +156,8 @@ export interface RunImportResult {
   errors: number;
   chunksCreated: number;
   failures: Array<{ path: string; error: string }>;
+  /** Set when the post-import link sweep threw. Pages are imported; edges are not. */
+  linkExtractionError?: string;
   /** Files dropped by the malformed-filename gate (walker + per-file defense). */
   malformedSkipped?: number;
   /** Aggregated alias/undeclared explicit-type warnings (schema.type_warnings). */
@@ -746,18 +748,56 @@ export async function runImport(
     info(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
   }
 
+  // Import writes pages and stops. A markdown link between two of those
+  // pages does not become a row in `links` until the existing DB-source
+  // stale sweep runs (`gbrain extract --stale`, the cycle drain). Run it
+  // here, scoped to the source this import wrote, so the graph connects
+  // as soon as the pages exist — including pages an earlier import left
+  // with a null links_extracted_at. Quiet: `import --json` must stay one
+  // stdout document. A thrown sweep still returns (pages are imported) but
+  // must not be reported as a clean success.
+  let structuralLinks = 0;
+  let linkExtractionError: string | undefined;
+  if (allFiles.length > 0) {
+    try {
+      const { extractStaleFromDB } = await import('./extract.ts');
+      const extracted = await extractStaleFromDB(engine, {
+        dryRun: false,
+        jsonMode: false,
+        includeFrontmatter: false,
+        sourceIdFilter: sourceId ?? 'default',
+        catchUp: false,
+        quiet: true,
+      });
+      structuralLinks = extracted.linksCreated;
+      if (extracted.staleRemaining > 0) {
+        console.error(
+          `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
+        );
+      }
+    } catch (e) {
+      linkExtractionError = e instanceof Error ? e.message : String(e);
+      console.error(`  Link extraction skipped: ${linkExtractionError}`);
+    }
+  }
+
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
   if (jsonOutput) {
     console.log(JSON.stringify({
-      status: 'success', duration_s: parseFloat(totalTime),
+      status: linkExtractionError ? 'link_extraction_failed' : 'success',
+      duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       total_files: allFiles.length,
+      ...(linkExtractionError ? { link_extraction_error: linkExtractionError } : {}),
     }));
   } else {
     console.log(`\nImport complete (${totalTime}s):`);
     console.log(`  ${imported} pages imported`);
     console.log(`  ${skipped} pages skipped (${skipped - errors} unchanged, ${errors} errors)`);
     console.log(`  ${chunksCreated} chunks created`);
+    if (structuralLinks > 0) {
+      console.log(`  ${structuralLinks} links created`);
+    }
   }
 
   // v0.39 T7 — end-of-run schema mismatch warn. Fires ONCE per import,
@@ -980,6 +1020,7 @@ export async function runImport(
 
   return {
     imported, skipped, errors, chunksCreated, failures,
+    ...(linkExtractionError ? { linkExtractionError } : {}),
     ...(totalMalformed > 0 ? { malformedSkipped: totalMalformed } : {}),
     ...(typeWarningCounts.size > 0 && typeWarningsEnabled
       ? { type_warnings: [...typeWarningCounts.values()] }

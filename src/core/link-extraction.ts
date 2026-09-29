@@ -168,7 +168,7 @@ const ANY_DIR_SEGMENT = '[a-z0-9][a-z0-9_-]*';
  * are dropped by the callers' existence checks, exactly as before.
  */
 const ENTITY_REF_RE = new RegExp(
-  `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${ANY_DIR_SEGMENT}\\/[^)\\s]+?)(?:\\.md)?\\)`,
+  `\\[([^\\]]+)\\]\\((?:\\.\\.\\/)*(${ANY_DIR_SEGMENT}\\/[^)#\\s]+?)(?:\\.md)?(?:#[^)]*)?\\)`,
   'g',
 );
 
@@ -236,13 +236,14 @@ const MARKDOWN_LABEL_WIKILINK_RE = /\[[^\]\n]*\[\[[^\]\n]+\]\][^\]\n]*\]\([^)\n]
 
 /**
  * #3190: same-directory markdown link — `[Name](slug.md)` whose target has
- * NO directory segment and NO scheme/anchor (`/`, `:`, `#` all excluded).
+ * NO directory segment and NO scheme (`/`, `:` excluded). A trailing
+ * `#fragment` is not part of the slug, same as wikilinks.
  * The `.md` suffix is REQUIRED (mirrors the FS extractor's mdPattern) so
  * bare parenthetical prose (`[sic](reference)`) never produces a ref.
  * Resolution against the linking page's directory happens in
  * extractPageLinks (this module has no page context here).
  */
-const SAME_DIR_MD_RE = /\[([^\]]+)\]\(([^)/:#\s]+?)\.md\)/g;
+const SAME_DIR_MD_RE = /\[([^\]]+)\]\(([^)/:#\s]+?)\.md(?:#[^)]*)?\)/g;
 
 /**
  * A code-reference found in markdown prose. Created by extractCodeRefs and
