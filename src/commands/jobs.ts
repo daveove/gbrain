@@ -2877,7 +2877,22 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    await import('../core/cycle/daily-memory.ts').then((m) => m.writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    const dailyMemory = await import('../core/cycle/daily-memory.ts').then((m) =>
+      m.writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    if (dailyMemory.written) {
+      try {
+        const { queueDeferredStaleSweep } = await import('../core/deferred-stale-extract.ts');
+        const { DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
+        await queueDeferredStaleSweep(engine, {
+          sourceId: DAILY_MEMORY_SOURCE_ID,
+          commit: `daily-memory:${dailyMemory.day}`,
+          reason: 'daily_memory_write',
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(`[autopilot-global-maintenance] daily memory extract enqueue skipped: ${message}`);
+      }
+    }
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls

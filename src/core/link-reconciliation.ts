@@ -1,7 +1,7 @@
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { extractPageLinks, unwrapWikilink, resolvedLinkCandidate,
   isCrossSourceLinksEnabled, type LinkCandidate, type LinkExtractionPack, type SlugResolver } from './link-extraction.ts';
-import { fetchSource, isSourceFederated } from './sources-load.ts';
+import { fetchSource, sourceAllowsOutboundCrossSourceLinks } from './sources-load.ts';
 import { parseMarkdown } from './markdown.ts';
 import { isValidSourceId } from './source-id.ts';
 import { buildSourceLocalReferenceIndex } from './source-local-reference-index.ts';
@@ -214,7 +214,7 @@ export async function loadLinkSourcePolicy(engine: BrainEngine, sourceId: string
   const [source, crossSource, defaultSourceId] = await Promise.all([
     fetchSource(engine, sourceId), isCrossSourceLinksEnabled(engine), resolveLinkFallbackDefault(engine),
   ]);
-  return { allowCrossSource: source !== null && !source.archived && isSourceFederated(source.config), crossSource, defaultSourceId };
+  return { allowCrossSource: source !== null && !source.archived && sourceAllowsOutboundCrossSourceLinks(source.config), crossSource, defaultSourceId };
 }
 
 export function capturedLinkEndpoints(links: LinkBatchInput[], metadata: ReadonlyMap<string, Pick<LinkPageMetadata, 'slug' | 'source_id' | 'knowledge_revision'>>) {

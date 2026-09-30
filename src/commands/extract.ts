@@ -89,7 +89,7 @@ import {
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
-import { loadAllSources } from '../core/sources-load.ts';
+import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from '../core/sources-load.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
 // Postgres bind-parameter limit is 65535. Links use 4 cols/row → 16K hard ceiling;
@@ -1825,8 +1825,10 @@ async function extractLinksFromDB(
   // #3478: the 'default' fallback in resolveCandidateSources is a federation
   // feature — an isolated source must not regrow cross-source edges on every
   // sweep. Sources absent from the table (or archived) fail closed to isolated.
-  const federatedSourceIds = new Set(
-    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+  const outboundCrossSourceIds = new Set(
+    (await loadAllSources(engine))
+      .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config))
+      .map(source => source.id),
   );
   const targetMetadata = new Map((await loadLinkPageMetadata(engine)).map(p => [`${p.source_id}\0${p.slug}`, p]));
   await loadSourceLinkPacks(engine, walkRefs.filter(ref => !typeFilter
@@ -1874,7 +1876,7 @@ async function extractLinksFromDB(
       slug, fullContent, page.frontmatter, page.type, resolver,
       { skipFrontmatter: !includeFrontmatter, globalBasename, pack, targetType: (targetSlug, targetSourceId) => {
         const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
-          source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+          source_id, allSlugs, slugToSources, outboundCrossSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
         return resolved.ok ? targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
       } },
     );
@@ -1890,7 +1892,7 @@ async function extractLinksFromDB(
       // non-origin/non-default source) so the two don't get counted as one;
       // the #3908 crossSource flag resolves the edge instead of dropping it.
       const resolved = resolveCandidateSources(
-        c, slug, source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id),
+        c, slug, source_id, allSlugs, slugToSources, outboundCrossSourceIds.has(source_id),
         { crossSource, defaultSourceId: linkDefaultSourceId },
       );
       if (!resolved.ok) {
@@ -2170,8 +2172,10 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   // #4611: mirrors extractLinksFromDB — configured default, resolved once.
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
-  const federatedSourceIds = new Set(
-    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+  const outboundCrossSourceIds = new Set(
+    (await loadAllSources(engine))
+      .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config))
+      .map(source => source.id),
   );
   if (pendingLinks.length) {
     let readyPending = 0;
@@ -2179,7 +2183,7 @@ export async function extractStaleFromDB(
       readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
         deadline: pendingDeadline, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-          federatedSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+          outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
       pendingLinks = (await pendingBatches.next()).value ?? [];
     } while (pendingLinks.length);
     opts.signal?.throwIfAborted();
@@ -2248,7 +2252,7 @@ export async function extractStaleFromDB(
         page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver,
         { skipFrontmatter: !includeFrontmatter, globalBasename, pack, targetType: (targetSlug, targetSourceId) => {
           const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
-            page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+            page.source_id, allSlugs, slugToSources, outboundCrossSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
           return resolved.ok ? targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
         } },
       );
@@ -2257,7 +2261,7 @@ export async function extractStaleFromDB(
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(
           c, page.slug, page.source_id, allSlugs, slugToSources,
-          federatedSourceIds.has(page.source_id),
+          outboundCrossSourceIds.has(page.source_id),
           { crossSource, defaultSourceId: linkDefaultSourceId },
         );
         if (!r.ok) {

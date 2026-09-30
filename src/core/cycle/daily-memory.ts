@@ -10,9 +10,11 @@
  *
  * The scan is brain-wide on purpose: this runs only from the single
  * maintenance job, which is the lane that already walks every source.
- * The note itself is one row in source `dream` (non-federated). Page
- * visibility alone is not enough: remote_private_pages can opt out of
- * private filtering, so cross-source indexes must not live in `default`.
+ * The note itself is one row in source `dream` (`federated: false`,
+ * `system_index: true`). Page visibility alone is not enough:
+ * remote_private_pages can opt out of private filtering, so cross-source
+ * indexes must not live in `default`. `system_index` keeps outbound
+ * link extraction able to resolve targets in other sources.
  */
 
 import { createHash } from 'node:crypto';
@@ -31,12 +33,20 @@ export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
 
 /** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
+  const config = JSON.stringify({ federated: false, system_index: true });
   await engine.executeRaw(
     `INSERT INTO sources (id, name, config)
      SELECT $1, $2, $3::text::jsonb
      WHERE NOT EXISTS (SELECT 1 FROM sources WHERE id = $1)
      ON CONFLICT (id) DO NOTHING`,
-    [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', JSON.stringify({ federated: false })],
+    [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', config],
+  );
+  // Keep the trusted-index markers sticky if an older row predates them.
+  await engine.executeRaw(
+    `UPDATE sources
+     SET config = COALESCE(config, '{}'::jsonb) || $2::text::jsonb
+     WHERE id = $1`,
+    [DAILY_MEMORY_SOURCE_ID, config],
   );
 }
 

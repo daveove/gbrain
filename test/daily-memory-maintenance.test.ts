@@ -371,11 +371,14 @@ describe('daily memory from sources the brain already holds', () => {
     const daily = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect(daily.compiled_truth).toContain('[[restricted:notes/restricted-fixture]]');
     const reference = daily.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
-    const dreamCfg = await engine.executeRaw<{ federated: boolean | null }>(
-      `SELECT (config->>'federated')::boolean AS federated FROM sources WHERE id = $1`,
+    const dreamCfg = await engine.executeRaw<{ federated: boolean | null; system_index: boolean | null }>(
+      `SELECT (config->>'federated')::boolean AS federated,
+              (config->>'system_index')::boolean AS system_index
+         FROM sources WHERE id = $1`,
       [DAILY_MEMORY_SOURCE_ID],
     );
     expect(dreamCfg[0]?.federated).toBe(false);
+    expect(dreamCfg[0]?.system_index).toBe(true);
     // Build current safe search projections so hiding isn't a missing-index side effect.
     for (const slug of [result.slug, reference]) {
       const page = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
@@ -422,6 +425,46 @@ describe('daily memory from sources the brain already holds', () => {
       const owner = await operationsByName.search.handler(dreamOwner, { query }) as { slug: string }[];
       expect(owner.map(row => row.slug)).toContain(slug);
     }
+  });
+
+  test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
+    await engine.setConfig('version', '7');
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
+    const jobId = await queueDeferredStaleSweep(engine, {
+      sourceId: DAILY_MEMORY_SOURCE_ID,
+      commit: `daily-memory:${result.day}`,
+      reason: 'daily_memory_write',
+    });
+    expect(jobId).not.toBeNull();
+    const jobs = await engine.executeRaw<{ idempotency_key: string | null }>(
+      `SELECT idempotency_key FROM minion_jobs WHERE name = 'extract'`,
+    );
+    expect(jobs.some(job => job.idempotency_key === `extract-stale:${DAILY_MEMORY_SOURCE_ID}:daily-memory:${result.day}`)).toBe(true);
+  });
+
+  test('dream system index extracts outbound edges to other sources', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('notes','notes') ON CONFLICT (id) DO NOTHING", []);
+    await engine.putPage('meetings/standup', {
+      type: 'meeting', title: 'Standup', compiled_truth: 'talked about the rollout',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'notes' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-30T00:00:00Z'::timestamptz, effective_date_source = 'date'
+       WHERE source_id = 'notes' AND slug = 'meetings/standup'`,
+    );
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    await extractStaleFromDB(engine, {
+      dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
+      sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+    });
+    const targets = (await engine.getLinks(result.slug))
+      .filter(link => link.from_source_id === DAILY_MEMORY_SOURCE_ID)
+      .map(link => `${link.to_source_id}:${link.to_slug}`);
+    expect(targets).toContain('notes:meetings/standup');
   });
 
   test('record source types normalize to stored graph targets and preserve stable safe paths', async () => {
