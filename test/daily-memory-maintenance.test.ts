@@ -16,6 +16,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
 import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
@@ -993,4 +994,21 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).not.toContain('old index');
     expect(page!.deleted_at ?? null).toBeNull();
   });
+
+  test('dailyMemoryDaysForSlugs includes soft-deleted pages so prior indexes can drop them', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await engine.putPage('notes/gone', {
+      type: 'note', title: 'Gone', compiled_truth: 'was here',
+      frontmatter: { date: '2026-09-20' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/gone'",
+    );
+    await engine.softDeletePage('notes/gone', { sourceId: 'default' });
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/gone']);
+    expect(days).toEqual(['2026-09-20']);
+  });
+
+
+
 });
