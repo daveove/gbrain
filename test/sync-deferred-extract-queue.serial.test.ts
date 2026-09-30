@@ -191,7 +191,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(waiting).toHaveLength(1);
     expect(waiting[0].id).not.toBe(first.id);
     expect(waiting[0].data.deferred_commit).toBe(headCommit());
-    expect(waiting[0].idempotency_key).toMatch(new RegExp(`^extract-stale:default:${headCommit()}:[0-9a-f-]{36}$`));
+    expect(waiting[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}:after:${first.id}`);
   }, 120_000);
 
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {

@@ -3975,6 +3975,24 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     serr(`  (silence with: gbrain config set schema.type_warnings false)`);
   }
 
+  // Keep historical daily indexes current after a manual/CLI sync too — not
+  // only queued autopilot-cycle jobs (Codex: refreshDailyMemoryAfterSourceSync
+  // was otherwise unreachable from `gbrain sync`).
+  if (pagesAffected.length > 0) {
+    try {
+      const { createHash } = await import('node:crypto');
+      const sourceId = opts.sourceId ?? 'default';
+      const digest = createHash('sha256').update(`manual-sync:${sourceId}:${pin}`).digest('hex').slice(0, 8);
+      const syntheticId = (Number.parseInt(digest, 16) % 0x7fffffff) + 1;
+      await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(
+        engine,
+        { id: syntheticId, data: {} },
+        sourceId,
+        { status: 'ok', phases: [{ phase: 'sync', pagesAffected }] },
+      );
+    } catch { /* best-effort index refresh */ }
+  }
+
   return {
     status: 'synced',
     fromCommit: lastCommit,

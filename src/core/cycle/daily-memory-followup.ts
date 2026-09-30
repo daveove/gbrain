@@ -243,8 +243,10 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
   if (JSON.stringify(days) !== JSON.stringify(saved)) {
     const written = await engine.executeRaw(`UPDATE minion_jobs SET data=jsonb_set(data,'{daily_memory_affected_dates}',($2::jsonb)->'days')
       WHERE id=$1 AND name='autopilot-cycle' AND status='active' RETURNING id`, [job.id, { days }]);
-    if (!written.length) throw new Error('Affected daily memory dates were not persisted');
-    job.data.daily_memory_affected_dates = days;
+    if (written.length) {
+      job.data.daily_memory_affected_dates = days;
+    }
+    // Standalone sync / non-cycle callers still queue days without a cycle row.
   }
   await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0);
 }

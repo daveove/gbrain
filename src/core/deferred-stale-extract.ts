@@ -4,7 +4,6 @@
  * full or large import does not run the stale sweep inside the caller.
  */
 
-import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 
 /** Same ceiling as incremental sync (`totalChanges <= 100`). */
@@ -41,8 +40,10 @@ export async function queueDeferredStaleSweep(
     && job.data.deferred_commit === opts.commit && ['waiting', 'delayed', 'active'].includes(job.status);
   let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
   if (!isLiveSweep(job) || !['waiting', 'delayed'].includes(job.status)) {
+    // Deterministic successor keyed to the existing row: many concurrent
+    // pending-target probes must not mint a UUID flood behind one active sweep.
     job = await queue.add('extract', payload, {
-      idempotency_key: `${key}:${randomUUID()}`,
+      idempotency_key: `${key}:after:${job.id}`,
       timeout_ms: timeoutMs,
     });
   }
