@@ -459,6 +459,13 @@ export async function dispatchPerSource(
     } else {
       log(`[dispatch] job #${job.id} autopilot-cycle (legacy single-source)`);
     }
+    // Pure-DB / source-less brains never enter the per-source daily barrier.
+    // Carry the pinned day and legacy cycle id so daily memory still runs.
+    await queueFanoutDailyMemory(queue, {
+      day: dailyMemoryDate,
+      ids: [job.id],
+      key: `legacy:${opts.slot}`,
+    });
     return {
       dispatched: [],
       coalesced: [],
@@ -469,6 +476,8 @@ export async function dispatchPerSource(
       legacy_fallback: true,
       all_sources_fresh: false,
       all_sources_handled: false,
+      daily_memory_date: dailyMemoryDate,
+      source_job_ids: [job.id],
     };
   }
 
