@@ -537,11 +537,62 @@ describe('daily memory from sources the brain already holds', () => {
     expect(targets).not.toContain('notes/injected');
   });
 
+  test('unchanged indexes preserve revisions and retry failed extraction until day and references are fresh', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    expect(first.written).toBe(true);
+    expect(first.needs_extract).toBe(true);
+    const snapshot = () => engine.executeRaw("SELECT slug, knowledge_revision, updated_at FROM pages WHERE source_id=$1 ORDER BY slug", [DAILY_MEMORY_SOURCE_ID]);
+    const original = await snapshot();
+    const enqueue = spyOn(MinionQueue.prototype, 'add');
+    try {
+      enqueue.mockImplementation(async () => { throw new Error('Synthetic first handoff failure'); });
+      await expect(queueDailyMemoryExtract(engine, first)).rejects.toThrow('Synthetic first handoff failure');
+    } finally { enqueue.mockRestore(); }
+    const retry = await writeSeptember30();
+    expect(retry.written).toBe(false);
+    expect(retry.reason).toBe('unchanged');
+    expect(retry.needs_extract).toBe(true);
+    expect(await snapshot()).toEqual(original);
+    await queueDailyMemoryExtract(engine, retry);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND status='waiting'")).toHaveLength(1);
+    await engine.markPagesExtractedBatch([{ slug: retry.slug, source_id: DAILY_MEMORY_SOURCE_ID }], new Date().toISOString());
+    expect((await writeSeptember30()).needs_extract).toBe(true); // The reference is still unstamped.
+    await extractStaleFromDB(engine, { dryRun: false, quiet: true, jsonMode: true, catchUp: false,
+      includeFrontmatter: false, sourceIdFilter: DAILY_MEMORY_SOURCE_ID });
+    const healthy = await writeSeptember30();
+    expect(healthy.reason).toBe('unchanged');
+    expect(healthy.needs_extract).toBe(false);
+    expect(await snapshot()).toEqual(original);
+    const failIfCalled = spyOn(MinionQueue.prototype, 'add');
+    try {
+      failIfCalled.mockImplementation(async () => { throw new Error('Healthy no-op must not enqueue'); });
+      await queueDailyMemoryExtract(engine, healthy);
+      expect(failIfCalled).not.toHaveBeenCalled();
+    } finally { failIfCalled.mockRestore(); }
+  });
+
+  test('record no-op requires private visibility and every source identity marker', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    await writeSeptember30();
+    const [row] = await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id=$1 AND slug LIKE 'source-records/%'", [DAILY_MEMORY_SOURCE_ID]);
+    const reference = (await engine.getPage(row.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    const frontmatter: Record<string, unknown> = { ...reference.frontmatter, visibility: 'world' };
+    delete frontmatter.source_record_ref;
+    await engine.putPage(row.slug, { ...reference, frontmatter }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect((await writeSeptember30()).written).toBe(true);
+    const repaired = (await engine.getPage(row.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(repaired.frontmatter.visibility).toBe('private');
+    expect(repaired.frontmatter.source_record_ref).toBe('gmail:1');
+    expect(repaired.frontmatter.source_record_type).toBe('gmail');
+    expect(repaired.frontmatter.source_record_id).toBe('gmail:1');
+  });
+
   test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
     expect(result.written).toBe(true);
-    await queueDailyMemoryExtract(engine, { ...result, written: false });
+    await queueDailyMemoryExtract(engine, { ...result, written: false, needs_extract: false });
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
     await queueDailyMemoryExtract(engine, result);
     const jobs = await engine.executeRaw<{ idempotency_key: string | null }>(
@@ -558,7 +609,7 @@ describe('daily memory from sources the brain already holds', () => {
       await expect(queueDailyMemoryExtract(engine, result)).rejects.toThrow('Synthetic enqueue failure');
       expect((await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.knowledge_revision).toBe(durable.knowledge_revision);
       enqueue.mockClear();
-      await queueDailyMemoryExtract(engine, { ...result, written: false });
+      await queueDailyMemoryExtract(engine, { ...result, written: false, needs_extract: false });
       expect(enqueue).not.toHaveBeenCalled();
     } finally { enqueue.mockRestore(); }
   });

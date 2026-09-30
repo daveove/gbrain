@@ -90,13 +90,14 @@ export interface DailyMemoryWrite {
   day: string;
   slug: string;
   source_id?: string;
+  needs_extract?: boolean;
   pages: number;
-  reason?: 'no_source_activity' | 'human_page' | 'error';
+  reason?: 'no_source_activity' | 'human_page' | 'unchanged' | 'error';
 }
 
 /** A durable note survives queue rejection; maintenance retries the failed handoff. */
 export async function queueDailyMemoryExtract(engine: BrainEngine, result: DailyMemoryWrite): Promise<void> {
-  if (!result.written) return;
+  if (!result.written && !result.needs_extract) return;
   const { queueDeferredStaleSweep } = await import('../deferred-stale-extract.ts');
   const jobId = await queueDeferredStaleSweep(engine, {
     sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID,
@@ -315,31 +316,60 @@ export async function writeDailyMemoryFromSources(
       return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page' };
     }
 
+    let recordsWrote = false;
     for (const group of records) {
       const available: SourceRecordLink[] = [];
       for (const link of group.links) {
         throwIfAborted(opts.signal, '[dream] daily memory');
-        if (await putSourceRecordIndex(engine, group.source_type, link)) available.push(link);
+        const put = await putSourceRecordIndex(engine, group.source_type, link);
+        if (put.available) available.push(link);
+        if (put.wrote) recordsWrote = true;
       }
       group.links = available;
     }
 
-    await engine.putPage(slug, {
-      type: 'note',
-      title: `Daily memory ${day}`,
-      compiled_truth: renderNote(day, { rows, pageTotal, records }),
-      timeline: '',
-      frontmatter: {
-        dream_generated: true,
-        visibility: 'private',
-        dream_cycle_date: day,
-        dream_created_cycle_date: day,
-        raw_trace_exempt: true,
-        raw_trace_exempt_reason: 'daily memory index; source pages keep their own traces',
-      },
-    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const title = `Daily memory ${day}`;
+    const compiled_truth = renderNote(day, { rows, pageTotal, records });
+    const dailyUnchanged = Boolean(
+      existing
+      && !existing.deleted_at
+      && existing.frontmatter?.dream_generated === true
+      && existing.title === title
+      && existing.compiled_truth === compiled_truth
+      && existing.frontmatter?.dream_cycle_date === day
+      && existing.frontmatter?.visibility === 'private',
+    );
+    if (!dailyUnchanged) {
+      await engine.putPage(slug, {
+        type: 'note',
+        title,
+        compiled_truth,
+        timeline: '',
+        frontmatter: {
+          dream_generated: true,
+          visibility: 'private',
+          dream_cycle_date: day,
+          dream_created_cycle_date: day,
+          raw_trace_exempt: true,
+          raw_trace_exempt_reason: 'daily memory index; source pages keep their own traces',
+        },
+      }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    }
 
-    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length };
+    const targets = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
+    const [readiness] = await engine.executeRaw<{ needed: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM pages
+        WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
+          AND frontmatter @> '{"dream_generated":true}'::jsonb
+          AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)) AS needed`,
+      [DAILY_MEMORY_SOURCE_ID, targets],
+    );
+    const needs_extract = readiness.needed;
+
+    if (dailyUnchanged && !recordsWrote) {
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, pages: rows.length, reason: 'unchanged' };
+    }
+    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, pages: rows.length };
   } catch (err) {
     throwIfAborted(opts.signal, '[dream] daily memory');
     const message = err instanceof Error ? err.message : String(err);
@@ -398,26 +428,44 @@ async function putSourceRecordIndex(
   engine: BrainEngine,
   sourceType: string,
   record: SourceRecordLink,
-): Promise<boolean> {
+): Promise<{ available: boolean; wrote: boolean }> {
   await ensureDailyMemorySource(engine);
   const existing = await engine.getPage(record.slug, {
     sourceId: DAILY_MEMORY_SOURCE_ID,
     includeDeleted: true,
   });
-  if (existing && existing.frontmatter?.dream_generated !== true) return !existing.deleted_at;
+  if (existing && existing.frontmatter?.dream_generated !== true) {
+    return { available: !existing.deleted_at, wrote: false };
+  }
   const updatedAt = new Date(record.updated_at).toISOString();
+  const title = `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`;
+  const compiled_truth = [
+    `Source: ${escapeMdMeta(sourceType)}`,
+    `Record ID: ${escapeMdMeta(record.id)}`,
+    `Source reference: ${escapeMdMeta(record.source_ref)}`,
+    `Entity type: ${escapeMdMeta(record.entity_type)}`,
+    `Entity ID: ${escapeMdMeta(record.entity_id)}`,
+    `Updated: ${updatedAt}`,
+    '',
+  ].join('\n');
+  if (
+    existing
+    && !existing.deleted_at
+    && existing.title === title
+    && existing.compiled_truth === compiled_truth
+    && existing.frontmatter?.dream_generated === true
+    && existing.frontmatter?.visibility === 'private'
+    && existing.frontmatter?.source_record_type === sourceType
+    && existing.frontmatter?.source_record_ref === record.source_ref
+    && existing.frontmatter?.source_record_id === record.id
+    && existing.frontmatter?.source_record_updated_at === updatedAt
+  ) {
+    return { available: true, wrote: false };
+  }
   await engine.putPage(record.slug, {
     type: 'note',
-    title: `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`,
-    compiled_truth: [
-      `Source: ${escapeMdMeta(sourceType)}`,
-      `Record ID: ${escapeMdMeta(record.id)}`,
-      `Source reference: ${escapeMdMeta(record.source_ref)}`,
-      `Entity type: ${escapeMdMeta(record.entity_type)}`,
-      `Entity ID: ${escapeMdMeta(record.entity_id)}`,
-      `Updated: ${updatedAt}`,
-      '',
-    ].join('\n'),
+    title,
+    compiled_truth,
     timeline: '',
     frontmatter: {
       dream_generated: true,
@@ -430,5 +478,5 @@ async function putSourceRecordIndex(
       raw_trace_exempt_reason: 'source record metadata index; payload stays in source_records',
     },
   }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-  return true;
+  return { available: true, wrote: true };
 }
