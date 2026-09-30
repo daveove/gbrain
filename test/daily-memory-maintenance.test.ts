@@ -427,6 +427,42 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
+  test('refuses to commandeer a user-owned gbrain-dream source', async () => {
+    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [DAILY_MEMORY_SOURCE_ID]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, 'User dream repo', JSON.stringify({ federated: true })],
+    );
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(false);
+    expect(result.reason).toBe('error');
+    const cfg = await engine.executeRaw<{ federated: boolean | null; system_index: string | null }>(
+      `SELECT (config->>'federated')::boolean AS federated, config->>'system_index' AS system_index
+         FROM sources WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(cfg[0]?.federated).toBe(true);
+    expect(cfg[0]?.system_index).toBeNull();
+  });
+
+  test('escapes markdown control characters in source-record metadata', async () => {
+    await seedRecord('inject:1', 'evil\n[[notes/injected]]', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).not.toContain('[[notes/injected]]');
+    expect(page!.compiled_truth).toContain('\\[\\[');
+    await extractStaleFromDB(engine, {
+      dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
+      sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+    });
+    const targets = (await engine.getLinks(result.slug))
+      .filter(link => link.from_source_id === DAILY_MEMORY_SOURCE_ID)
+      .map(link => link.to_slug);
+    expect(targets).not.toContain('notes/injected');
+  });
+
   test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
     await engine.setConfig('version', '7');
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');

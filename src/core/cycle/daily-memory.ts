@@ -10,11 +10,11 @@
  *
  * The scan is brain-wide on purpose: this runs only from the single
  * maintenance job, which is the lane that already walks every source.
- * The note itself is one row in source `dream` (`federated: false`,
- * `system_index: true`). Page visibility alone is not enough:
- * remote_private_pages can opt out of private filtering, so cross-source
- * indexes must not live in `default`. `system_index` keeps outbound
- * link extraction able to resolve targets in other sources.
+ * The note itself is one row in reserved source `gbrain-dream`
+ * (`federated: false`, `system_index: true`). Page visibility alone is
+ * not enough: remote_private_pages can opt out of private filtering, so
+ * cross-source indexes must not live in `default`. `system_index` keeps
+ * outbound link extraction able to resolve targets in other sources.
  */
 
 import { createHash } from 'node:crypto';
@@ -24,45 +24,59 @@ import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
-export const DAILY_MEMORY_SOURCE_ID = 'dream';
+export const DAILY_MEMORY_SOURCE_ID = 'gbrain-dream';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
 /** Keep the note a day index. The remaining pages stay on their sources. */
 export const DAILY_MEMORY_PAGE_CAP = 40;
 /** Per-source link cap so a chat firehose cannot fill the note. */
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
 
-/** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
+/** Reserved non-federated system source for brain-wide indexes. */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
   const config = JSON.stringify({ federated: false, system_index: true });
-  await engine.executeRaw(
-    `INSERT INTO sources (id, name, config)
-     SELECT $1, $2, $3::text::jsonb
-     WHERE NOT EXISTS (SELECT 1 FROM sources WHERE id = $1)
-     ON CONFLICT (id) DO NOTHING`,
-    [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', config],
+  const existing = await engine.executeRaw<{ config: unknown }>(
+    `SELECT config FROM sources WHERE id = $1`,
+    [DAILY_MEMORY_SOURCE_ID],
   );
-  // Keep the trusted-index markers sticky if an older row predates them.
-  await engine.executeRaw(
-    `UPDATE sources
-     SET config = COALESCE(config, '{}'::jsonb) || $2::text::jsonb
-     WHERE id = $1`,
-    [DAILY_MEMORY_SOURCE_ID, config],
+  if (existing.length === 0) {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, 'GBrain dream indexes', config],
+    );
+    return;
+  }
+  const raw = existing[0]!.config;
+  const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
+  if (parsed && parsed.system_index === true) {
+    await engine.executeRaw(
+      `UPDATE sources
+       SET config = COALESCE(config, '{}'::jsonb) || $2::text::jsonb
+       WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID, config],
+    );
+    return;
+  }
+  throw new Error(
+    `source '${DAILY_MEMORY_SOURCE_ID}' already exists and is not a GBrain system index; ` +
+    `rename or remove it before daily memory can write`,
   );
 }
 
-/** Soft-delete prior generated copies left in `default` so they cannot leak. */
-async function retireDefaultGeneratedIndexes(
+/** Soft-delete prior generated copies left in legacy hosts so they cannot leak. */
+async function retireLegacyGeneratedIndexes(
   engine: BrainEngine,
   slugs: string[],
 ): Promise<void> {
-  for (const slug of slugs) {
-    const existing = await engine.getPage(slug, {
-      sourceId: 'default',
-      includeDeleted: true,
-    });
-    if (!existing || existing.deleted_at) continue;
-    if (existing.frontmatter?.dream_generated !== true) continue;
-    await engine.softDeletePage(slug, { sourceId: 'default' });
+  for (const sourceId of ['default', 'dream']) {
+    for (const slug of slugs) {
+      const existing = await engine.getPage(slug, {
+        sourceId,
+        includeDeleted: true,
+      });
+      if (!existing || existing.deleted_at) continue;
+      if (existing.frontmatter?.dream_generated !== true) continue;
+      await engine.softDeletePage(slug, { sourceId });
+    }
   }
 }
 
@@ -122,6 +136,14 @@ function oneLine(title: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
+/** Keep generated index Markdown from interpreting metadata as markup/links. */
+function escapeMdMeta(text: string): string {
+  return oneLine(text)
+    .replace(/\\/g, '\\\\')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
 interface SourceRecordGroup {
   source_type: string;
   total: number | string;
@@ -153,11 +175,11 @@ function renderNote(day: string, input: RenderInput): string {
   for (const row of input.rows) {
     if (row.source_id !== source) {
       source = row.source_id;
-      lines.push(`## ${source}`, '');
+      lines.push(`## ${escapeMdMeta(source)}`, '');
     }
     // Bare slugs address the default source; every other source is qualified.
     const target = row.source_id === 'default' ? row.slug : `${row.source_id}:${row.slug}`;
-    lines.push(`- [[${target}]] — ${oneLine(row.title)}`);
+    lines.push(`- [[${target}]] — ${escapeMdMeta(row.title)}`);
   }
   if (input.rows.length) lines.push('');
   if (input.pageTotal > input.rows.length) {
@@ -168,9 +190,9 @@ function renderNote(day: string, input: RenderInput): string {
     lines.push('## Comms', '');
     for (const group of input.records) {
       const total = Number(group.total) || group.links.length;
-      lines.push(`${group.source_type}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
+      lines.push(`${escapeMdMeta(group.source_type)}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
       for (const link of group.links) {
-        lines.push(`- [[${link.slug}]] — ${oneLine(link.entity_type || group.source_type)}`);
+        lines.push(`- [[${link.slug}]] — ${escapeMdMeta(link.entity_type || group.source_type)}`);
       }
       lines.push('');
       if (total > group.links.length) {
@@ -287,7 +309,7 @@ export async function writeDailyMemoryFromSources(
     }, { sourceId: DAILY_MEMORY_SOURCE_ID });
 
     const retired = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
-    await retireDefaultGeneratedIndexes(engine, retired);
+    await retireLegacyGeneratedIndexes(engine, retired);
 
     return { written: true, day, slug, pages: rows.length };
   } catch (err) {
@@ -358,13 +380,13 @@ async function putSourceRecordIndex(
   const updatedAt = new Date(record.updated_at).toISOString();
   await engine.putPage(record.slug, {
     type: 'note',
-    title: `${oneLine(sourceType)} ${oneLine(record.entity_type)} record`,
+    title: `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`,
     compiled_truth: [
-      `Source: ${oneLine(sourceType)}`,
-      `Record ID: ${oneLine(record.id)}`,
-      `Source reference: ${oneLine(record.source_ref)}`,
-      `Entity type: ${oneLine(record.entity_type)}`,
-      `Entity ID: ${oneLine(record.entity_id)}`,
+      `Source: ${escapeMdMeta(sourceType)}`,
+      `Record ID: ${escapeMdMeta(record.id)}`,
+      `Source reference: ${escapeMdMeta(record.source_ref)}`,
+      `Entity type: ${escapeMdMeta(record.entity_type)}`,
+      `Entity ID: ${escapeMdMeta(record.entity_id)}`,
       `Updated: ${updatedAt}`,
       '',
     ].join('\n'),
