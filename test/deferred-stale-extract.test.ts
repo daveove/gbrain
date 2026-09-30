@@ -19,14 +19,17 @@ const pin = { sourceId: 'default', commit: 'same-pin', reason: 'fixture' };
 
 test('parallel same-pin callers share one successor of each active sweep', async () => {
   const queue = new MinionQueue(engine), base = await queueDeferredStaleSweep(engine, pin);
+  if (typeof base !== 'number') throw new Error('Expected accepted sweep ID');
   const active = (await queue.claim('base-lock', 60_000, 'default', ['extract']))!;
-  expect(active.id).toEqual(base);
+  expect(active.id).toBe(base);
   const firstWave = await Promise.all(Array.from({ length: 12 }, () => queueDeferredStaleSweep(engine, pin)));
   expect(new Set(firstWave).size).toBe(1);
   expect(firstWave[0]).not.toEqual(base);
   await queue.completeJob(active.id, 'base-lock', {});
   const successor = (await queue.claim('successor-lock', 60_000, 'default', ['extract']))!;
-  expect(successor.id).toEqual(firstWave[0]);
+  const firstId = firstWave[0];
+  if (typeof firstId !== 'number') throw new Error('Expected accepted successor ID');
+  expect(successor.id).toBe(firstId);
   const secondWave = await Promise.all(Array.from({ length: 12 }, () => queueDeferredStaleSweep(engine, pin)));
   expect(new Set(secondWave).size).toBe(1);
   expect(secondWave[0]).not.toEqual(successor.id);
