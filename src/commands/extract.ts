@@ -2132,7 +2132,7 @@ export async function extractStaleFromDB(
   let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline, defaultSourceId: linkDefaultSourceId });
+  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
   let pendingLinks = (await pendingBatches.next()).value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {

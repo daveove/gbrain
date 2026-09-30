@@ -4,7 +4,8 @@
  * and no ambient configuration changes. PostgreSQL must receive an object
  * envelope for the origin recordset, not a pre-stringified JSON array.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
+import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { extractStaleFromDB } from '../../src/commands/extract.ts';
@@ -68,16 +69,17 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
   for (const qualified of [true, false]) test(`a target-scoped drain wakes a foreign origin without reading its body (qualified=${qualified})`, async () => {
     const engine = fixture.engine;
     const originSource = `pending-origin-native-${qualified}`, targetSource = `pending-target-native-${qualified}`;
+    const originSlug = `people/qualified-origin-${qualified}`, targetSlug = `people/qualified-later-${qualified}`;
     await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb)", [originSource, targetSource]);
     const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
       dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
     });
     if (!qualified) await engine.setConfig('sources.default', targetSource);
-    await engine.putPage('people/qualified-origin', { type: 'person', title: 'Qualified origin fixture',
-      compiled_truth: qualified ? `[[${targetSource}:people/qualified-later]]` : '[[people/qualified-later]]' }, { sourceId: originSource });
+    await engine.putPage(originSlug, { type: 'person', title: 'Qualified origin fixture',
+      compiled_truth: qualified ? `[[${targetSource}:${targetSlug}]]` : `[[${targetSlug}]]` }, { sourceId: originSource });
     await scoped(originSource);
     expect(await loadPendingLinkReferences(engine, originSource)).toHaveLength(1);
-    await engine.putPage('people/qualified-later', { type: 'person', title: 'Qualified target fixture',
+    await engine.putPage(targetSlug, { type: 'person', title: 'Qualified target fixture',
       compiled_truth: 'Synthetic fixture' }, { sourceId: targetSource });
     const pending = await loadPendingLinkReferences(engine, originSource);
     expect((await scoped(targetSource, true)).staleRemaining).toBe(1);
@@ -95,9 +97,36 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
     expect(await engine.countStalePagesForExtraction({ sourceId: originSource })).toBe(1);
     expect(await loadPendingLinkReferences(engine, originSource)).toHaveLength(0);
     expect((await scoped(originSource)).pagesProcessed).toBe(1);
-    expect((await engine.getLinks('people/qualified-origin', { sourceId: originSource })).some(link =>
-      link.to_source_id === targetSource && link.to_slug === 'people/qualified-later')).toBe(true);
+    expect((await engine.getLinks(originSlug, { sourceId: originSource })).some(link =>
+      link.to_source_id === targetSource && link.to_slug === targetSlug)).toBe(true);
     expect((await scoped(originSource)).pagesProcessed).toBe(0);
+  }, 60_000);
+
+  test('an eager foreign extraction worker observes the stale origin before queue acceptance', async () => {
+    const engine = fixture.engine, a = 'pending-eager-origin-native', b = 'pending-eager-target-native';
+    await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb)", [a,b]);
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    const scoped = (sourceId: string) => extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+    });
+    await engine.putPage('people/eager-origin', { type: 'person', title: 'Eager origin fixture',
+      compiled_truth: '[[people/eager-later]]' }, { sourceId: a });
+    await scoped(a);
+    await engine.putPage('people/eager-later', { type: 'person', title: 'Eager target fixture',
+      compiled_truth: '' }, { sourceId: b });
+    const original = MinionQueue.prototype.add;
+    let eagerProcessed = 0;
+    const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+      eagerProcessed += (await scoped(a)).pagesProcessed;
+      return original.apply(this, args);
+    });
+    try { expect((await scoped(b)).pagesProcessed).toBe(1); }
+    finally { add.mockRestore(); }
+    expect(eagerProcessed).toBe(1);
+    expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+    expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+    expect((await engine.getLinks('people/eager-origin', { sourceId: a })).some(link =>
+      link.to_source_id === b && link.to_slug === 'people/eager-later')).toBe(true);
   }, 60_000);
 
   test('registry keyset batches exclude unrelated source origins on PostgreSQL', async () => {

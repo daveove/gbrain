@@ -506,3 +506,108 @@ test('B-scoped stale sweep wakes A pending on [[B:later]] and enqueues A extract
   expect((await engine.getLinks('people/origin', { sourceId: 'src-a' }))
     .some(link => link.to_slug === 'people/later' && link.to_source_id === 'src-b')).toBe(true);
 });
+
+
+test('B-scoped sweep wakes unqualified pending when default target arrives in B', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.setConfig('sources.default', 'src-b');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[people/later]].'), { sourceId: 'src-a' });
+  expect(await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  })).toMatchObject({ staleRemaining: 0 });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(1);
+
+  await engine.putPage('people/later', page(), { sourceId: 'src-b' });
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/later', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+  const jobs = await engine.executeRaw<{ idempotency_key: string | null }>(
+    "SELECT idempotency_key FROM minion_jobs WHERE name='extract'",
+  );
+  expect(jobs.some(job => job.idempotency_key === 'extract-stale:src-a:pending-target:src-b')).toBe(true);
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  });
+  expect((await engine.getLinks('people/origin', { sourceId: 'src-a' }))
+    .some(link => link.to_slug === 'people/later' && link.to_source_id === 'src-b')).toBe(true);
+});
+
+test('failed foreign wake enqueue leaves pending durable for a later B sweep', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[src-b:people/later]].'), { sourceId: 'src-a' });
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  });
+  await engine.putPage('people/later', page(), { sourceId: 'src-b' });
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/later', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+
+  const { MinionQueue } = await import('../src/core/minions/queue.ts');
+  const add = spyOn(MinionQueue.prototype, 'add');
+  add.mockImplementation(async () => { throw new Error('queue unavailable'); });
+  try {
+    await expect(extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+      sourceIdFilter: 'src-b', catchUp: false,
+    })).rejects.toThrow('queue unavailable');
+  } finally {
+    add.mockRestore();
+  }
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(1);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+});
+
+for (const qualified of [true, false]) test(`foreign origin is stale before an eager queued worker reads it (qualified=${qualified})`, async () => {
+  const a = 'pending-race-origin', b = 'pending-race-target';
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb)", [a,b]);
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
+    dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+  });
+  await engine.putPage('people/race-origin', page(qualified ? `[[${b}:people/race-later]]` : '[[people/race-later]]'), { sourceId: a });
+  await scoped(a);
+  await engine.putPage('people/race-later', page(), { sourceId: b });
+  const pending = await loadPendingLinkReferences(engine, a);
+  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  const original = MinionQueue.prototype.add;
+  let eagerProcessed = 0;
+  const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+    eagerProcessed += (await scoped(a)).pagesProcessed;
+    return original.apply(this, args);
+  });
+  try { expect((await scoped(b)).pagesProcessed).toBe(1); }
+  finally { add.mockRestore(); }
+  expect(eagerProcessed).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+  expect((await engine.getLinks('people/race-origin', { sourceId: a })).some(link =>
+    link.to_source_id === b && link.to_slug === 'people/race-later')).toBe(true);
+});

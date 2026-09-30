@@ -36,9 +36,9 @@ function parseReference(value: string): PendingLinkReference | null {
 
 const PENDING_BATCH_SIZE = 100;
 
-/** Keyset batches filter origin or explicitly recorded target source before parsing. */
+/** Keyset batches filter origins or changed-source target endpoints before parsing. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number; defaultSourceId?: string } = {}): AsyncGenerator<PendingLinkRow[], void> {
+  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], void> {
   let after = '';
   while (true) {
     opts.signal?.throwIfAborted();
@@ -48,10 +48,11 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
         AND ($2::text IS NULL OR CASE WHEN key LIKE $1 AND pg_input_is_valid(value,'jsonb') THEN
           value::jsonb->>'sourceId'=$2 OR (value::jsonb->'candidates') @>
             jsonb_build_array(jsonb_build_object('targetSourceId',$2::text))
-          OR ($2=$5 AND EXISTS (SELECT 1 FROM jsonb_array_elements(
+          OR EXISTS (SELECT 1 FROM jsonb_array_elements(
             CASE WHEN jsonb_typeof(value::jsonb->'candidates')='array' THEN value::jsonb->'candidates' ELSE '[]'::jsonb END) candidate
-            WHERE NOT candidate ? 'targetSourceId')) END)
-        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE, opts.defaultSourceId ?? null]);
+            WHERE COALESCE(candidate->>'targetSourceId','')='' AND EXISTS (SELECT 1 FROM pages p
+              WHERE p.deleted_at IS NULL AND p.source_id=$2 AND p.slug=candidate->>'targetSlug')) END)
+        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
     if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
     const parsed = rows.flatMap(row => {
