@@ -29,6 +29,8 @@ interface PreparedMutationBase {
   additionalPageKeys?: readonly {sourceId:string;slug:string}[];
   noop?: boolean;
   deferEmbedding?: boolean;
+  /** Days observed before apply; used for durable daily-index refresh after commit. */
+  dailyMemoryPriorDays?: string[];
   /** Must perform only transaction-composable database work. */
   apply(tx: BrainEngine): Promise<Record<string, unknown>>;
   validate?(tx: BrainEngine): Promise<void>;

@@ -106,6 +106,15 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   signal?.throwIfAborted();
   assertPageRevision(snapshot, preparedIntent ? { expectedRevision: preparedIntent.expectedRevision } : engineMutationPrecondition(parseMutationPrecondition(p)));
   if ((snapshot?.page.id ?? null) !== row.page_id) throw new OperationError('page_identity_changed', 'The accepted page identity changed.');
+  let dailyMemoryPriorDays: string[] | undefined;
+  if (snapshot && ['put_page', 'capture', 'delete_page', 'restore_page'].includes(row.operation)) {
+    try {
+      const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
+      dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(engine, row.source_id, [row.slug], { signal });
+    } catch { dailyMemoryPriorDays = []; }
+  }
+  const withPrior = <T extends PreparedMutation>(prepared: T): T =>
+    (dailyMemoryPriorDays ? { ...prepared, dailyMemoryPriorDays } : prepared) as T;
   const observedRevision = snapshot?.revision ?? null;
   if (row.operation === 'put_page' && p.allow_empty !== true && snapshot && !snapshot.page.deleted_at
     && typeof p.content === 'string' && `${snapshot.page.compiled_truth}\n${snapshot.page.timeline ?? ''}`.trim()) {
@@ -123,7 +132,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     // Tombstones still own their recorded artifact. Purge always attempts its
     // removal before the guarded hard-delete and receipt commit; failure rolls
     // back to the prior row, and replay survives the eventual absence of that row.
-    return { observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, null, undefined, { allowMissing: purge }), apply: async tx => {
+    return withPrior({ observedRevision, noop, file: await prepareFileTarget(engine, row, snapshot, null, undefined, { allowMissing: purge }), apply: async tx => {
       if (purge) {
         await tx.deletePage(row.slug, source);
         return { status: 'purged', slug: row.slug, source_id: row.source_id, residuals: PURGE_RESIDUALS };
@@ -131,7 +140,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       if (!noop) { await tx.createVersion(row.slug, source); await tx.softDeletePage(row.slug, source); }
       return { status: 'soft_deleted', slug: row.slug, source_id: row.source_id, noop,
         recoverable_until: 'now + 72h via restore_page (remove immediately instead: gbrain delete <slug> --purge, local CLI only)' };
-    } };
+    } });
   }
   let content = preparedIntent?.content ?? p.content as string;
   let versionTags: string[] | undefined = preparedIntent?.tags;
@@ -169,9 +178,9 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     const incoming = parseMarkdown(content,row.slug);
     const tags = versionTags ?? [...new Set([...snapshot.tags,...incoming.tags])].sort();
     if (digest(canonical(snapshot.page,snapshot.tags)) === digest(canonical(incoming,tags))) {
-      return {observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,targetDeleted ? null : serializePageToMarkdown(snapshot.page,snapshot.tags)),
+      return withPrior({observedRevision,noop:true,file:await prepareFileTarget(engine,row,snapshot,targetDeleted ? null : serializePageToMarkdown(snapshot.page,snapshot.tags)),
         apply:async()=>({...pageNoopAdvisories(row),status:'skipped',slug:row.slug,source_id:row.source_id,noop:true,chunks:0,chunk_skip_reason:'write_skipped',
-          ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})};
+          ...(row.operation==='capture'?{channel:'capture',content_hash:p.capture_hash}:{})})});
     }
   }
   let prepared: PreparedContentImport | undefined;
@@ -199,12 +208,12 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     await authorizeWrite(engine, row.authority, row.operation, ready.slug);
     const duplicate = await engine.readPageSnapshot(ready.slug, { ...source, excludePrivate: row.authority.remote });
     if (!duplicate) throw new OperationError('permission_denied', 'The duplicate is not readable by this writer.');
-    return { observedRevision, noop: true, additionalPageKeys:[{sourceId:row.source_id,slug:ready.slug}],validate: async tx => {
+    return withPrior({ observedRevision, noop: true, additionalPageKeys:[{sourceId:row.source_id,slug:ready.slug}],validate: async tx => {
       await authorizeWrite(tx,row.authority,row.operation,ready.slug,true);
       const current=await tx.readPageSnapshot(ready.slug,{...source,excludePrivate:row.authority.remote});
       if (!current || current.page.id!==duplicate.page.id || current.revision!==duplicate.revision) throw new OperationError('revision_conflict','The read-only duplicate changed during preparation.');
     },
-      apply: async () => ({ status: 'duplicate', slug: duplicate.page.slug, duplicate_revision: duplicate.revision }) };
+      apply: async () => ({ status: 'duplicate', slug: duplicate.page.slug, duplicate_revision: duplicate.revision }) });
   }
   const tags = versionTags ?? [...new Set([...(snapshot?.tags ?? []), ...ready.parsedPage.tags])].sort();
   const renderedPage: Page = { ...(snapshot?.page ?? { id: 0, slug: row.slug, source_id: row.source_id, created_at: new Date(), updated_at: new Date() }), ...ready.parsedPage };
@@ -219,7 +228,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     ? await prepareAutomaticLinks(engine,row.slug,ready.parsedPage,row.source_id) : undefined;
   const file = await prepareFileTarget(engine, row, snapshot, targetDeleted ? null : rendered);
   const sourcePath = file ? scannerSourcePath(file.root, file.path) : undefined;
-  return { observedRevision, noop, additionalPageKeys:links?.pageKeys, file, validate: ready.validate, apply: async tx => {
+  return withPrior({ observedRevision, noop, additionalPageKeys:links?.pageKeys, file, validate: ready.validate, apply: async tx => {
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
     if (!noop) {
       await ready.apply(tx);
@@ -245,5 +254,5 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
       ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'
         : isEmbedSkipped(ready.parsedPage.frontmatter) || isQuarantined(ready.parsedPage.frontmatter) ? 'embed_skip' : 'empty_body'} : {}),
       ...(row.operation === 'capture' ? { channel: 'capture', content_hash: p.capture_hash } : {}) };
-  } };
+  } });
 }

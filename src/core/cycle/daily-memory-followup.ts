@@ -241,25 +241,8 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 }
 
 
-/** Schedule historical daily-index refresh after a committed page mutation. */
-export async function refreshDailyMemoryAfterPageMutation(
-  engine: BrainEngine,
-  opts: { sourceId: string; slug: string; operation: string; requestId: string },
-): Promise<string[]> {
-  if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
-  if (!['put_page', 'delete_page', 'restore_page', 'capture'].includes(opts.operation)) return [];
-  const days = await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug]);
-  if (!days.length) return [];
-  const queue = new MinionQueue(engine);
-  const key = `page:${opts.operation}:${opts.sourceId}:${opts.slug}:${opts.requestId}`;
-  for (const day of days) {
-    await queueFanoutDailyMemory(queue, { day, ids: [], key });
-  }
-  return days;
-}
-
-/** After archive/restore, refresh every day that source still owns or used to own. */
-export async function refreshDailyMemoryAfterSourceArchiveChange(
+/** Calendar days a source currently contributes to the daily index. */
+export async function collectDailyMemoryDaysForSource(
   engine: BrainEngine,
   sourceId: string,
   opts: { signal?: AbortSignal } = {},
@@ -279,15 +262,64 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
     if (rows.length < 500) break;
     cursor = rows[rows.length - 1]!.slug;
   }
-  const days = [...affectedDays].sort();
-  if (!days.length) return [];
+  return [...affectedDays].sort();
+}
+
+/** Publish a collected day set after its lifecycle transition has committed. */
+export async function enqueueDailyMemoryDaysForTransition(
+  engine: BrainEngine,
+  days: string[],
+  transitionKey: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<string[]> {
+  const sorted = [...new Set(days.filter(isDay))].sort();
+  if (!sorted.length) return [];
   const queue = new MinionQueue(engine);
-  // Each invocation follows a committed lifecycle transition, independent of prior completed refreshes.
-  const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   opts.signal?.throwIfAborted();
-  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey });
-  await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
-  return days;
+  const firstChild = await queueFanoutDailyMemory(queue, { day: sorted[0], ids: [], key: transitionKey });
+  await queueDailyDateBatch(queue, sorted, firstChild, 1, [firstChild]);
+  return sorted;
+}
+
+/** After archive/restore, refresh every day that source still owns or used to own. */
+export async function refreshDailyMemoryAfterSourceArchiveChange(
+  engine: BrainEngine,
+  sourceId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<string[]> {
+  const days = await collectDailyMemoryDaysForSource(engine, sourceId, opts);
+  if (!days.length) return [];
+  // Each invocation follows a committed lifecycle transition, independent of prior completed refreshes.
+  return enqueueDailyMemoryDaysForTransition(engine, days, `archive:${sourceId}:${randomUUID()}`, opts);
+}
+
+/** After a committed page mutation, refresh every day the slug still touches or used to touch. */
+export async function refreshDailyMemoryAfterPageMutation(
+  engine: BrainEngine,
+  opts: {
+    sourceId: string;
+    slug: string;
+    operation: string;
+    requestId: string;
+    priorDays?: string[];
+    signal?: AbortSignal;
+  },
+): Promise<string[]> {
+  if (!opts.sourceId || opts.sourceId === DAILY_MEMORY_SOURCE_ID || !opts.slug) return [];
+  if (!['put_page', 'delete_page', 'restore_page', 'capture'].includes(opts.operation)) return [];
+  const afterDays = opts.operation === 'delete_page' && !(await engine.executeRaw<{ id: number }>(
+    'SELECT id FROM pages WHERE source_id=$1 AND slug=$2', [opts.sourceId, opts.slug],
+  )).length
+    ? []
+    : await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { signal: opts.signal });
+  const days = [...new Set([...(opts.priorDays ?? []), ...afterDays].filter(isDay))].sort();
+  if (!days.length) return [];
+  return enqueueDailyMemoryDaysForTransition(
+    engine,
+    days,
+    `page:${opts.operation}:${opts.sourceId}:${opts.slug}:${opts.requestId}`,
+    { signal: opts.signal },
+  );
 }
 
 /** Accept a complete standalone-sync day handoff before its checkpoint advances. */

@@ -29,8 +29,9 @@
 
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../core/engine.ts';
+import { DAILY_MEMORY_SOURCE_ID } from '../core/cycle/daily-memory.ts';
 import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
@@ -820,6 +821,12 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   // catch-and-retry degrade inside a tx; missing table ⇒ empty column set ⇒
   // no FK ⇒ skip); the FK constraint itself is the backstop for a
   // registration committing between the re-check and the DELETE.
+  const {
+    collectDailyMemoryDaysForSource,
+    enqueueDailyMemoryDaysForTransition,
+  } = await import('../core/cycle/daily-memory-followup.ts');
+  const dailyMemoryDays = await collectDailyMemoryDaysForSource(engine, id);
+
   class SourceReferencedError extends Error {}
   try {
     await engine.transaction(async (tx) => {
@@ -832,10 +839,6 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
         );
         if (Number(rows[0]?.n ?? 0) > 0) throw new SourceReferencedError();
       }
-      // Discover + enqueue inside the delete TX so workers cannot finish a refresh
-      // against the still-live source before DELETE commits (managed path does the same).
-      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
-      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
       await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
     });
   } catch (e) {
@@ -846,6 +849,10 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
       process.exit(5);
     }
     throw e;
+  }
+
+  if (dailyMemoryDays.length) {
+    await enqueueDailyMemoryDaysForTransition(engine, dailyMemoryDays, `remove:${id}:${randomUUID()}`);
   }
 
   const pageCount = impact?.pageCount ?? 0;
