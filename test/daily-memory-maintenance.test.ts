@@ -13,7 +13,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
-import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
@@ -28,7 +28,7 @@ describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
   beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 30000);
   afterAll(async () => { await engine.disconnect(); });
-  beforeEach(async () => { await resetPgliteState(engine); });
+  beforeEach(async () => { await resetPgliteState(engine); await ensureDailyMemorySource(engine); });
 
   test('autopilot-global-maintenance writes one note linking today\'s pages and skips older and dream pages', async () => {
     await engine.executeRaw(
@@ -227,19 +227,19 @@ describe('daily memory from sources the brain already holds', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
     try {
       const ingested = await runTranscriptsIngest(engine, {
-        paths: [file], format: 'codex', sourceId: DAILY_MEMORY_SOURCE_ID,
+        paths: [file], format: 'codex', sourceId: 'default',
         dateZone: 'Asia/Manila', sinceIso: '2026-09-29T16:00:00.000Z',
       });
       expect(ingested.pages.imported).toBe(1);
       expect(ingested.cleanScan).toBe(true);
       const slug = ingested.slugsTouched[0]!;
       expect(slug).toContain('2026-09-29');
-      const session = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      const session = await engine.getPage(slug, { sourceId: 'default' });
       expect(session!.frontmatter.date).toBe('2026-09-30');
       expect(new Date(session!.effective_date!).toISOString()).toBe('2026-09-30T00:00:00.000Z');
       await engine.setConfig('cycle.timezone', 'Asia/Manila');
       await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
-      expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth).toContain(`[[${slug}]]`);
+      expect((await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${slug}]]`);
       const previous = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
       expect(previous.reason).toBe('no_source_activity');
     } finally {
@@ -361,41 +361,65 @@ describe('daily memory from sources the brain already holds', () => {
       type: 'note', title: 'Restricted fixture', compiled_truth: 'Synthetic fixture',
       frontmatter: { date: '2026-09-30' },
     }, { sourceId: 'restricted' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-30T00:00:00Z'::timestamptz,
+        effective_date_source = 'date'
+       WHERE source_id = 'restricted' AND slug = 'notes/restricted-fixture'`,
+    );
     await seedRecord('record-fixture', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
-    const daily = (await engine.getPage(result.slug))!;
+    const daily = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect(daily.compiled_truth).toContain('[[restricted:notes/restricted-fixture]]');
     const reference = daily.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    const dreamCfg = await engine.executeRaw<{ federated: boolean | null }>(
+      `SELECT (config->>'federated')::boolean AS federated FROM sources WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(dreamCfg[0]?.federated).toBe(false);
     // Build current safe search projections so hiding isn't a missing-index side effect.
     for (const slug of [result.slug, reference]) {
-      const page = (await engine.getPage(slug))!;
+      const page = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
       expect(page.frontmatter.visibility).toBe('private');
+      expect(page.source_id).toBe(DAILY_MEMORY_SOURCE_ID);
       await importFromContent(engine, slug, serializeMarkdown(page.frontmatter, page.compiled_truth, '', {
         type: page.type, title: page.title, tags: [],
-      }), { noEmbed: true, forceRechunk: true });
+      }), { noEmbed: true, forceRechunk: true, sourceId: DAILY_MEMORY_SOURCE_ID });
     }
     await engine.setConfig('search.mcp_keyword_only', 'true');
     __resetPrivateVisibilityCacheForTests();
-    const context = (remote: boolean) => ({
+    const defaultRemote = (remote: boolean) => ({
       engine, remote, sourceId: 'default', config: { engine: 'pglite' }, dryRun: false,
       logger: { info() {}, warn() {}, error() {} },
       auth: { token: 'fixture', clientId: 'fixture', scopes: ['read'], allowedSources: ['default'] },
     }) as never;
+    const dreamOwner = {
+      engine, remote: false, sourceId: DAILY_MEMORY_SOURCE_ID, config: { engine: 'pglite' }, dryRun: false,
+      logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'fixture', clientId: 'fixture', scopes: ['read'], allowedSources: [DAILY_MEMORY_SOURCE_ID] },
+    } as never;
     for (const slug of [result.slug, reference]) {
-      await expect(operationsByName.get_page.handler(context(true), { slug })).rejects.toThrow(/Page not found/);
-      const owner = await operationsByName.get_page.handler(context(false), { slug }) as { slug: string };
+      await expect(operationsByName.get_page.handler(defaultRemote(true), { slug })).rejects.toThrow(/Page not found/);
+      const owner = await operationsByName.get_page.handler(dreamOwner, { slug }) as { slug: string };
       expect(owner.slug).toBe(slug);
     }
-    const remoteList = await operationsByName.list_pages.handler(context(true), { limit: 100 }) as { slug: string }[];
-    const ownerList = await operationsByName.list_pages.handler(context(false), { limit: 100 }) as { slug: string }[];
+    // Visibility opt-out must not pierce the source boundary for default-only grants.
+    await engine.setConfig('search.remote_private_pages', 'visible');
+    __resetPrivateVisibilityCacheForTests();
     for (const slug of [result.slug, reference]) {
+      await expect(operationsByName.get_page.handler(defaultRemote(true), { slug })).rejects.toThrow(/Page not found/);
+      const remoteList = await operationsByName.list_pages.handler(defaultRemote(true), { limit: 100 }) as { slug: string }[];
       expect(remoteList.map(row => row.slug)).not.toContain(slug);
+      const remoteSearch = await operationsByName.search.handler(defaultRemote(true), {
+        query: slug.startsWith('source-records/') ? 'Source reference' : 'Daily memory',
+      }) as { slug: string }[];
+      expect(remoteSearch.map(row => row.slug)).not.toContain(slug);
+    }
+    const ownerList = await operationsByName.list_pages.handler(dreamOwner, { limit: 100 }) as { slug: string }[];
+    for (const slug of [result.slug, reference]) {
       expect(ownerList.map(row => row.slug)).toContain(slug);
     }
     for (const [query, slug] of [['Daily memory', result.slug], ['Source reference', reference]]) {
-      const remote = await operationsByName.search.handler(context(true), { query }) as { slug: string }[];
-      const owner = await operationsByName.search.handler(context(false), { query }) as { slug: string }[];
-      expect(remote.map(row => row.slug)).not.toContain(slug);
+      const owner = await operationsByName.search.handler(dreamOwner, { query }) as { slug: string }[];
       expect(owner.map(row => row.slug)).toContain(slug);
     }
   });
@@ -407,7 +431,7 @@ describe('daily memory from sources the brain already holds', () => {
     await seedRecord('unicode-reference', 'Mélange', '2026-09-30T00:00:00Z');
     const first = await writeSeptember30();
     expect(first.written).toBe(true);
-    const page = (await engine.getPage(first.slug))!;
+    const page = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     const slugs = [...page.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1]);
     expect(slugs).toHaveLength(4);
     expect(slugs.every(slug => slug === slug.toLowerCase())).toBe(true);
@@ -416,18 +440,18 @@ describe('daily memory from sources the brain already holds', () => {
     expect(slugs.some(slug => slug.startsWith('source-records/gmail/'))).toBe(true);
     expect(slugs.some(slug => /^source-records\/type-[a-f0-9]{64}\/[a-f0-9]{64}$/.test(slug))).toBe(true);
     const stored = await engine.executeRaw<{ slug: string }>(
-      "SELECT slug FROM pages WHERE source_id='default' AND slug LIKE 'source-records/%'", []);
+      "SELECT slug FROM pages WHERE source_id = $1 AND slug LIKE 'source-records/%'", [DAILY_MEMORY_SOURCE_ID]);
     expect(stored.map(row => row.slug).sort()).toEqual([...slugs].sort());
-    for (const slug of slugs) expect(await engine.resolveSlugs(slug, { sourceId: 'default' })).toContain(slug);
+    for (const slug of slugs) expect(await engine.resolveSlugs(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toContain(slug);
     await extractStaleFromDB(engine, {
       dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
-      sourceIdFilter: 'default',
+      sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
     });
-    const targets = (await engine.getLinks(first.slug, { sourceId: 'default' })).map(link => link.to_slug);
+    const targets = (await engine.getLinks(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).map(link => link.to_slug);
     for (const slug of slugs) expect(targets).toContain(slug);
     await engine.executeRaw("UPDATE source_records SET id = 'replacement-slash-id' WHERE source_type = 'mail/slack'", []);
     await writeSeptember30();
-    const refreshed = (await engine.getPage(first.slug))!;
+    const refreshed = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect([...refreshed.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1])).toEqual(slugs);
   });
 
@@ -463,7 +487,7 @@ describe('daily memory from sources the brain already holds', () => {
 
   test('human daily guard runs before metadata pages are created', async () => {
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
-    await engine.putPage(dailyMemorySlug('2026-09-30'), { type: 'note', title: 'Human day', compiled_truth: 'Preserve me' });
+    await engine.putPage(dailyMemorySlug('2026-09-30'), { type: 'note', title: 'Human day', compiled_truth: 'Preserve me' }, { sourceId: DAILY_MEMORY_SOURCE_ID });
     const result = await writeSeptember30();
     expect(result.reason).toBe('human_page');
     const count = await engine.executeRaw<{ total: number }>(
@@ -477,9 +501,9 @@ describe('daily memory from sources the brain already holds', () => {
     const result = await writeSeptember30();
     const first = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     const slug = first!.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
-    await engine.putPage(slug, { type: 'note', title: 'Human index', compiled_truth: 'Keep me', frontmatter: {} });
+    await engine.putPage(slug, { type: 'note', title: 'Human index', compiled_truth: 'Keep me', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
     await writeSeptember30();
-    expect((await engine.getPage(slug))!.compiled_truth).toBe('Keep me');
+    expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toBe('Keep me');
     await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     await writeSeptember30();
     const daily = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });

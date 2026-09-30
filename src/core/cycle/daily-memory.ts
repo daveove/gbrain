@@ -10,7 +10,9 @@
  *
  * The scan is brain-wide on purpose: this runs only from the single
  * maintenance job, which is the lane that already walks every source.
- * The note itself is one row in source `default`.
+ * The note itself is one row in source `dream` (non-federated). Page
+ * visibility alone is not enough: remote_private_pages can opt out of
+ * private filtering, so cross-source indexes must not live in `default`.
  */
 
 import { createHash } from 'node:crypto';
@@ -20,12 +22,40 @@ import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
-export const DAILY_MEMORY_SOURCE_ID = 'default';
+export const DAILY_MEMORY_SOURCE_ID = 'dream';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
 /** Keep the note a day index. The remaining pages stay on their sources. */
 export const DAILY_MEMORY_PAGE_CAP = 40;
 /** Per-source link cap so a chat firehose cannot fill the note. */
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
+
+/** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
+export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
+  await engine.executeRaw(
+    `INSERT INTO sources (id, name, config)
+     SELECT $1, $2, $3::text::jsonb
+     WHERE NOT EXISTS (SELECT 1 FROM sources WHERE id = $1)
+     ON CONFLICT (id) DO NOTHING`,
+    [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', JSON.stringify({ federated: false })],
+  );
+}
+
+/** Soft-delete prior generated copies left in `default` so they cannot leak. */
+async function retireDefaultGeneratedIndexes(
+  engine: BrainEngine,
+  slugs: string[],
+): Promise<void> {
+  for (const slug of slugs) {
+    const existing = await engine.getPage(slug, {
+      sourceId: 'default',
+      includeDeleted: true,
+    });
+    if (!existing || existing.deleted_at) continue;
+    if (existing.frontmatter?.dream_generated !== true) continue;
+    await engine.softDeletePage(slug, { sourceId: 'default' });
+  }
+}
+
 
 export interface DailyMemoryWrite {
   written: boolean;
@@ -115,7 +145,8 @@ function renderNote(day: string, input: RenderInput): string {
       source = row.source_id;
       lines.push(`## ${source}`, '');
     }
-    const target = row.source_id === DAILY_MEMORY_SOURCE_ID ? row.slug : `${row.source_id}:${row.slug}`;
+    // Bare slugs address the default source; every other source is qualified.
+    const target = row.source_id === 'default' ? row.slug : `${row.source_id}:${row.slug}`;
     lines.push(`- [[${target}]] — ${oneLine(row.title)}`);
   }
   if (input.rows.length) lines.push('');
@@ -159,6 +190,7 @@ export async function writeDailyMemoryFromSources(
   let day = '';
   let slug = '';
   try {
+    await ensureDailyMemorySource(engine);
     const zone = await resolveCycleTimeZone(engine);
     // An explicit day is that calendar day in every zone. Timezone projection
     // applies only when the day is derived from the clock.
@@ -244,6 +276,9 @@ export async function writeDailyMemoryFromSources(
       },
     }, { sourceId: DAILY_MEMORY_SOURCE_ID });
 
+    const retired = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
+    await retireDefaultGeneratedIndexes(engine, retired);
+
     return { written: true, day, slug, pages: rows.length };
   } catch (err) {
     throwIfAborted(opts.signal, '[dream] daily memory');
@@ -304,6 +339,7 @@ async function putSourceRecordIndex(
   sourceType: string,
   record: SourceRecordLink,
 ): Promise<boolean> {
+  await ensureDailyMemorySource(engine);
   const existing = await engine.getPage(record.slug, {
     sourceId: DAILY_MEMORY_SOURCE_ID,
     includeDeleted: true,
