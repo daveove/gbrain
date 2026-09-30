@@ -57,24 +57,4 @@ import { loadPendingLinkReferences } from '../../src/core/pending-link-reference
     expect(await loadPendingLinkReferences(engine, sourceId)).toHaveLength(0);
     expect((await drain()).pagesProcessed).toBe(0);
   }, 60_000);
-
-  test('bare canonical attendance converges without a dormant retry', async () => {
-    const engine = fixture.engine, person = 'people/bob-example', meeting = 'meetings/attendance-example';
-    await engine.setConfig('link_resolution.global_basename', 'true');
-    try {
-      await engine.putPage(person, { type: 'person', title: 'Bob example', compiled_truth: '' }, { sourceId });
-      await engine.putPage(meeting, {
-        type: 'meeting', title: 'Attendance example', compiled_truth: 'Attendees: [[bob-example]]',
-      }, { sourceId });
-      const drain = () => extractStaleFromDB(engine, {
-        dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
-        sourceIdFilter: sourceId, catchUp: false,
-      });
-      expect((await drain()).staleRemaining).toBe(0);
-      expect((await engine.getLinks(person, { sourceId }))
-        .some(link => link.to_slug === meeting && link.link_type === 'attended')).toBe(true);
-      expect(await loadPendingLinkReferences(engine, sourceId)).toHaveLength(0);
-      expect((await drain()).pagesProcessed).toBe(0);
-    } finally { await engine.setConfig('link_resolution.global_basename', 'false'); }
-  }, 60_000);
 });

@@ -17,6 +17,7 @@ import { bundledPackPath } from '../src/core/schema-pack/bundled-assets.ts';
 import { loadActivePackForLocalEngine } from '../src/core/schema-pack/best-effort.ts';
 import { installFixtureChunks } from './helpers/page-projection.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { loadPendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const sourceId = 'attendance-fixture';
 const person = 'people/alice-example';
@@ -194,6 +195,10 @@ for (const kind of ['pglite', ...(process.env.DATABASE_URL ? ['postgres'] : [])]
           const rows = await engine.executeRaw<{ producer: string; origin: string }>(`SELECT l.link_source AS producer,o.slug AS origin
             FROM links l JOIN pages o ON o.id=l.origin_page_id WHERE o.source_id=$1 AND o.slug=$2 AND l.link_type='attended'`, [sourceId, meeting]);
           expect(rows).toEqual([{ producer: 'wikilink-resolved', origin: meeting }]);
+          if (lane === 'stale') {
+            expect(await loadPendingLinkReferences(engine, sourceId)).toHaveLength(0);
+            expect((await extract(lane, true)).pagesProcessed).toBe(0);
+          }
           await seed(person, 'person', 'An updated person with no attendance claim.');
           await extract(lane, true);
           expect(await attendees()).toEqual([person]);
