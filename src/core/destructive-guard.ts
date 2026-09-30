@@ -314,13 +314,13 @@ export function checkDestructiveConfirmation(
 
 /** System indexes are retained; archival and expiry must not remove their history. */
 export async function assertSourceNotSystemIndex(engine: BrainEngine, sourceId: string): Promise<void> {
-  if (sourceId === 'default') throw new Error('The default source cannot be archived or purged.');
+  if (sourceId === 'default') throw new Error('The default source cannot be archived, purged, or removed.');
   const owned = await engine.executeRaw<{ protected: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM sources WHERE id=$1 AND (
       (${SOURCE_CONFIG_OBJECT_SQL})->>'system_index'='true'
       OR (id='dream' AND name='Dream cycle indexes'
         AND (${SOURCE_CONFIG_OBJECT_SQL})->>'federated'='false'))) AS protected`, [sourceId]);
-  if (owned[0]?.protected === true) throw Object.assign(new Error(`Source '${sourceId}' is a system index and cannot be archived or purged.`), { code: 'system_index_source' });
+  if (owned[0]?.protected === true) throw Object.assign(new Error(`Source '${sourceId}' is a system index and cannot be archived, purged, or removed.`), { code: 'system_index_source' });
 }
 
 // ── Soft Delete ─────────────────────────────────────────────

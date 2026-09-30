@@ -766,10 +766,13 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   const _keepStorage = args.includes('--keep-storage');
   void _keepStorage;
 
-  if (id === 'default') {
-    console.error('Error: cannot remove the "default" source (it backs the pre-v0.17 brain).');
+  if (id === 'default' || id === DAILY_MEMORY_SOURCE_ID) {
+    console.error(`Error: cannot remove the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   const src = await fetchSource(engine, id);
   if (!src) {
@@ -829,6 +832,10 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
         );
         if (Number(rows[0]?.n ?? 0) > 0) throw new SourceReferencedError();
       }
+      // Discover + enqueue inside the delete TX so workers cannot finish a refresh
+      // against the still-live source before DELETE commits (managed path does the same).
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
       await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
     });
   } catch (e) {
