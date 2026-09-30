@@ -922,7 +922,7 @@ export async function applyAliasHop(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   query: string,
-  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean; excludeSlugs?: string[] },
+  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; requireSafeChunks?: boolean; excludeSlugs?: string[] },
 ): Promise<SearchResult[]> {
   if (!query) return results;
   const qNorm = normalizeAlias(query);
@@ -2654,7 +2654,7 @@ export async function hybridSearchCached(
     // serving old-classification rows for the rest of the cache TTL.
     intentPatterns: intentStateForCache.fingerprint,
     // Retained storage-key shape; semantic response reuse is disabled below.
-    excludePrivate: opts?.excludePrivate === true,
+    excludePrivate: opts?.excludePrivate ?? false,
     // v=27 (E5b) — the resolved gate + this query's intent class, classified
     // by the SAME pattern-aware banks bare hybridSearch resolves (above).
     adaptiveReturn: {

@@ -11,6 +11,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { ImportAbortError, runImport } from '../src/commands/import.ts';
+import { extractStaleFromDB } from '../src/commands/extract.ts';
 import { INLINE_EXTRACT_CHANGE_LIMIT } from '../src/core/deferred-stale-extract.ts';
 import { loadPendingLinkReferences } from '../src/core/pending-link-references.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -206,47 +207,45 @@ describe('import structural edges', () => {
     });
   }, 120_000);
 
-  test('a pure no-op large directory does not enqueue another deferred sweep', async () => {
-    await engine.executeRaw(
-      `INSERT INTO sources (id, name) VALUES ('noop-src', 'noop-src') ON CONFLICT (id) DO NOTHING`,
-    );
-    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-noop-large-'));
+  test('large unchanged imports queue only real stale work and retain full-sync handoff', async () => {
+    const sourceId = 'unchanged-large-src';
+    await engine.executeRaw('INSERT INTO sources (id,name) VALUES ($1,$1)', [sourceId]);
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-large-unchanged-'));
     const count = INLINE_EXTRACT_CHANGE_LIMIT + 1;
-    for (let i = 0; i < count; i++) {
-      writeFileSync(
-        join(dir, `noop-${i}.md`),
-        `---\ntype: concept\n---\n# Noop ${i}\n\nSee [Other](noop-${(i + 1) % count}.md).\n`,
-      );
-    }
+    for (let i = 0; i < count; i++) writeFileSync(join(dir, `unchanged-${i}.md`), `# Unique ${i}\n\nBody ${i}.`);
     const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
-      const first = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'noop-src' });
-      expect(first.imported).toBe(count);
-      expect(first.errors).toBe(0);
-      await engine.executeRaw(
-        `UPDATE minion_jobs
-         SET status = 'completed', finished_at = now()
-         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
-      );
-      await engine.executeRaw(
-        `UPDATE pages SET links_extracted_at = GREATEST(now(), updated_at, '2026-09-21T00:00:00Z'::timestamptz)
-         WHERE source_id = 'noop-src' AND deleted_at IS NULL`,
-      );
-      const before = await engine.executeRaw<{ total: number }>(
-        `SELECT count(*)::int AS total FROM minion_jobs
-         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
-      );
-      const second = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'noop-src' });
-      expect(second.imported).toBe(0);
-      expect(second.errors).toBe(0);
-      expect(second.linkExtractionError).toBeUndefined();
-      const after = await engine.executeRaw<{ total: number }>(
-        `SELECT count(*)::int AS total FROM minion_jobs
-         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
-      );
-      expect(after[0].total).toBe(before[0].total);
+      await runImport(engine, [dir, '--no-embed', '--json'], { sourceId, noExtract: true });
+      const enqueue = spyOn(MinionQueue.prototype, 'add');
+      try {
+        const stale = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+        expect(stale.imported).toBe(0);
+        expect(stale.errors).toBe(0);
+        expect(enqueue).toHaveBeenCalledTimes(1);
+        expect(enqueue.mock.calls[0]?.[1]).toEqual(expect.objectContaining({ reason: 'import_stale_backlog' }));
+      } finally { enqueue.mockRestore(); }
+      await extractStaleFromDB(engine, { sourceIdFilter: sourceId, dryRun: false, jsonMode: true, quiet: true, catchUp: true });
+      expect(await engine.countStalePagesForExtraction({ sourceId })).toBe(0);
+      const offline = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('queue unavailable'); });
+      try {
+        const noop = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+        expect(noop.imported).toBe(0);
+        expect(noop.skipped).toBe(count);
+        expect(noop.errors).toBe(0);
+        expect(offline).not.toHaveBeenCalled();
+        writeFileSync(join(dir, 'unchanged-0.md'), '# Unique 0\n\nChanged body.');
+        const changed = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+        expect(changed.imported).toBe(1);
+        expect(changed.errors).toBe(0);
+        expect(offline).not.toHaveBeenCalled();
+        expect(await engine.countStalePagesForExtraction({ sourceId })).toBe(0);
+        const full = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId, fullSync: true });
+        expect(full.imported).toBe(0);
+        expect(full.linkExtractionError).toContain('queue unavailable');
+        expect(offline).toHaveBeenCalledTimes(1);
+      } finally { offline.mockRestore(); }
     });
-  }, 180_000);
+  }, 60_000);
 
   test('a small import with a large stale backlog queues the sweep', async () => {
     await engine.executeRaw(

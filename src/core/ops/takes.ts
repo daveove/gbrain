@@ -157,7 +157,7 @@ const takes_calibration: Operation = {
 async function countMcpResolved(ctx: OperationContext): Promise<number> {
   const scope = await readPolicyOpts(ctx);
   const where: string[] = [`t.resolved_at IS NOT NULL`, `t.resolved_by LIKE 'mcp:%'`];
-  if (scope.excludePrivate) where.push(privatePagesFilterFragment('p'));
+  if (scope.excludePrivate) where.push(privatePagesFilterFragment('p', scope.excludePrivate));
   const params: unknown[] = [];
   if (scope.sourceIds && scope.sourceIds.length > 0) {
     params.push(scope.sourceIds);

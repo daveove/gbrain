@@ -1,5 +1,5 @@
 import { OperationError } from '../ops/contract.ts';
-import { REMOTE_PRIVATE_PAGES_KEY } from '../search/private-visibility.ts';
+import { REMOTE_PRIVATE_PAGES_KEY, privatePagesFilterFragment } from '../search/private-visibility.ts';
 import type { SqlEngine, WriteAuthority } from './model.ts';
 
 /** Publication uses fresh policy, independent of the read-side telemetry cache. */
@@ -12,8 +12,9 @@ export async function excludesPrivateWrites(engine: SqlEngine, remote: boolean):
 /** Recheck after page guards at publication; also hide inaccessible receipt targets. */
 export async function authorizePageVisibility(engine: SqlEngine, authority: WriteAuthority, slug: string): Promise<void> {
   if (!authority.remote) return;
-  if (!(authority.excludePrivate ?? true) && !await excludesPrivateWrites(engine, true)) return;
-  const rows = await engine.executeRaw(`SELECT 1 FROM pages WHERE source_id=$1 AND slug=$2
-    AND frontmatter->>'visibility'='private' LIMIT 1`, [authority.sourceId, slug]);
+  const filter = (authority.excludePrivate ?? true) === true || await excludesPrivateWrites(engine, true)
+    ? true : 'owner-only';
+  const rows = await engine.executeRaw(`SELECT 1 FROM pages p WHERE source_id=$1 AND slug=$2
+    AND NOT (${privatePagesFilterFragment('p', filter)}) LIMIT 1`, [authority.sourceId, slug]);
   if (rows.length) throw new OperationError('page_not_found', 'Page not found.');
 }

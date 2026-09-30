@@ -1,6 +1,6 @@
 import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
-import { writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 
 /** An explicit YYYY-MM-DD is a cycle date, not an instant in a timezone. */
 export function dailyMemoryArgs(day: string | undefined): { date?: string } {
@@ -19,7 +19,7 @@ async function main(): Promise<void> {
   try {
     await engine.connect(engineConfig);
     const result = await writeDailyMemoryFromSources(engine, dailyMemoryArgs(process.argv[2]));
-    const page = result.slug ? await engine.getPage(result.slug, { sourceId: 'default', includeDeleted: true }) : null;
+    const page = result.slug ? await engine.getPage(result.slug, { sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID, includeDeleted: true }) : null;
     console.log(JSON.stringify({ ...result, dream_generated: page?.frontmatter?.dream_generated === true, deleted: Boolean(page?.deleted_at) }));
     if (result.reason === 'error') process.exitCode = 1;
   } finally {

@@ -112,12 +112,12 @@ describe('daily memory from sources the brain already holds', () => {
     }
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     const page = await engine.getPage(dailyMemorySlug('2026-09-30'));
-    expect(page!.compiled_truth).toContain('[[notes/instant]]');
-    expect(page!.compiled_truth).toContain('[[notes/calendar]]');
-    expect(page!.compiled_truth).not.toContain('[[notes/previous-calendar]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/instant]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/calendar]]');
+    expect(page!.compiled_truth).not.toContain('[[default:notes/previous-calendar]]');
     await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
-    expect(previous!.compiled_truth).not.toContain('[[notes/instant]]');
+    expect(previous!.compiled_truth).not.toContain('[[default:notes/instant]]');
   });
 
   test('imported unquoted YAML calendar dates survive JSON storage while midnight datetimes remain instants', async () => {
@@ -133,14 +133,14 @@ describe('daily memory from sources the brain already holds', () => {
     expect(imported!.frontmatter.date).toBe('2026-09-30');
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     const today = await engine.getPage(dailyMemorySlug('2026-09-30'));
-    expect(today!.compiled_truth).toContain('[[notes/yaml-calendar]]');
-    expect(today!.compiled_truth).toContain('[[notes/yaml-local-midnight]]');
-    expect(today!.compiled_truth).not.toContain('[[notes/yaml-utc-midnight]]');
+    expect(today!.compiled_truth).toContain('[[default:notes/yaml-calendar]]');
+    expect(today!.compiled_truth).toContain('[[default:notes/yaml-local-midnight]]');
+    expect(today!.compiled_truth).not.toContain('[[default:notes/yaml-utc-midnight]]');
     await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
-    expect(previous!.compiled_truth).toContain('[[notes/yaml-utc-midnight]]');
-    expect(previous!.compiled_truth).not.toContain('[[notes/yaml-calendar]]');
-    expect(previous!.compiled_truth).not.toContain('[[notes/yaml-local-midnight]]');
+    expect(previous!.compiled_truth).toContain('[[default:notes/yaml-utc-midnight]]');
+    expect(previous!.compiled_truth).not.toContain('[[default:notes/yaml-calendar]]');
+    expect(previous!.compiled_truth).not.toContain('[[default:notes/yaml-local-midnight]]');
   });
 
   test('UTC-midnight timestamps and fallback anchors use the local day west of UTC', async () => {
@@ -152,9 +152,9 @@ describe('daily memory from sources the brain already holds', () => {
     await engine.executeRaw(`UPDATE pages SET effective_date = '2026-09-30T00:00:00Z', effective_date_source = 'fallback' WHERE slug = 'notes/anchor'`);
     await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     const page = await engine.getPage(dailyMemorySlug('2026-09-29'));
-    expect(page!.compiled_truth).toContain('[[notes/midnight]]');
-    expect(page!.compiled_truth).toContain('[[notes/anchor]]');
-    expect(page!.compiled_truth).not.toContain('[[notes/calendar-value]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/midnight]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/anchor]]');
+    expect(page!.compiled_truth).not.toContain('[[default:notes/calendar-value]]');
   });
 
   test('legacy serialized calendar scalars retain their day while fresh identical instants use the zone', async () => {
@@ -174,21 +174,21 @@ describe('daily memory from sources the brain already holds', () => {
     });
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     const today = await engine.getPage(dailyMemorySlug('2026-09-30'));
-    expect(today!.compiled_truth).toContain('[[notes/legacy-calendar]]');
-    expect(today!.compiled_truth).not.toContain('[[notes/fresh-iso-instant]]');
-    expect(today!.compiled_truth).not.toContain('[[notes/fresh-date-object]]');
+    expect(today!.compiled_truth).toContain('[[default:notes/legacy-calendar]]');
+    expect(today!.compiled_truth).not.toContain('[[default:notes/fresh-iso-instant]]');
+    expect(today!.compiled_truth).not.toContain('[[default:notes/fresh-date-object]]');
     await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
-    expect(previous!.compiled_truth).not.toContain('[[notes/legacy-calendar]]');
-    expect(previous!.compiled_truth).toContain('[[notes/fresh-iso-instant]]');
-    expect(previous!.compiled_truth).toContain('[[notes/fresh-date-object]]');
+    expect(previous!.compiled_truth).not.toContain('[[default:notes/legacy-calendar]]');
+    expect(previous!.compiled_truth).toContain('[[default:notes/fresh-iso-instant]]');
+    expect(previous!.compiled_truth).toContain('[[default:notes/fresh-date-object]]');
     const edited = (await engine.getPage('notes/fresh-date-object'))!;
     await engine.putPage('notes/fresh-date-object', {
       ...edited, frontmatter: { ...edited.frontmatter, date: '2026-09-30' },
     });
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth)
-      .toContain('[[notes/fresh-date-object]]');
+      .toContain('[[default:notes/fresh-date-object]]');
   });
 
   test('replacement frontmatter retains known instant provenance and explicit calendar edits clear it', async () => {
@@ -205,7 +205,7 @@ describe('daily memory from sources the brain already holds', () => {
       .toEqual({ date: iso });
     await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     expect((await engine.getPage(dailyMemorySlug('2026-09-29')))!.compiled_truth)
-      .toContain('[[notes/replacement-instant]]');
+      .toContain('[[default:notes/replacement-instant]]');
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     expect(await engine.getPage(dailyMemorySlug('2026-09-30'))).toBeNull();
     await engine.putPage('notes/replacement-instant', { ...input, frontmatter: { date: '2026-09-30' } });
@@ -213,7 +213,7 @@ describe('daily memory from sources the brain already holds', () => {
       .toBeUndefined();
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth)
-      .toContain('[[notes/replacement-instant]]');
+      .toContain('[[default:notes/replacement-instant]]');
   });
 
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
@@ -239,7 +239,7 @@ describe('daily memory from sources the brain already holds', () => {
       expect(new Date(session!.effective_date!).toISOString()).toBe('2026-09-30T00:00:00.000Z');
       await engine.setConfig('cycle.timezone', 'Asia/Manila');
       await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
-      expect((await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${slug}]]`);
+      expect((await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[default:${slug}]]`);
       const previous = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
       expect(previous.reason).toBe('no_source_activity');
     } finally {
@@ -256,7 +256,7 @@ describe('daily memory from sources the brain already holds', () => {
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     const refs = extractEntityRefs(page!.compiled_truth);
     expect(refs.filter(ref => ref.slug === 'notes/shared').map(ref => ref.sourceId)).toEqual(['alpha', 'beta']);
-    expect(page!.compiled_truth).not.toContain('[[notes/shared]]');
+    expect(page!.compiled_truth).not.toContain('[[default:notes/shared]]');
   });
 
   test('a live human page at the daily slug is unchanged', async () => {
@@ -341,18 +341,61 @@ describe('daily memory from sources the brain already holds', () => {
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(page!.compiled_truth).toContain('discrawl: 10 records changed');
     expect(page!.compiled_truth).toContain('gmail: 2 records changed');
-    expect(page!.compiled_truth).toContain('[[source-records/gmail/');
+    expect(page!.compiled_truth).toContain('[[dream:source-records/gmail/');
     expect(page!.compiled_truth).toContain('8 of 10 records are linked.');
-    expect(page!.compiled_truth.match(/\[\[source-records\/discrawl\//g)).toHaveLength(8);
+    expect(page!.compiled_truth.match(/\[\[dream:source-records\/discrawl\//g)).toHaveLength(8);
     expect(page!.compiled_truth).not.toContain('gmail:unpromoted');
     expect(page!.compiled_truth).not.toContain('private');
-    for (const [, slug] of page!.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)) {
+    for (const [, slug] of page!.compiled_truth.matchAll(/\[\[dream:(source-records\/[^\]]+)\]\]/g)) {
       const recordPage = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
       expect(recordPage).not.toBeNull();
       expect(recordPage!.compiled_truth).not.toContain('private');
     }
     const allPages = await engine.executeRaw<{ total: number }>('SELECT count(*)::int AS total FROM pages', []);
     expect(allPages[0].total).toBe(22);
+  });
+
+  test('default human live and deleted notes block the dream writer before reference creation', async () => {
+    await seedRecord('guard-record', 'gmail', '2026-09-30T00:00:00Z');
+    const slug = dailyMemorySlug('2026-09-30');
+    await engine.putPage(slug, { type: 'note', title: 'Human day', compiled_truth: 'Human fixture', frontmatter: {} });
+    for (const deleted of [false, true]) {
+      if (deleted) await engine.softDeletePage(slug);
+      const guarded = await writeSeptember30();
+      expect(guarded.reason).toBe('human_page');
+      expect(guarded.source_id).toBe('default');
+      expect(await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+      expect((await engine.getPage(slug, { includeDeleted: true }))!.compiled_truth).toBe('Human fixture');
+      expect((await engine.executeRaw("SELECT 1 FROM pages WHERE slug LIKE 'source-records/%'")).length).toBe(0);
+    }
+  });
+
+  test('new dream indexes retain historical default pages and resolve qualified graph targets', async () => {
+    await seedRecord('stable-record', 'gmail', '2026-09-30T00:00:00Z');
+    await engine.putPage('notes/default-target', { type: 'note', title: 'Default target', compiled_truth: 'Fixture',
+      frontmatter: { date: '2026-09-30' } });
+    await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z', effective_date_source='date' WHERE source_id='default' AND slug='notes/default-target'");
+    await writeSeptember30();
+    const slug = dailyMemorySlug('2026-09-30');
+    const first = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    const ref = first.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
+    await engine.putPage(ref, { type: 'note', title: 'Legacy reference', compiled_truth: 'Legacy identity',
+      frontmatter: { dream_generated: true, source_record_id: 'stable-record', source_record_type: 'gmail', source_record_ref: 'stable-record' } });
+    await engine.putPage(slug, { type: 'note', title: 'Legacy day', compiled_truth: `[[${ref}]]`,
+      frontmatter: { dream_generated: true } });
+    await writeSeptember30();
+    expect((await engine.getPage(slug))!.compiled_truth).toBe(`[[${ref}]]`);
+    expect((await engine.getPage(ref))!.compiled_truth).toBe('Legacy identity');
+    const fresh = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(fresh.compiled_truth).toContain('[[default:notes/default-target]]');
+    expect(fresh.compiled_truth).toContain(`[[dream:${ref}]]`);
+    // Cross-source graph edges follow the existing explicit operator policy.
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    await extractStaleFromDB(engine, { dryRun: false, quiet: true, jsonMode: true, catchUp: false,
+      includeFrontmatter: false, sourceIdFilter: DAILY_MEMORY_SOURCE_ID });
+    const edges = await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(edges.some(edge => edge.to_slug === ref && edge.to_source_id === DAILY_MEMORY_SOURCE_ID)).toBe(true);
+    expect(edges.some(edge => edge.to_slug === 'notes/default-target' && edge.to_source_id === 'default')).toBe(true);
   });
 
   test('brain-wide generated indexes remain owner-readable and hidden from scoped remote reads', async () => {
@@ -370,7 +413,7 @@ describe('daily memory from sources the brain already holds', () => {
     const result = await writeSeptember30();
     const daily = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect(daily.compiled_truth).toContain('[[restricted:notes/restricted-fixture]]');
-    const reference = daily.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    const reference = daily.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
     const dreamCfg = await engine.executeRaw<{ federated: boolean | null }>(
       `SELECT (config->>'federated')::boolean AS federated FROM sources WHERE id = $1`,
       [DAILY_MEMORY_SOURCE_ID],
@@ -432,7 +475,7 @@ describe('daily memory from sources the brain already holds', () => {
     const first = await writeSeptember30();
     expect(first.written).toBe(true);
     const page = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
-    const slugs = [...page.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1]);
+    const slugs = [...page.compiled_truth.matchAll(/\[\[dream:(source-records\/[^\]]+)\]\]/g)].map(match => match[1]);
     expect(slugs).toHaveLength(4);
     expect(slugs.every(slug => slug === slug.toLowerCase())).toBe(true);
     expect(slugs.some(slug => slug.startsWith('source-records/mail%3aslack/'))).toBe(true);
@@ -452,7 +495,7 @@ describe('daily memory from sources the brain already holds', () => {
     await engine.executeRaw("UPDATE source_records SET id = 'replacement-slash-id' WHERE source_type = 'mail/slack'", []);
     await writeSeptember30();
     const refreshed = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
-    expect([...refreshed.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1])).toEqual(slugs);
+    expect([...refreshed.compiled_truth.matchAll(/\[\[dream:(source-records\/[^\]]+)\]\]/g)].map(match => match[1])).toEqual(slugs);
   });
 
   test('source record day boundaries use Manila midnight and count record-only activity', async () => {
@@ -465,19 +508,19 @@ describe('daily memory from sources the brain already holds', () => {
     expect(result.day).toBe('2026-09-30');
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(page!.compiled_truth).toContain('gmail: 2 records changed');
-    expect(page!.compiled_truth.match(/\[\[source-records\/gmail\//g)).toHaveLength(2);
+    expect(page!.compiled_truth.match(/\[\[dream:source-records\/gmail\//g)).toHaveLength(2);
   });
 
   test('record slugs survive changed row IDs and repeated writes without duplicates', async () => {
     await seedRecord('gmail:original', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
     const first = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    const slug = first!.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    const slug = first!.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
     await engine.executeRaw(`UPDATE source_records SET id = 'replacement-id'`, []);
     await writeSeptember30();
     await writeSeptember30();
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    expect(page!.compiled_truth).toContain(`[[${slug}]]`);
+    expect(page!.compiled_truth).toContain(`[[dream:${slug}]]`);
     const record = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(record!.frontmatter.source_record_id).toBe('replacement-id');
     expect(record!.frontmatter.source_record_ref).toBe('gmail:original');
@@ -500,14 +543,14 @@ describe('daily memory from sources the brain already holds', () => {
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
     const first = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    const slug = first!.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    const slug = first!.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
     await engine.putPage(slug, { type: 'note', title: 'Human index', compiled_truth: 'Keep me', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
     await writeSeptember30();
     expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toBe('Keep me');
     await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     await writeSeptember30();
     const daily = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    expect(daily!.compiled_truth).not.toContain(`[[${slug}]]`);
+    expect(daily!.compiled_truth).not.toContain(`[[dream:${slug}]]`);
     const deleted = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true });
     expect(deleted!.deleted_at).toBeTruthy();
     expect(deleted!.compiled_truth).toBe('Keep me');
@@ -543,8 +586,8 @@ describe('daily memory from sources the brain already holds', () => {
     expect(result.day).toBe('2026-09-29');
     expect(result.written).toBe(true);
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    expect(page!.compiled_truth).toContain('[[notes/dated]]');
-    expect(page!.compiled_truth).toContain('[[notes/clock]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/dated]]');
+    expect(page!.compiled_truth).toContain('[[default:notes/clock]]');
     expect(page!.compiled_truth).not.toContain('previous-local-day');
   });
 
@@ -558,7 +601,7 @@ describe('daily memory from sources the brain already holds', () => {
     const manila = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     expect(manila.written).toBe(true);
     expect((await engine.getPage(manila.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
-      .toContain('[[notes/manila-event]]');
+      .toContain('[[default:notes/manila-event]]');
     await engine.softDeletePage(manila.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
 
     await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
@@ -566,7 +609,7 @@ describe('daily memory from sources the brain already holds', () => {
     expect(losAngeles.reason).toBe('no_source_activity');
     const previous = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
     expect((await engine.getPage(previous.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
-      .toContain('[[notes/manila-event]]');
+      .toContain('[[default:notes/manila-event]]');
   });
 
   test('an explicit cycle day is not shifted by a timezone west of UTC', async () => {
@@ -626,7 +669,7 @@ describe('daily memory from sources the brain already holds', () => {
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(page!.compiled_truth).toContain('40 of 42 pages are linked.');
     expect(page!.compiled_truth).not.toContain('previous-day');
-    expect(page!.compiled_truth.match(/\[\[notes\/page-/g)).toHaveLength(40);
+    expect(page!.compiled_truth.match(/\[\[default:notes\/page-/g)).toHaveLength(40);
   });
 
   test('existing ratio_session pages are linked without creating or changing sessions', async () => {
@@ -637,7 +680,7 @@ describe('daily memory from sources the brain already holds', () => {
     const result = await writeDailyMemoryFromSources(engine);
     expect(result.written).toBe(true);
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    expect(page!.compiled_truth).toContain('[[ratio/sessions/example-session]]');
+    expect(page!.compiled_truth).toContain('[[default:ratio/sessions/example-session]]');
     expect(page!.compiled_truth).not.toContain('private session body');
     const after = await engine.getPage('ratio/sessions/example-session');
     expect(after!.compiled_truth).toBe(before!.compiled_truth);

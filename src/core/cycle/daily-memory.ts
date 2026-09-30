@@ -12,7 +12,8 @@
  * maintenance job, which is the lane that already walks every source.
  * The note itself is one row in source `dream` (non-federated). Page
  * visibility alone is not enough: remote_private_pages can opt out of
- * private filtering, so cross-source indexes must not live in `default`.
+ * private filtering, and mandatory owner-aggregate authorization protects both new dream indexes
+ * and historical default copies, independently of that opt-out.
  */
 
 import { createHash } from 'node:crypto';
@@ -40,27 +41,11 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
   );
 }
 
-/** Soft-delete prior generated copies left in `default` so they cannot leak. */
-async function retireDefaultGeneratedIndexes(
-  engine: BrainEngine,
-  slugs: string[],
-): Promise<void> {
-  for (const slug of slugs) {
-    const existing = await engine.getPage(slug, {
-      sourceId: 'default',
-      includeDeleted: true,
-    });
-    if (!existing || existing.deleted_at) continue;
-    if (existing.frontmatter?.dream_generated !== true) continue;
-    await engine.softDeletePage(slug, { sourceId: 'default' });
-  }
-}
-
-
 export interface DailyMemoryWrite {
   written: boolean;
   day: string;
   slug: string;
+  source_id?: string;
   pages: number;
   reason?: 'no_source_activity' | 'human_page' | 'error';
 }
@@ -145,8 +130,8 @@ function renderNote(day: string, input: RenderInput): string {
       source = row.source_id;
       lines.push(`## ${source}`, '');
     }
-    // Bare slugs address the default source; every other source is qualified.
-    const target = row.source_id === 'default' ? row.slug : `${row.source_id}:${row.slug}`;
+    // Qualify every target: this index now lives outside the default source.
+    const target = `${row.source_id}:${row.slug}`;
     lines.push(`- [[${target}]] — ${oneLine(row.title)}`);
   }
   if (input.rows.length) lines.push('');
@@ -160,7 +145,7 @@ function renderNote(day: string, input: RenderInput): string {
       const total = Number(group.total) || group.links.length;
       lines.push(`${group.source_type}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
       for (const link of group.links) {
-        lines.push(`- [[${link.slug}]] — ${oneLine(link.entity_type || group.source_type)}`);
+        lines.push(`- [[${DAILY_MEMORY_SOURCE_ID}:${link.slug}]] — ${oneLine(link.entity_type || group.source_type)}`);
       }
       lines.push('');
       if (total > group.links.length) {
@@ -190,13 +175,18 @@ export async function writeDailyMemoryFromSources(
   let day = '';
   let slug = '';
   try {
-    await ensureDailyMemorySource(engine);
     const zone = await resolveCycleTimeZone(engine);
     // An explicit day is that calendar day in every zone. Timezone projection
     // applies only when the day is derived from the clock.
     day = await resolveCycleDate(engine, { now, explicitDate: opts.date });
     slug = dailyMemorySlug(day);
     throwIfAborted(opts.signal, '[dream] daily memory');
+    // A pre-existing human default index remains authoritative, even when deleted.
+    const legacy = await engine.getPage(slug, { sourceId: 'default', includeDeleted: true });
+    if (legacy && legacy.frontmatter.dream_generated !== true) {
+      return { written: false, day, slug, source_id: 'default', pages: 0, reason: 'human_page' };
+    }
+    await ensureDailyMemorySource(engine);
 
     const rows: SourcePageRow[] = [];
     let pageTotal = 0;
@@ -249,7 +239,7 @@ export async function writeDailyMemoryFromSources(
       includeDeleted: true,
     });
     if (existing && existing.frontmatter?.dream_generated !== true) {
-      return { written: false, day, slug, pages: rows.length, reason: 'human_page' };
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page' };
     }
 
     for (const group of records) {
@@ -276,10 +266,7 @@ export async function writeDailyMemoryFromSources(
       },
     }, { sourceId: DAILY_MEMORY_SOURCE_ID });
 
-    const retired = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
-    await retireDefaultGeneratedIndexes(engine, retired);
-
-    return { written: true, day, slug, pages: rows.length };
+    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length };
   } catch (err) {
     throwIfAborted(opts.signal, '[dream] daily memory');
     const message = err instanceof Error ? err.message : String(err);

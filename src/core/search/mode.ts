@@ -929,9 +929,9 @@ export interface KnobsHashContext {
    * differs from a trusted private-included run. Lives in ctx (not
    * ResolvedSearchKnobs) because it's per-call trust posture, not a mode
    * knob — same path as detail/hardExcludes. Undefined hashes like `false`
-   * (private included), matching enforcement's strict `=== true` semantics.
+   * (private included); owner-only retains mandatory aggregate exclusion.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * v=24 (#4415, wave-g): the EFFECTIVE salience/recency boost modes for
    * this call — per-call SearchOpts, or the classifier's auto-suggestion
@@ -1078,9 +1078,9 @@ export function knobsHash(
     // private-excluding (remote-default) lookup and vice versa. Replaces
     // #4352's wholesale skipCache bypass, which disabled the semantic cache
     // for every remote MCP caller (excludePrivate=true is their default).
-    // Strict `=== true` mirrors the enforcement predicate so undefined and
-    // false (both private-included) hash identically.
-    `xp=${ctx?.excludePrivate === true ? 1 : 0}`,
+    // Owner-only differs from full private exclusion; unrestricted local
+    // false and undefined retain the same cache identity.
+    `xp=${ctx?.excludePrivate === 'owner-only' ? 'owner-only' : ctx?.excludePrivate === true ? 1 : 0}`,
     // v=25 addition (#3617, append-only): keyword AND→OR fallback knob. A
     // fallback-on write (OR-relaxed rows blended in) must not be served
     // to a fallback-off lookup — the zero-strict-recall result sets are

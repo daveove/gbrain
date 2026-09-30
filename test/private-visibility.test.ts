@@ -96,19 +96,19 @@ describe('resolveExcludePrivatePages gate (#4352)', () => {
     expect(await resolveExcludePrivatePages(engine, undefined)).toBe(true);
   });
 
-  test('config opt-out disables enforcement', async () => {
+  test('config opt-out retains owner aggregate enforcement', async () => {
     await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
     __resetPrivateVisibilityCacheForTests();
-    expect(await resolveExcludePrivatePages(engine, true)).toBe(false);
+    expect(await resolveExcludePrivatePages(engine, true)).toBe('owner-only');
     await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
     __resetPrivateVisibilityCacheForTests();
     expect(await resolveExcludePrivatePages(engine, true)).toBe(true);
   });
 
-  test('GBRAIN_REMOTE_PRIVATE_PAGES=1 env escape hatch disables enforcement', async () => {
+  test('GBRAIN_REMOTE_PRIVATE_PAGES=1 retains owner aggregate enforcement', async () => {
     __resetPrivateVisibilityCacheForTests();
     await withEnv({ GBRAIN_REMOTE_PRIVATE_PAGES: '1' }, async () => {
-      expect(await resolveExcludePrivatePages(engine, true)).toBe(false);
+      expect(await resolveExcludePrivatePages(engine, true)).toBe('owner-only');
     });
   });
 });
