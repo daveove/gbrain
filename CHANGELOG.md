@@ -10,6 +10,14 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.59.19.0] - 2026-09-30
+
+Daily memory notes now include counts of source records updated that day and up to eight links per source. The linked reference pages contain source metadata without message text. Existing human day notes remain unchanged.
+
+The daily launcher imports only the current Manila day's Codex sessions before it writes the note. Unchanged transcripts use the existing content-hash skip.
+
+To take advantage of v0.59.19.0, update the checkout and use `scripts/gbrain-daily-memory.sh` in the existing daily job.
+
 ## [0.59.18.0] - 2026-09-29
 
 **Dream no longer keeps made-up quotes, wrong-speaker quotes or invented numbers as memory, and `gbrain eval compare` computes the statistics it claims.**

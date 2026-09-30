@@ -136,4 +136,178 @@ describe('daily memory from sources the brain already holds', () => {
     expect(deleted!.title).toBe('Removed day');
     expect(deleted!.frontmatter.dream_generated).not.toBe(true);
   });
+
+  async function seedRecord(id: string, source: string, updatedAt: string, slug?: string): Promise<void> {
+    await engine.executeRaw(
+      `CREATE TABLE IF NOT EXISTS source_records (
+        id text PRIMARY KEY, source_type text, source_ref text, entity_type text,
+        entity_id text, payload_json jsonb, updated_at timestamptz
+      )`, [],
+    );
+    await engine.executeRaw(
+      `INSERT INTO source_records VALUES ($1, $2, $1, 'message', $1, $3::text::jsonb, $4::timestamptz)`,
+      [id, source, JSON.stringify({ slug, title: 'private title', message: 'private body' }), updatedAt],
+    );
+    if (slug) {
+      await engine.putPage(slug, { type: 'note', title: 'Stored page', compiled_truth: 'private page body' });
+      await engine.executeRaw(
+        `UPDATE pages SET effective_date = '2020-01-01'::timestamptz WHERE slug = $1`, [slug],
+      );
+    }
+  }
+
+  async function writeSeptember30() {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    return writeDailyMemoryFromSources(engine, { now: () => new Date('2026-09-30T02:00:00Z') });
+  }
+
+  test('source records count all updates, cap stable openable record links, and omit payload text', async () => {
+    for (let i = 0; i < 10; i++) {
+      await seedRecord(`discrawl:${i}`, 'discrawl', '2026-09-30T00:00:00Z', `comms/disc-${i}`);
+    }
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z', 'mail/thread-1');
+    await seedRecord('gmail:unpromoted', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('discrawl: 10 records changed');
+    expect(page!.compiled_truth).toContain('gmail: 2 records changed');
+    expect(page!.compiled_truth).toContain('[[source-records/gmail/');
+    expect(page!.compiled_truth).toContain('8 of 10 records are linked.');
+    expect(page!.compiled_truth.match(/\[\[source-records\/discrawl\//g)).toHaveLength(8);
+    expect(page!.compiled_truth).not.toContain('gmail:unpromoted');
+    expect(page!.compiled_truth).not.toContain('private');
+    for (const [, slug] of page!.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)) {
+      const recordPage = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      expect(recordPage).not.toBeNull();
+      expect(recordPage!.compiled_truth).not.toContain('private');
+    }
+    const allPages = await engine.executeRaw<{ total: number }>('SELECT count(*)::int AS total FROM pages', []);
+    expect(allPages[0].total).toBe(22);
+  });
+
+  test('source record day boundaries use Manila midnight and count record-only activity', async () => {
+    await seedRecord('before', 'gmail', '2026-09-29T15:59:59.999Z');
+    await seedRecord('start', 'gmail', '2026-09-29T16:00:00Z');
+    await seedRecord('end', 'gmail', '2026-09-30T15:59:59.999Z');
+    await seedRecord('after', 'gmail', '2026-09-30T16:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    expect(result.day).toBe('2026-09-30');
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('gmail: 2 records changed');
+    expect(page!.compiled_truth.match(/\[\[source-records\/gmail\//g)).toHaveLength(2);
+  });
+
+  test('record slugs survive changed row IDs and repeated writes without duplicates', async () => {
+    await seedRecord('gmail:original', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    const first = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const slug = first!.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    await engine.executeRaw(`UPDATE source_records SET id = 'replacement-id'`, []);
+    await writeSeptember30();
+    await writeSeptember30();
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain(`[[${slug}]]`);
+    const record = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(record!.frontmatter.source_record_id).toBe('replacement-id');
+    expect(record!.frontmatter.source_record_ref).toBe('gmail:original');
+    const count = await engine.executeRaw<{ total: number }>('SELECT count(*)::int AS total FROM pages', []);
+    expect(count[0].total).toBe(2);
+  });
+
+  test('human daily guard runs before metadata pages are created', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    await engine.putPage(dailyMemorySlug('2026-09-30'), { type: 'note', title: 'Human day', compiled_truth: 'Preserve me' });
+    const result = await writeSeptember30();
+    expect(result.reason).toBe('human_page');
+    const count = await engine.executeRaw<{ total: number }>(
+      `SELECT count(*)::int AS total FROM pages WHERE slug LIKE 'source-records/%'`, [],
+    );
+    expect(count[0].total).toBe(0);
+  });
+
+  test('human record index pages are preserved and deleted ones remain unlinked', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    const first = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const slug = first!.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    await engine.putPage(slug, { type: 'note', title: 'Human index', compiled_truth: 'Keep me', frontmatter: {} });
+    await writeSeptember30();
+    expect((await engine.getPage(slug))!.compiled_truth).toBe('Keep me');
+    await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await writeSeptember30();
+    const daily = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(daily!.compiled_truth).not.toContain(`[[${slug}]]`);
+    const deleted = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true });
+    expect(deleted!.deleted_at).toBeTruthy();
+    expect(deleted!.compiled_truth).toBe('Keep me');
+  });
+
+  test('absent source_records table still permits page indexing', async () => {
+    await engine.executeRaw('DROP TABLE IF EXISTS source_records', []);
+    await seedTodayPage();
+    const result = await writeDailyMemoryFromSources(engine);
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[meetings/standup]]');
+  });
+
+  test('page indexing retains the 40-link cap and effective-date calendar precedence', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    for (let i = 0; i < 42; i++) {
+      const slug = `notes/page-${String(i).padStart(2, '0')}`;
+      await engine.putPage(slug, { type: 'note', title: 'Today page', compiled_truth: 'private body' });
+      await engine.executeRaw(
+        `UPDATE pages SET effective_date = '2026-09-29T16:00:00Z'::timestamptz,
+          updated_at = '2026-10-01T00:00:00Z'::timestamptz WHERE slug = $1`, [slug],
+      );
+    }
+    await engine.putPage('notes/previous-day', { type: 'note', title: 'Previous day', compiled_truth: 'Earlier note' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-29T15:59:59Z'::timestamptz,
+        updated_at = '2026-09-30T00:00:00Z'::timestamptz WHERE slug = 'notes/previous-day'`, [],
+    );
+    const result = await writeSeptember30();
+    expect(result.pages).toBe(40);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('40 of 42 pages are linked.');
+    expect(page!.compiled_truth).not.toContain('previous-day');
+    expect(page!.compiled_truth.match(/\[\[notes\/page-/g)).toHaveLength(40);
+  });
+
+  test('existing ratio_session pages are linked without creating or changing sessions', async () => {
+    await engine.putPage('ratio/sessions/example-session', {
+      type: 'ratio_session', title: 'Example session', compiled_truth: 'private session body',
+    });
+    const before = await engine.getPage('ratio/sessions/example-session');
+    const result = await writeDailyMemoryFromSources(engine);
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[ratio/sessions/example-session]]');
+    expect(page!.compiled_truth).not.toContain('private session body');
+    const after = await engine.getPage('ratio/sessions/example-session');
+    expect(after!.compiled_truth).toBe(before!.compiled_truth);
+    expect(after!.updated_at).toEqual(before!.updated_at);
+    const sessions = await engine.executeRaw<{ total: number }>(
+      `SELECT count(*)::int AS total FROM pages WHERE type = 'ratio_session'`, [],
+    );
+    expect(sessions[0].total).toBe(1);
+  });
+
+  test('dream daily notes refresh, including a soft-deleted generated note', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const slug = dailyMemorySlug('2026-09-30');
+    await engine.putPage(slug, {
+      type: 'note', title: 'Old generated note', compiled_truth: 'old index',
+      frontmatter: { dream_generated: true },
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('gmail: 1 record changed');
+    expect(page!.compiled_truth).not.toContain('old index');
+    expect(page!.deleted_at ?? null).toBeNull();
+  });
 });
