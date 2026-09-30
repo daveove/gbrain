@@ -1054,11 +1054,17 @@ export async function runImport(
     // success list regardless of whether this SAME run also had failures,
     // so a stale row from an earlier run gets cleared even if today's run
     // is only partially clean.
-    if (succeededPaths.length > 0) {
+    // Clear healed file paths and a recovered transient <link-extraction>
+    // sentinel (it starts with `<`, so --skip-failed never acknowledges it).
+    const healedPaths = [
+      ...succeededPaths,
+      ...(!linkExtractionError ? ['<link-extraction>'] as const : []),
+    ];
+    if (healedPaths.length > 0) {
       const { clearFailures } = await import('../core/sync.ts');
       // #3838: keyed by the resolved source, matching recordFailures above —
       // a row recorded under the resolved source must clear under it too.
-      clearFailures(sourceId ?? 'default', succeededPaths);
+      clearFailures(sourceId ?? 'default', healedPaths);
     }
 
     // #2114 guard: the global sync.* keys describe THE brain repo (the

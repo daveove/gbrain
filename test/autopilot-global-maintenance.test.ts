@@ -11,7 +11,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -415,5 +415,20 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const stamped = await engine.getConfig(LAST_GLOBAL_AT_KEY);
     expect(stamped).not.toBeNull();
     expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
+  });
+});
+
+
+describe('autopilot-global-maintenance daily memory order', () => {
+  test('daily memory write follows runCycle in the handler source', () => {
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'jobs.ts'), 'utf8');
+    const start = src.indexOf("worker.register('autopilot-global-maintenance'");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("worker.register('shell'", start);
+    const body = src.slice(start, end > start ? end : undefined);
+    const runIdx = body.indexOf('const report = await runCycle(engine,');
+    const writeIdx = body.indexOf('writeDailyMemoryFromSources(engine');
+    expect(runIdx).toBeGreaterThan(-1);
+    expect(writeIdx).toBeGreaterThan(runIdx);
   });
 });

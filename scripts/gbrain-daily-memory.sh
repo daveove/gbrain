@@ -2,13 +2,14 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export GBRAIN_POOL_SIZE=1 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
-export TZ=Asia/Manila
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 mkdir -p "$(dirname "$LOG")" "$HOME/.local/state/gbrain"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
+# env.sh may export TZ; force the launcher calendar after sourcing.
+export TZ=Asia/Manila
 if [[ "${GBRAIN_DAILY_LOCK_FD:-}" != 9 ]]; then
   exec python3 "$REPO/scripts/daily-memory-lock.py" "$0" "$@"
 fi

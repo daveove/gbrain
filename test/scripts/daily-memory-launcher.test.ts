@@ -8,7 +8,7 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-codex-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null };
 
 function fixture() {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
@@ -27,7 +27,7 @@ kind = 'resolve' if args[0] == '-e' else ('ingest' if 'transcripts' in args else
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ')}) + '\\n')
 if kind == 'resolve':
     if os.environ.get('TEST_RESOLVE_FAIL') == '1':
         print('fixture config resolver failed', file=sys.stderr)
@@ -196,4 +196,14 @@ finally:
     expect(result.code).toBe(7);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
   });
+
+  it('reapplies Asia/Manila after env.sh exports TZ', () => {
+    const { home, run } = fixture();
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export TZ=UTC\n');
+    const result = run(['2026-09-29']);
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['write']);
+    expect(result.calls[0].tz).toBe('Asia/Manila');
+  });
+
 });

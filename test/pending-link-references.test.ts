@@ -79,7 +79,8 @@ for (const federated of [true, false]) test(`qualified target arrival requeues i
   expect(await loadPendingLinkReferences(engine, a)).toHaveLength(1);
   await engine.putPage('people/later', page(), { sourceId: b });
   const pending = await loadPendingLinkReferences(engine, a);
-  expect((await scoped(b, true)).staleRemaining).toBe(1); // Only B is extracted by this invocation.
+  // B's new page plus a ready foreign A wakeup when federated cross-source applies.
+  expect((await scoped(b, true)).staleRemaining).toBe(federated ? 2 : 1);
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
   const read = engine.readPageSnapshot;
@@ -118,7 +119,8 @@ test('only the configured fallback source wakes an unqualified foreign origin', 
   expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   await engine.putPage('people/fallback-later', page(), { sourceId: b });
-  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  // B stale page + foreign A wakeup.
+  expect((await scoped(b, true)).staleRemaining).toBe(2);
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
   const read = engine.readPageSnapshot;
@@ -153,7 +155,8 @@ for (const failure of ['throw', 'null']) test(`foreign wake retries a failed dur
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(1);
   const jobsBefore = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'");
-  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  // B still stale (failed before drain) + already-stale foreign A wakeup.
+  expect((await scoped(b, true)).staleRemaining).toBe(2);
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toEqual(jobsBefore);
   expect((await scoped(b)).pagesProcessed).toBe(1);
@@ -456,6 +459,34 @@ for (const incremental of [true, false]) test(`file all-mode abort after snapsho
 });
 
 
+
+test('dry-run B-scoped preview counts a foreign A wakeup', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[src-b:people/later]].'), { sourceId: 'src-a' });
+  expect(await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  })).toMatchObject({ staleRemaining: 0 });
+  await engine.putPage('people/later', page(), { sourceId: 'src-b' });
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/later', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+  const registry = await loadPendingLinkReferences(engine, 'src-a');
+  expect(registry).toHaveLength(1);
+  const preview = await extractStaleFromDB(engine, {
+    dryRun: true, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(preview).toMatchObject({ staleRemaining: 1, pagesProcessed: 0, linksCreated: 0 });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toEqual(registry);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(0);
+});
+
+
 test('B-scoped stale sweep wakes A pending on [[B:later]] and enqueues A extract', async () => {
   await engine.setConfig('link_resolution.cross_source', 'true');
   await engine.executeRaw(
@@ -595,7 +626,8 @@ for (const qualified of [true, false]) test(`foreign origin is stale before an e
   await scoped(a);
   await engine.putPage('people/race-later', page(), { sourceId: b });
   const pending = await loadPendingLinkReferences(engine, a);
-  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  // B stale page + foreign A wakeup.
+  expect((await scoped(b, true)).staleRemaining).toBe(2);
   expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
   const original = MinionQueue.prototype.add;
   let eagerProcessed = 0;

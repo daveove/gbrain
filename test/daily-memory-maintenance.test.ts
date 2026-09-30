@@ -3,7 +3,7 @@ import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
  * The daily maintenance job writes one durable memory from pages that
  * already live in sources. The test calls `autopilot-global-maintenance`
  * the way that job does: no phase list, so the handler defaults to
- * MAINTENANCE_PHASES and writes the note before the cycle.
+ * MAINTENANCE_PHASES and writes the note after the cycle.
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';

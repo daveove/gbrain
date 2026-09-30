@@ -134,8 +134,10 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
       if (!opts.dryRun) await engine.executeRaw('DELETE FROM config WHERE key=$1 AND value=$2', [row.key, row.value]);
     } else if (ref.candidates.some(candidate => resolves({ ...candidate, linkType: '', context: '' }, ref))) {
       if (opts.dryRun) {
-        // Already-stale origins are included in the normal preflight count.
-        if (current && !current.already_stale && (!opts.sourceId || ref.sourceId === opts.sourceId)) requeued++;
+        // Local already-stale origins are in the normal preflight count.
+        // Foreign origins are not, so count every ready foreign handoff.
+        const foreign = Boolean(opts.sourceId && ref.sourceId !== opts.sourceId);
+        if (current && (foreign || !current.already_stale)) requeued++;
         continue;
       }
       if (opts.sourceId && ref.sourceId !== opts.sourceId) {

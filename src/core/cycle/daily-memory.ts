@@ -2,7 +2,7 @@
  * One durable daily memory from pages that already live in the brain.
  *
  * The daily maintenance job (`autopilot-global-maintenance`) calls
- * `writeDailyMemoryFromSources` once, before the long mixed phases. Sources
+ * `writeDailyMemoryFromSources` once, after the long mixed phases. Sources
  * that already hold a page whose content date falls on the cycle's calendar
  * day contribute a short label and a wikilink. source_records updated that
  * same day add one summary line per source and a capped set of stable record

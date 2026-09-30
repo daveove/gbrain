@@ -2877,8 +2877,10 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
-    await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    // Daily snapshot after maintenance phases so concurrent per-source cycles
+    // from the same fan-out usually finish importing before the scan. Avoid a
+    // hard wait on those siblings: holding this worker slot can deadlock when
+    // concurrency is tight.
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls
@@ -2893,6 +2895,8 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
+    const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
+    await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {

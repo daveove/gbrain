@@ -72,3 +72,29 @@ describe('a path that fails then succeeds clears its ledger row (#3839)', () => 
     });
   });
 });
+
+
+describe('transient <link-extraction> sentinel clears after a successful handoff', () => {
+  test('open after extraction failure, gone after a later clean import', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-clear-link-extract-'));
+    execSync('git init', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email "t@t.t"', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name "T"', { cwd: repo, stdio: 'pipe' });
+    writeFileSync(join(repo, 'note.md'), '---\ntype: note\n---\n# Note\n\nbody\n');
+    execSync('git add note.md', { cwd: repo, stdio: 'pipe' });
+    execSync('git commit -m seed', { cwd: repo, stdio: 'pipe' });
+
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-link-'));
+    const { recordFailures } = await import('../src/core/sync-failure-ledger.ts');
+
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      // Simulate a prior transient extraction failure recorded by import.
+      recordFailures('default', [{ path: '<link-extraction>', error: 'stale count timed out' }], 'c1');
+      expect(loadSyncFailures().some((f) => f.path === '<link-extraction>' && f.state === 'open')).toBe(true);
+
+      await runImport(engine, [repo, '--fresh', '--no-embed', '--json']);
+
+      expect(loadSyncFailures().filter((f) => f.path === '<link-extraction>')).toEqual([]);
+    });
+  });
+});
