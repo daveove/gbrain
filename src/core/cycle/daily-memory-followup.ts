@@ -205,8 +205,8 @@ export async function dailyMemoryDaysForSlugs(
 }
 
 async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string[], sourceJobId: number,
-  cursor: number, childIds: number[] = [], delay = 0): Promise<number> {
-  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor })).digest('hex').slice(0, 20);
+  cursor: number, childIds: number[] = [], delay = 0, pollFromJobId = 0): Promise<number> {
+  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId })).digest('hex').slice(0, 20);
   const day = days[Math.min(Math.max(cursor, 0), Math.max(days.length - 1, 0))] ?? days[0];
   const data = { daily_memory_date: day, daily_memory_dates: days,
     daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor,
@@ -289,7 +289,7 @@ async function settleDailyDateChildren(
   }
   job.signal?.throwIfAborted();
   if (rows.some(row => PENDING.has(row.status))) {
-    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000);
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000, job.id);
     return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_days_queued: days };
   }
   const replayed: number[] = [];
@@ -302,7 +302,7 @@ async function settleDailyDateChildren(
     }));
   }
   if (replayed.length) {
-    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, replayed, 30_000);
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, replayed, 30_000, job.id);
     return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_replayed: replayed.length };
   }
   return {
