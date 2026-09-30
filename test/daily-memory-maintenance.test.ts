@@ -1011,4 +1011,39 @@ describe('daily memory from sources the brain already holds', () => {
 
 
 
+  test('dailyMemoryDaysForSlugs includes prior dates when a page moves', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await ensureDailyMemorySource(engine);
+    await engine.putPage('notes/moving', {
+      type: 'note', title: 'Moving', compiled_truth: 'was Sep 10',
+      frontmatter: { date: '2026-09-10' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-10T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/moving'",
+    );
+    // Prior index link still points at the old day after the move.
+    await engine.putPage(dailyMemorySlug('2026-09-10'), {
+      type: 'note', title: 'Daily memory 2026-09-10',
+      compiled_truth: 'See [[notes/moving]].',
+      frontmatter: { dream_generated: true, dream_cycle_date: '2026-09-10', visibility: 'private' },
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const from = await engine.getPage(dailyMemorySlug('2026-09-10'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const to = await engine.getPage('notes/moving', { sourceId: 'default' });
+    await engine.executeRaw(
+      `INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
+       VALUES ($1, $2, '', 'markdown')`,
+      [from!.id, to!.id],
+    );
+    await engine.putPage('notes/moving', {
+      type: 'note', title: 'Moving', compiled_truth: 'now Sep 20',
+      frontmatter: { date: '2026-09-20' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/moving'",
+    );
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/moving']);
+    expect(days).toContain('2026-09-10');
+    expect(days).toContain('2026-09-20');
+  });
+
 });
