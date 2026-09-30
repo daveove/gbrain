@@ -440,6 +440,20 @@ describe('autopilot-global-maintenance daily memory order', () => {
     const end = src.indexOf("worker.register('autopilot-global-maintenance'", start);
     const body = src.slice(start, end > start ? end : undefined);
     expect(body).toContain('dailyMemoryDaysForSlugs');
+    expect(body).toContain('claimDailyMemoryRegenDays');
+    expect(body).not.toContain('days.slice(0, 8)');
     expect(body.indexOf('dailyMemoryDaysForSlugs')).toBeGreaterThan(body.indexOf('const report = await runCycle(engine,'));
+  });
+
+  test('global maintenance drains stashed daily memory regen days', () => {
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'jobs.ts'), 'utf8');
+    const start = src.indexOf("worker.register('autopilot-global-maintenance'");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("worker.register('shell'", start);
+    const body = src.slice(start, end > start ? end : undefined);
+    const todayWrite = body.indexOf('writeDailyMemoryFromSources(engine, { signal: job.signal })');
+    const pendingDrain = body.indexOf('claimDailyMemoryRegenDays(engine, [])');
+    expect(todayWrite).toBeGreaterThan(-1);
+    expect(pendingDrain).toBeGreaterThan(todayWrite);
   });
 });

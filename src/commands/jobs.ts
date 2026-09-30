@@ -2855,11 +2855,13 @@ export async function registerBuiltinHandlers(
         try {
           const {
             dailyMemoryDaysForSlugs,
+            claimDailyMemoryRegenDays,
             writeDailyMemoryFromSources,
             queueDailyMemoryExtract,
           } = await import('../core/cycle/daily-memory.ts');
-          const days = await dailyMemoryDaysForSlugs(engine, sourceId, pagesAffected);
-          for (const day of days.slice(0, 8)) {
+          const discovered = await dailyMemoryDaysForSlugs(engine, sourceId, pagesAffected);
+          const days = await claimDailyMemoryRegenDays(engine, discovered);
+          for (const day of days) {
             await queueDailyMemoryExtract(
               engine,
               await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day }),
@@ -2923,8 +2925,25 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
-    const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
+    const {
+      writeDailyMemoryFromSources,
+      queueDailyMemoryExtract,
+      claimDailyMemoryRegenDays,
+    } = await import('../core/cycle/daily-memory.ts');
     await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    // Drain any calendar days a source-cycle batch stashed past its cap.
+    try {
+      for (const day of await claimDailyMemoryRegenDays(engine, [])) {
+        await queueDailyMemoryExtract(
+          engine,
+          await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day }),
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `[autopilot-global-maintenance] pending daily memory regen failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {

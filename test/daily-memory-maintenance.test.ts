@@ -15,7 +15,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
-import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_PENDING_DAYS_KEY, DAILY_MEMORY_REGEN_DAY_BATCH, claimDailyMemoryRegenDays, dailyMemoryDaysForSlugs, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
@@ -993,4 +993,29 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).not.toContain('old index');
     expect(page!.deleted_at ?? null).toBeNull();
   });
+
+  test('dailyMemoryDaysForSlugs includes soft-deleted pages so prior indexes can drop them', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await engine.putPage('notes/gone', {
+      type: 'note', title: 'Gone', compiled_truth: 'was here',
+      frontmatter: { date: '2026-09-20' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/gone'",
+    );
+    await engine.softDeletePage('notes/gone', { sourceId: 'default' });
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/gone']);
+    expect(days).toEqual(['2026-09-20']);
+  });
+
+  test('claimDailyMemoryRegenDays batches eight days and stashes the rest', async () => {
+    const discovered = Array.from({ length: 10 }, (_, i) => `2026-09-${String(i + 1).padStart(2, '0')}`);
+    const first = await claimDailyMemoryRegenDays(engine, discovered, DAILY_MEMORY_REGEN_DAY_BATCH);
+    expect(first).toEqual(discovered.slice(0, 8));
+    expect(JSON.parse((await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY))!)).toEqual(discovered.slice(8));
+    const second = await claimDailyMemoryRegenDays(engine, [], DAILY_MEMORY_REGEN_DAY_BATCH);
+    expect(second).toEqual(discovered.slice(8));
+    expect(await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY)).toBeNull();
+  });
+
 });

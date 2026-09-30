@@ -243,6 +243,48 @@ function renderNote(day: string, input: RenderInput): string {
  * and swallowed so a note failure does not cancel the rest of the maintenance
  * job; an abort still propagates.
  */
+/** Max calendar days one source-cycle job regenerates before stashing the rest. */
+export const DAILY_MEMORY_REGEN_DAY_BATCH = 8;
+/** Config key for calendar days left after a per-source regen batch. */
+export const DAILY_MEMORY_PENDING_DAYS_KEY = 'dream.daily_memory_pending_days';
+
+function parsePendingDailyMemoryDays(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(
+      parsed.filter((day): day is string => typeof day === 'string' && isCalendarDateSpelling(day)),
+    )].sort();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Merge discovered days with any stashed backlog. Return up to `limit` oldest
+ * days and persist the remainder so a later cycle or global maintenance drains them.
+ */
+export async function claimDailyMemoryRegenDays(
+  engine: BrainEngine,
+  discovered: string[],
+  limit = DAILY_MEMORY_REGEN_DAY_BATCH,
+): Promise<string[]> {
+  const pending = parsePendingDailyMemoryDays(await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY));
+  const all = [...new Set([
+    ...pending,
+    ...discovered.filter((day) => isCalendarDateSpelling(day)),
+  ])].sort();
+  const claim = all.slice(0, Math.max(0, limit));
+  const rest = all.slice(claim.length);
+  if (rest.length === 0) {
+    if (pending.length > 0) await engine.unsetConfig(DAILY_MEMORY_PENDING_DAYS_KEY);
+  } else {
+    await engine.setConfig(DAILY_MEMORY_PENDING_DAYS_KEY, JSON.stringify(rest));
+  }
+  return claim;
+}
+
 /** Calendar days an imported slug set should refresh in the daily index. */
 export async function dailyMemoryDaysForSlugs(
   engine: BrainEngine,
@@ -251,12 +293,14 @@ export async function dailyMemoryDaysForSlugs(
 ): Promise<string[]> {
   if (slugs.length === 0) return [];
   const zone = await resolveCycleTimeZone(engine);
+  // Include soft-deleted rows: incremental sync puts deleted slugs in
+  // pagesAffected, and the prior index must drop them on regen.
   const rows = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
     `SELECT source_id, slug, title, effective_date, effective_date_source, frontmatter,
        to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
        to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
      FROM pages
-     WHERE deleted_at IS NULL AND source_id = $2 AND slug = ANY($3::text[])`,
+     WHERE source_id = $2 AND slug = ANY($3::text[])`,
     [zone, sourceId, slugs],
   );
   const days = new Set<string>();
