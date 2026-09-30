@@ -95,6 +95,7 @@ describe('daily memory launcher', () => {
     expect(args.slice(1, 5)).toEqual(['transcripts', 'ingest', '--format', 'codex']);
     expect(new Date(args[args.indexOf('--since') + 1]).getTime()).toBe(input.start);
     expect(args.slice(args.indexOf('--source-id'), args.indexOf('--source-id') + 2)).toEqual(['--source-id', 'default']);
+    expect(args.slice(args.indexOf('--date-zone'), args.indexOf('--date-zone') + 2)).toEqual(['--date-zone', 'Asia/Manila']);
     expect(args.slice(-2)).toEqual([input.precedingUtc, input.currentUtc]);
     expect(args).not.toContain(input.before);
     expect(args).not.toContain(input.after);

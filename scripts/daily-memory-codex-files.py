@@ -22,6 +22,9 @@ for utc_day in sorted({start.date(), (end - datetime.timedelta(microseconds=1)).
                     stamp = entry['payload'].get('timestamp') or entry['timestamp']
                     instant = datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00'))
                     if start <= instant < end:
+                        # A 00:00–07:59 Manila session lives in the previous UTC
+                        # folder. Ingest stamps this selected day (--date-zone
+                        # Asia/Manila); the UTC date prefix would index it yesterday.
                         sys.stdout.buffer.write(str(path).encode() + b'\0')
                     break
                 except (ValueError, KeyError, TypeError):

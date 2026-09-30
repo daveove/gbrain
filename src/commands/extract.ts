@@ -2084,6 +2084,8 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
+    /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
+    signal?: AbortSignal;
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
@@ -2091,6 +2093,7 @@ export async function extractStaleFromDB(
   const log = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const timeBudgetMs = opts.timeBudgetMs ?? STALE_TIME_BUDGET_MS;
   const versionTs = LINK_EXTRACTOR_VERSION_TS;
+  opts.signal?.throwIfAborted();
 
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
   const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
@@ -2163,10 +2166,13 @@ export async function extractStaleFromDB(
   // from a genuinely missing target.
   let skippedCrossSource = 0;
 
+  try {
   for (;;) {
+    opts.signal?.throwIfAborted();
     const rows = await engine.listStalePagesForExtraction({
       batchSize: STALE_BATCH_SIZE, afterPageId, sourceId: sourceIdFilter, versionTs,
     });
+    opts.signal?.throwIfAborted();
     if (rows.length === 0) break;
     await loadSourceLinkPacks(engine, rows.map(page => page.source_id), packs);
 
@@ -2263,11 +2269,14 @@ export async function extractStaleFromDB(
     progress.tick(processedRefs.length);
     afterPageId = rows[rows.length - 1]!.id;
 
+    opts.signal?.throwIfAborted();
     if (!catchUp && Date.now() - startMs > timeBudgetMs) { budgetHit = true; break; }
   }
-
-  progress.finish();
+  } finally {
+    progress.finish();
+  }
   if (packUnavailable) throw new Error('Cannot extract links: active schema pack is unavailable.');
+  opts.signal?.throwIfAborted();
   const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
 
   if (!jsonMode) {

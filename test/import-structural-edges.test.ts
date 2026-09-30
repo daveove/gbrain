@@ -6,11 +6,11 @@
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { execSync } from 'child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runImport } from '../src/commands/import.ts';
+import { ImportAbortError, runImport } from '../src/commands/import.ts';
 import { INLINE_EXTRACT_CHANGE_LIMIT } from '../src/core/deferred-stale-extract.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -238,4 +238,92 @@ describe('import structural edges', () => {
       expect(reasons).toContain('import_full_sync');
     });
   }, 120_000);
+
+  test('a thrown link sweep does not advance the bookmark or drop the resume checkpoint', async () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-import-bookmark-')));
+    writeFileSync(join(repo, 'note.md'), '---\ntype: concept\n---\n# Note\n\nSee [Other](other.md).\n');
+    execSync('git init', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email "t@example.com"', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name "Tester"', { cwd: repo, stdio: 'pipe' });
+    execSync('git add -A && git commit -m "init"', { cwd: repo, stdio: 'pipe' });
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true });
+    const checkpoint = join(gbrainHome, '.gbrain', 'import-checkpoint.json');
+    writeFileSync(checkpoint, JSON.stringify({
+      schema_version: 1, owner: 'gbrain', kind: 'import', dir: repo,
+      completedPaths: ['note.md'], timestamp: new Date().toISOString(),
+    }));
+    const previousRepo = await engine.getConfig('sync.repo_path');
+    const previousCommit = await engine.getConfig('sync.last_commit');
+    const wrapped = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'countStalePagesForExtraction') {
+          return () => { throw new Error('sweep blew up'); };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      await engine.setConfig('sync.repo_path', repo);
+      await engine.setConfig('sync.last_commit', 'old-anchor');
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        const result = await runImport(wrapped, [repo, '--no-embed', '--json']);
+        expect(result.errors).toBe(1);
+        expect(result.failures).toContainEqual({ path: '<link-extraction>', error: expect.stringContaining('sweep blew up') });
+        expect(await engine.getConfig('sync.last_commit')).toBe('old-anchor');
+        expect(existsSync(checkpoint)).toBe(true);
+        expect(JSON.parse(readFileSync(checkpoint, 'utf8')).completedPaths).toEqual(['note.md']);
+      });
+    } finally {
+      if (previousRepo == null) await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.repo_path'`);
+      else await engine.setConfig('sync.repo_path', previousRepo);
+      if (previousCommit == null) await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.last_commit'`);
+      else await engine.setConfig('sync.last_commit', previousCommit);
+    }
+  }, 60_000);
+
+  test('cancellation during the stale sweep is rethrown, not stored as a link failure', async () => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-import-cancel-sweep-')));
+    writeFileSync(join(repo, 'note.md'), '---\ntype: concept\n---\n# Note\n\nbody\n');
+    execSync('git init', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email "t@example.com"', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name "Tester"', { cwd: repo, stdio: 'pipe' });
+    execSync('git add -A && git commit -m "init"', { cwd: repo, stdio: 'pipe' });
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    const controller = new AbortController();
+    const previousRepo = await engine.getConfig('sync.repo_path');
+    const previousCommit = await engine.getConfig('sync.last_commit');
+    const wrapped = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'countStalePagesForExtraction') return async () => 1;
+        if (prop === 'listStalePagesForExtraction') {
+          return () => {
+            controller.abort();
+            return [];
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    try {
+      await engine.setConfig('sync.repo_path', repo);
+      await engine.setConfig('sync.last_commit', 'old-anchor');
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        const error = await runImport(wrapped, [repo, '--no-embed', '--json'], { signal: controller.signal })
+          .then(() => null, (caught: unknown) => caught);
+        expect(error).toBeInstanceOf(ImportAbortError);
+        expect((error as ImportAbortError).partialResult?.failures ?? []).not.toContainEqual(
+          expect.objectContaining({ path: '<link-extraction>' }),
+        );
+        expect(await engine.getConfig('sync.last_commit')).toBe('old-anchor');
+      });
+    } finally {
+      if (previousRepo == null) await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.repo_path'`);
+      else await engine.setConfig('sync.repo_path', previousRepo);
+      if (previousCommit == null) await engine.executeRaw(`DELETE FROM config WHERE key = 'sync.last_commit'`);
+      else await engine.setConfig('sync.last_commit', previousCommit);
+    }
+  }, 60_000);
 });

@@ -70,6 +70,12 @@ export interface TranscriptsIngestOpts {
   userPatternsPath?: string;
   /** Adapter registry override (tests). */
   adapters?: TranscriptAdapter[];
+  /**
+   * IANA zone for the frontmatter calendar date. The slug stays on the UTC
+   * day. The daily-memory launcher passes Asia/Manila so a session that
+   * starts before 08:00 there is indexed on that Manila day.
+   */
+  dateZone?: string;
   /** Called once per processed file (progress ticks). */
   onFileDone?: (done: number, total: number, path: string) => void;
   /**
@@ -265,7 +271,7 @@ export async function runTranscriptsIngest(
           });
           outcome.redactions = redacted.redactionCount;
           outcome.imperatives = redacted.imperativesFlagged;
-          const rendered = renderSessionParts(redacted, { sourcePath: path });
+          const rendered = renderSessionParts(redacted, { sourcePath: path, dateZone: opts.dateZone });
           outcome.baseSlug = rendered.baseSlug;
           outcome.parts = rendered.parts.length;
 

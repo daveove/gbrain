@@ -53,7 +53,7 @@ if [[ $# -eq 0 ]]; then
   if [[ ${#files[@]} -gt 0 ]]; then
     since="$(python3 -c 'import datetime,sys; d=datetime.datetime.fromisoformat(sys.argv[1]+"T00:00:00+08:00"); print(d.astimezone(datetime.timezone.utc).isoformat())' "$day")"
     printf 'codex ingest day=%s files=%s\n' "$day" "${#files[@]}" >> "$LOG"
-    run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default "${files[@]}"
+    run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone Asia/Manila "${files[@]}"
   fi
 fi
 printf 'daily-memory start %s\n' "$(TZ=Asia/Manila date '+%Y-%m-%d %H:%M:%S %z')" >> "$LOG"
