@@ -13,7 +13,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
-import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
@@ -540,13 +540,9 @@ describe('daily memory from sources the brain already holds', () => {
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
     expect(result.written).toBe(true);
-    const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
-    const jobId = await queueDeferredStaleSweep(engine, {
-      sourceId: DAILY_MEMORY_SOURCE_ID,
-      commit: `daily-memory:${result.day}`,
-      reason: 'daily_memory_write',
-    });
-    expect(jobId).not.toBeNull();
+    await queueDailyMemoryExtract(engine, { ...result, written: false });
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
+    await queueDailyMemoryExtract(engine, result);
     const jobs = await engine.executeRaw<{ idempotency_key: string | null }>(
       `SELECT idempotency_key FROM minion_jobs WHERE name = 'extract'`,
     );
