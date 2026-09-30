@@ -30,14 +30,58 @@ export const DAILY_MEMORY_PAGE_CAP = 40;
 /** Per-source link cap so a chat firehose cannot fill the note. */
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
 
+const DAILY_MEMORY_SOURCE_NAME = 'Dream cycle indexes';
+
+function parseSourceConfig(raw: unknown): Record<string, unknown> | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) as Record<string, unknown>; }
+    catch { return null; }
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  return null;
+}
+
+/** True when the row is already our system index (current or pre-system_index). */
+function isOwnedDailyMemorySource(
+  config: Record<string, unknown> | null,
+  name: string | null,
+): boolean {
+  if (config?.system_index === true) return true;
+  // Prior builds inserted federated:false under this display name before system_index.
+  return config?.federated === false && name === DAILY_MEMORY_SOURCE_NAME;
+}
+
 /** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
-  await engine.executeRaw(
-    `INSERT INTO sources (id, name, config)
-     SELECT $1, $2, $3::text::jsonb
-     WHERE NOT EXISTS (SELECT 1 FROM sources WHERE id = $1)
-     ON CONFLICT (id) DO NOTHING`,
-    [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', JSON.stringify({ federated: false })],
+  const config = JSON.stringify({ federated: false, system_index: true });
+  const existing = await engine.executeRaw<{ config: unknown; name: string | null }>(
+    `SELECT config, name FROM sources WHERE id = $1`,
+    [DAILY_MEMORY_SOURCE_ID],
+  );
+  if (existing.length === 0) {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
+    );
+    return;
+  }
+  const row = existing[0]!;
+  const parsed = parseSourceConfig(row.config);
+  if (isOwnedDailyMemorySource(parsed, row.name)) {
+    // Keep trusted-index markers sticky for our owned dream index.
+    await engine.executeRaw(
+      `UPDATE sources
+       SET name = $2,
+           config = COALESCE(config, '{}'::jsonb) || $3::text::jsonb
+       WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
+    );
+    return;
+  }
+  throw new Error(
+    `source '${DAILY_MEMORY_SOURCE_ID}' already exists and is not a GBrain system index; ` +
+    `rename or remove it before daily memory can write`,
   );
 }
 
@@ -48,6 +92,22 @@ export interface DailyMemoryWrite {
   source_id?: string;
   pages: number;
   reason?: 'no_source_activity' | 'human_page' | 'error';
+}
+
+/** The existing maintenance queue owns graph refresh; a queue error preserves the note. */
+export async function queueDailyMemoryExtract(engine: BrainEngine, result: DailyMemoryWrite): Promise<void> {
+  if (!result.written) return;
+  try {
+    const { queueDeferredStaleSweep } = await import('../deferred-stale-extract.ts');
+    await queueDeferredStaleSweep(engine, {
+      sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID,
+      commit: `daily-memory:${result.day}`,
+      reason: 'daily_memory_write',
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[autopilot-global-maintenance] daily memory extract enqueue skipped: ${message}`);
+  }
 }
 
 export function dailyMemorySlug(day: string): string {
@@ -97,6 +157,22 @@ function oneLine(title: string): string {
   return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
+/** Keep generated index Markdown from interpreting metadata as markup/links. */
+function escapeMdMeta(text: string): string {
+  return oneLine(String(text ?? ''))
+    .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]');
+}
+
+/** Preserve stored identity; targets containing wiki delimiters cannot render safely. */
+function wikiLinkTarget(sourceId: string, slug: string): string | null {
+  if (/[\[\]]/.test(sourceId + slug)) return null;
+  try { validateSlug(slug); } catch { return null; }
+  return `${sourceId}:${slug}`;
+}
+
 interface SourceRecordGroup {
   source_type: string;
   total: number | string;
@@ -128,11 +204,12 @@ function renderNote(day: string, input: RenderInput): string {
   for (const row of input.rows) {
     if (row.source_id !== source) {
       source = row.source_id;
-      lines.push(`## ${source}`, '');
+      lines.push(`## ${escapeMdMeta(source)}`, '');
     }
     // Qualify every target: this index now lives outside the default source.
-    const target = `${row.source_id}:${row.slug}`;
-    lines.push(`- [[${target}]] — ${oneLine(row.title)}`);
+    const target = wikiLinkTarget(row.source_id, row.slug);
+    if (target === null) continue;
+    lines.push(`- [[${target}]] — ${escapeMdMeta(row.title)}`);
   }
   if (input.rows.length) lines.push('');
   if (input.pageTotal > input.rows.length) {
@@ -143,9 +220,9 @@ function renderNote(day: string, input: RenderInput): string {
     lines.push('## Comms', '');
     for (const group of input.records) {
       const total = Number(group.total) || group.links.length;
-      lines.push(`${group.source_type}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
+      lines.push(`${escapeMdMeta(group.source_type)}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
       for (const link of group.links) {
-        lines.push(`- [[${DAILY_MEMORY_SOURCE_ID}:${link.slug}]] — ${oneLine(link.entity_type || group.source_type)}`);
+        lines.push(`- [[${DAILY_MEMORY_SOURCE_ID}:${link.slug}]] — ${escapeMdMeta(link.entity_type || group.source_type)}`);
       }
       lines.push('');
       if (total > group.links.length) {
@@ -222,7 +299,7 @@ export async function writeDailyMemoryFromSources(
       for (const row of candidates) {
         if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
         pageTotal++;
-        if (rows.length < DAILY_MEMORY_PAGE_CAP) rows.push(row);
+        if (rows.length < DAILY_MEMORY_PAGE_CAP && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
       }
       if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
       const last = candidates[candidates.length - 1];
@@ -335,13 +412,13 @@ async function putSourceRecordIndex(
   const updatedAt = new Date(record.updated_at).toISOString();
   await engine.putPage(record.slug, {
     type: 'note',
-    title: `${oneLine(sourceType)} ${oneLine(record.entity_type)} record`,
+    title: `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`,
     compiled_truth: [
-      `Source: ${oneLine(sourceType)}`,
-      `Record ID: ${oneLine(record.id)}`,
-      `Source reference: ${oneLine(record.source_ref)}`,
-      `Entity type: ${oneLine(record.entity_type)}`,
-      `Entity ID: ${oneLine(record.entity_id)}`,
+      `Source: ${escapeMdMeta(sourceType)}`,
+      `Record ID: ${escapeMdMeta(record.id)}`,
+      `Source reference: ${escapeMdMeta(record.source_ref)}`,
+      `Entity type: ${escapeMdMeta(record.entity_type)}`,
+      `Entity ID: ${escapeMdMeta(record.entity_id)}`,
       `Updated: ${updatedAt}`,
       '',
     ].join('\n'),

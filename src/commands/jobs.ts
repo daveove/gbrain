@@ -2877,7 +2877,8 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    await import('../core/cycle/daily-memory.ts').then((m) => m.writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
+    await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls

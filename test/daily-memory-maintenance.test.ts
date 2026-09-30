@@ -389,8 +389,6 @@ describe('daily memory from sources the brain already holds', () => {
     const fresh = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect(fresh.compiled_truth).toContain('[[default:notes/default-target]]');
     expect(fresh.compiled_truth).toContain(`[[dream:${ref}]]`);
-    // Cross-source graph edges follow the existing explicit operator policy.
-    await engine.setConfig('link_resolution.cross_source', 'true');
     await extractStaleFromDB(engine, { dryRun: false, quiet: true, jsonMode: true, catchUp: false,
       includeFrontmatter: false, sourceIdFilter: DAILY_MEMORY_SOURCE_ID });
     const edges = await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
@@ -414,11 +412,12 @@ describe('daily memory from sources the brain already holds', () => {
     const daily = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
     expect(daily.compiled_truth).toContain('[[restricted:notes/restricted-fixture]]');
     const reference = daily.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
-    const dreamCfg = await engine.executeRaw<{ federated: boolean | null }>(
-      `SELECT (config->>'federated')::boolean AS federated FROM sources WHERE id = $1`,
+    const dreamCfg = await engine.executeRaw<{ federated: boolean | null; system_index: boolean | null }>(
+      `SELECT (config->>'federated')::boolean AS federated, (config->>'system_index')::boolean AS system_index FROM sources WHERE id = $1`,
       [DAILY_MEMORY_SOURCE_ID],
     );
     expect(dreamCfg[0]?.federated).toBe(false);
+    expect(dreamCfg[0]?.system_index).toBe(true);
     // Build current safe search projections so hiding isn't a missing-index side effect.
     for (const slug of [result.slug, reference]) {
       const page = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
@@ -465,6 +464,115 @@ describe('daily memory from sources the brain already holds', () => {
       const owner = await operationsByName.search.handler(dreamOwner, { query }) as { slug: string }[];
       expect(owner.map(row => row.slug)).toContain(slug);
     }
+  });
+
+  test('unrenderable stored slugs are skipped without inventing a link target', async () => {
+    for (const slug of ['notes/safe', 'notes/bad[[phantom]]']) {
+      await engine.putPage(slug, { type: 'note', title: 'Label [[injected]]', compiled_truth: 'Synthetic fixture' });
+      await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z', effective_date_source='filename' WHERE source_id='default' AND slug=$1", [slug]);
+    }
+    const result = await writeSeptember30();
+    const daily = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(daily.compiled_truth).toContain('[[default:notes/safe]]');
+    expect(daily.compiled_truth).not.toContain('[[default:notes/bad');
+    expect(daily.compiled_truth).not.toContain('[[injected]]');
+    expect(daily.compiled_truth).toContain('1 of 2 pages are linked.');
+    expect(await engine.getPage('notes/bad[[phantom]]')).not.toBeNull();
+  });
+
+  test('refuses to commandeer a user-owned dream source', async () => {
+    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [DAILY_MEMORY_SOURCE_ID]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, 'User dream repo', JSON.stringify({ federated: true })],
+    );
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(false);
+    expect(result.reason).toBe('error');
+    const cfg = await engine.executeRaw<{ federated: boolean | null; system_index: string | null }>(
+      `SELECT (config->>'federated')::boolean AS federated, config->>'system_index' AS system_index
+         FROM sources WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(cfg[0]?.federated).toBe(true);
+    expect(cfg[0]?.system_index).toBeNull();
+  });
+
+  test('sticky-upgrades a legacy federated:false dream index we already own', async () => {
+    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [DAILY_MEMORY_SOURCE_ID]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', JSON.stringify({ federated: false })],
+    );
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const cfg = await engine.executeRaw<{ federated: boolean | null; system_index: boolean | null }>(
+      `SELECT (config->>'federated')::boolean AS federated,
+              (config->>'system_index')::boolean AS system_index
+         FROM sources WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(cfg[0]?.federated).toBe(false);
+    expect(cfg[0]?.system_index).toBe(true);
+  });
+
+  test('escapes markdown control characters in source-record metadata', async () => {
+    await seedRecord('inject:1', 'evil\n[[notes/injected]]', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).not.toContain('[[notes/injected]]');
+    expect(page!.compiled_truth).toContain('\\[\\[');
+    await extractStaleFromDB(engine, {
+      dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
+      sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+    });
+    const targets = (await engine.getLinks(result.slug))
+      .filter(link => link.from_source_id === DAILY_MEMORY_SOURCE_ID)
+      .map(link => link.to_slug);
+    expect(targets).not.toContain('notes/injected');
+  });
+
+  test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
+    await engine.setConfig('version', '7');
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
+    const jobId = await queueDeferredStaleSweep(engine, {
+      sourceId: DAILY_MEMORY_SOURCE_ID,
+      commit: `daily-memory:${result.day}`,
+      reason: 'daily_memory_write',
+    });
+    expect(jobId).not.toBeNull();
+    const jobs = await engine.executeRaw<{ idempotency_key: string | null }>(
+      `SELECT idempotency_key FROM minion_jobs WHERE name = 'extract'`,
+    );
+    expect(jobs.some(job => job.idempotency_key === `extract-stale:${DAILY_MEMORY_SOURCE_ID}:daily-memory:${result.day}`)).toBe(true);
+  });
+
+  test('dream system index extracts outbound edges to other sources', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('notes','notes') ON CONFLICT (id) DO NOTHING", []);
+    await engine.putPage('meetings/standup', {
+      type: 'meeting', title: 'Standup', compiled_truth: 'talked about the rollout',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'notes' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-30T00:00:00Z'::timestamptz, effective_date_source = 'date'
+       WHERE source_id = 'notes' AND slug = 'meetings/standup'`,
+    );
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    await extractStaleFromDB(engine, {
+      dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
+      sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+    });
+    const targets = (await engine.getLinks(result.slug))
+      .filter(link => link.from_source_id === DAILY_MEMORY_SOURCE_ID)
+      .map(link => `${link.to_source_id}:${link.to_slug}`);
+    expect(targets).toContain('notes:meetings/standup');
   });
 
   test('record source types normalize to stored graph targets and preserve stable safe paths', async () => {
