@@ -1,6 +1,6 @@
 /** A durable daily-only barrier releases its worker while fanout siblings finish. */
 import { DATE_INSTANT_PROVENANCE, computeEffectiveDate } from '../effective-date.ts';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { calendarDateInTimeZone, resolveCycleDate, resolveCycleTimeZone, utcDate } from './cycle-date.ts';
@@ -220,7 +220,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
   if (!sourceId || sourceId === DAILY_MEMORY_SOURCE_ID) return [];
-  const slugs: string[] = [];
+  const affectedDays = new Set<string>();
   let cursor = '';
   for (;;) {
     opts.signal?.throwIfAborted();
@@ -228,17 +228,20 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
       `SELECT slug FROM pages WHERE source_id=$1 AND slug>$2 ORDER BY slug LIMIT 500`,
       [sourceId, cursor],
     );
-    for (const row of rows) slugs.push(row.slug);
+    for (const day of await dailyMemoryDaysForSlugs(engine, sourceId, rows.map(row => row.slug), opts)) {
+      affectedDays.add(day);
+    }
     if (rows.length < 500) break;
     cursor = rows[rows.length - 1]!.slug;
   }
-  const days = await dailyMemoryDaysForSlugs(engine, sourceId, slugs, opts);
+  const days = [...affectedDays].sort();
   if (!days.length) return [];
   const queue = new MinionQueue(engine);
-  // Empty sibling ids: finishFanoutDailyMemory writes immediately for each day.
+  // Each invocation follows a committed lifecycle transition, independent of prior completed refreshes.
+  const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   for (const day of days) {
     opts.signal?.throwIfAborted();
-    await queueFanoutDailyMemory(queue, { day, ids: [], key: `archive:${sourceId}` });
+    await queueFanoutDailyMemory(queue, { day, ids: [], key: transitionKey });
   }
   return days;
 }

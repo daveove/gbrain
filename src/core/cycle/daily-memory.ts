@@ -236,6 +236,20 @@ function renderNote(day: string, input: RenderInput): string {
   return lines.join('\n');
 }
 
+async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
+  const [historical] = await engine.executeRaw<{ needed: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pages JOIN sources s ON s.id=pages.source_id
+      WHERE source_id=$1 AND s.archived IS NOT TRUE AND deleted_at IS NULL
+      AND (s.config @> '{"system_index":true}'::jsonb
+        OR (s.name='Dream cycle indexes' AND s.config @> '{"federated":false}'::jsonb))
+      AND frontmatter @> '{"dream_generated":true}'::jsonb
+      AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
+        AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
+      AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
+        OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+  return historical.needed;
+}
+
 /**
  * Write `daily-memory/YYYY-MM-DD` when any source already has a page for the
  * cycle day. A human-owned page at that slug is left in place, including one
@@ -245,17 +259,6 @@ function renderNote(day: string, input: RenderInput): string {
  * and swallowed so a note failure does not cancel the rest of the maintenance
  * job; an abort still propagates.
  */
-async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
-  const [historical] = await engine.executeRaw<{ needed: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL
-      AND frontmatter @> '{"dream_generated":true}'::jsonb
-      AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
-        AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
-      AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
-        OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
-  return historical.needed;
-}
-
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
   opts: { signal?: AbortSignal; now?: () => Date; date?: string } = {},

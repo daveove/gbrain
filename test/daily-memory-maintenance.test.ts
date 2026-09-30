@@ -640,6 +640,23 @@ describe('daily memory from sources the brain already holds', () => {
     expect(jobs[0]!.data.sourceId).toBe(DAILY_MEMORY_SOURCE_ID);
   });
 
+  test('a human default index does not wake extraction for an unrelated dream source', async () => {
+    await seedRecord('gmail:unowned-probe', 'gmail', '2026-09-30T00:00:00Z');
+    await writeSeptember30();
+    await engine.executeRaw("UPDATE sources SET name='User workspace', config='{}'::jsonb WHERE id=$1",
+      [DAILY_MEMORY_SOURCE_ID]);
+    await engine.putPage(dailyMemorySlug('2026-09-30'), {
+      type: 'note', title: 'Human day', compiled_truth: 'Operator note', frontmatter: { author: 'human' },
+    }, { sourceId: 'default' });
+    const before = await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: 'default' });
+    const result = await writeSeptember30();
+    expect(result.reason).toBe('human_page');
+    expect(result.needs_extract).toBe(false);
+    await queueDailyMemoryExtract(engine, result);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
+    expect(await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: 'default' })).toEqual(before);
+  });
+
   test('an inactive day queues version-stale historical dream indexes without creating or resurrecting it', async () => {
     await seedRecord('gmail:historical-version', 'gmail', '2026-09-30T00:00:00Z');
     const historical = await writeSeptember30();
