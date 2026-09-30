@@ -371,7 +371,7 @@ describe('daily memory from sources the brain already holds', () => {
       expect(page.frontmatter.visibility).toBe('private');
       await importFromContent(engine, slug, serializeMarkdown(page.frontmatter, page.compiled_truth, '', {
         type: page.type, title: page.title, tags: [],
-      }), { noEmbed: true, noExtract: true, forceRechunk: true });
+      }), { noEmbed: true, forceRechunk: true });
     }
     await engine.setConfig('search.mcp_keyword_only', 'true');
     __resetPrivateVisibilityCacheForTests();
