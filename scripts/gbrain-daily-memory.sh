@@ -9,20 +9,11 @@ mkdir -p "$(dirname "$LOG")" "$HOME/.local/state/gbrain"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
-LOCK="$HOME/.local/state/gbrain/daily-memory.lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    echo 'daily-memory writer already running' >> "$LOG"
-    exit 0
-  fi
-  rm -f "$LOCK/pid"
-  rmdir "$LOCK"
-  mkdir "$LOCK"
+if [[ "${GBRAIN_DAILY_LOCK_FD:-}" != 9 ]]; then
+  exec python3 "$REPO/scripts/daily-memory-lock.py" "$0" "$@"
 fi
-printf '%s\n' "$$" > "$LOCK/pid"
 TMP="$(mktemp)"
-trap 'rm -f "$TMP" "$LOCK/pid"; rmdir "$LOCK"' EXIT
+trap 'rm -f "$TMP"' EXIT
 run_command() {
   local ec url resolver_ec
   set +e

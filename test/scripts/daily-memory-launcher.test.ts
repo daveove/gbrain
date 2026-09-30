@@ -21,7 +21,7 @@ function fixture() {
   const calls = join(home, 'calls.jsonl');
   const bun = join(home, '.local/bin/bun');
   writeFileSync(bun, `#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 args = sys.argv[1:]
 kind = 'resolve' if args[0] == '-e' else ('ingest' if 'transcripts' in args else 'write')
 log = pathlib.Path(os.environ['TEST_CALLS'])
@@ -39,6 +39,9 @@ if kind == os.environ.get('TEST_FAIL_KIND'):
     if attempts == 0 or os.environ.get('TEST_FAIL_ALWAYS') == '1':
         print('EMAXCONNSESSION' if os.environ.get('TEST_FAIL_MODE') == 'session' else 'fixture command failed')
         sys.exit(7)
+if kind == 'write' and os.environ.get('TEST_HOLD') == '1':
+    pathlib.Path(os.environ['TEST_READY']).touch()
+    time.sleep(1)
 print('fixture success')
 `);
   chmodSync(bun, 0o755);
@@ -77,6 +80,38 @@ function todayInputs(home: string) {
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 describe('daily memory launcher', () => {
+  it('allows only one concurrent writer and releases the kernel lock after exit', () => {
+    const { home, run } = fixture();
+    const calls = join(home, 'calls.jsonl');
+    const ready = join(home, 'ready');
+    const probe = spawnSync('python3', ['-c', `
+import os, pathlib, subprocess, sys, time
+launcher, home, repo, calls, ready = sys.argv[1:]
+env = {k:v for k,v in os.environ.items() if not k.startswith('GBRAIN_') and k != 'DATABASE_URL'}
+env.update(HOME=home, GBRAIN_REPO_ROOT=repo, TEST_CALLS=calls, TEST_HOLD='1', TEST_READY=ready)
+first = subprocess.Popen(['/bin/bash', launcher, '2026-09-29'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+try:
+    deadline = time.monotonic() + 5
+    while not pathlib.Path(ready).exists():
+        if first.poll() is not None or time.monotonic() > deadline:
+            raise RuntimeError('first writer did not acquire lock')
+        time.sleep(0.01)
+    second = subprocess.run(['/bin/bash', launcher, '2026-09-29'], env=env, capture_output=True, timeout=5)
+    assert second.returncode == 0
+    assert b'already running' in second.stdout
+    assert first.wait(timeout=5) == 0
+finally:
+    if first.poll() is None:
+        first.kill()
+        first.wait()
+`, launcher, home, repo, calls, ready], { encoding: 'utf8', timeout: 15_000 });
+    expect(probe.error).toBeUndefined();
+    expect(probe.status).toBe(0);
+    expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
+    expect(run(['2026-09-29']).code).toBe(0);
+    expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(2);
+  });
+
   it('selects both UTC folders within the Manila calendar day, excluding adjacent days', () => {
     const { home } = fixture();
     const input = todayInputs(home);
