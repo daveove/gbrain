@@ -5,10 +5,11 @@
  * MAINTENANCE_PHASES and writes the note before the cycle.
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
@@ -547,6 +548,19 @@ describe('daily memory from sources the brain already holds', () => {
       `SELECT idempotency_key FROM minion_jobs WHERE name = 'extract'`,
     );
     expect(jobs.some(job => job.idempotency_key === `extract-stale:${DAILY_MEMORY_SOURCE_ID}:daily-memory:${result.day}`)).toBe(true);
+    const durable = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    const enqueue = spyOn(MinionQueue.prototype, 'add');
+    try {
+      enqueue.mockResolvedValue({ status: 'completed', data: {} } as never);
+      await expect(queueDailyMemoryExtract(engine, result)).rejects.toThrow('handoff was not accepted');
+      expect((await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toBe(durable.compiled_truth);
+      enqueue.mockImplementation(async () => { throw new Error('Synthetic enqueue failure'); });
+      await expect(queueDailyMemoryExtract(engine, result)).rejects.toThrow('Synthetic enqueue failure');
+      expect((await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.knowledge_revision).toBe(durable.knowledge_revision);
+      enqueue.mockClear();
+      await queueDailyMemoryExtract(engine, { ...result, written: false });
+      expect(enqueue).not.toHaveBeenCalled();
+    } finally { enqueue.mockRestore(); }
   });
 
   test('dream system index extracts outbound edges to other sources', async () => {

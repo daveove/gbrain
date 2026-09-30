@@ -94,20 +94,16 @@ export interface DailyMemoryWrite {
   reason?: 'no_source_activity' | 'human_page' | 'error';
 }
 
-/** The existing maintenance queue owns graph refresh; a queue error preserves the note. */
+/** A durable note survives queue rejection; maintenance retries the failed handoff. */
 export async function queueDailyMemoryExtract(engine: BrainEngine, result: DailyMemoryWrite): Promise<void> {
   if (!result.written) return;
-  try {
-    const { queueDeferredStaleSweep } = await import('../deferred-stale-extract.ts');
-    await queueDeferredStaleSweep(engine, {
-      sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID,
-      commit: `daily-memory:${result.day}`,
-      reason: 'daily_memory_write',
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[autopilot-global-maintenance] daily memory extract enqueue skipped: ${message}`);
-  }
+  const { queueDeferredStaleSweep } = await import('../deferred-stale-extract.ts');
+  const jobId = await queueDeferredStaleSweep(engine, {
+    sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID,
+    commit: `daily-memory:${result.day}`,
+    reason: 'daily_memory_write',
+  });
+  if (jobId === null) throw new Error('Daily memory extraction handoff was not accepted.');
 }
 
 export function dailyMemorySlug(day: string): string {
