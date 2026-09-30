@@ -38,6 +38,30 @@ export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
   return job.id;
 }
 
+/** Prior calendar day for a YYYY-MM-DD value, or null when invalid. */
+export function previousCalendarDay(day: string): string | null {
+  if (!isDay(day)) return null;
+  const dt = new Date(`${day}T00:00:00.000Z`);
+  dt.setUTCDate(dt.getUTCDate() - 1);
+  const prev = dt.toISOString().slice(0, 10);
+  return isDay(prev) ? prev : null;
+}
+
+/** Current-day fanout plus a one-day lookback so late source_records still land. */
+export async function queueFanoutDailyMemoryWithRecordLookback(
+  queue: Pick<MinionQueue, 'add'>,
+  opts: { day: string; ids: number[]; key: string; delay?: number },
+): Promise<{ dayJobId: number; lookbackJobId: number | null; lookbackDay: string | null }> {
+  const dayJobId = await queueFanoutDailyMemory(queue, opts);
+  const lookbackDay = previousCalendarDay(opts.day);
+  if (!lookbackDay) return { dayJobId, lookbackJobId: null, lookbackDay: null };
+  const lookbackJobId = await queueFanoutDailyMemory(queue, {
+    day: lookbackDay, ids: opts.ids, key: `${opts.key}:lookback1`, delay: opts.delay,
+  });
+  return { dayJobId, lookbackJobId, lookbackDay };
+}
+
+
 export async function finishFanoutDailyMemory(engine: BrainEngine, job: DailyJob) {
   job.signal?.throwIfAborted();
   const day = job.data.daily_memory_date;
@@ -180,12 +204,16 @@ export async function dailyMemoryDaysForSlugs(
   return [...days].sort();
 }
 
-async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string[], sourceJobId: number, cursor: number): Promise<number> {
-  const hash = createHash('sha256').update(JSON.stringify(days)).digest('hex').slice(0, 20);
-  const data = { daily_memory_date: days[cursor], daily_memory_dates: days,
-    daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor };
+async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string[], sourceJobId: number,
+  cursor: number, childIds: number[] = [], delay = 0): Promise<number> {
+  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor })).digest('hex').slice(0, 20);
+  const day = days[Math.min(Math.max(cursor, 0), Math.max(days.length - 1, 0))] ?? days[0];
+  const data = { daily_memory_date: day, daily_memory_dates: days,
+    daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor,
+    daily_memory_day_job_ids: childIds };
   const job = await queue.add('autopilot-daily-memory', data, {
-    idempotency_key: `autopilot-daily-batch:${sourceJobId}:${hash}:${cursor}`, max_attempts: 2, timeout_ms: 60_000,
+    idempotency_key: `autopilot-daily-batch:${sourceJobId}:${hash}:${cursor}`,
+    max_attempts: 2, timeout_ms: 60_000, delay,
   });
   if (!job || !['waiting','delayed','active','completed'].includes(job.status)
     || !Object.entries(data).every(([key,value]) => JSON.stringify(job.data[key]) === JSON.stringify(value))) {
@@ -246,17 +274,70 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   return days;
 }
 
+async function settleDailyDateChildren(
+  engine: BrainEngine,
+  job: DailyJob,
+  days: string[],
+  sourceJobId: number,
+  childIds: number[],
+) {
+  const queue = new MinionQueue(engine);
+  const rows = childIds.length ? await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
+    'SELECT id,status,data FROM minion_jobs WHERE id=ANY($1::bigint[])', [childIds]) : [];
+  if (rows.length !== childIds.length || rows.some(row => !TERMINAL.has(row.status) && !PENDING.has(row.status))) {
+    throw new Error('Daily memory day jobs missing or unknown');
+  }
+  job.signal?.throwIfAborted();
+  if (rows.some(row => PENDING.has(row.status))) {
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000);
+    return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_days_queued: days };
+  }
+  const replayed: number[] = [];
+  for (const row of rows.filter(row => row.status === 'dead' || row.status === 'failed')) {
+    const day = row.data.daily_memory_date;
+    if (!isDay(day)) continue;
+    job.signal?.throwIfAborted();
+    replayed.push(await queueFanoutDailyMemory(queue, {
+      day, ids: [], key: `source:${sourceJobId}:replay:${row.id}`,
+    }));
+  }
+  if (replayed.length) {
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, replayed, 30_000);
+    return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_replayed: replayed.length };
+  }
+  return {
+    daily_memory_pending: false,
+    daily_memory_days_queued: days,
+    dependency_failures: rows.filter(row => row.status !== 'completed').map(row => ({ id: row.id, status: row.status })),
+  };
+}
+
 async function dispatchDailyDateBatch(engine: BrainEngine, job: DailyJob) {
   const days = job.data.daily_memory_dates;
   const cursor = job.data.daily_memory_cursor, sourceJobId = job.data.daily_memory_source_job_id;
+  const rawChildren = job.data.daily_memory_day_job_ids ?? [];
   if (!Array.isArray(days) || !days.length || !days.every(isDay)
-    || !Number.isSafeInteger(cursor) || (cursor as number) < 0 || (cursor as number) >= days.length
-    || !Number.isSafeInteger(sourceJobId) || (sourceJobId as number) <= 0) throw new Error('Invalid affected-day continuation');
-  const queue = new MinionQueue(engine), start = cursor as number;
+    || !Number.isSafeInteger(cursor) || (cursor as number) < 0
+    || !Number.isSafeInteger(sourceJobId) || (sourceJobId as number) <= 0
+    || !Array.isArray(rawChildren) || !rawChildren.every(id => Number.isSafeInteger(id) && id > 0)) {
+    throw new Error('Invalid affected-day continuation');
+  }
+  const queue = new MinionQueue(engine);
+  const start = cursor as number;
+  let childIds = [...rawChildren as number[]];
+  // Cursor past the end means we are only waiting on / replaying children.
+  if (start >= days.length) {
+    if (!childIds.length) throw new Error('Invalid affected-day continuation');
+    return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds);
+  }
   for (const day of days.slice(start, start + 8)) {
     job.signal?.throwIfAborted();
-    await queueFanoutDailyMemory(queue, { day, ids: [], key: `source:${sourceJobId}` });
+    childIds.push(await queueFanoutDailyMemory(queue, { day, ids: [], key: `source:${sourceJobId}` }));
   }
-  const next = start + 8 < days.length ? await queueDailyDateBatch(queue, days, sourceJobId as number, start + 8) : null;
-  return { daily_memory_days_queued: days.slice(start, start + 8), daily_memory_continuation_id: next };
+  const nextCursor = start + 8;
+  if (nextCursor < days.length) {
+    const next = await queueDailyDateBatch(queue, days, sourceJobId as number, nextCursor, childIds);
+    return { daily_memory_days_queued: days.slice(start, nextCursor), daily_memory_continuation_id: next };
+  }
+  return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds);
 }

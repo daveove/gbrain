@@ -34,7 +34,7 @@
 
 import { existsSync } from 'fs';
 import { resolveCycleDate } from '../core/cycle/cycle-date.ts';
-import { queueFanoutDailyMemory } from '../core/cycle/daily-memory-followup.ts';
+import { queueFanoutDailyMemory, queueFanoutDailyMemoryWithRecordLookback } from '../core/cycle/daily-memory-followup.ts';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
 import { SOURCE_FRESHNESS_PHASES, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } from '../core/cycle.ts';
@@ -461,7 +461,7 @@ export async function dispatchPerSource(
     }
     // Pure-DB / source-less brains never enter the per-source daily barrier.
     // Carry the pinned day and legacy cycle id so daily memory still runs.
-    await queueFanoutDailyMemory(queue, {
+    await queueFanoutDailyMemoryWithRecordLookback(queue, {
       day: dailyMemoryDate,
       ids: [job.id],
       key: `legacy:${opts.slot}`,
@@ -667,7 +667,7 @@ export async function dispatchGlobalMaintenance(
   }
   const lastGlobalAt = await engine.getConfig(LAST_GLOBAL_AT_KEY);
   if (!isGlobalMaintenanceStale(lastGlobalAt, Date.now(), floorMin)) {
-    if (opts.dailyMemoryDate) await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate, ids: opts.sourceJobIds ?? [], key: opts.slot });
+    if (opts.dailyMemoryDate) await queueFanoutDailyMemoryWithRecordLookback(queue, { day: opts.dailyMemoryDate, ids: opts.sourceJobIds ?? [], key: opts.slot });
     return { dispatched: false, reason: 'fresh' };
   }
 
@@ -688,7 +688,7 @@ export async function dispatchGlobalMaintenance(
   );
   if (opts.dailyMemoryDate) {
     try {
-      await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate,
+      await queueFanoutDailyMemoryWithRecordLookback(queue, { day: opts.dailyMemoryDate,
         ids: [...(opts.sourceJobIds ?? []), job.id], key: opts.slot });
     } catch (error) {
       // Job already accepted with daily_memory_deferred; without a barrier the
