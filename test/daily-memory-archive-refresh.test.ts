@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from '
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
 import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { refreshDailyMemoryAfterPageMutation, runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { runSources } from '../src/commands/sources.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -170,6 +172,42 @@ describe('daily memory refresh on source archive/restore', () => {
     } finally {
       rejected.mockRestore();
     }
+  });
+
+  test('CLI removal rolls back its accepted first child when the settlement handoff fails', async () => {
+    const sourceId = 'remove-atomic', day = '2026-09-30';
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Remove fixture')", [sourceId]);
+    await engine.putPage('notes/day', { type: 'note', title: 'Fixture', compiled_truth: 'Synthetic', frontmatter: { date: day } }, { sourceId });
+    await writeDailyMemoryFromSources(engine, { date: day });
+    const original = MinionQueue.prototype.add;
+    let calls = 0;
+    const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+      const tx = (this as unknown as { engine: BrainEngine }).engine;
+      expect(tx).not.toBe(engine);
+      expect(await tx.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
+      if (++calls === 2) throw new Error('synthetic settlement outage');
+      return original.call(this, ...args);
+    });
+    try { await expect(runSources(engine, ['remove', sourceId, '--confirm-destructive'])).rejects.toThrow('synthetic settlement outage'); }
+    finally { add.mockRestore(); }
+    expect(calls).toBe(2);
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
+    expect(await engine.getPage('notes/day', { sourceId })).not.toBeNull();
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+    await runSources(engine, ['remove', sourceId, '--confirm-destructive']);
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(0);
+    const queue = new MinionQueue(engine);
+    const child = await queue.claim('removed-source-lock', 60_000, 'default', ['autopilot-daily-memory']);
+    if (!child) throw new Error('Expected accepted removal refresh');
+    await queue.completeJob(child.id, 'removed-source-lock', await runDailyMemoryJob(engine, child));
+    expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(`[[${sourceId}:notes/day]]`);
+  });
+
+  test('CLI removal refuses reserved indexes without an undefined constant reference', async () => {
+    const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
+    try { await expect(runSources(engine, ['remove', 'dream', '--confirm-destructive'])).rejects.toThrow('fixture exit 3'); }
+    finally { exit.mockRestore(); }
+    expect(await engine.executeRaw("SELECT id FROM sources WHERE id='dream'")).toHaveLength(1);
   });
 
 });

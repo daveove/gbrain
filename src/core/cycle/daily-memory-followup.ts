@@ -241,20 +241,22 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 }
 
 
-/** Schedule historical daily-index refresh after a committed page mutation. */
+/** Accept historical index work inside the page publication transaction. */
 export async function refreshDailyMemoryAfterPageMutation(
   engine: BrainEngine,
-  opts: { sourceId: string; slug: string; operation: string; requestId: string },
+  opts: { sourceId: string; slug: string; operation: string; requestId: string; priorDays?: string[] },
 ): Promise<string[]> {
   if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
   if (!['put_page', 'delete_page', 'restore_page', 'capture'].includes(opts.operation)) return [];
-  const days = await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug]);
-  if (!days.length) return [];
-  const queue = new MinionQueue(engine);
-  const key = `page:${opts.operation}:${opts.sourceId}:${opts.slug}:${opts.requestId}`;
-  for (const day of days) {
-    await queueFanoutDailyMemory(queue, { day, ids: [], key });
+  if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
+    throw new Error('Invalid prior daily memory dates');
   }
+  const days = [...new Set([...(opts.priorDays ?? []),
+    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug])])].sort();
+  if (!days.length) return [];
+  await queueStandaloneSyncDailyMemory(engine, {
+    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days,
+  });
   return days;
 }
 
@@ -282,7 +284,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   const days = [...affectedDays].sort();
   if (!days.length) return [];
   const queue = new MinionQueue(engine);
-  // Each invocation follows a committed lifecycle transition, independent of prior completed refreshes.
+  // The lifecycle caller owns the transaction boundary; separate transitions need fresh refreshes.
   const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   opts.signal?.throwIfAborted();
   const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey });

@@ -766,7 +766,7 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   const _keepStorage = args.includes('--keep-storage');
   void _keepStorage;
 
-  if (id === 'default' || id === DAILY_MEMORY_SOURCE_ID) {
+  if (id === 'default' || id === 'dream') {
     console.error(`Error: cannot remove the "${id}" source.`);
     process.exit(3);
   }
@@ -811,15 +811,8 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(5);
   }
 
-  // cathedral-6 (F1): the row DELETE commits FIRST — atomically with an in-tx
-  // referents re-check — and external teardown (unharden: git scaffolding /
-  // cron / credential) runs only AFTER the commit. Pre-fix the teardown ran
-  // before the DELETE, so a registration racing between the pre-check and the
-  // DELETE failed the FK AFTER scaffolding was already destroyed. The in-tx
-  // re-check uses a column-preflighted statement shape (25P02: no
-  // catch-and-retry degrade inside a tx; missing table ⇒ empty column set ⇒
-  // no FK ⇒ skip); the FK constraint itself is the backstop for a
-  // registration committing between the re-check and the DELETE.
+  // Commit deletion and refresh jobs together; external teardown follows commit.
+  // Recheck physical OAuth referents in the transaction; its FK is the backstop.
   class SourceReferencedError extends Error {}
   try {
     await engine.transaction(async (tx) => {
