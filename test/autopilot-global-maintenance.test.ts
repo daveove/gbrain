@@ -216,6 +216,24 @@ describe('dispatchGlobalMaintenance — single-flight gate', () => {
     expect(added[0].data.daily_memory_deferred).toBe(true);
   });
 
+  test('barrier enqueue failure clears daily_memory_deferred on the accepted job', async () => {
+    const updates: Array<{ sql: string; params: unknown[] }> = [];
+    const engine = {
+      kind: 'postgres' as const,
+      getConfig: async () => null,
+      executeRaw: async (sql: string, params: unknown[] = []) => { updates.push({ sql, params }); return []; },
+    } as unknown as BrainEngine;
+    const queue = { add: async (name: string, data: Record<string, unknown>) => {
+      if (name === 'autopilot-daily-memory') throw new Error('Synthetic barrier enqueue failure');
+      return { id: 44, status: 'waiting', data, coalesced: false };
+    } } as never;
+    await expect(dispatchGlobalMaintenance(engine, queue, {
+      repoPath: '/tmp', slot: 'barrier-fail', timeoutMs: 1, jsonMode: true, emit: () => {},
+      dailyMemoryDate: '2026-09-30', sourceJobIds: [3],
+    })).rejects.toThrow('Synthetic barrier enqueue failure');
+    expect(updates.some(u => u.sql.includes("data - 'daily_memory_deferred'") && u.params[0] === 44)).toBe(true);
+  });
+
   test('fresh global maintenance does not suppress a source fanout daily barrier', async () => {
     const { engine } = stubs(new Date().toISOString());
     const added: Array<{ name: string; data: Record<string, unknown> }> = [];

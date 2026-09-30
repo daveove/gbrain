@@ -686,8 +686,25 @@ export async function dispatchGlobalMaintenance(
       maxPending: 1,
     },
   );
-  if (opts.dailyMemoryDate) await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate,
-    ids: [...(opts.sourceJobIds ?? []), job.id], key: opts.slot });
+  if (opts.dailyMemoryDate) {
+    try {
+      await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate,
+        ids: [...(opts.sourceJobIds ?? []), job.id], key: opts.slot });
+    } catch (error) {
+      // Job already accepted with daily_memory_deferred; without a barrier the
+      // handler skips the daily write. Clear the flag so it writes itself.
+      if (!job.coalesced) {
+        try {
+          await engine.executeRaw(
+            `UPDATE minion_jobs SET data = data - 'daily_memory_deferred'
+             WHERE id = $1 AND COALESCE(data->>'daily_memory_deferred','') = 'true'`,
+            [job.id],
+          );
+        } catch { /* best-effort; still surface the barrier failure */ }
+      }
+      throw error;
+    }
+  }
   if (job.coalesced) {
     if (opts.jsonMode) {
       emit(JSON.stringify({ event: 'dispatch_coalesced', job_id: job.id, mode: 'global_maintenance', slot: opts.slot }));
