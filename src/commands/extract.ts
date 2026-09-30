@@ -38,6 +38,7 @@
  * whole corpus through getPage.
  */
 
+import { probePendingOriginsForArrivedTargets } from '../core/pending-link-target-arrivals.ts';
 import { pendingLinkReferenceBatches, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates, queuePendingOriginExtraction } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -1647,11 +1648,9 @@ export async function extractLinksForSlugs(
   opts?: { sourceId?: string; includeFrontmatter?: boolean },
 ): Promise<ExtractForSlugsResult> {
   const allFiles = walkMarkdownFiles(repoPath);
-  // Resolve each requested slug to its REAL path (see buildSlugPathIndex).
-  // The old reconstructed path missed any file whose name is not already a
-  // slug: `existsSync` was false, the page was skipped in silence, and the
-  // caller stamped it extracted anyway — so `extract --stale` never came
-  // back for it and the edges were lost for good.
+  // Resolve each requested slug to its real path. Reconstructing slug.md can
+  // silently miss a differently named file and leave its edges absent while
+  // the caller mistakenly stamps it fresh.
   const slugToPath = buildSlugPathIndex(allFiles);
   const allSlugs = new Set(slugToPath.keys());
   // Post-sync extract replaces each page's own markdown-derived edges in the
@@ -1697,36 +1696,10 @@ export async function extractLinksForSlugs(
       processed.push(slug);
     } catch { /* skip: unreadable — not processed, stays stale */ }
   }
-  // Small sync only extracts/stamps pagesAffected. A newly arrived target must
-  // also wake dormant origins that listed it as pending, or they stay fresh
-  // until an unrelated stale sweep.
   if (processed.length > 0) {
     await probePendingOriginsForArrivedTargets(engine, sourceId, { globalBasename });
   }
   return { created, processed };
-}
-
-/** Probe the pending registry for origins that may wake because this source gained targets. */
-async function probePendingOriginsForArrivedTargets(
-  engine: BrainEngine,
-  sourceId: string,
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number } = { globalBasename: false },
-): Promise<void> {
-  const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
-  const crossSource = await isCrossSourceLinksEnabled(engine);
-  const outboundCrossSourceIds = new Set((await loadAllSources(engine))
-    .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  for await (const pendingLinks of pendingLinkReferenceBatches(engine, sourceId, {
-    signal: opts.signal, deadline: opts.deadline,
-  })) {
-    await probePendingLinkReferences(engine, pendingLinks, {
-      globalBasename: opts.globalBasename, signal: opts.signal, deadline: opts.deadline,
-      versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
-      onReadyForeign: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
-    }, (candidate, origin, pendingSlugs, pendingSources) =>
-      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-        outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
-  }
 }
 
 export async function extractTimelineForSlugs(
