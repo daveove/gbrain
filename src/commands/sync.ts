@@ -1364,7 +1364,25 @@ async function queueManualSyncDailyMemoryRefresh(
   if (opts.pagesAffected.length === 0) return;
   const { createHash, randomUUID } = await import('node:crypto');
   const markerKey = manualSyncDailyMemoryRefreshKey(opts.sourceId);
-  const pagesKey = [...opts.pagesAffected].sort().join('\n');
+  let pagesAffected = [...opts.pagesAffected];
+  const priorRaw = await engine.getConfig(markerKey);
+  if (priorRaw) {
+    try {
+      const prior = JSON.parse(priorRaw) as { pagesAffected?: unknown; fullSource?: boolean };
+      if (prior.fullSource === true) {
+        // Authoritative full-source retry still pending — do not replace it with a slug subset.
+        await retryPendingManualSyncDailyMemoryRefresh(engine, opts.sourceId);
+        return;
+      }
+      if (Array.isArray(prior.pagesAffected)) {
+        pagesAffected = [...new Set([
+          ...pagesAffected,
+          ...prior.pagesAffected.filter((s): s is string => typeof s === 'string'),
+        ])];
+      }
+    } catch { /* ignore corrupt prior marker */ }
+  }
+  const pagesKey = [...pagesAffected].sort().join('\n');
   // Fresh invocation every call: working-tree and committed re-syncs can share
   // a pin while page content changed; never coalesce onto completed day keys.
   const invocation = randomUUID();
@@ -1375,7 +1393,7 @@ async function queueManualSyncDailyMemoryRefresh(
   const syntheticId = (Number.parseInt(digest, 16) % 0x7fffffff) + 1;
   const marker = JSON.stringify({
     pin: opts.pin,
-    pagesAffected: opts.pagesAffected,
+    pagesAffected,
     syntheticId,
     workingTree: opts.workingTree,
   });
@@ -1384,7 +1402,7 @@ async function queueManualSyncDailyMemoryRefresh(
     engine,
     { id: syntheticId, data: {} },
     opts.sourceId,
-    { status: 'ok', phases: [{ phase: 'sync', pagesAffected: opts.pagesAffected }] },
+    { status: 'ok', phases: [{ phase: 'sync', pagesAffected }] },
   );
   await engine.unsetConfig(markerKey);
 }
@@ -4066,9 +4084,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // only queued autopilot-cycle jobs (Codex: refreshDailyMemoryAfterSourceSync
   // was otherwise unreachable from `gbrain sync`).
   const refreshSourceId = opts.sourceId ?? 'default';
+  let pendingRetryFailed = false;
   try {
     await retryPendingManualSyncDailyMemoryRefresh(engine, refreshSourceId);
-  } catch { /* prior marker retried on a later sync */ }
+  } catch {
+    // Keep the prior marker intact; still merge current slugs into it below.
+    pendingRetryFailed = true;
+  }
   if (pagesAffected.length > 0) {
     try {
       await queueManualSyncDailyMemoryRefresh(engine, {
@@ -4077,7 +4099,9 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
         pagesAffected,
         workingTree: importWorkingTree,
       });
-    } catch { /* marker retained for durable retry on the next sync */ }
+    } catch { /* marker retained (merged) for durable retry on the next sync */ }
+  } else if (pendingRetryFailed) {
+    /* prior marker unchanged */
   }
 
   return {

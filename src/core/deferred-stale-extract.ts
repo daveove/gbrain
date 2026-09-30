@@ -39,13 +39,24 @@ export async function queueDeferredStaleSweep(
     job.data?.stale === true && job.data.sourceId === payload.sourceId
     && job.data.deferred_commit === opts.commit && ['waiting', 'delayed', 'active'].includes(job.status);
   let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-  // Chain deterministic successors past finished/active rows. A single
-  // `after:<baseId>` generation strands later same-pin writes once that
-  // successor completes; each non-waiting tip becomes the next coalesce key.
-  for (let gen = 0; gen < 64; gen++) {
-    if (isLiveSweep(job) && ['waiting', 'delayed'].includes(job.status)) {
-      return job.id;
-    }
+  // Jump to the newest same-pin generation so long-lived pins (e.g. commit:'import')
+  // do not exhaust a fixed walk from the base row.
+  const [newest] = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
+    `SELECT id, status, data FROM minion_jobs
+     WHERE name='extract'
+       AND (idempotency_key=$1 OR idempotency_key LIKE $2)
+     ORDER BY id DESC LIMIT 1`,
+    [key, `${key}:after:%`],
+  );
+  if (newest && newest.id !== job.id) {
+    job = { id: newest.id, status: newest.status, data: newest.data };
+  }
+  // Chain deterministic successors past finished/active rows. Concurrent
+  // callers coalesce on after:<predecessorId>; same-pin re-handoffs advance.
+  const seen = new Set<number>();
+  while (!(isLiveSweep(job) && ['waiting', 'delayed'].includes(job.status))) {
+    if (seen.has(job.id)) return isLiveSweep(job) ? job.id : null;
+    seen.add(job.id);
     const predecessorId = job.id;
     job = await queue.add('extract', payload, {
       idempotency_key: `${key}:after:${predecessorId}`,
@@ -55,8 +66,8 @@ export async function queueDeferredStaleSweep(
       return job.id;
     }
     if (job.id === predecessorId) {
-      break;
+      return isLiveSweep(job) ? job.id : null;
     }
   }
-  return isLiveSweep(job) ? job.id : null;
+  return job.id;
 }
