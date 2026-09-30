@@ -82,7 +82,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   if(!isWriteRequestId(requestId) || input.expectedIncarnation!==undefined&&!isWriteRequestId(input.expectedIncarnation))
     throw new OperationError('invalid_params','request_id and expected_incarnation must be UUIDs.');
   if(['remove','purge','archive'].includes(input.operation)&&input.sourceId==='default') throw new OperationError('invalid_params','The default source cannot be removed or archived.');
-  if (['archive','purge'].includes(input.operation)) {
+  if (['archive','purge','remove'].includes(input.operation)) {
     const { assertSourceNotSystemIndex } = await import('../destructive-guard.ts');
     await assertSourceNotSystemIndex(engine, input.sourceId);
   }

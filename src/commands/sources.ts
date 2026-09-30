@@ -766,10 +766,13 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   const _keepStorage = args.includes('--keep-storage');
   void _keepStorage;
 
-  if (id === 'default') {
-    console.error('Error: cannot remove the "default" source (it backs the pre-v0.17 brain).');
+  if (id === 'default' || id === DAILY_MEMORY_SOURCE_ID) {
+    console.error(`Error: cannot remove the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   const src = await fetchSource(engine, id);
   if (!src) {

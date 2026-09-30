@@ -58,6 +58,7 @@ test('managed lifecycle rejects archive of an owned system source before topolog
   await engine.executeRaw("UPDATE sources SET config=config || '{\"system_index\":true}'::jsonb WHERE id=$1",[source]);
   const before=await getWorktreeBinding(engine,source);
   await expect(runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source})).rejects.toThrow('system index');
+  await expect(runManagedSourceLifecycle(engine,{operation:'remove',sourceId:source,confirmDestructive:true})).rejects.toThrow('system index');
   expect(await getWorktreeBinding(engine,source)).toEqual(before);
   expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
 }),60_000);
