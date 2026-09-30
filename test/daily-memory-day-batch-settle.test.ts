@@ -75,4 +75,49 @@ describe('daily memory day-batch settle and record lookback', () => {
     );
     expect(jobs.some(j => String(j.idempotency_key).includes('replay') && j.data.daily_memory_date === '2026-09-28')).toBe(true);
   });
+
+  test('wait-only pending poll uses a fresh successor job', async () => {
+    const queue = new MinionQueue(engine);
+    const source = await queue.add('autopilot-cycle', { daily_memory_affected_dates: ['2026-09-28'] }, {
+      max_attempts: 1, timeout_ms: 60_000,
+    });
+    const dayJob = await queue.add('autopilot-daily-memory', {
+      daily_memory_date: '2026-09-28',
+      daily_memory_only: true,
+      source_cycle_job_ids: [],
+    }, { max_attempts: 2, timeout_ms: 60_000 });
+    // Leave child pending (waiting). First settle must enqueue a delayed successor, not itself.
+    const settleA = await queue.add('autopilot-daily-memory', {
+      daily_memory_date: '2026-09-28',
+      daily_memory_dates: ['2026-09-28'],
+      daily_memory_source_job_id: source.id,
+      daily_memory_cursor: 1,
+      daily_memory_day_job_ids: [dayJob.id],
+    }, { max_attempts: 2, timeout_ms: 60_000 });
+    const resultA = await runDailyMemoryJob(engine, {
+      id: settleA.id,
+      data: settleA.data,
+    });
+    expect(resultA.daily_memory_pending).toBe(true);
+    expect(resultA.daily_memory_job_id).toBeTruthy();
+    expect(resultA.daily_memory_job_id).not.toBe(settleA.id);
+    const successor = await engine.executeRaw<{ id: number; status: string; idempotency_key: string }>(
+      'SELECT id,status,idempotency_key FROM minion_jobs WHERE id=$1', [resultA.daily_memory_job_id],
+    );
+    expect(successor[0]?.status).toBe('delayed');
+    // Second poll from the successor must also get a different delayed job (not the successor itself).
+    const resultB = await runDailyMemoryJob(engine, {
+      id: successor[0]!.id,
+      data: {
+        daily_memory_date: '2026-09-28',
+        daily_memory_dates: ['2026-09-28'],
+        daily_memory_source_job_id: source.id,
+        daily_memory_cursor: 1,
+        daily_memory_day_job_ids: [dayJob.id],
+      },
+    });
+    expect(resultB.daily_memory_pending).toBe(true);
+    expect(resultB.daily_memory_job_id).not.toBe(successor[0]!.id);
+    expect(resultB.daily_memory_job_id).not.toBe(settleA.id);
+  });
 });
