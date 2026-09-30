@@ -273,6 +273,24 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   return days;
 }
 
+/** Accept a complete standalone-sync day handoff before its checkpoint advances. */
+export async function queueStandaloneSyncDailyMemory(
+  engine: BrainEngine,
+  opts: { sourceId: string; commit: string; days: string[] },
+): Promise<number | null> {
+  if (!opts.sourceId || !opts.commit || !Array.isArray(opts.days) || !opts.days.every(isDay)) {
+    throw new Error('Invalid standalone sync daily memory handoff');
+  }
+  const days = [...new Set(opts.days)].sort();
+  if (!days.length) return null;
+  const hash = createHash('sha256').update(JSON.stringify(days)).digest('hex').slice(0, 20);
+  // A checkpoint retry may duplicate an index write, but never reuse a finished refresh.
+  const key = `sync:${opts.sourceId}:${opts.commit}:${hash}:${randomUUID()}`;
+  const queue = new MinionQueue(engine);
+  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key });
+  return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
+}
+
 async function settleDailyDateChildren(
   engine: BrainEngine,
   job: DailyJob,

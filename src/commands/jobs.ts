@@ -2892,7 +2892,6 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
-    // Keep the pinned-day backup even if a separate completion barrier was rejected.
     await finishFanoutDailyMemory(engine, dailyJob);
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')

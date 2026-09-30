@@ -57,6 +57,7 @@ describe('daily memory refresh on source archive/restore', () => {
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(link);
     const archiveWatcher = (await queue.claim('archive-watcher-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
     const archiveDone = await runDailyMemoryJob(engine, archiveWatcher);
+    if (!('daily_memory_pending' in archiveDone)) throw new Error('Expected settlement result');
     expect(archiveDone.daily_memory_pending).toBe(false);
     await queue.completeJob(archiveWatcher.id, 'archive-watcher-lock', archiveDone);
     expect(await restoreSource(engine, sourceId)).toBe(true);
@@ -67,6 +68,7 @@ describe('daily memory refresh on source archive/restore', () => {
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(link);
     const restoreWatcher = (await queue.claim('restore-watcher-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
     const restoreDone = await runDailyMemoryJob(engine, restoreWatcher);
+    if (!('daily_memory_pending' in restoreDone)) throw new Error('Expected settlement result');
     expect(restoreDone.daily_memory_pending).toBe(false);
     await queue.completeJob(restoreWatcher.id, 'restore-watcher-lock', restoreDone);
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='completed'")).toHaveLength(4);
@@ -101,6 +103,7 @@ describe('daily memory refresh on source archive/restore', () => {
     await queue.failJob(child.id, 'archive-dead-lock', 'Synthetic archive child failure', 'dead');
     const watcher = (await queue.claim('archive-watch-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
     const replay = await runDailyMemoryJob(engine, watcher);
+    if (!('daily_memory_replayed' in replay)) throw new Error('Expected settlement result');
     expect(replay.daily_memory_replayed).toBe(1);
     await queue.completeJob(watcher.id, 'archive-watch-lock', replay);
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(link);
@@ -111,6 +114,7 @@ describe('daily memory refresh on source archive/restore', () => {
     await queue.promoteDelayed();
     const poll = (await queue.claim('archive-poll-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
     const done = await runDailyMemoryJob(engine, poll);
+    if (!('daily_memory_pending' in done)) throw new Error('Expected settlement result');
     expect(done.daily_memory_pending).toBe(false);
     await queue.completeJob(poll.id, 'archive-poll-lock', done);
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(link);

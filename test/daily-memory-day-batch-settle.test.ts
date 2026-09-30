@@ -70,6 +70,7 @@ describe('daily memory day-batch settle and record lookback', () => {
         expect(stored.data.daily_memory_day_job_ids).toEqual([failedChild.id]);
       } else {
         const result = await runDailyMemoryJob(engine, batch);
+    if (!('daily_memory_replayed' in result)) throw new Error('Expected settlement result');
         expect(result.daily_memory_replayed).toBe(1);
         await queue.completeJob(batch.id, 'batch-lock', result);
         await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE status='delayed'");
@@ -84,6 +85,7 @@ describe('daily memory day-batch settle and record lookback', () => {
     const data = { daily_memory_dates: days, daily_memory_date: days[0], daily_memory_source_job_id: child.id,
       daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id], daily_memory_replay_round: 2 };
     const pending = await runDailyMemoryJob(engine, { id: 100, data });
+    if (!('daily_memory_job_id' in pending)) throw new Error('Expected settlement result');
     const [poll] = await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [pending.daily_memory_job_id]);
     expect(poll.data.daily_memory_replay_round).toBe(2);
     expect(poll.data.daily_memory_day_job_ids).toEqual([child.id]);
@@ -114,6 +116,7 @@ describe('daily memory day-batch settle and record lookback', () => {
       id: settleA.id,
       data: settleA.data,
     });
+    if (!('daily_memory_job_id' in resultA)) throw new Error('Expected settlement result');
     expect(resultA.daily_memory_pending).toBe(true);
     expect(resultA.daily_memory_job_id).toBeTruthy();
     expect(resultA.daily_memory_job_id).not.toBe(settleA.id);
@@ -132,6 +135,7 @@ describe('daily memory day-batch settle and record lookback', () => {
         daily_memory_day_job_ids: [dayJob.id],
       },
     });
+    if (!('daily_memory_job_id' in resultB)) throw new Error('Expected settlement result');
     expect(resultB.daily_memory_pending).toBe(true);
     expect(resultB.daily_memory_job_id).not.toBe(successor[0]!.id);
     expect(resultB.daily_memory_job_id).not.toBe(settleA.id);
@@ -150,18 +154,16 @@ describe('daily memory day-batch settle and record lookback', () => {
     }, { max_attempts: 2, timeout_ms: 60_000 });
     await engine.executeRaw("UPDATE minion_jobs SET status='dead', finished_at=now() WHERE id=$1", [dayJob.id]);
     const before = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
-    const result = await runDailyMemoryJob(engine, {
+    await expect(runDailyMemoryJob(engine, {
       id: 0,
       data: {
         daily_memory_date: '2026-09-28',
         daily_memory_dates: ['2026-09-28'],
         daily_memory_source_job_id: source.id,
         daily_memory_cursor: 1,
-        daily_memory_day_job_ids: [dayJob.id],
+        daily_memory_day_job_ids: [dayJob.id], daily_memory_replay_round: 2,
       },
-    });
-    expect(result.daily_memory_pending).toBe(false);
-    expect(result.daily_memory_replayed ?? 0).toBe(0);
+    })).rejects.toThrow('replay exhausted');
     const after = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
     expect(after.length).toBe(before.length);
   });

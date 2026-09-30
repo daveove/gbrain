@@ -4,7 +4,6 @@
  * full or large import does not run the stale sweep inside the caller.
  */
 
-import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 
 /** Same ceiling as incremental sync (`totalChanges <= 100`). */
@@ -36,15 +35,18 @@ export async function queueDeferredStaleSweep(
   // No maxWaiting: an unscoped coalesce matches ANY waiting extract job and
   // would drop this sweep. The idempotency key is the dedup.
   const key = `extract-stale:${opts.sourceId ?? 'default'}:${opts.commit}`;
-  const isLiveSweep = (job: { status: string; data: Record<string, unknown> }): boolean =>
+  const matchesSweep = (job: { data: Record<string, unknown> }): boolean =>
     job.data?.stale === true && job.data.sourceId === payload.sourceId
-    && job.data.deferred_commit === opts.commit && ['waiting', 'delayed', 'active'].includes(job.status);
-  let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-  if (!isLiveSweep(job) || !['waiting', 'delayed'].includes(job.status)) {
-    job = await queue.add('extract', payload, {
-      idempotency_key: `${key}:${randomUUID()}`,
-      timeout_ms: timeoutMs,
-    });
+    && job.data.deferred_commit === opts.commit;
+  let nextKey = key;
+  // Follow accepted predecessors, never create a run-unique sibling for each caller.
+  // Bound old same-pin history; callers fail closed if it cannot be traversed safely.
+  for (let depth = 0; depth < 64; depth++) {
+    const job = await queue.add('extract', payload, { idempotency_key: nextKey, timeout_ms: timeoutMs });
+    if (!job || !matchesSweep(job) || !Number.isSafeInteger(job.id) || job.id <= 0) return null;
+    if (['waiting', 'delayed'].includes(job.status)) return job.id;
+    if (!['active', 'completed', 'failed', 'dead', 'cancelled'].includes(job.status)) return null;
+    nextKey = `${key}:after:${job.id}`;
   }
-  return isLiveSweep(job) ? job.id : null;
+  return null;
 }

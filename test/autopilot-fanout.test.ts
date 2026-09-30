@@ -270,7 +270,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(result.legacy_fallback).toBe(true);
     expect(result.source_job_ids).toEqual([100]);
     expect(result.daily_memory_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory']);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
     expect((added[0].data as Record<string, unknown>).source_id).toBeUndefined();
     expect(added[0].opts.idempotency_key).toBe('autopilot-cycle:2026-05-22T12:00:00.000Z');
     const daily = added[1].data as Record<string, unknown>;
@@ -283,7 +283,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     const { engine, queue, added, fanoutOpts } = makeStubs([], { listThrows: true });
     const result = await dispatchPerSource(engine, queue, fanoutOpts);
     expect(result.legacy_fallback).toBe(true);
-    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory']);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
     expect(result.source_job_ids).toEqual([100]);
   });
 
@@ -504,7 +504,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
   test('legacy fallback submit passes maxPending: 1 (cross-slot single-flight) and no maxWaiting', async () => {
     const { engine, queue, added, fanoutOpts } = makeStubs([]);
     await dispatchPerSource(engine, queue, fanoutOpts);
-    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory']);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
     expect(added[0].opts.maxPending).toBe(1);
     expect(added[0].opts.maxWaiting).toBeUndefined();
   });
