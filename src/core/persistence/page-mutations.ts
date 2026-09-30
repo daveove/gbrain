@@ -129,5 +129,28 @@ export async function submitPageMutation(ctx: OperationContext,
   const row = await admitWrite(ctx.engine, { principal, operation: input.operation, sourceId, sourceIncarnation: source.incarnation,
     slug, pageId: snapshot?.page.id ?? null, requestId, callerIntent, intent, authority,
     worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null });
-  return writeResponse(await waitForWrite(ctx.engine, row, ctx.config, input.waitMs));
+  let priorDays: string[] = [];
+  if (['put_page', 'delete_page', 'restore_page', 'capture'].includes(input.operation) && snapshot) {
+    try {
+      const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
+      priorDays = await dailyMemoryDaysForSlugs(ctx.engine, sourceId, [slug]);
+    } catch { priorDays = []; }
+  }
+  const result = writeResponse(await waitForWrite(ctx.engine, row, ctx.config, input.waitMs));
+  if (['put_page', 'delete_page', 'restore_page', 'capture'].includes(input.operation)) {
+    try {
+      const { dailyMemoryDaysForSlugs, queueFanoutDailyMemory } = await import('../cycle/daily-memory-followup.ts');
+      const { MinionQueue } = await import('../minions/queue.ts');
+      const afterDays = snapshot && input.operation === 'delete_page'
+        ? []
+        : await dailyMemoryDaysForSlugs(ctx.engine, sourceId, [slug]);
+      const days = [...new Set([...priorDays, ...afterDays])];
+      const queue = new MinionQueue(ctx.engine);
+      const key = `page:${input.operation}:${sourceId}:${slug}:${row.id}`;
+      for (const day of days) {
+        await queueFanoutDailyMemory(queue, { day, ids: [], key });
+      }
+    } catch { /* durable retry remains on the next source-sync / maintenance */ }
+  }
+  return result;
 }

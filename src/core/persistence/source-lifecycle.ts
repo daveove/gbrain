@@ -177,6 +177,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         if(refs.length) throw new OperationError('source_referenced','OAuth clients still reference this source. Revoke and remove those registrations first.');
         const [impact]=await tx.executeRaw<{count:string}>('SELECT count(*)::text AS count FROM pages WHERE source_id=$1',[input.sourceId]);
         pagesDeleted=Number(impact.count);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
         await tx.executeRaw('DELETE FROM sources WHERE id=$1 AND incarnation=$2::uuid',[input.sourceId,incarnation]);
         await tx.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1 AND source_incarnation=$2::uuid',[input.sourceId,incarnation]);
       }

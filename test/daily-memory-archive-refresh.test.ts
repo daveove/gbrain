@@ -141,4 +141,9 @@ describe('daily memory refresh on source archive/restore', () => {
     );
     expect(jobs.some(j => j.data.daily_memory_date === '2026-09-29')).toBe(true);
   });
+
+  test('refuses to remove the owned dream source via system-index guard', async () => {
+    const { assertSourceNotSystemIndex } = await import('../src/core/destructive-guard.ts');
+    await expect(assertSourceNotSystemIndex(engine, DAILY_MEMORY_SOURCE_ID)).rejects.toThrow(/system index/);
+  });
 });
