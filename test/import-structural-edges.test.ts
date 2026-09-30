@@ -206,6 +206,48 @@ describe('import structural edges', () => {
     });
   }, 120_000);
 
+  test('a pure no-op large directory does not enqueue another deferred sweep', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('noop-src', 'noop-src') ON CONFLICT (id) DO NOTHING`,
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-noop-large-'));
+    const count = INLINE_EXTRACT_CHANGE_LIMIT + 1;
+    for (let i = 0; i < count; i++) {
+      writeFileSync(
+        join(dir, `noop-${i}.md`),
+        `---\ntype: concept\n---\n# Noop ${i}\n\nSee [Other](noop-${(i + 1) % count}.md).\n`,
+      );
+    }
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const first = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'noop-src' });
+      expect(first.imported).toBe(count);
+      expect(first.errors).toBe(0);
+      await engine.executeRaw(
+        `UPDATE minion_jobs
+         SET status = 'completed', finished_at = now()
+         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
+      );
+      await engine.executeRaw(
+        `UPDATE pages SET links_extracted_at = GREATEST(now(), updated_at, '2026-09-21T00:00:00Z'::timestamptz)
+         WHERE source_id = 'noop-src' AND deleted_at IS NULL`,
+      );
+      const before = await engine.executeRaw<{ total: number }>(
+        `SELECT count(*)::int AS total FROM minion_jobs
+         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
+      );
+      const second = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'noop-src' });
+      expect(second.imported).toBe(0);
+      expect(second.errors).toBe(0);
+      expect(second.linkExtractionError).toBeUndefined();
+      const after = await engine.executeRaw<{ total: number }>(
+        `SELECT count(*)::int AS total FROM minion_jobs
+         WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:noop-src:import%'`,
+      );
+      expect(after[0].total).toBe(before[0].total);
+    });
+  }, 180_000);
+
   test('a small import with a large stale backlog queues the sweep', async () => {
     await engine.executeRaw(
       `INSERT INTO sources (id, name) VALUES ('backlog-src', 'backlog-src') ON CONFLICT (id) DO NOTHING`,

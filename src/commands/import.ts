@@ -904,12 +904,14 @@ export async function runImport(
   // freshness, and the resume checkpoint — advancing those first lets the
   // next sync treat the commit as current while its edges are missing.
   // A small import with a small stale backlog drains the sweep here, scoped
-  // to the source this import wrote. A full sync, a file set over the shared
-  // 100-change gate, or a larger stale backlog queues the durable sweep: the
-  // inline budget is about 30 minutes. Quiet: `import --json` must stay one
-  // stdout document. A thrown sweep still returns (pages are imported) but
-  // counts as an import error in `errors` and `failures`. Cancellation is
-  // checked before the sweep and between stale batches, then rethrown.
+  // to the source this import wrote. A full sync, more than 100 imported
+  // changes, or a larger stale backlog queues the durable sweep: the inline
+  // budget is about 30 minutes. Directory size alone does not defer — a
+  // content-hash no-op of a large tree must not enqueue. Quiet: `import
+  // --json` must stay one stdout document. A thrown sweep still returns
+  // (pages are imported) but counts as an import error in `errors` and
+  // `failures`. Cancellation is checked before the sweep and between stale
+  // batches, then rethrown.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
   const recordLinkFailure = (message: string): void => {
@@ -927,7 +929,9 @@ export async function runImport(
     throwIfInterrupted();
     throw error;
   };
-  const deferForSize = opts.fullSync === true || allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT;
+  // Gate size on imported/changed files, not directory size: a pure no-op
+  // re-import of a large tree must not mint deferred UUID successors.
+  const deferForSize = opts.fullSync === true || imported > INLINE_EXTRACT_CHANGE_LIMIT;
   let deferForBacklog = false;
   if (!opts.noExtract && !deferForSize && allFiles.length > 0) {
     try {
@@ -947,7 +951,7 @@ export async function runImport(
   if (!opts.noExtract && !linkExtractionError && (deferForSize || deferForBacklog)) {
     const reason = opts.fullSync
       ? 'import_full_sync'
-      : (allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT ? 'import_size_gate' : 'import_stale_backlog');
+      : (imported > INLINE_EXTRACT_CHANGE_LIMIT ? 'import_size_gate' : 'import_stale_backlog');
     let queuedJobId: number | string | null = null;
     try {
       throwIfInterrupted();
