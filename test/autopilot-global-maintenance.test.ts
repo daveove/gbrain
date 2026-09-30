@@ -354,6 +354,39 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
   }, 60_000);
 
+  test('global maintenance consolidates every source when repoPath matches one source', async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-consolidate-scope-'));
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path) VALUES ('alpha', 'alpha', $1), ('beta', 'beta', NULL)`,
+      [repoPath],
+    );
+    for (const sourceId of ['alpha', 'beta']) {
+      for (let i = 0; i < 3; i++) {
+        await engine.executeRaw(
+          `INSERT INTO facts (source_id, entity_slug, fact, source, valid_from, visibility)
+           VALUES ($1, 'people/example', $2, 'test', now() - interval '2 days', 'world')`,
+          [sourceId, `${sourceId} fact ${i}`],
+        );
+      }
+    }
+    const handlers = await captureHandlers();
+    const result = await handlers.get('autopilot-global-maintenance')!({
+      id: 6837,
+      data: { repoPath, phases: ['consolidate'] },
+      signal: undefined,
+    });
+    const consolidate = result.report.phases.find((p: { phase: string }) => p.phase === 'consolidate');
+    expect(consolidate.details.buckets_processed).toBe(2);
+
+    const scoped = await runCycle(engine, {
+      brainDir: repoPath,
+      sourceId: 'alpha',
+      phases: ['consolidate'],
+    });
+    const scopedPhase = scoped.phases.find((p) => p.phase === 'consolidate');
+    expect(scopedPhase?.details.buckets_processed).toBe(1);
+  }, 60_000);
+
   test('runs global phases (no source_id) and stamps autopilot.last_global_at on success', async () => {
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-global-maintenance-'));

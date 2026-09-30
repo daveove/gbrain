@@ -280,6 +280,27 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).not.toContain('previous-local-day');
   });
 
+  test('an offset datetime uses the cycle timezone and a UTC-midnight date stays calendar', async () => {
+    await engine.putPage('notes/manila-event', { type: 'note', title: 'Manila event', compiled_truth: 'body' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-30T00:30:00+08:00'::timestamptz,
+        updated_at = '2026-09-01T00:00:00Z'::timestamptz WHERE slug = 'notes/manila-event'`,
+    );
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const manila = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect(manila.written).toBe(true);
+    expect((await engine.getPage(manila.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+      .toContain('[[notes/manila-event]]');
+    await engine.softDeletePage(manila.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    const losAngeles = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect(losAngeles.reason).toBe('no_source_activity');
+    const previous = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    expect((await engine.getPage(previous.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+      .toContain('[[notes/manila-event]]');
+  });
+
   test('an explicit cycle day is not shifted by a timezone west of UTC', async () => {
     await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
     const args = dailyMemoryArgs('2026-09-29');

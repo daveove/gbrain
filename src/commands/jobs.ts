@@ -2544,9 +2544,8 @@ export async function registerBuiltinHandlers(
     if (job.data.dir) importArgs.push(String(job.data.dir));
     if (job.data.noEmbed) importArgs.push('--no-embed');
     const result = await runImport(engine, importArgs, { signal: job.signal, sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined });
-    if (result.linkExtractionError) {
-      throw new Error(`Import link extraction failed: ${result.linkExtractionError}`);
-    }
+    const linkFailure = result.linkExtractionError ?? result.failures.find((f) => f.path === '<link-extraction>')?.error;
+    if (linkFailure) throw new Error(`Import link extraction failed: ${linkFailure}`);
     if (result.errors > 0) {
       throw new Error(`Import failed for ${result.errors} file(s); fix rejected documents and retry the job.`);
     }

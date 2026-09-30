@@ -139,12 +139,17 @@ export async function writeDailyMemoryFromSources(
        WHERE deleted_at IS NULL
          AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
          AND NOT (source_id = $4 AND slug = $3)
-         -- A filename or frontmatter date is stored as UTC midnight. Converting
-         -- that instant into a zone west of UTC lands it on the previous local
-         -- day. Compare the stored calendar date, and apply the cycle zone
-         -- only when the page has no effective_date and we fall back to updated_at.
+         -- Date-only values are stored as UTC midnight. Any other effective_date
+         -- is a real instant and must be projected through the cycle zone.
+         -- A null effective_date falls back to updated_at in that same zone.
          AND COALESCE(
-           (effective_date AT TIME ZONE 'UTC')::date,
+           CASE
+             WHEN effective_date IS NULL THEN NULL
+             WHEN (effective_date AT TIME ZONE 'UTC')
+               = date_trunc('day', effective_date AT TIME ZONE 'UTC')
+               THEN (effective_date AT TIME ZONE 'UTC')::date
+             ELSE (effective_date AT TIME ZONE $1)::date
+           END,
            (updated_at AT TIME ZONE $1)::date
          ) = $2::date
        ORDER BY source_id, slug

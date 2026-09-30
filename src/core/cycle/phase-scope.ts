@@ -12,7 +12,8 @@ import type { CyclePhase } from '../cycle.ts';
  *   writers that already walk every source inside one invocation
  *   (consolidate, conversation_facts_backfill, enrich_thin): the daily
  *   maintenance job runs each once, and a per-source freshness job must
- *   not run them again.
+ *   not run them again. Global maintenance passes no source id, so
+ *   consolidate still enumerates every source.
  */
 export type PhaseScope = 'source' | 'global' | 'mixed';
 

@@ -122,6 +122,7 @@ describe('import structural edges', () => {
         const result = await runImport(wrapped, [dir, '--no-embed', '--json']);
         expect(result.imported).toBe(1);
         expect(result.errors).toBe(1);
+        expect(result.failures).toContainEqual({ path: '<link-extraction>', error: expect.stringContaining('sweep blew up') });
         expect(result.linkExtractionError).toContain('sweep blew up');
       });
     } finally {
@@ -174,7 +175,40 @@ describe('import structural edges', () => {
     });
   }, 120_000);
 
-  test('a thrown link sweep blocks an in-process full sync', async () => {
+  test('a small import with a large stale backlog queues the sweep', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('backlog-src', 'backlog-src') ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title)
+       SELECT 'backlog-src', 'stale-' || i, 'note', 'Stale'
+       FROM generate_series(1, $1) AS i
+       ON CONFLICT DO NOTHING`,
+      [INLINE_EXTRACT_CHANGE_LIMIT + 1],
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-backlog-'));
+    writeFileSync(join(dir, 'fresh.md'), '---\ntype: note\n---\n# Fresh\n\nSee [Stale](stale-1.md).\n');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'backlog-src' });
+      expect(result.imported).toBe(1);
+      expect(result.errors).toBe(0);
+      const stamped = await engine.executeRaw<{ stamped: number }>(
+        `SELECT count(*)::int AS stamped FROM pages
+         WHERE source_id = 'backlog-src' AND links_extracted_at IS NOT NULL AND deleted_at IS NULL`,
+      );
+      expect(stamped[0].stamped).toBe(0);
+      const jobs = await engine.executeRaw<{ data: unknown }>(
+        `SELECT data FROM minion_jobs WHERE name = 'extract' AND idempotency_key = 'extract-stale:backlog-src:import'`,
+      );
+      expect(jobs).toHaveLength(1);
+      const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { reason?: string; stale?: boolean };
+      expect(data.stale).toBe(true);
+      expect(data.reason).toBe('import_stale_backlog');
+    });
+  }, 120_000);
+
+  test('a full sync queues the stale sweep instead of draining it inline', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'gbrain-fullsync-sweep-'));
     mkdirSync(join(repo, 'notes'));
     writeFileSync(join(repo, 'notes/one.md'), '---\ntype: concept\n---\n# One\n\nSee [Two](two.md).\n');
@@ -183,21 +217,25 @@ describe('import structural edges', () => {
     execSync('git config user.email "t@example.com"', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.name "Tester"', { cwd: repo, stdio: 'pipe' });
     execSync('git add -A && git commit -m "init"', { cwd: repo, stdio: 'pipe' });
-    const wrapped = new Proxy(engine, {
-      get(target, prop, receiver) {
-        if (prop === 'countStalePagesForExtraction') {
-          return () => { throw new Error('sweep blew up'); };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    });
     const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
       const { performSync } = await import('../src/commands/sync.ts');
-      const result = await performSync(wrapped, { repoPath: repo, full: true, noPull: true, noEmbed: true });
-      expect(result.status).toBe('blocked_by_failures');
-      expect(await engine.getConfig('sync.last_commit')).toBeNull();
+      const result = await performSync(engine, { repoPath: repo, full: true, noPull: true, noEmbed: true });
+      expect(result.status).not.toBe('blocked_by_failures');
+      const links = await engine.executeRaw<{ total: number }>(
+        `SELECT count(*)::int AS total FROM links l
+         JOIN pages pf ON pf.id = l.from_page_id
+         WHERE pf.slug IN ('notes/one', 'notes/two')`,
+      );
+      expect(links[0].total).toBe(0);
+      const jobs = await engine.executeRaw<{ data: unknown }>(
+        `SELECT data FROM minion_jobs WHERE name = 'extract' AND idempotency_key LIKE 'extract-stale:default:%'`,
+      );
+      const reasons = jobs.map((job) => {
+        const data = (typeof job.data === 'string' ? JSON.parse(job.data) : job.data) as { reason?: string };
+        return data.reason;
+      });
+      expect(reasons).toContain('import_full_sync');
     });
   }, 120_000);
 });

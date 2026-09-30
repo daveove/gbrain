@@ -4091,6 +4091,7 @@ async function performFullSync(
       includeHidden: opts.includeHidden,
       includeGitignored: opts.includeGitignored,
       slugRoot,
+      fullSync: true,
       // issue #1939: performFullSync owns the failure ledger + bookmark via the
       // shared gate below; don't let runImport double-record or write its own.
       managedBookmark: true,
@@ -4114,8 +4115,10 @@ async function performFullSync(
   // A thrown link sweep is not a clean full sync. Pages are already imported;
   // the bookmark must not advance, or the next run looks up to date while
   // edges are missing.
-  if (result.linkExtractionError) {
-    serr(`\nFull sync blocked: link extraction failed: ${result.linkExtractionError}`);
+  const linkExtractionError = result.linkExtractionError
+    ?? result.failures.find((f) => f.path === '<link-extraction>')?.error;
+  if (linkExtractionError) {
+    serr(`\nFull sync blocked: link extraction failed: ${linkExtractionError}`);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     return {

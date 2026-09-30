@@ -182,6 +182,8 @@ export async function runImport(
     strategy?: SyncStrategy;
     sourceId?: string;
     managedBookmark?: boolean;
+    /** Full sync imports the whole tree. Never drain the stale sweep inline. */
+    fullSync?: boolean;
     /**
      * #753/#774: glob patterns to exclude from the import (same semantics as
      * `isSyncable`'s `exclude` — matched against the dir-relative path).
@@ -1078,24 +1080,45 @@ export async function runImport(
   // Import writes pages and stops. A markdown link between two of those
   // pages does not become a row in `links` until the existing DB-source
   // stale sweep runs (`gbrain extract --stale`, the cycle drain). A small
-  // import drains that sweep here, scoped to the source this import wrote,
-  // so the graph connects as soon as the pages exist — including pages an
-  // earlier import left with a null links_extracted_at. A full or large
-  // import (same 100-change gate as sync) must not run that sweep inline:
-  // its default budget is about 30 minutes, and a full sync is the whole
-  // tree. Those runs queue the durable stale-sweep job instead. Quiet:
-  // `import --json` must stay one stdout document. A thrown sweep still
-  // returns (pages are imported) but counts as an import error so every
-  // caller that already fails on `errors` sees it.
+  // import with a small stale backlog drains that sweep here, scoped to
+  // the source this import wrote, so the graph connects as soon as the
+  // pages exist. A full sync, a file set over the shared 100-change gate,
+  // or a larger stale backlog queues the durable sweep instead: the inline
+  // budget is about 30 minutes. Quiet: `import --json` must stay one stdout
+  // document. A thrown sweep still returns (pages are imported) but counts
+  // as an import error in `errors` and `failures`.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
-  if (allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT) {
+  const recordLinkFailure = (message: string): void => {
+    linkExtractionError = message;
+    errors++;
+    failures.push({ path: '<link-extraction>', error: message });
+    console.error(`  Link extraction skipped: ${message}`);
+  };
+  const deferForSize = opts.fullSync === true || allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT;
+  let deferForBacklog = false;
+  if (!deferForSize && allFiles.length > 0) {
+    try {
+      const { LINK_EXTRACTOR_VERSION_TS } = await import('../core/link-extraction.ts');
+      const stalePages = await engine.countStalePagesForExtraction({
+        sourceId: sourceId ?? 'default',
+        versionTs: LINK_EXTRACTOR_VERSION_TS,
+      });
+      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT;
+    } catch (e) {
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (!linkExtractionError && (deferForSize || deferForBacklog)) {
+    const reason = opts.fullSync
+      ? 'import_full_sync'
+      : (allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT ? 'import_size_gate' : 'import_stale_backlog');
     let queuedJobId: number | string | null = null;
     try {
       queuedJobId = await queueDeferredStaleSweep(engine, {
         sourceId: sourceId ?? 'default',
         commit: opts.commit ?? 'import',
-        reason: 'import_size_gate',
+        reason,
       });
     } catch { /* best-effort — the hint below still names the manual sweep */ }
     console.error(
@@ -1103,7 +1126,7 @@ export async function runImport(
       (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
       ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
     );
-  } else if (allFiles.length > 0) {
+  } else if (!linkExtractionError && allFiles.length > 0) {
     try {
       const { extractStaleFromDB } = await import('./extract.ts');
       const extracted = await extractStaleFromDB(engine, {
@@ -1121,13 +1144,12 @@ export async function runImport(
         );
       }
     } catch (e) {
-      linkExtractionError = e instanceof Error ? e.message : String(e);
-      errors++;
-      console.error(`  Link extraction skipped: ${linkExtractionError}`);
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
     }
   }
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+  const fileFailures = failures.filter((f) => f.path !== '<link-extraction>').length;
   if (jsonOutput) {
     // `skipped` includes every per-file failure importFile RETURNS (invalid
     // frontmatter, oversize, symlink, slug mismatch) as well as content-hash
@@ -1141,7 +1163,7 @@ export async function runImport(
       duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       total_files: allFiles.length,
-      unchanged: skipped - failures.length - malformedFileSkips,
+      unchanged: skipped - fileFailures - malformedFileSkips,
       malformed_skipped: malformedFileSkips,
       failures,
       ...(linkExtractionError ? { link_extraction_error: linkExtractionError } : {}),
@@ -1151,7 +1173,7 @@ export async function runImport(
   } else {
     slog(`\nImport complete (${totalTime}s):`);
     slog(`  ${imported} pages imported`);
-    slog(`  ${skipped} pages skipped (${skipped - failures.length - malformedFileSkips} unchanged, ${errors} errors, ${malformedFileSkips} malformed filenames)`);
+    slog(`  ${skipped} pages skipped (${skipped - fileFailures - malformedFileSkips} unchanged, ${errors} errors, ${malformedFileSkips} malformed filenames)`);
     slog(`  ${chunksCreated} chunks created`);
     if (structuralLinks > 0) {
       slog(`  ${structuralLinks} links created`);
