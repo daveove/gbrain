@@ -78,7 +78,8 @@ describe('daily memory refresh on source archive/restore', () => {
       // The state change committed, but its no-op retry must still enqueue the refresh.
       expect(await operation(engine, sourceId)).toBe(operation === softDeleteSource ? null : false);
     }
-    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='waiting'")).toHaveLength(2);
+    // Each successful lifecycle queues a day job plus a wait-only settlement batch.
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status IN ('waiting','delayed')")).toHaveLength(4);
   });
 
   test('restoring a source queues its affected daily memory days', async () => {
@@ -101,5 +102,30 @@ describe('daily memory refresh on source archive/restore', () => {
       "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
     );
     expect(jobs.some(j => j.data.daily_memory_date === '2026-09-29')).toBe(true);
+  });
+
+  test('refuses to archive the owned dream source', async () => {
+    await expect(softDeleteSource(engine, DAILY_MEMORY_SOURCE_ID)).rejects.toThrow(/cannot archive system source/);
+    const row = await engine.executeRaw<{ archived: boolean }>(
+      'SELECT archived FROM sources WHERE id=$1', [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(row[0]?.archived).toBe(false);
+  });
+
+  test('archive refresh queues a wait-only settlement for day jobs', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES('archive-settle','Archive settle',false)");
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Day', compiled_truth: 'Body',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'archive-settle' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='archive-settle'",
+    );
+    expect(await softDeleteSource(engine, 'archive-settle')).not.toBeNull();
+    const jobs = await engine.executeRaw<{ status: string; data: Record<string, unknown> }>(
+      "SELECT status,data FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === '2026-09-30' && !j.data.daily_memory_dates)).toBe(true);
+    expect(jobs.some(j => Array.isArray(j.data.daily_memory_dates) && j.data.daily_memory_cursor === 1)).toBe(true);
   });
 });

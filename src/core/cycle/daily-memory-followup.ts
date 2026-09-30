@@ -9,6 +9,8 @@ import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffecti
 export type DailyJob = { id: number; data: Record<string, unknown>; signal?: AbortSignal };
 const TERMINAL = new Set(['completed', 'failed', 'dead', 'cancelled']);
 const PENDING = new Set(['waiting', 'active', 'delayed', 'waiting-children', 'paused']);
+/** Automatic dead/failed day replays per settlement chain; further recovery is explicit. */
+const MAX_DAY_REPLAYS = 2;
 function isDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)
     && Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0,10) === day;
@@ -23,8 +25,14 @@ export async function pinDailyMemoryJob(engine: BrainEngine, job: DailyJob): Pro
 }
 
 export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
-  opts: { day: string; ids: number[]; key: string; delay?: number }): Promise<number> {
-  const data = { daily_memory_only: true, daily_memory_date: opts.day, source_cycle_job_ids: [...new Set(opts.ids)].sort((a,b) => a-b) };
+  opts: { day: string; ids: number[]; key: string; delay?: number; replayCount?: number }): Promise<number> {
+  const replayCount = Math.max(0, Math.floor(opts.replayCount ?? 0));
+  const data = {
+    daily_memory_only: true,
+    daily_memory_date: opts.day,
+    source_cycle_job_ids: [...new Set(opts.ids)].sort((a,b) => a-b),
+    ...(replayCount > 0 ? { daily_memory_replay_count: replayCount } : {}),
+  };
   const dependencies = createHash('sha256').update(JSON.stringify(data.source_cycle_job_ids)).digest('hex').slice(0, 20);
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily:${opts.day}:${opts.key}:${dependencies}`, delay: opts.delay ?? 0,
@@ -32,7 +40,8 @@ export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
   });
   if (!job || !['waiting', 'delayed', 'active', 'completed'].includes(job.status)
     || job.data.daily_memory_only !== true || job.data.daily_memory_date !== opts.day
-    || JSON.stringify(job.data.source_cycle_job_ids) !== JSON.stringify(data.source_cycle_job_ids)) {
+    || JSON.stringify(job.data.source_cycle_job_ids) !== JSON.stringify(data.source_cycle_job_ids)
+    || (replayCount > 0 && job.data.daily_memory_replay_count !== replayCount)) {
     throw new Error('Daily memory completion barrier was not accepted');
   }
   return job.id;
@@ -267,10 +276,15 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   const queue = new MinionQueue(engine);
   // Each invocation follows a committed lifecycle transition, independent of prior completed refreshes.
   const transitionKey = `archive:${sourceId}:${randomUUID()}`;
+  const childIds: number[] = [];
   for (const day of days) {
     opts.signal?.throwIfAborted();
-    await queueFanoutDailyMemory(queue, { day, ids: [], key: transitionKey });
+    childIds.push(await queueFanoutDailyMemory(queue, { day, ids: [], key: transitionKey }));
   }
+  // Positive sourceJobId scopes settle idempotency; no minion row required.
+  const sourceJobId = (createHash('sha256').update(transitionKey).digest().readUInt32BE(0) % 0x7fffffff) || 1;
+  // Wait-only batch tracks children to completion / bounded replay (same as source-sync).
+  await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000);
   return days;
 }
 
@@ -296,9 +310,13 @@ async function settleDailyDateChildren(
   for (const row of rows.filter(row => row.status === 'dead' || row.status === 'failed')) {
     const day = row.data.daily_memory_date;
     if (!isDay(day)) continue;
+    const prior = Number(row.data.daily_memory_replay_count);
+    const replayCount = Number.isFinite(prior) && prior > 0 ? Math.floor(prior) : 0;
+    if (replayCount >= MAX_DAY_REPLAYS) continue;
     job.signal?.throwIfAborted();
     replayed.push(await queueFanoutDailyMemory(queue, {
       day, ids: [], key: `source:${sourceJobId}:replay:${row.id}`,
+      replayCount: replayCount + 1,
     }));
   }
   if (replayed.length) {

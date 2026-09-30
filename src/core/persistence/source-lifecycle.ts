@@ -19,6 +19,7 @@ import { canonicalFilesystemPath, nativeFilesystemPath } from './root-registry.t
 import { flushTopologyDirectory } from './topology-filesystem.ts';
 import { claimPhysicalRoot } from './physical-root.ts';
 import { assertWriterAdminState, WRITER_INSPECTION_HINT } from './admin-intent.ts';
+import { DAILY_MEMORY_SOURCE_ID } from '../cycle/daily-memory.ts';
 
 export interface SourceLifecycleInput {
   operation:'add'|'claim'|'archive'|'restore'|'remove'|'purge'|'rebind'|'reclone';
@@ -81,7 +82,7 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
   const requestId=input.requestId??randomUUID();
   if(!isWriteRequestId(requestId) || input.expectedIncarnation!==undefined&&!isWriteRequestId(input.expectedIncarnation))
     throw new OperationError('invalid_params','request_id and expected_incarnation must be UUIDs.');
-  if(['remove','purge','archive'].includes(input.operation)&&input.sourceId==='default') throw new OperationError('invalid_params','The default source cannot be removed or archived.');
+  if(['remove','purge','archive'].includes(input.operation)&&(input.sourceId==='default'||input.sourceId===DAILY_MEMORY_SOURCE_ID)) throw new OperationError('invalid_params','System sources cannot be removed or archived.');
   const principal=await topologyPrincipal(engine);
   const intent={...input,requestId:undefined,dryRun:undefined};
   const prior=await priorTopologyChange(engine,principal,requestId,intent);

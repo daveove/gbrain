@@ -71,9 +71,13 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
   const parsed = parseSourceConfig(row.config);
   if (isOwnedDailyMemorySource(parsed, row.name)) {
     // Keep trusted-index markers sticky for our owned dream index.
+    // Clear archive flags so a mistaken archive cannot purge historical indexes.
     await engine.executeRaw(
       `UPDATE sources
        SET name = $2,
+           archived = false,
+           archived_at = NULL,
+           archive_expires_at = NULL,
            config = COALESCE(config, '{}'::jsonb) || $3::text::jsonb
        WHERE id = $1`,
       [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],

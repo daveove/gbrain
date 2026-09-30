@@ -120,4 +120,33 @@ describe('daily memory day-batch settle and record lookback', () => {
     expect(resultB.daily_memory_job_id).not.toBe(successor[0]!.id);
     expect(resultB.daily_memory_job_id).not.toBe(settleA.id);
   });
+
+  test('bounds automatic day-job replays', async () => {
+    const queue = new MinionQueue(engine);
+    const source = await queue.add('autopilot-cycle', { daily_memory_affected_dates: ['2026-09-28'] }, {
+      max_attempts: 1, timeout_ms: 60_000,
+    });
+    const dayJob = await queue.add('autopilot-daily-memory', {
+      daily_memory_date: '2026-09-28',
+      daily_memory_only: true,
+      source_cycle_job_ids: [],
+      daily_memory_replay_count: 2,
+    }, { max_attempts: 2, timeout_ms: 60_000 });
+    await engine.executeRaw("UPDATE minion_jobs SET status='dead', finished_at=now() WHERE id=$1", [dayJob.id]);
+    const before = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    const result = await runDailyMemoryJob(engine, {
+      id: 0,
+      data: {
+        daily_memory_date: '2026-09-28',
+        daily_memory_dates: ['2026-09-28'],
+        daily_memory_source_job_id: source.id,
+        daily_memory_cursor: 1,
+        daily_memory_day_job_ids: [dayJob.id],
+      },
+    });
+    expect(result.daily_memory_pending).toBe(false);
+    expect(result.daily_memory_replayed ?? 0).toBe(0);
+    const after = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(after.length).toBe(before.length);
+  });
 });

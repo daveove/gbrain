@@ -23,6 +23,7 @@ import { isPathContained } from './path-confine.ts';
 import { defaultCloneDir } from './sources-ops.ts';
 import { gbrainPath } from './config.ts';
 import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
+import { DAILY_MEMORY_SOURCE_ID } from './cycle/daily-memory.ts';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -330,6 +331,9 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
+  if (sourceId === 'default' || sourceId === DAILY_MEMORY_SOURCE_ID) {
+    throw new Error(`cannot archive system source '${sourceId}'`);
+  }
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'archive',sourceId});
