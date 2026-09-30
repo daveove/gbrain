@@ -166,7 +166,8 @@ function escapeMdMeta(text: string): string {
 
 /** Preserve stored identity; targets containing wiki delimiters cannot render safely. */
 function wikiLinkTarget(sourceId: string, slug: string): string | null {
-  if (/[\[\]]/.test(sourceId + slug)) return null;
+  // extractMarkdownLinks strips | alias, # heading, and ^ block from the target.
+  if (/[\[\]|#^]/.test(sourceId + slug)) return null;
   try { validateSlug(slug); } catch { return null; }
   return `${sourceId}:${slug}`;
 }

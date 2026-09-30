@@ -1046,4 +1046,66 @@ describe('daily memory from sources the brain already holds', () => {
     expect(days).toContain('2026-09-20');
   });
 
+  test('writeDailyMemoryFromSources omits wikilink delimiter slugs from generated targets', async () => {
+    await engine.setConfig('cycle.timezone', 'UTC');
+    for (const slug of ['notes/foo|bar', 'notes/foo#heading', 'notes/foo^block']) {
+      await engine.putPage(slug, {
+        type: 'note', title: slug, compiled_truth: 'body',
+        frontmatter: { date: '2026-09-30' },
+      }, { sourceId: 'default' });
+      await engine.executeRaw(
+        "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug=$1",
+        [slug],
+      );
+    }
+    await engine.putPage('notes/safe', {
+      type: 'note', title: 'Safe', compiled_truth: 'body',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/safe'",
+    );
+    const result = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[default:notes/safe]]');
+    expect(page!.compiled_truth).not.toContain('foo|bar');
+    expect(page!.compiled_truth).not.toContain('foo#heading');
+    expect(page!.compiled_truth).not.toContain('foo^block');
+  });
+
+  test('dailyMemoryDaysForSlugs recovers prior event_date and zoned instant dates from versions', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await engine.putPage('notes/versioned', {
+      type: 'note', title: 'Versioned', compiled_truth: 'old',
+      frontmatter: { event_date: '2026-09-10' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-10T00:00:00Z'::timestamptz, effective_date_source='event_date' WHERE source_id='default' AND slug='notes/versioned'",
+    );
+    await engine.createVersion('notes/versioned', { sourceId: 'default' });
+    await engine.putPage('notes/versioned', {
+      type: 'note', title: 'Versioned', compiled_truth: 'mid',
+      frontmatter: {
+        date: '2026-09-20T16:30:00.000Z',
+        [DATE_INSTANT_PROVENANCE]: { date: '2026-09-20T16:30:00.000Z' },
+      },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-20T16:30:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/versioned'",
+    );
+    await engine.createVersion('notes/versioned', { sourceId: 'default' });
+    await engine.putPage('notes/versioned', {
+      type: 'note', title: 'Versioned', compiled_truth: 'new',
+      frontmatter: { date: '2026-09-25' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-25T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/versioned'",
+    );
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/versioned']);
+    expect(days).toContain('2026-09-10'); // event_date from first version
+    expect(days).toContain('2026-09-21'); // 16:30Z instant in Asia/Manila
+    expect(days).toContain('2026-09-25'); // live calendar date
+  });
+
 });

@@ -49,6 +49,11 @@ function formatDateInTimeZone(instant: Date, timeZone: string): string {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+/** Calendar YYYY-MM-DD for an instant in an IANA zone (same projection as cycle SQL). */
+export function calendarDateInTimeZone(instant: Date, timeZone: string): string {
+  return formatDateInTimeZone(instant, timeZone);
+}
+
 /**
  * Time zone that owns one dream-cycle run. Same ladder as
  * `resolveCycleDate` (configured `cycle.timezone`, then the host zone, then
