@@ -2843,7 +2843,7 @@ export async function registerBuiltinHandlers(
         await new Promise<void>(r => setImmediate(r));
       },
     });
-
+    await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(engine, job, sourceId, report);
     return {
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,

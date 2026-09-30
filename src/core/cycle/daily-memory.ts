@@ -112,7 +112,7 @@ export function dailyMemorySlug(day: string): string {
   return `${DAILY_MEMORY_SLUG_PREFIX}/${day}`;
 }
 
-interface SourcePageRow {
+export interface SourcePageRow {
   source_id: string;
   slug: string;
   title: string;
@@ -121,7 +121,7 @@ interface SourcePageRow {
   frontmatter: Record<string, unknown>;
 }
 
-function isCalendarEffectiveDate(row: SourcePageRow): boolean {
+export function isCalendarEffectiveDate(row: SourcePageRow): boolean {
   if (row.effective_date_source === 'filename') return true;
   if (row.effective_date_source === 'fallback') return false;
   const date = new Date(row.effective_date!);

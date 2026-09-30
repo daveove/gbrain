@@ -15,7 +15,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
+import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync } from '../src/core/cycle/daily-memory-followup.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -368,6 +368,46 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     try { await expect(finishFanoutDailyMemory(engine, { id: 78, data: { daily_memory_date: '2026-09-30', source_cycle_job_ids: [sibling.id] } })).rejects.toThrow('was not accepted'); }
     finally { add.mockRestore(); }
     expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+  });
+
+  test('source-sync refresh persists all affected days before rejection, retries no-op sync and clears tombstones', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('affected-source','Affected fixture')");
+    const slugs: string[] = [], days: string[] = [];
+    for (let i = 0; i < 9; i++) {
+      const day = `2026-09-${10+i}`, slug = `notes/affected-${i}`;
+      days.push(day); slugs.push(slug);
+      await engine.putPage(slug, { type: 'note', title: 'Affected fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } }, { sourceId: 'affected-source' });
+      await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2 AND slug=$3", [day,'affected-source',slug]);
+    }
+    const { ensureDailyMemorySource } = await import('../src/core/cycle/daily-memory.ts');
+    await ensureDailyMemorySource(engine);
+    await engine.putPage(`daily-memory/${days[0]}`, { type: 'note', title: 'Old generated day', compiled_truth: '[[affected-source:notes/affected-0]]', frontmatter: { dream_generated: true } }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.softDeletePage(slugs[0], { sourceId: 'affected-source' });
+    const queue = new MinionQueue(engine), source = await queue.add('autopilot-cycle', { source_id: 'affected-source' });
+    const claimed = (await queue.claim('affected-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(claimed.id).toBe(source.id);
+    const reject = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('Synthetic affected-day rejection'); });
+    try { await expect(refreshDailyMemoryAfterSourceSync(engine, claimed, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: slugs }] })).rejects.toThrow('Synthetic affected-day rejection'); }
+    finally { reject.mockRestore(); }
+    const [saved] = await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [source.id]);
+    expect(saved.data.daily_memory_affected_dates).toEqual(days);
+    await queue.failJob(source.id, 'affected-lock', 'Synthetic first handoff failure', 'delayed', 0);
+    await queue.promoteDelayed();
+    const retried = (await queue.claim('affected-retry-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    await refreshDailyMemoryAfterSourceSync(engine, retried, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: [] }] });
+    await queue.completeJob(source.id, 'affected-retry-lock', {});
+    const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
+    const batchSizes: number[] = [];
+    for (let i = 0; i < 24; i++) {
+      const daily = await queue.claim('affected-daily-lock', 60_000, 'default', ['autopilot-daily-memory']);
+      if (!daily) break;
+      const result = await handler(daily);
+      if (Array.isArray(result.daily_memory_days_queued)) batchSizes.push(result.daily_memory_days_queued.length);
+      await queue.completeJob(daily.id, 'affected-daily-lock', result);
+    }
+    expect(batchSizes).toEqual([8,1]);
+    for (const day of days) expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
+    expect((await engine.getPage(`daily-memory/${days[0]}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('[[affected-source:notes/affected-0]]');
   });
 
   test('autopilot-cycle handler normalizes a legacy per-source payload down to freshness phases', async () => {

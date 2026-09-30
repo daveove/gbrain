@@ -378,6 +378,33 @@ test('incremental file extraction hands missing targets off before stamping', as
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+
+test('small sync target arrival wakes a pending origin without a stale sweep', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-target-wake-'));
+  try {
+    mkdirSync(join(dir, 'people'));
+    writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/later]]');
+    await engine.putPage('people/origin', page('[[people/later]]'));
+    const originResult = await extractLinksForSlugs(engine, dir, ['people/origin']);
+    expect(originResult.processed).toEqual(['people/origin']);
+    await stampExtracted(engine, originResult.processed.map(slug => ({ slug, source_id: 'default' })));
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
+    expect(await engine.countStalePagesForExtraction()).toBe(0);
+
+    writeFileSync(join(dir, 'people/later.md'), '---\ntype: person\n---\nSynthetic later');
+    await engine.putPage('people/later', page());
+    // Small sync path: only the arrived target is extracted/stamped.
+    const targetResult = await extractLinksForSlugs(engine, dir, ['people/later']);
+    expect(targetResult.processed).toEqual(['people/later']);
+    await stampExtracted(engine, targetResult.processed.map(slug => ({ slug, source_id: 'default' })));
+
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+    expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBe(1);
+    expect((await drain()).pagesProcessed).toBe(1);
+    expect((await engine.getLinks('people/origin')).some(link => link.to_slug === 'people/later')).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('incremental registry failure does not report the origin safe to stamp', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-pending-fail-'));
   mkdirSync(join(dir, 'people'));
