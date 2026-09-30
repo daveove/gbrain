@@ -16,6 +16,8 @@ Daily memory notes now include counts of source records updated that day and up 
 
 The daily launcher imports only the current Manila day's Codex sessions before it writes the note. Unchanged transcripts use the existing content-hash skip.
 
+A date stored on a page stays on that calendar day in any timezone, and an explicit daily-memory date is not shifted. A large import queues link extraction instead of sweeping inline, and a failed link sweep fails the import.
+
 To take advantage of v0.59.19.0, update the checkout and use `scripts/gbrain-daily-memory.sh` in the existing daily job.
 
 ## [0.59.18.0] - 2026-09-29

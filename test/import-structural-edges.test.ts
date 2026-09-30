@@ -5,11 +5,13 @@
  * exists.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { execSync } from 'child_process';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runImport } from '../src/commands/import.ts';
+import { INLINE_EXTRACT_CHANGE_LIMIT } from '../src/core/deferred-stale-extract.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 describe('import structural edges', () => {
@@ -119,6 +121,7 @@ describe('import structural edges', () => {
       await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
         const result = await runImport(wrapped, [dir, '--no-embed', '--json']);
         expect(result.imported).toBe(1);
+        expect(result.errors).toBe(1);
         expect(result.linkExtractionError).toContain('sweep blew up');
       });
     } finally {
@@ -132,4 +135,69 @@ describe('import structural edges', () => {
     expect(payload?.status).not.toBe('success');
     expect(payload?.link_extraction_error).toContain('sweep blew up');
   }, 60_000);
+
+  test('a large import queues the stale sweep instead of draining it inline', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-large-'));
+    const count = INLINE_EXTRACT_CHANGE_LIMIT + 1;
+    for (let i = 0; i < count; i++) {
+      writeFileSync(
+        join(dir, `page-${i}.md`),
+        `---\ntype: concept\n---\n# Page ${i}\n\nSee [Other](page-${(i + 1) % count}.md).\n`,
+      );
+    }
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const result = await runImport(engine, [dir, '--no-embed', '--json']);
+      expect(result.imported).toBe(count);
+      expect(result.errors).toBe(0);
+      expect(result.linkExtractionError).toBeUndefined();
+      const stamped = await engine.executeRaw<{ stamped: number }>(
+        `SELECT count(*)::int AS stamped FROM pages
+         WHERE slug LIKE 'page-%' AND links_extracted_at IS NOT NULL AND deleted_at IS NULL`,
+      );
+      expect(stamped[0].stamped).toBe(0);
+      const links = await engine.executeRaw<{ total: number }>(
+        `SELECT count(*)::int AS total FROM links l
+         JOIN pages pf ON pf.id = l.from_page_id
+         WHERE pf.slug LIKE 'page-%'`,
+      );
+      expect(links[0].total).toBe(0);
+      const jobs = await engine.executeRaw<{ data: unknown; idempotency_key: string | null; timeout_ms: number | null }>(
+        `SELECT data, idempotency_key, timeout_ms FROM minion_jobs WHERE name = 'extract'`,
+      );
+      expect(jobs).toHaveLength(1);
+      const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { stale?: boolean; reason?: string };
+      expect(data.stale).toBe(true);
+      expect(data.reason).toBe('import_size_gate');
+      expect(jobs[0].idempotency_key).toBe('extract-stale:default:import');
+      expect(jobs[0].timeout_ms).toBeGreaterThanOrEqual(30 * 60 * 1000);
+    });
+  }, 120_000);
+
+  test('a thrown link sweep blocks an in-process full sync', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'gbrain-fullsync-sweep-'));
+    mkdirSync(join(repo, 'notes'));
+    writeFileSync(join(repo, 'notes/one.md'), '---\ntype: concept\n---\n# One\n\nSee [Two](two.md).\n');
+    writeFileSync(join(repo, 'notes/two.md'), '---\ntype: concept\n---\n# Two\n\nTarget.\n');
+    execSync('git init', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.email "t@example.com"', { cwd: repo, stdio: 'pipe' });
+    execSync('git config user.name "Tester"', { cwd: repo, stdio: 'pipe' });
+    execSync('git add -A && git commit -m "init"', { cwd: repo, stdio: 'pipe' });
+    const wrapped = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'countStalePagesForExtraction') {
+          return () => { throw new Error('sweep blew up'); };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const { performSync } = await import('../src/commands/sync.ts');
+      const result = await performSync(wrapped, { repoPath: repo, full: true, noPull: true, noEmbed: true });
+      expect(result.status).toBe('blocked_by_failures');
+      expect(await engine.getConfig('sync.last_commit')).toBeNull();
+    });
+  }, 120_000);
 });

@@ -119,7 +119,7 @@ function renderNote(day: string, input: RenderInput): string {
  */
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
-  opts: { signal?: AbortSignal; now?: () => Date } = {},
+  opts: { signal?: AbortSignal; now?: () => Date; date?: string } = {},
 ): Promise<DailyMemoryWrite> {
   throwIfAborted(opts.signal, '[dream] daily memory');
   const now = opts.now ?? (() => new Date());
@@ -127,7 +127,9 @@ export async function writeDailyMemoryFromSources(
   let slug = '';
   try {
     const zone = await resolveCycleTimeZone(engine);
-    day = await resolveCycleDate(engine, { now });
+    // An explicit day is that calendar day in every zone. Timezone projection
+    // applies only when the day is derived from the clock.
+    day = await resolveCycleDate(engine, { now, explicitDate: opts.date });
     slug = dailyMemorySlug(day);
     throwIfAborted(opts.signal, '[dream] daily memory');
 
@@ -137,7 +139,14 @@ export async function writeDailyMemoryFromSources(
        WHERE deleted_at IS NULL
          AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
          AND NOT (source_id = $4 AND slug = $3)
-         AND (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date
+         -- A filename or frontmatter date is stored as UTC midnight. Converting
+         -- that instant into a zone west of UTC lands it on the previous local
+         -- day. Compare the stored calendar date, and apply the cycle zone
+         -- only when the page has no effective_date and we fall back to updated_at.
+         AND COALESCE(
+           (effective_date AT TIME ZONE 'UTC')::date,
+           (updated_at AT TIME ZONE $1)::date
+         ) = $2::date
        ORDER BY source_id, slug
        LIMIT $5`,
       [zone, day, slug, DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_PAGE_CAP],

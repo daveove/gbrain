@@ -14,6 +14,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
 import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemoryArgs } from '../scripts/write-daily-memory.ts';
 
 describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
@@ -253,19 +254,57 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).toContain('[[meetings/standup]]');
   });
 
+  test('a UTC-midnight effective_date stays on that calendar day west of UTC', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await engine.putPage('notes/dated', { type: 'note', title: 'Dated note', compiled_truth: 'body' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = '2026-09-29T00:00:00Z'::timestamptz,
+        updated_at = '2026-09-28T12:00:00Z'::timestamptz WHERE slug = 'notes/dated'`,
+    );
+    await engine.putPage('notes/clock', { type: 'note', title: 'Clock fallback', compiled_truth: 'body' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = NULL,
+        updated_at = '2026-09-29T15:00:00Z'::timestamptz WHERE slug = 'notes/clock'`,
+    );
+    await engine.putPage('notes/previous-local-day', { type: 'note', title: 'Previous local day', compiled_truth: 'body' });
+    await engine.executeRaw(
+      `UPDATE pages SET effective_date = NULL,
+        updated_at = '2026-09-29T06:59:59Z'::timestamptz WHERE slug = 'notes/previous-local-day'`,
+    );
+    const result = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    expect(result.day).toBe('2026-09-29');
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[notes/dated]]');
+    expect(page!.compiled_truth).toContain('[[notes/clock]]');
+    expect(page!.compiled_truth).not.toContain('previous-local-day');
+  });
+
+  test('an explicit cycle day is not shifted by a timezone west of UTC', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    const args = dailyMemoryArgs('2026-09-29');
+    expect(args).toEqual({ date: '2026-09-29' });
+    const result = await writeDailyMemoryFromSources(engine, args);
+    expect(result.day).toBe('2026-09-29');
+    expect(result.slug).toBe('daily-memory/2026-09-29');
+    expect(result.reason).toBe('no_source_activity');
+    expect(dailyMemoryArgs(undefined)).toEqual({});
+    expect(() => dailyMemoryArgs('2026-02-31')).toThrow('YYYY-MM-DD');
+  });
+
   test('page indexing retains the 40-link cap and effective-date calendar precedence', async () => {
     await engine.setConfig('cycle.timezone', 'Asia/Manila');
     for (let i = 0; i < 42; i++) {
       const slug = `notes/page-${String(i).padStart(2, '0')}`;
       await engine.putPage(slug, { type: 'note', title: 'Today page', compiled_truth: 'private body' });
       await engine.executeRaw(
-        `UPDATE pages SET effective_date = '2026-09-29T16:00:00Z'::timestamptz,
+        `UPDATE pages SET effective_date = '2026-09-30T00:00:00Z'::timestamptz,
           updated_at = '2026-10-01T00:00:00Z'::timestamptz WHERE slug = $1`, [slug],
       );
     }
     await engine.putPage('notes/previous-day', { type: 'note', title: 'Previous day', compiled_truth: 'Earlier note' });
     await engine.executeRaw(
-      `UPDATE pages SET effective_date = '2026-09-29T15:59:59Z'::timestamptz,
+      `UPDATE pages SET effective_date = '2026-09-29T00:00:00Z'::timestamptz,
         updated_at = '2026-09-30T00:00:00Z'::timestamptz WHERE slug = 'notes/previous-day'`, [],
     );
     const result = await writeSeptember30();

@@ -10,6 +10,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { refreshProjectionStatistics } from '../core/search/projection-statistics.ts';
 import { importFile, importImageFile, isImageFilePath as isImageImportPath, MAX_FILE_SIZE } from '../core/import-file.ts';
+import { INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import { validateSlug } from '../core/utils.ts';
 import { collectSyncableFiles, shouldLogIngest } from './import.ts';
@@ -3836,62 +3837,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // the stale sweep scans the whole source, so banked-across-runs pages are
   // covered regardless.
   const extractOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
-  if (!opts.noExtract && totalChanges > 100 && pagesAffected.length > 0) {
+  if (!opts.noExtract && totalChanges > INLINE_EXTRACT_CHANGE_LIMIT && pagesAffected.length > 0) {
     // #2849: above the size gate the deferred extraction must be DURABLY
-    // QUEUED, not just hinted. The autopilot cycle's extract phase is
-    // slug-scoped (an up_to_date follow-up sync hands it an empty
-    // pagesAffected), so a webhook-driven large sync left
-    // `links_extracted_at` unstamped FOREVER unless an operator ran
-    // `gbrain extract --stale` by hand. Submit a source-scoped stale-sweep
-    // job bound to the consumed commit (idempotency key) so repeated
-    // webhook deliveries / sync retries of the same commit coalesce onto
-    // one job. The sweep itself is the watermark scan — it picks up the
-    // pages this run imported AND any banked across resumed runs.
-    // Best-effort: queue submission failure falls back to the hint-only
-    // behavior (the pages stay stale + visible to doctor, never mis-stamped).
+    // QUEUED, not just hinted. queueDeferredStaleSweep is that path (also
+    // used by a large import). Best-effort: a submission failure leaves the
+    // pages stale and visible to doctor, never mis-stamped.
     let queuedJobId: number | string | null = null;
     try {
-      const { MinionQueue } = await import('../core/minions/queue.ts');
-      const { STALE_TIME_BUDGET_MS } = await import('./extract.ts');
-      const queue = new MinionQueue(engine);
-      const payload = {
-        stale: true,
-        ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+      queuedJobId = await queueDeferredStaleSweep(engine, {
+        sourceId: opts.sourceId,
+        commit: pin,
         reason: 'sync_size_gate',
-        // Bound to the PIN this run drained to (== headCommit unless resuming
-        // a stored target), not live HEAD — the sweep covers what we imported.
-        deferred_commit: pin,
-      };
-      // The stale sweep has its own internal wall-clock budget
-      // (GBRAIN_EXTRACT_TIME_BUDGET_MS-derived); without an explicit
-      // timeout_ms the job would inherit the tight null-default and get
-      // wall-clock-killed mid-sweep (#1737 class). 5-min headroom.
-      const timeoutMs = STALE_TIME_BUDGET_MS + 5 * 60 * 1000;
-      // NO maxWaiting here: with an unscoped (NULL-sourceId) payload the
-      // queue's coalesce filter matches ANY waiting 'extract' job (e.g. a
-      // remediation-submitted {mode:'links'} row) and returns THAT job —
-      // silently dropping the sweep while we log "queued". The idempotency
-      // key alone is the dedup for repeat submissions toward the same pin.
-      const key = `extract-stale:${opts.sourceId ?? 'default'}:${pin}`;
-      const isLiveSweep = (j: { status: string; data: Record<string, unknown> }): boolean =>
-        j.data?.stale === true && ['waiting', 'delayed', 'active'].includes(j.status);
-      let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-      if (!isLiveSweep(job)) {
-        // The key slot holds a FINISHED row: a prior sweep toward this pin
-        // that completed BEFORE this run's pages landed (checkpoint-resume /
-        // blocked-advance re-sync of the same target). Those pages went
-        // stale after that sweep's watermark pass, so coalescing onto the
-        // finished row would strand them — queue a fresh sweep under a
-        // run-unique key. (An 'active' sweep is safe to coalesce onto: its
-        // end-of-run staleRemaining re-count chains a continuation.)
-        job = await queue.add('extract', payload, {
-          idempotency_key: `${key}:${Date.now()}`,
-          timeout_ms: timeoutMs,
-        });
-      }
-      // Only claim "queued" once we verified the returned row IS a live
-      // stale sweep — never trust queue.add's row blind.
-      if (isLiveSweep(job)) queuedJobId = job.id;
+      });
     } catch { /* best-effort — hint below still tells the operator */ }
     slog(
       `  Large sync: deferring link/timeline extraction` +
@@ -3901,7 +3858,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       ` Run 'gbrain extract --stale${opts.sourceId ? ` --source-id ${opts.sourceId}` : ''}' to extract now.`,
     );
   }
-  if (!opts.noExtract && totalChanges <= 100 && pagesAffected.length > 0) {
+  if (!opts.noExtract && totalChanges <= INLINE_EXTRACT_CHANGE_LIMIT && pagesAffected.length > 0) {
     try {
       const { extractLinksForSlugs, extractTimelineForSlugs, stampExtracted, slugsSafeToStamp } = await import('./extract.ts');
       // #774: pages' source_path is git-root-relative, so extract resolves
@@ -4153,6 +4110,28 @@ async function performFullSync(
     `[gbrain phase] sync.fullsync.import done ${Date.now() - _fullImportT0}ms ` +
     `imported=${result.imported} skipped=${result.skipped} errors=${result.errors}`,
   );
+
+  // A thrown link sweep is not a clean full sync. Pages are already imported;
+  // the bookmark must not advance, or the next run looks up to date while
+  // edges are missing.
+  if (result.linkExtractionError) {
+    serr(`\nFull sync blocked: link extraction failed: ${result.linkExtractionError}`);
+    await engine.setConfig('sync.last_run', new Date().toISOString());
+    await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
+    return {
+      status: 'blocked_by_failures',
+      fromCommit: null,
+      toCommit: headCommit,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      renamed: 0,
+      chunksCreated: result.chunksCreated,
+      embedded: 0,
+      pagesAffected: [],
+      failedFiles: result.errors,
+    };
+  }
 
   // issue #1939 — gate the full-sync bookmark through the SAME shared ledger as
   // the incremental path (Codex #6: a wedge here on first/forced sync was

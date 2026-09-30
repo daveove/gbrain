@@ -32,6 +32,7 @@ import {
 import { realpathOrResolve } from '../core/path-confine.ts';
 import { slog } from '../core/console-prefix.ts';
 import { refreshProjectionStatistics } from '../core/search/projection-statistics.ts';
+import { INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
 import { importManagedFile } from '../core/persistence/import-mutations.ts';
 
 /** Return a refusal when an import target lies outside every admitted root. */
@@ -1076,15 +1077,33 @@ export async function runImport(
 
   // Import writes pages and stops. A markdown link between two of those
   // pages does not become a row in `links` until the existing DB-source
-  // stale sweep runs (`gbrain extract --stale`, the cycle drain). Run it
-  // here, scoped to the source this import wrote, so the graph connects
-  // as soon as the pages exist — including pages an earlier import left
-  // with a null links_extracted_at. Quiet: `import --json` must stay one
-  // stdout document. A thrown sweep still returns (pages are imported) but
-  // must not be reported as a clean success.
+  // stale sweep runs (`gbrain extract --stale`, the cycle drain). A small
+  // import drains that sweep here, scoped to the source this import wrote,
+  // so the graph connects as soon as the pages exist — including pages an
+  // earlier import left with a null links_extracted_at. A full or large
+  // import (same 100-change gate as sync) must not run that sweep inline:
+  // its default budget is about 30 minutes, and a full sync is the whole
+  // tree. Those runs queue the durable stale-sweep job instead. Quiet:
+  // `import --json` must stay one stdout document. A thrown sweep still
+  // returns (pages are imported) but counts as an import error so every
+  // caller that already fails on `errors` sees it.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
-  if (allFiles.length > 0) {
+  if (allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT) {
+    let queuedJobId: number | string | null = null;
+    try {
+      queuedJobId = await queueDeferredStaleSweep(engine, {
+        sourceId: sourceId ?? 'default',
+        commit: opts.commit ?? 'import',
+        reason: 'import_size_gate',
+      });
+    } catch { /* best-effort — the hint below still names the manual sweep */ }
+    console.error(
+      `  Large import: deferring link extraction` +
+      (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
+      ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
+    );
+  } else if (allFiles.length > 0) {
     try {
       const { extractStaleFromDB } = await import('./extract.ts');
       const extracted = await extractStaleFromDB(engine, {
@@ -1103,6 +1122,7 @@ export async function runImport(
       }
     } catch (e) {
       linkExtractionError = e instanceof Error ? e.message : String(e);
+      errors++;
       console.error(`  Link extraction skipped: ${linkExtractionError}`);
     }
   }
