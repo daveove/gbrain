@@ -286,10 +286,12 @@ async function loadSourceRecordGroups(
     );
     for (const link of links) {
       const hash = createHash('sha256').update(`${group.source_type}\0${link.source_ref}`).digest('hex');
-      let type = encodeURIComponent(group.source_type);
-      try { validateSlug(`source-records/${type}/${hash}`); }
-      catch { type = `type-${createHash('sha256').update(group.source_type).digest('hex')}`; }
-      link.slug = `source-records/${type}/${hash}`;
+      const type = encodeURIComponent(group.source_type);
+      try { link.slug = validateSlug(`source-records/${type}/${hash}`); }
+      catch {
+        const typeHash = createHash('sha256').update(group.source_type).digest('hex');
+        link.slug = validateSlug(`source-records/type-${typeHash}/${hash}`);
+      }
     }
     linked.push({ ...group, links });
   }

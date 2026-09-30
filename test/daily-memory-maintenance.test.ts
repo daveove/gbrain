@@ -19,6 +19,7 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { dailyMemoryArgs } from '../scripts/write-daily-memory.ts';
+import { extractStaleFromDB } from '../src/commands/extract.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
@@ -399,17 +400,31 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
-  test('record source types with separators get stable openable slugs without changing safe types', async () => {
+  test('record source types normalize to stored graph targets and preserve stable safe paths', async () => {
     await seedRecord('slash-reference', 'mail/slack', '2026-09-30T00:00:00Z');
     await seedRecord('safe-reference', 'gmail', '2026-09-30T00:00:00Z');
+    await seedRecord('upper-reference', 'Mail:Slack', '2026-09-30T00:00:00Z');
+    await seedRecord('unicode-reference', 'Mélange', '2026-09-30T00:00:00Z');
     const first = await writeSeptember30();
     expect(first.written).toBe(true);
     const page = (await engine.getPage(first.slug))!;
     const slugs = [...page.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1]);
-    expect(slugs).toHaveLength(2);
+    expect(slugs).toHaveLength(4);
+    expect(slugs.every(slug => slug === slug.toLowerCase())).toBe(true);
+    expect(slugs.some(slug => slug.startsWith('source-records/mail%3aslack/'))).toBe(true);
+    expect(slugs.some(slug => slug.startsWith('source-records/m%c3%a9lange/'))).toBe(true);
     expect(slugs.some(slug => slug.startsWith('source-records/gmail/'))).toBe(true);
     expect(slugs.some(slug => /^source-records\/type-[a-f0-9]{64}\/[a-f0-9]{64}$/.test(slug))).toBe(true);
-    for (const slug of slugs) expect(await engine.getPage(slug)).not.toBeNull();
+    const stored = await engine.executeRaw<{ slug: string }>(
+      "SELECT slug FROM pages WHERE source_id='default' AND slug LIKE 'source-records/%'", []);
+    expect(stored.map(row => row.slug).sort()).toEqual([...slugs].sort());
+    for (const slug of slugs) expect(await engine.resolveSlugs(slug, { sourceId: 'default' })).toContain(slug);
+    await extractStaleFromDB(engine, {
+      dryRun: false, quiet: true, jsonMode: true, catchUp: false, includeFrontmatter: false,
+      sourceIdFilter: 'default',
+    });
+    const targets = (await engine.getLinks(first.slug, { sourceId: 'default' })).map(link => link.to_slug);
+    for (const slug of slugs) expect(targets).toContain(slug);
     await engine.executeRaw("UPDATE source_records SET id = 'replacement-slash-id' WHERE source_type = 'mail/slack'", []);
     await writeSeptember30();
     const refreshed = (await engine.getPage(first.slug))!;
