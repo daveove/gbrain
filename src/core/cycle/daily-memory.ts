@@ -14,6 +14,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
@@ -165,25 +166,47 @@ export async function writeDailyMemoryFromSources(
     slug = dailyMemorySlug(day);
     throwIfAborted(opts.signal, '[dream] daily memory');
 
-    const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
-      `SELECT source_id, slug, title, effective_date, effective_date_source, frontmatter,
-         to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
-         to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
-       FROM pages
-       WHERE deleted_at IS NULL
-         AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
-         AND NOT (source_id = $4 AND slug = $3)
-         AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
-           OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
-       ORDER BY source_id, slug`,
-      [zone, day, slug, DAILY_MEMORY_SOURCE_ID],
-    );
-    // Filter before applying the cap or counting: date-only values retain
-    // their calendar day; timestamped values retain their actual instant.
-    const matching = candidates.filter(row =>
-      (row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) === day);
-    const pageTotal = matching.length;
-    const rows = matching.slice(0, DAILY_MEMORY_PAGE_CAP);
+    const rows: SourcePageRow[] = [];
+    let pageTotal = 0;
+    let afterSource = '';
+    let afterSlug = '';
+    for (;;) {
+      throwIfAborted(opts.signal, '[dream] daily memory');
+      const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
+        `SELECT source_id, slug, title, effective_date, effective_date_source,
+           jsonb_build_object(
+             COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
+             'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
+             'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
+             '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
+               COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
+               'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+               'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+               'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+               'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
+           to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+           to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
+         FROM pages
+         WHERE deleted_at IS NULL
+           AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
+           AND NOT (source_id = $4 AND slug = $3)
+           AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
+             OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
+           AND (source_id, slug) > ($5, $6)
+         ORDER BY source_id, slug LIMIT $7`,
+        [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
+      );
+      // Count every matching calendar/instant day without retaining a whole-day snapshot.
+      for (const row of candidates) {
+        if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
+        pageTotal++;
+        if (rows.length < DAILY_MEMORY_PAGE_CAP) rows.push(row);
+      }
+      if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
+      const last = candidates[candidates.length - 1];
+      afterSource = last.source_id;
+      afterSlug = last.slug;
+    }
     const records = await loadSourceRecordGroups(engine, zone, day);
     if (rows.length === 0 && records.length === 0) {
       return { written: false, day, slug, pages: 0, reason: 'no_source_activity' };
@@ -263,7 +286,10 @@ async function loadSourceRecordGroups(
     );
     for (const link of links) {
       const hash = createHash('sha256').update(`${group.source_type}\0${link.source_ref}`).digest('hex');
-      link.slug = `source-records/${encodeURIComponent(group.source_type)}/${hash}`;
+      let type = encodeURIComponent(group.source_type);
+      try { validateSlug(`source-records/${type}/${hash}`); }
+      catch { type = `type-${createHash('sha256').update(group.source_type).digest('hex')}`; }
+      link.slug = `source-records/${type}/${hash}`;
     }
     linked.push({ ...group, links });
   }

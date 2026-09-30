@@ -399,6 +399,23 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
+  test('record source types with separators get stable openable slugs without changing safe types', async () => {
+    await seedRecord('slash-reference', 'mail/slack', '2026-09-30T00:00:00Z');
+    await seedRecord('safe-reference', 'gmail', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    expect(first.written).toBe(true);
+    const page = (await engine.getPage(first.slug))!;
+    const slugs = [...page.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1]);
+    expect(slugs).toHaveLength(2);
+    expect(slugs.some(slug => slug.startsWith('source-records/gmail/'))).toBe(true);
+    expect(slugs.some(slug => /^source-records\/type-[a-f0-9]{64}\/[a-f0-9]{64}$/.test(slug))).toBe(true);
+    for (const slug of slugs) expect(await engine.getPage(slug)).not.toBeNull();
+    await engine.executeRaw("UPDATE source_records SET id = 'replacement-slash-id' WHERE source_type = 'mail/slack'", []);
+    await writeSeptember30();
+    const refreshed = (await engine.getPage(first.slug))!;
+    expect([...refreshed.compiled_truth.matchAll(/\[\[(source-records\/[^\]]+)\]\]/g)].map(match => match[1])).toEqual(slugs);
+  });
+
   test('source record day boundaries use Manila midnight and count record-only activity', async () => {
     await seedRecord('before', 'gmail', '2026-09-29T15:59:59.999Z');
     await seedRecord('start', 'gmail', '2026-09-29T16:00:00Z');
@@ -540,7 +557,32 @@ describe('daily memory from sources the brain already holds', () => {
       `UPDATE pages SET effective_date = '2026-09-29T00:00:00Z'::timestamptz,
         updated_at = '2026-09-30T00:00:00Z'::timestamptz WHERE slug = 'notes/previous-day'`, [],
     );
-    const result = await writeSeptember30();
+    // These precede the accepted labels but their UTC day only is September30.
+    for (let i = 0; i < 85; i++) {
+      await engine.putPage(`notes/aaa-instant-${String(i).padStart(2, '0')}`, {
+        type: 'note', title: 'Other local day', compiled_truth: 'Synthetic fixture',
+        frontmatter: { date: '2026-09-30T23:30:00Z', unrelated_blob: 'x'.repeat(32768) },
+      });
+    }
+    await engine.executeRaw(`UPDATE pages SET effective_date='2026-09-30T23:30:00Z'::timestamptz,
+      effective_date_source='date', updated_at='2026-10-01T00:00:00Z'::timestamptz
+      WHERE slug LIKE 'notes/aaa-instant-%'`, []);
+    const executeRaw = engine.executeRaw;
+    let batches = 0;
+    engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
+      const selected = await executeRaw.call(this, sql, params);
+      if (sql.includes('AS utc_day')) {
+        batches++;
+        expect(selected.length).toBeLessThanOrEqual(40);
+        for (const row of selected as { frontmatter: Record<string, unknown> }[]) {
+          expect(row.frontmatter).not.toHaveProperty('unrelated_blob');
+        }
+      }
+      return selected;
+    }) as typeof engine.executeRaw;
+    let result;
+    try { result = await writeSeptember30(); } finally { engine.executeRaw = executeRaw; }
+    expect(batches).toBeGreaterThan(3);
     expect(result.pages).toBe(40);
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(page!.compiled_truth).toContain('40 of 42 pages are linked.');
