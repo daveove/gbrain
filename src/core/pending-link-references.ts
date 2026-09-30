@@ -25,8 +25,8 @@ const PENDING_BATCH_SIZE = 100;
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
   opts: { signal?: AbortSignal; deadline?: number; includeTargetingOrigins?: boolean } = {}): AsyncGenerator<PendingLinkRow[], void> {
   let after = '';
-  // When scoped, also probe origins that pending-qualified a target in this source
-  // so a B-scoped sweep can wake A after `[[B:later]]` arrives.
+  // When scoped, also probe foreign origins pending a target in this source
+  // (qualified `[[B:later]]` or unqualified slug that now exists in B).
   const includeTargets = Boolean(opts.includeTargetingOrigins && sourceId);
   while (true) {
     opts.signal?.throwIfAborted();
@@ -37,7 +37,16 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
           OR value::jsonb->>'sourceId' = $2
           OR ($5::boolean AND EXISTS (
             SELECT 1 FROM jsonb_array_elements(COALESCE(value::jsonb->'candidates', '[]'::jsonb)) AS c
-            WHERE c->>'targetSourceId' = $2)))
+            WHERE c->>'targetSourceId' = $2
+               OR (
+                 COALESCE(c->>'targetSourceId', '') = ''
+                 AND EXISTS (
+                   SELECT 1 FROM pages p
+                   WHERE p.deleted_at IS NULL
+                     AND p.source_id = $2
+                     AND p.slug = c->>'targetSlug'
+                 )
+               ))))
         ORDER BY key LIMIT $4`,
       [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE, includeTargets]);
     opts.signal?.throwIfAborted();
@@ -119,6 +128,8 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
       if (opts.dryRun) {
         // Already-stale origins are included in the normal preflight count.
         if (current && !current.already_stale) requeued++;
+        // Callers may enqueue a follow-up before mutating; notify even when already stale.
+        opts.onRequeued?.(ref.sourceId);
         continue;
       }
       // The config CAS and origin revision/incarnation check belong to the same statement.

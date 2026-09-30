@@ -2173,40 +2173,57 @@ export async function extractStaleFromDB(
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  const wokenForeignOrigins = new Set<string>();
   if (pendingLinks.length) {
     let readyPending = 0;
+    const resolves = (candidate: Parameters<typeof resolveCandidateSources>[0], origin: { slug: string; sourceId: string },
+      pendingSlugs: Set<string>, pendingSources: Map<string, string[]>) =>
+      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
+        outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok;
     do {
-      readyPending += await probePendingLinkReferences(engine, pendingLinks, {
+      const localPending = sourceIdFilter
+        ? pendingLinks.filter(row => row.reference.sourceId === sourceIdFilter)
+        : pendingLinks;
+      const foreignPending = sourceIdFilter
+        ? pendingLinks.filter(row => row.reference.sourceId !== sourceIdFilter)
+        : [];
+
+      readyPending += await probePendingLinkReferences(engine, localPending, {
         globalBasename, signal: opts.signal, deadline: pendingDeadline, dryRun, versionTs,
-        onRequeued: (originSourceId) => {
-          if (sourceIdFilter && originSourceId !== sourceIdFilter) wokenForeignOrigins.add(originSourceId);
-        },
-      }, (candidate, origin, pendingSlugs, pendingSources) =>
-        resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-          outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+      }, resolves);
+
+      // Foreign wakes must stay durable: accept an origin-scoped job before
+      // clearing the pending row. A failed handoff leaves the registry intact.
+      if (foreignPending.length) {
+        const readyForeign = new Set<string>();
+        const foreignReadyCount = await probePendingLinkReferences(engine, foreignPending, {
+          globalBasename, signal: opts.signal, deadline: pendingDeadline, dryRun: true, versionTs,
+          onRequeued: (originSourceId) => { readyForeign.add(originSourceId); },
+        }, resolves);
+        if (dryRun) {
+          readyPending += foreignReadyCount;
+        } else if (readyForeign.size > 0) {
+          const { queueDeferredStaleSweep } = await import('../core/deferred-stale-extract.ts');
+          for (const originSourceId of readyForeign) {
+            const jobId = await queueDeferredStaleSweep(engine, {
+              sourceId: originSourceId,
+              commit: `pending-target:${sourceIdFilter}`,
+              reason: 'pending_cross_source_target',
+            });
+            if (jobId === null) {
+              throw new Error(`Foreign origin wake handoff was not accepted for source '${originSourceId}'`);
+            }
+          }
+          readyPending += await probePendingLinkReferences(engine, foreignPending, {
+            globalBasename, signal: opts.signal, deadline: pendingDeadline, dryRun: false, versionTs,
+          }, resolves);
+        }
+      }
+
       pendingLinks = (await pendingBatches.next()).value ?? [];
     } while (pendingLinks.length);
     opts.signal?.throwIfAborted();
     totalStale = dryRun ? totalStale + readyPending
       : await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
-  }
-  // Target-source sweeps mark foreign origins stale above; enqueue their extract
-  // so DB-only brains do not wait forever for an A-scoped or brain-wide pass.
-  if (!dryRun && wokenForeignOrigins.size > 0) {
-    try {
-      const { queueDeferredStaleSweep } = await import('../core/deferred-stale-extract.ts');
-      for (const originSourceId of wokenForeignOrigins) {
-        await queueDeferredStaleSweep(engine, {
-          sourceId: originSourceId,
-          commit: `pending-target:${sourceIdFilter}`,
-          reason: 'pending_cross_source_target',
-        });
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[extract --stale] foreign origin wake enqueue skipped: ${message}`);
-    }
   }
   if (dryRun) return reportDryRun();
   if (totalStale === 0)
