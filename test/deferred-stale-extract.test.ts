@@ -61,11 +61,34 @@ test('queue rejection and mismatched or unsupported returned jobs fail closed', 
   }
 });
 
-test('historical successor traversal is bounded and cannot create unlimited siblings', async () => {
-  let id = 0;
+test('concurrent claim races are bounded independently of retained history', async () => {
+  const data = { stale: true, sourceId: 'default', deferred_commit: pin.commit };
+  let calls = 0;
+  // The retained tip is far beyond the former 64-generation lifetime cap.
+  const metadata = spyOn(engine, 'executeRaw').mockResolvedValue([
+    { id: 1000, status: 'completed', data, idempotency_key: 'extract-stale:default:same-pin:after:999' },
+  ] as never);
   const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => ({
-    id: ++id, status: 'completed', data: { stale: true, sourceId: 'default', deferred_commit: pin.commit },
+    id: ++calls === 1 ? 1 : 999 + calls, status: 'active', data,
   }) as never);
-  try { expect(await queueDeferredStaleSweep(engine, pin)).toBeNull(); expect(add).toHaveBeenCalledTimes(64); }
-  finally { add.mockRestore(); }
+  try {
+    expect(await queueDeferredStaleSweep(engine, pin)).toBeNull();
+    expect(add).toHaveBeenCalledTimes(8);
+    expect(metadata).toHaveBeenCalledTimes(1);
+    expect(add.mock.calls[1]?.[2]?.idempotency_key).toBe('extract-stale:default:same-pin:after:1000');
+  } finally { add.mockRestore(); metadata.mockRestore(); }
+});
+
+test('a retained tip from another source cannot accept this source handoff', async () => {
+  const add = spyOn(MinionQueue.prototype, 'add').mockResolvedValue({
+    id: 1, status: 'completed', data: { stale: true, sourceId: 'default', deferred_commit: pin.commit },
+  } as never);
+  const metadata = spyOn(engine, 'executeRaw').mockResolvedValue([
+    { id: 1000, status: 'waiting', data: { stale: true, sourceId: 'other', deferred_commit: pin.commit },
+      idempotency_key: 'extract-stale:default:same-pin:after:999' },
+  ] as never);
+  try {
+    expect(await queueDeferredStaleSweep(engine, pin)).toBeNull();
+    expect(add).toHaveBeenCalledTimes(1);
+  } finally { add.mockRestore(); metadata.mockRestore(); }
 });

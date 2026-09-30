@@ -39,14 +39,34 @@ export async function queueDeferredStaleSweep(
     job.data?.stale === true && job.data.sourceId === payload.sourceId
     && job.data.deferred_commit === opts.commit;
   let nextKey = key;
-  // Follow accepted predecessors, never create a run-unique sibling for each caller.
-  // Bound old same-pin history; callers fail closed if it cannot be traversed safely.
-  for (let depth = 0; depth < 64; depth++) {
+  // Locate the retained tip once instead of replaying a lifetime-limited chain.
+  // Same-pin callers still converge on after:<tipId> under queue idempotency.
+  let locatedTip = false;
+  const visited = new Set<number>();
+  // This budget bounds concurrent claim races, never the number of prior generations.
+  for (let races = 0; races < 8; races++) {
     const job = await queue.add('extract', payload, { idempotency_key: nextKey, timeout_ms: timeoutMs });
     if (!job || !matchesSweep(job) || !Number.isSafeInteger(job.id) || job.id <= 0) return null;
     if (['waiting', 'delayed'].includes(job.status)) return job.id;
     if (!['active', 'completed', 'failed', 'dead', 'cancelled'].includes(job.status)) return null;
-    nextKey = `${key}:after:${job.id}`;
+    if (visited.has(job.id)) return null;
+    visited.add(job.id);
+    if (!locatedTip) {
+      locatedTip = true;
+      const prefix = `${key}:after:`;
+      const [tip] = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown>; idempotency_key: string }>(
+        `SELECT id,status,data,idempotency_key FROM minion_jobs WHERE name='extract'
+          AND (idempotency_key=$1 OR (starts_with(idempotency_key,$2)
+            AND substring(idempotency_key FROM length($2)+1) ~ '^[1-9][0-9]*$'))
+          ORDER BY id DESC LIMIT 1`, [key, prefix]);
+      if (!tip || !matchesSweep(tip) || !Number.isSafeInteger(tip.id) || tip.id < job.id) return null;
+      if (['waiting', 'delayed'].includes(tip.status)) {
+        nextKey = tip.idempotency_key;
+        continue;
+      }
+      if (!['active', 'completed', 'failed', 'dead', 'cancelled'].includes(tip.status)) return null;
+      nextKey = `${key}:after:${tip.id}`;
+    } else nextKey = `${key}:after:${job.id}`;
   }
   return null;
 }

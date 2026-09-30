@@ -228,6 +228,30 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     );
   }, 120_000);
 
+  test('a stable import pin accepts generation 66 and concurrent callers reuse its live tip', async () => {
+    const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
+    const { MinionQueue } = await import('../src/core/minions/queue.ts');
+    const queue = new MinionQueue(engine);
+    const input = { sourceId: 'default', commit: 'import', reason: 'fixture' };
+    let previous = 0;
+    for (let generation = 0; generation < 65; generation++) {
+      const id = await queueDeferredStaleSweep(engine, input);
+      if (typeof id !== 'number') throw new Error('Expected accepted stable-pin sweep ID');
+      const token = `stable-pin-${generation}`;
+      expect((await queue.claim(token, 60_000, 'default', ['extract']))?.id).toBe(id);
+      expect((await queue.completeJob(id, token, {}))?.status).toBe('completed');
+      previous = id;
+    }
+    const ids = await Promise.all([
+      queueDeferredStaleSweep(engine, input), queueDeferredStaleSweep(engine, input),
+    ]);
+    expect(ids[0]).not.toBeNull();
+    expect(ids[1]).toBe(ids[0]);
+    const waiting = (await staleExtractJobs()).filter(job => job.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].idempotency_key).toBe(`extract-stale:default:import:after:${previous}`);
+  }, 120_000);
+
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {
     // Blocker-3 regression (#3561 review): the idempotency fast path returns
     // a COMPLETED row as-is. A re-sync of the same range (checkpoint-resume /

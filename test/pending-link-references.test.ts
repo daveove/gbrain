@@ -230,6 +230,34 @@ test('delayed bare basename with display alias wakes for a source-local qualifie
   } finally { await engine.setConfig('link_resolution.global_basename', 'false'); }
 });
 
+test('scoped bare target arrivals wake only the source-local basename origin', async () => {
+  const a = 'basename-origin', b = 'basename-foreign';
+  await engine.setConfig('link_resolution.global_basename', 'true');
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{\"federated\":true}'::jsonb)", [a,b]);
+  const scoped = (sourceId: string) => extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+  });
+  try {
+    await engine.putPage('people/origin', page('[[bob]]'), { sourceId: a });
+    await scoped(a);
+    const pending = await loadPendingLinkReferences(engine, a);
+    expect(pending).toHaveLength(1);
+    await engine.putPage('people/bob', page(), { sourceId: b });
+    await scoped(b);
+    expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+    expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+    await engine.putPage('people/bob', page(), { sourceId: a });
+    await scoped(a);
+    expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+    expect((await engine.getLinks('people/origin', { sourceId: a })).some(link =>
+      link.to_slug === 'people/bob' && link.to_source_id === a)).toBe(true);
+  } finally {
+    await engine.setConfig('link_resolution.global_basename', 'false');
+    await engine.setConfig('link_resolution.cross_source', 'false');
+  }
+});
+
 test('expired readiness deadline preserves dormant registry and watermark', async () => {
   await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
   const rows = await loadPendingLinkReferences(engine);
