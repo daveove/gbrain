@@ -2097,19 +2097,20 @@ export async function extractStaleFromDB(
   const versionTs = LINK_EXTRACTOR_VERSION_TS;
   opts.signal?.throwIfAborted();
 
-  // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
+  // Count stale watermarks first; ready dormant references add work without a stale watermark.
   let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
-  if (dryRun) {
+  const pendingLinks = await loadPendingLinkReferences(engine, sourceIdFilter);
+  opts.signal?.throwIfAborted();
+  const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
       process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale }) + '\n');
     } else {
       log(`(dry run) ${totalStale} page(s) need link/timeline extraction. Run without --dry-run to extract.`);
     }
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
-  }
-  const pendingLinks = await loadPendingLinkReferences(engine, sourceIdFilter);
-  opts.signal?.throwIfAborted();
-  if (totalStale === 0 && pendingLinks.length === 0) {
+  };
+  if (dryRun && pendingLinks.length === 0) return reportDryRun();
+  if (!dryRun && totalStale === 0 && pendingLinks.length === 0) {
     if (!jsonMode) log('No stale pages — extraction is up to date.');
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
   }
@@ -2139,13 +2140,15 @@ export async function extractStaleFromDB(
     (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
   );
   if (pendingLinks.length) {
-    await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
-      deadline: catchUp ? Infinity : startMs + timeBudgetMs }, (candidate, origin, pendingSlugs, pendingSources) =>
+    const readyPending = await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
+      deadline: catchUp ? Infinity : startMs + timeBudgetMs, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
       resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
         federatedSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
     opts.signal?.throwIfAborted();
-    totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+    totalStale = dryRun ? totalStale + readyPending
+      : await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   }
+  if (dryRun) return reportDryRun();
   if (totalStale === 0)
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
   const allRefs = await engine.listAllPageRefs();

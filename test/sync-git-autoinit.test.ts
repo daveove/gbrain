@@ -51,12 +51,14 @@ function mdPage(title: string, body = 'Content.'): string {
 
 describe('#2964: sync auto-inits a never-git-initialized default brain dir', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null = null;
   let dir: string;
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -65,6 +67,7 @@ describe('#2964: sync auto-inits a never-git-initialized default brain dir', () 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     dir = mkdtempSync(join(tmpdir(), 'gbrain-2964-'));
     writeFileSync(join(dir, 'page1.md'), mdPage('Page 1'));
     writeFileSync(join(dir, 'page2.md'), mdPage('Page 2'));

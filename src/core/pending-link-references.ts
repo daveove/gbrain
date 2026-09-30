@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
-import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, type LinkCandidate } from './link-extraction.ts';
+import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACTOR_VERSION_TS, type LinkCandidate } from './link-extraction.ts';
 
 const PREFIX = 'internal.pending-links.';
 type Store = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
@@ -60,12 +60,19 @@ export async function storePendingLinkReferences(engine: Store, origin: PendingL
 /** Only metadata and stored candidates are inspected. Dormant misses never read page bodies. */
 export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkRow[],
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference) => boolean,
-  signal?: AbortSignal, deadline = Infinity): Promise<number> {
-  const identities = rows.map(row => ({ slug: row.reference.slug, sourceId: row.reference.sourceId }));
-  const origins = await engine.executeRaw<{ slug: string; source_id: string; knowledge_revision: string; incarnation: string }>(
-    `SELECT p.slug,p.source_id,p.knowledge_revision,s.incarnation FROM pages p JOIN sources s ON s.id=p.source_id
-      JOIN jsonb_to_recordset(($1::jsonb)->'rows') AS wanted(slug text,"sourceId" text)
-        ON p.slug=wanted.slug AND p.source_id=wanted."sourceId" WHERE p.deleted_at IS NULL`, [{ rows: identities }]);
+  signal?: AbortSignal, deadline = Infinity,
+  opts: { dryRun?: boolean; versionTs?: string } = {}): Promise<number> {
+  const identities = rows.map(row => ({ key: row.key, value: row.value,
+    slug: row.reference.slug, sourceId: row.reference.sourceId }));
+  const origins = await engine.executeRaw<{ slug: string; source_id: string; knowledge_revision: string; incarnation: string; already_stale: boolean }>(
+    `SELECT p.slug,p.source_id,p.knowledge_revision,s.incarnation,
+      (p.links_extracted_at IS NULL OR p.links_extracted_at < $2::timestamptz
+        OR p.updated_at > p.links_extracted_at) AS already_stale
+      FROM pages p JOIN sources s ON s.id=p.source_id
+      JOIN jsonb_to_recordset(($1::jsonb)->'rows') AS wanted(key text,value text,slug text,"sourceId" text)
+        ON p.slug=wanted.slug AND p.source_id=wanted."sourceId"
+      JOIN config c ON c.key=wanted.key AND c.value=wanted.value
+      WHERE p.deleted_at IS NULL`, [{ rows: identities }, opts.versionTs ?? LINK_EXTRACTOR_VERSION_TS]);
   const currentOrigins = new Map(origins.map(origin => [JSON.stringify([origin.source_id, origin.slug]), origin]));
   let requeued = 0;
   for (const row of rows) {
@@ -77,8 +84,13 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
       || current.incarnation !== ref.sourceIncarnation;
     signal?.throwIfAborted();
     if (obsolete) {
-      await engine.executeRaw('DELETE FROM config WHERE key=$1 AND value=$2', [row.key, row.value]);
+      if (!opts.dryRun) await engine.executeRaw('DELETE FROM config WHERE key=$1 AND value=$2', [row.key, row.value]);
     } else if (ref.candidates.some(candidate => resolves({ ...candidate, linkType: '', context: '' }, ref))) {
+      if (opts.dryRun) {
+        // Already-stale origins are included in the normal preflight count.
+        if (current && !current.already_stale) requeued++;
+        continue;
+      }
       // The config CAS and origin revision/incarnation check belong to the same statement.
       const changed = await engine.executeRaw(`WITH ready AS (
         UPDATE pages p SET links_extracted_at=NULL FROM sources s,config c
@@ -95,7 +107,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
 
 /** Probe stored names only; normal basename semantics remain source-local. */
 export async function probePendingLinkReferences(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number },
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   const slugs = [...new Set(rows.flatMap(row => [row.reference.slug,
@@ -117,7 +129,7 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
     if (!opts.globalBasename || candidate.targetSourceId || candidate.targetSlug.includes('/')) return false;
     return queryBasenameIndex(indexes.get(origin.sourceId)!, candidate.targetSlug).some(targetSlug =>
       resolves({ ...candidate, targetSlug }, origin, allSlugs, sources));
-  }, opts.signal, opts.deadline);
+  }, opts.signal, opts.deadline, opts);
 }
 
 /** A resolved basename edge satisfies its parser-generated bare direct candidate. */

@@ -4,6 +4,7 @@
  * full or large import does not run the stale sweep inside the caller.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 
 /** Same ceiling as incremental sync (`totalChanges <= 100`). */
@@ -12,8 +13,8 @@ export const INLINE_EXTRACT_CHANGE_LIMIT = 100;
 /**
  * Queue a source-scoped `extract` job with `{ stale: true }`.
  * The idempotency key is the consumed commit (or another stable pin). A
- * still-live row for that pin is reused. A finished row is not: pages can
- * land after that sweep, so a fresh job is queued under a run-unique key.
+ * waiting or delayed row for that pin is reused. Active and finished rows
+ * may have already counted the backlog, so they need a durable successor.
  * Returns the live job id, or null when the returned row is not a live sweep.
  */
 export async function queueDeferredStaleSweep(
@@ -36,11 +37,12 @@ export async function queueDeferredStaleSweep(
   // would drop this sweep. The idempotency key is the dedup.
   const key = `extract-stale:${opts.sourceId ?? 'default'}:${opts.commit}`;
   const isLiveSweep = (job: { status: string; data: Record<string, unknown> }): boolean =>
-    job.data?.stale === true && ['waiting', 'delayed', 'active'].includes(job.status);
+    job.data?.stale === true && job.data.sourceId === payload.sourceId
+    && job.data.deferred_commit === opts.commit && ['waiting', 'delayed', 'active'].includes(job.status);
   let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-  if (!isLiveSweep(job)) {
+  if (!isLiveSweep(job) || !['waiting', 'delayed'].includes(job.status)) {
     job = await queue.add('extract', payload, {
-      idempotency_key: `${key}:${Date.now()}`,
+      idempotency_key: `${key}:${randomUUID()}`,
       timeout_ms: timeoutMs,
     });
   }

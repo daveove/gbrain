@@ -1,3 +1,4 @@
+import { dateProvenanceForWrite } from './effective-date.ts';
 import { registerManagedFilesystemEngine } from './persistence/filesystem-guard.ts';
 import { replaceDerivedLinks, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
 import { trackPgliteDatabase, PgliteClosingError, notifyPgliteOpened } from './pglite-lifecycle.ts';
@@ -1774,8 +1775,8 @@ export class PGLiteEngine implements BrainEngine {
   private async _putPage(slug: string, page: PageInput, opts?: PageWriteOptions): Promise<Page> {
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    const frontmatter = await dateProvenanceForWrite(this, sourceId, slug, page.frontmatter || {});
 
     // Data-loss guard (mirrors postgres-engine.ts): a page edit is a
     // read-modify-write; if the read returned empty, the modify lands on

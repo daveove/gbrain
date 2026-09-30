@@ -153,6 +153,40 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).not.toContain('[[notes/calendar-value]]');
   });
 
+  test('legacy serialized calendar scalars retain their day while fresh identical instants use the zone', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    const iso = '2026-09-30T00:00:00.000Z';
+    await engine.putPage('notes/legacy-calendar', {
+      type: 'note', title: 'Legacy calendar', compiled_truth: 'fixture', frontmatter: { date: iso },
+    });
+    await engine.executeRaw(`UPDATE pages SET effective_date=$1::timestamptz, effective_date_source='date',
+      frontmatter=jsonb_build_object('date',$2::text) WHERE slug='notes/legacy-calendar'`, [iso, iso]);
+    // A normal read-modify-write must not promote the historical value.
+    await engine.putPage('notes/legacy-calendar', { ...(await engine.getPage('notes/legacy-calendar'))!, compiled_truth: 'edited fixture' });
+    await importFromContent(engine, 'notes/fresh-iso-instant', `---\ndate: "${iso}"\n---\n# Fixture\n\nExplicit timestamp.\n`, { noEmbed: true });
+    await engine.putPage('notes/fresh-date-object', {
+      type: 'note', title: 'Fresh date object', compiled_truth: 'fixture', frontmatter: { date: new Date(iso) },
+      effective_date: new Date(iso), effective_date_source: 'date',
+    });
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    const today = await engine.getPage(dailyMemorySlug('2026-09-30'));
+    expect(today!.compiled_truth).toContain('[[notes/legacy-calendar]]');
+    expect(today!.compiled_truth).not.toContain('[[notes/fresh-iso-instant]]');
+    expect(today!.compiled_truth).not.toContain('[[notes/fresh-date-object]]');
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
+    expect(previous!.compiled_truth).not.toContain('[[notes/legacy-calendar]]');
+    expect(previous!.compiled_truth).toContain('[[notes/fresh-iso-instant]]');
+    expect(previous!.compiled_truth).toContain('[[notes/fresh-date-object]]');
+    const edited = (await engine.getPage('notes/fresh-date-object'))!;
+    await engine.putPage('notes/fresh-date-object', {
+      ...edited, frontmatter: { ...edited.frontmatter, date: '2026-09-30' },
+    });
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth)
+      .toContain('[[notes/fresh-date-object]]');
+  });
+
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-codex-manila-day-'));
     const file = join(dir, 'session.jsonl');

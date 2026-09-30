@@ -76,6 +76,8 @@ export const ATOMS_SCAN_HASH_KEY = 'atoms_scan_hash';
  * comment in `src/core/import-file.ts`.
  */
 export const HASH_EPHEMERAL_FRONTMATTER_KEYS: readonly string[] = [
+  // Date representation provenance must not re-embed unchanged content.
+  '_gbrain_date_instants',
   'captured_at',
   'ingested_at',
   QUARANTINE_KEY,

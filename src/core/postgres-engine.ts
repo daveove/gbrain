@@ -1,3 +1,4 @@
+import { dateProvenanceForWrite } from './effective-date.ts';
 import { tryAcquirePoolLongHold, PoolCapacityError } from './pool-budget.ts';
 import { replaceDerivedLinks, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
 import { mutatePageTag } from './page-state/tags.ts';
@@ -732,8 +733,8 @@ export class PostgresEngine implements BrainEngine {
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    const frontmatter = await dateProvenanceForWrite(this, sourceId, slug, page.frontmatter || {});
 
     // Data-loss guard: a page edit is a read-modify-write; if the read returned
     // empty, the modify lands on nothing and this upsert would blank the body

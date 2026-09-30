@@ -167,6 +167,32 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
   }, 120_000);
 
+  test('pages landing after an active sweep counted the backlog get a durable successor', async () => {
+    const { performSync } = await import('../src/commands/sync.ts');
+    const { MinionQueue } = await import('../src/core/minions/queue.ts');
+    const queue = new MinionQueue(engine), lockToken = 'active-sweep-fixture';
+    const baseCommit = headCommit();
+    writeLinkedPages(101);
+    git('git add -A && git commit -m "big drop"');
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const [first] = await staleExtractJobs();
+    // The worker has finished its final count but has not banked completion.
+    expect((await queue.claim(lockToken, 120_000, 'default', ['extract']))?.id).toBe(first.id);
+    await engine.executeRaw(`UPDATE pages SET links_extracted_at = now()`);
+    expect(await engine.countStalePagesForExtraction()).toBe(0);
+    // A second import of the same pin lands before that worker completes.
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    expect(await engine.countStalePagesForExtraction()).toBeGreaterThan(0);
+    expect((await queue.completeJob(first.id, lockToken, { staleRemaining: 0 }))?.status).toBe('completed');
+    const waiting = (await staleExtractJobs()).filter(job => job.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].id).not.toBe(first.id);
+    expect(waiting[0].data.deferred_commit).toBe(headCommit());
+    expect(waiting[0].idempotency_key).toMatch(new RegExp(`^extract-stale:default:${headCommit()}:[0-9a-f-]{36}$`));
+  }, 120_000);
+
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {
     // Blocker-3 regression (#3561 review): the idempotency fast path returns
     // a COMPLETED row as-is. A re-sync of the same range (checkpoint-resume /

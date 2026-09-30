@@ -49,6 +49,13 @@ import { loadPendingLinkReferences } from '../../src/core/pending-link-reference
     await engine.putPage('people/later-example', {
       type: 'person', title: 'Later example', compiled_truth: 'A later target.',
     }, { sourceId });
+    const beforePreview = await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug', [sourceId]);
+    expect(await extractStaleFromDB(engine, {
+      dryRun: true, jsonMode: true, quiet: true, includeFrontmatter: false,
+      sourceIdFilter: sourceId, catchUp: false,
+    })).toMatchObject({ staleRemaining: 2, pagesProcessed: 0, linksCreated: 0, timelineCreated: 0 });
+    expect(await loadPendingLinkReferences(engine, sourceId)).toEqual(pending);
+    expect(await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug', [sourceId])).toEqual(beforePreview);
     const result = await drain();
     expect(result.pagesProcessed).toBe(2);
     expect(result.staleRemaining).toBe(0);

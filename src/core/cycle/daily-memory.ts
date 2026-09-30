@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
-import { parseDateLoose } from '../effective-date.ts';
+import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
 export const DAILY_MEMORY_SOURCE_ID = 'default';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
@@ -60,9 +60,17 @@ function isCalendarEffectiveDate(row: SourcePageRow): boolean {
     const value = row.frontmatter[key];
     if (parseDateLoose(value)?.getTime() !== date.getTime()) continue;
     if (typeof value !== 'string') return false;
+    if (isCalendarDateSpelling(value)) return true;
+    const instants = row.frontmatter[DATE_INSTANT_PROVENANCE];
+    if (instants && typeof instants === 'object' && !Array.isArray(instants)
+      && (instants as Record<string, unknown>)[key] === date.toISOString()) return false;
+    // Old YAML calendar scalars were serialized as ISO UTC-midnight Dates.
+    // Their original spelling is lost. Retain calendar compatibility; fresh
+    // explicitly timestamped input carries the marker checked above.
+    if (value === date.toISOString() && value.endsWith('T00:00:00.000Z')) return true;
     // The parser's date-only shapes. Datetimes, including UTC midnight,
     // are instants and must use the cycle timezone.
-    return /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:[a-z]+,?\s+)?[a-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}|\d{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,9}\.?,?\s+\d{4})$/i.test(value.trim());
+    return false;
   }
   return false;
 }
