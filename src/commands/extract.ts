@@ -1340,8 +1340,9 @@ async function extractForSlugs(
       if (relPath === undefined) return; // deleted file — sync already handled removal
       const fullPath = join(brainDir, relPath);
       try {
-        const snapshot = ownership && (ownership.metadata.get(`${sourceId ?? 'default'}\0${slug}`)?.type === 'meeting' || ownership.origins.has(slug))
-          ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default' }) : null;
+        const snapshot = ownership ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default' }) : null;
+        if (ownership && !snapshot) return;
+        signal?.throwIfAborted();
         const content = readFileSync(fullPath, 'utf-8');
 
         if (doLinks) {
@@ -1359,6 +1360,7 @@ async function extractForSlugs(
               if (written === null) return;
             }
             linksCreated += written ?? await replaceLinksReportingLoss(slug, links, ownership);
+            if (!snapshot || !pack || !await storePendingFileReferences(engine, slug, sourceId ?? 'default', snapshot, content, ownership, pack, globalBasename, includeFrontmatter, signal)) return;
           }
         }
 
@@ -1390,7 +1392,7 @@ async function extractForSlugs(
   // to `extract --stale` / doctor. Stamp only after BOTH batches flushed,
   // with the pre-read updated_at snapshot (D4) — refs the snapshot never
   // saw (row created mid-run) are skipped and stay stale.
-  if (!dryRun && mode === 'all') {
+  if (!dryRun && mode === 'all' && !isAborted(signal)) {
     await stampExtracted(engine, refsWithSnapshotStamps(processedRefs, stampSnapshot));
   }
   progress.finish();
@@ -1467,8 +1469,9 @@ async function extractLinksFromDir(
       if (isAborted(signal)) return;
       try {
         const slug = pathToSlug(file.relPath);
-        const snapshot = ownership && (ownership.metadata.get(`${sourceId ?? 'default'}\0${slug}`)?.type === 'meeting' || ownership.origins.has(slug))
-          ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default' }) : null;
+        const snapshot = ownership ? await engine.readPageSnapshot(slug, { sourceId: sourceId ?? 'default' }) : null;
+        if (ownership && !snapshot) return;
+        signal?.throwIfAborted();
         const content = readFileSync(file.path, 'utf-8');
         const links = await extractLinksFromFile(content, file.relPath, allSlugs, { globalBasename, pack, pageTypes });
         let reconciled = false;
@@ -1493,6 +1496,7 @@ async function extractLinksFromDir(
             if (batch.length >= BATCH_SIZE) await flush();
           }
         }
+        if (ownership && (!snapshot || !pack || !await storePendingFileReferences(engine, slug, sourceId ?? 'default', snapshot, content, ownership, pack, globalBasename, false, signal))) return;
         processed.push(slug);
       } catch { /* skip unreadable */ }
       progress.tick(1);
@@ -1613,6 +1617,29 @@ export function slugsSafeToStamp(
   return links.processed.filter((slug) => timelineRead.has(slug));
 }
 
+async function storePendingFileReferences(engine: BrainEngine, slug: string, sourceId: string,
+  snapshot: NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>, content: string,
+  ownership: Awaited<ReturnType<typeof fileLinkOwnership>>, pack: LinkExtractionPack,
+  globalBasename: boolean, includeFrontmatter: boolean, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  const parsed = parseMarkdown(content, `${slug}.md`, { activePack: pack.page_types ? { page_types: pack.page_types } : undefined });
+  const extracted = await extractPageLinks(slug, content, parsed.frontmatter, snapshot.page.type, ownership.resolver,
+    { pack, globalBasename, skipFrontmatter: !includeFrontmatter, targetType: (targetSlug, targetSourceId) => {
+      const resolved = ownership.resolve(slug, { targetSlug, targetSourceId, linkType: '', context: '' });
+      return resolved.ok ? ownership.metadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
+    } });
+  if (!extracted.attendanceComplete) return false;
+  const missing: LinkCandidate[] = [], resolvedRows: LinkBatchInput[] = [];
+  for (const candidate of extracted.candidates) {
+    const resolved = ownership.resolve(slug, candidate);
+    if (resolved.ok) resolvedRows.push(resolvedLinkCandidate(candidate, slug, sourceId, resolved));
+    else if (resolved.reason === 'missing_target') missing.push(candidate);
+  }
+  await storePendingLinkReferences(engine, { slug, sourceId, revision: snapshot.revision,
+    sourceIncarnation: snapshot.sourceIncarnation }, pendingCandidates(missing, resolvedRows, globalBasename, slug, sourceId), signal);
+  return true;
+}
+
 export async function extractLinksForSlugs(
   engine: BrainEngine,
   repoPath: string,
@@ -1659,22 +1686,6 @@ export async function extractLinksForSlugs(
       if (!snapshot) continue;
       const content = readFileSync(filePath, 'utf-8');
       const links = await extractLinksFromFile(content, relPath, allSlugs, { globalBasename, includeFrontmatter, pack, pageTypes, aliases });
-      const missing: LinkCandidate[] = [];
-      const resolvedRows: LinkBatchInput[] = [];
-      if (snapshot) {
-        const parsed = parseMarkdown(content, relPath, { activePack: pack.page_types ? { page_types: pack.page_types } : undefined });
-        const extracted = await extractPageLinks(slug, content, parsed.frontmatter, snapshot.page.type, ownership.resolver,
-          { pack, globalBasename, skipFrontmatter: !includeFrontmatter, targetType: (targetSlug, targetSourceId) => {
-            const resolved = ownership.resolve(slug, { targetSlug, targetSourceId, linkType: '', context: '' });
-            return resolved.ok ? ownership.metadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
-          } });
-        if (!extracted.attendanceComplete) continue;
-        for (const candidate of extracted.candidates) {
-          const resolved = ownership.resolve(slug, candidate);
-          if (resolved.ok) resolvedRows.push(resolvedLinkCandidate(candidate, slug, sourceId, resolved));
-          else if (resolved.reason === 'missing_target') missing.push(candidate);
-        }
-      }
       let written: number | null | undefined;
       if (snapshot?.page.type === 'meeting' || ownership.origins.has(slug) || links.some(link => link.link_type === 'attended' && link.origin_slug === slug && link.to_slug === slug)) {
         if (!snapshot) throw new Error('Link extraction origin is missing');
@@ -1682,9 +1693,7 @@ export async function extractLinksForSlugs(
         if (written === null) continue;
       }
       created += written ?? await replacePageFileLinks(engine, slug, sourceId, links, includeFrontmatter, ownership) ?? 0;
-      if (snapshot) await storePendingLinkReferences(engine, { slug, sourceId,
-        revision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation },
-        pendingCandidates(missing, resolvedRows, globalBasename, slug, sourceId));
+      if (!await storePendingFileReferences(engine, slug, sourceId, snapshot, content, ownership, pack, globalBasename, includeFrontmatter)) continue;
       processed.push(slug);
     } catch { /* skip: unreadable — not processed, stays stale */ }
   }
@@ -1872,6 +1881,7 @@ async function extractLinksFromDB(
     unresolved.push(...extracted.unresolved);
     if (!extracted.attendanceComplete) { skippedAttendanceIncomplete++; continue; }
 
+    const missing: LinkCandidate[] = [];
     for (const c of extracted.candidates) {
       // v0.32.8 F10 cross-source link resolution, extracted to the shared pure
       // helper in v0.42.7 (#1696) so extract --stale reuses the exact same
@@ -1884,6 +1894,7 @@ async function extractLinksFromDB(
         { crossSource, defaultSourceId: linkDefaultSourceId },
       );
       if (!resolved.ok) {
+        if (resolved.reason === 'missing_target') missing.push(c);
         if (resolved.reason === 'cross_source') skippedCrossSource++;
         else skippedMissingTarget++;
         continue;
@@ -1915,6 +1926,8 @@ async function extractLinksFromDB(
           sourceIncarnation: snapshot.sourceIncarnation }, batch, { includeFrontmatter,
           expectedEndpoints: capturedLinkEndpoints(batch, targetMetadata) });
         created += written.created;
+        await storePendingLinkReferences(engine, { slug, sourceId: source_id, revision: snapshot.revision,
+          sourceIncarnation: snapshot.sourceIncarnation }, pendingCandidates(missing, batch, globalBasename, slug, source_id));
       } catch (error) {
         if (jsonMode) process.stderr.write(JSON.stringify({ event: 'batch_error', size: batch.length, code: 'graph_write_failed' }) + '\n');
         throw error;

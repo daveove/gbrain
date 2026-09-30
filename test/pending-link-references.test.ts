@@ -1,10 +1,10 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { extractLinksForSlugs, extractStaleFromDB, stampExtracted } from '../src/commands/extract.ts';
+import { extractLinksForSlugs, extractStaleFromDB, runExtract, runExtractCore, stampExtracted } from '../src/commands/extract.ts';
 import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
@@ -277,4 +277,68 @@ test('incremental registry failure does not report the origin safe to stamp', as
     expect((await extractLinksForSlugs(engine, dir, ['people/origin'])).processed).toEqual([]);
     expect(await engine.countStalePagesForExtraction()).toBe(1);
   } finally { engine.executeRaw = execute; rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+for (const mode of ['incremental', 'full-fs', 'manual-db'] as const) {
+  const run = (dir: string) => mode === 'manual-db'
+    ? runExtract(engine, ['all', '--source', 'db', '--source-id', 'default', '--json'])
+    : runExtractCore(engine, { mode: 'all', dir, quiet: true,
+      ...(mode === 'incremental' ? { slugs: ['people/origin'] } : {}) });
+  test(`${mode} all-mode persists missing targets before its watermark`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-all-pending-'));
+    try {
+      mkdirSync(join(dir, 'people'));
+      writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/later]]');
+      await engine.putPage('people/origin', page('[[people/later]]'));
+      await run(dir);
+      expect(await engine.countStalePagesForExtraction()).toBe(0);
+      expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
+      await engine.putPage('people/later', page());
+      await drain();
+      expect((await engine.getLinks('people/origin')).some(link => link.to_slug === 'people/later')).toBe(true);
+      expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+      expect((await drain()).pagesProcessed).toBe(0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+  test(`${mode} registry failure leaves its origin stale`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-all-pending-fail-'));
+    mkdirSync(join(dir, 'people'));
+    writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/missing]]');
+    await engine.putPage('people/origin', page('[[people/missing]]'));
+    const execute = engine.executeRaw;
+    engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
+      if (sql.includes('INSERT INTO config(key,value)')) throw new Error('registry unavailable');
+      return execute.call(this, sql, params);
+    }) as typeof engine.executeRaw;
+    try {
+      if (mode === 'manual-db') {
+        const exit = spyOn(process, 'exit').mockImplementation((code) => { throw new Error(`extract exit ${code}`); });
+        try { await expect(run(dir)).rejects.toThrow('extract exit 1'); expect(exit).toHaveBeenCalledWith(1); }
+        finally { exit.mockRestore(); }
+      } else await run(dir);
+      expect(await engine.countStalePagesForExtraction()).toBe(1);
+      expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+    } finally { engine.executeRaw = execute; rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+
+for (const incremental of [true, false]) test(`file all-mode abort after snapshot writes no pending state (${incremental})`, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-file-pending-abort-'));
+  mkdirSync(join(dir, 'people'));
+  writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/missing]]');
+  await engine.putPage('people/origin', page('[[people/missing]]'));
+  const controller = new AbortController();
+  const read = engine.readPageSnapshot;
+  engine.readPageSnapshot = async function(...args) {
+    const value = await read.apply(this, args); controller.abort(); return value;
+  };
+  try {
+    await runExtractCore(engine, { mode: 'all', dir, quiet: true, signal: controller.signal,
+      ...(incremental ? { slugs: ['people/origin'] } : {}) });
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+    expect(await engine.countStalePagesForExtraction()).toBe(1);
+    expect(await engine.getLinks('people/origin')).toHaveLength(0);
+  } finally { engine.readPageSnapshot = read; rmSync(dir, { recursive: true, force: true }); }
 });
