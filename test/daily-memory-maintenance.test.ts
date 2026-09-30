@@ -427,7 +427,7 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
-  test('refuses to commandeer a user-owned gbrain-dream source', async () => {
+  test('refuses to commandeer a user-owned dream source', async () => {
     await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [DAILY_MEMORY_SOURCE_ID]);
     await engine.executeRaw(
       `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
@@ -444,6 +444,25 @@ describe('daily memory from sources the brain already holds', () => {
     );
     expect(cfg[0]?.federated).toBe(true);
     expect(cfg[0]?.system_index).toBeNull();
+  });
+
+  test('sticky-upgrades a legacy federated:false dream index we already own', async () => {
+    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [DAILY_MEMORY_SOURCE_ID]);
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+      [DAILY_MEMORY_SOURCE_ID, 'Dream cycle indexes', JSON.stringify({ federated: false })],
+    );
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    expect(result.written).toBe(true);
+    const cfg = await engine.executeRaw<{ federated: boolean | null; system_index: boolean | null }>(
+      `SELECT (config->>'federated')::boolean AS federated,
+              (config->>'system_index')::boolean AS system_index
+         FROM sources WHERE id = $1`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(cfg[0]?.federated).toBe(false);
+    expect(cfg[0]?.system_index).toBe(true);
   });
 
   test('escapes markdown control characters in source-record metadata', async () => {

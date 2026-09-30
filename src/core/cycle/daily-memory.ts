@@ -10,11 +10,12 @@
  *
  * The scan is brain-wide on purpose: this runs only from the single
  * maintenance job, which is the lane that already walks every source.
- * The note itself is one row in reserved source `gbrain-dream`
- * (`federated: false`, `system_index: true`). Page visibility alone is
- * not enough: remote_private_pages can opt out of private filtering, so
- * cross-source indexes must not live in `default`. `system_index` keeps
- * outbound link extraction able to resolve targets in other sources.
+ * The note itself is one row in source `dream` (`federated: false`,
+ * `system_index: true`). Page visibility alone is not enough:
+ * remote_private_pages can opt out of private filtering, so cross-source
+ * indexes must not live in `default`. `system_index` keeps outbound
+ * link extraction able to resolve targets in other sources. A pre-existing
+ * non-system `dream` source is refused rather than commandeered.
  */
 
 import { createHash } from 'node:crypto';
@@ -24,35 +25,59 @@ import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
-export const DAILY_MEMORY_SOURCE_ID = 'gbrain-dream';
+export const DAILY_MEMORY_SOURCE_ID = 'dream';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
 /** Keep the note a day index. The remaining pages stay on their sources. */
 export const DAILY_MEMORY_PAGE_CAP = 40;
 /** Per-source link cap so a chat firehose cannot fill the note. */
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
 
-/** Reserved non-federated system source for brain-wide indexes. */
+const DAILY_MEMORY_SOURCE_NAME = 'Dream cycle indexes';
+
+function parseSourceConfig(raw: unknown): Record<string, unknown> | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) as Record<string, unknown>; }
+    catch { return null; }
+  }
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  return null;
+}
+
+/** True when the row is already our system index (current or pre-system_index). */
+function isOwnedDailyMemorySource(
+  config: Record<string, unknown> | null,
+  name: string | null,
+): boolean {
+  if (config?.system_index === true) return true;
+  // Prior builds inserted federated:false under this display name before system_index.
+  return config?.federated === false && name === DAILY_MEMORY_SOURCE_NAME;
+}
+
+/** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
   const config = JSON.stringify({ federated: false, system_index: true });
-  const existing = await engine.executeRaw<{ config: unknown }>(
-    `SELECT config FROM sources WHERE id = $1`,
+  const existing = await engine.executeRaw<{ config: unknown; name: string | null }>(
+    `SELECT config, name FROM sources WHERE id = $1`,
     [DAILY_MEMORY_SOURCE_ID],
   );
   if (existing.length === 0) {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
-      [DAILY_MEMORY_SOURCE_ID, 'GBrain dream indexes', config],
+      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
     );
     return;
   }
-  const raw = existing[0]!.config;
-  const parsed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, unknown> | null;
-  if (parsed && parsed.system_index === true) {
+  const row = existing[0]!;
+  const parsed = parseSourceConfig(row.config);
+  if (isOwnedDailyMemorySource(parsed, row.name)) {
+    // Keep trusted-index markers sticky for our owned dream index.
     await engine.executeRaw(
       `UPDATE sources
-       SET config = COALESCE(config, '{}'::jsonb) || $2::text::jsonb
+       SET name = $2,
+           config = COALESCE(config, '{}'::jsonb) || $3::text::jsonb
        WHERE id = $1`,
-      [DAILY_MEMORY_SOURCE_ID, config],
+      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
     );
     return;
   }
@@ -62,23 +87,22 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
   );
 }
 
-/** Soft-delete prior generated copies left in legacy hosts so they cannot leak. */
-async function retireLegacyGeneratedIndexes(
+/** Soft-delete prior generated copies left in `default` so they cannot leak. */
+async function retireDefaultGeneratedIndexes(
   engine: BrainEngine,
   slugs: string[],
 ): Promise<void> {
-  for (const sourceId of ['default', 'dream']) {
-    for (const slug of slugs) {
-      const existing = await engine.getPage(slug, {
-        sourceId,
-        includeDeleted: true,
-      });
-      if (!existing || existing.deleted_at) continue;
-      if (existing.frontmatter?.dream_generated !== true) continue;
-      await engine.softDeletePage(slug, { sourceId });
-    }
+  for (const slug of slugs) {
+    const existing = await engine.getPage(slug, {
+      sourceId: 'default',
+      includeDeleted: true,
+    });
+    if (!existing || existing.deleted_at) continue;
+    if (existing.frontmatter?.dream_generated !== true) continue;
+    await engine.softDeletePage(slug, { sourceId: 'default' });
   }
 }
+
 
 
 export interface DailyMemoryWrite {
@@ -138,10 +162,18 @@ function oneLine(title: string): string {
 
 /** Keep generated index Markdown from interpreting metadata as markup/links. */
 function escapeMdMeta(text: string): string {
-  return oneLine(text)
+  return oneLine(String(text ?? ''))
     .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
     .replace(/\[/g, '\\[')
     .replace(/\]/g, '\\]');
+}
+
+/** Intentional wikilink target: strip closers so metadata cannot nest links. */
+function wikiLinkTarget(sourceId: string, slug: string): string {
+  const safeSource = sourceId.replace(/[\[\]]/g, '');
+  const safeSlug = slug.replace(/[\[\]]/g, '');
+  return safeSource === 'default' ? safeSlug : `${safeSource}:${safeSlug}`;
 }
 
 interface SourceRecordGroup {
@@ -178,7 +210,7 @@ function renderNote(day: string, input: RenderInput): string {
       lines.push(`## ${escapeMdMeta(source)}`, '');
     }
     // Bare slugs address the default source; every other source is qualified.
-    const target = row.source_id === 'default' ? row.slug : `${row.source_id}:${row.slug}`;
+    const target = wikiLinkTarget(row.source_id, row.slug);
     lines.push(`- [[${target}]] — ${escapeMdMeta(row.title)}`);
   }
   if (input.rows.length) lines.push('');
@@ -192,7 +224,7 @@ function renderNote(day: string, input: RenderInput): string {
       const total = Number(group.total) || group.links.length;
       lines.push(`${escapeMdMeta(group.source_type)}: ${total} ${total === 1 ? 'record' : 'records'} changed`, '');
       for (const link of group.links) {
-        lines.push(`- [[${link.slug}]] — ${escapeMdMeta(link.entity_type || group.source_type)}`);
+        lines.push(`- [[${link.slug.replace(/[\[\]]/g, '')}]] — ${escapeMdMeta(link.entity_type || group.source_type)}`);
       }
       lines.push('');
       if (total > group.links.length) {
@@ -309,7 +341,7 @@ export async function writeDailyMemoryFromSources(
     }, { sourceId: DAILY_MEMORY_SOURCE_ID });
 
     const retired = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
-    await retireLegacyGeneratedIndexes(engine, retired);
+    await retireDefaultGeneratedIndexes(engine, retired);
 
     return { written: true, day, slug, pages: rows.length };
   } catch (err) {
