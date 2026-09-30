@@ -1,3 +1,4 @@
+import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
 /**
  * The daily maintenance job writes one durable memory from pages that
  * already live in sources. The test calls `autopilot-global-maintenance`
@@ -570,6 +571,75 @@ describe('daily memory from sources the brain already holds', () => {
       await queueDailyMemoryExtract(engine, healthy);
       expect(failIfCalled).not.toHaveBeenCalled();
     } finally { failIfCalled.mockRestore(); }
+  });
+
+  test('empty activity clears only the live generated dream day and preserves historical targets', async () => {
+    await seedRecord('gmail:empty', 'gmail', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    await extractStaleFromDB(engine, { dryRun: false, quiet: true, jsonMode: true, catchUp: false,
+      includeFrontmatter: false, sourceIdFilter: DAILY_MEMORY_SOURCE_ID });
+    expect(await engine.getLinks(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toHaveLength(0);
+    const original = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    await engine.putPage(first.slug, { type: 'note', title: 'Historical generated day',
+      compiled_truth: 'Historical [[default:source-records/example]]', frontmatter: { dream_generated: true } });
+    const historical = await engine.getPage(first.slug);
+    const references = await engine.executeRaw("SELECT slug,knowledge_revision FROM pages WHERE source_id=$1 AND slug LIKE 'source-records/%'", [DAILY_MEMORY_SOURCE_ID]);
+    await engine.executeRaw('DELETE FROM source_records');
+    const cleared = await writeSeptember30();
+    expect(cleared.written).toBe(true);
+    expect(cleared.needs_extract).toBe(true);
+    const empty = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(original.compiled_truth).toContain('gmail: 1 record changed');
+    expect(empty.compiled_truth).toContain('No stored page or source record activity remains');
+    expect(empty.compiled_truth).not.toContain('[[');
+    expect(empty.frontmatter.dream_generated).toBe(true);
+    expect(await engine.getPage(first.slug)).toEqual(historical);
+    expect(await engine.executeRaw("SELECT slug,knowledge_revision FROM pages WHERE source_id=$1 AND slug LIKE 'source-records/%'", [DAILY_MEMORY_SOURCE_ID])).toEqual(references);
+    await extractStaleFromDB(engine, { dryRun: false, quiet: true, jsonMode: true, catchUp: false,
+      includeFrontmatter: false, sourceIdFilter: DAILY_MEMORY_SOURCE_ID });
+    expect(await engine.getLinks(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toHaveLength(0);
+    expect((await writeSeptember30()).reason).toBe('unchanged');
+    await engine.softDeletePage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect((await writeSeptember30()).reason).toBe('no_source_activity');
+    expect((await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true }))!.deleted_at).toBeTruthy();
+  });
+
+  for (const sourceId of ['default', DAILY_MEMORY_SOURCE_ID]) for (const deleted of [false, true]) {
+    test(`empty activity preserves a human day in ${sourceId} (deleted=${deleted})`, async () => {
+      const slug = dailyMemorySlug('2026-09-30');
+      await engine.putPage(slug, { type: 'note', title: 'Human day', compiled_truth: 'Human day fixture',
+        frontmatter: { author: 'human' } }, { sourceId });
+      if (deleted) await engine.softDeletePage(slug, { sourceId });
+      const before = await engine.getPage(slug, { sourceId, includeDeleted: true });
+      const result = await writeSeptember30();
+      expect(result.reason).toBe('human_page');
+      expect(result.source_id).toBe(sourceId);
+      expect(await engine.getPage(slug, { sourceId, includeDeleted: true })).toEqual(before);
+    });
+  }
+
+  test('unchanged generated targets need extraction when their watermark predates the extractor version', async () => {
+    await seedRecord('gmail:version', 'gmail', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    const snapshot = () => engine.executeRaw("SELECT slug,knowledge_revision,updated_at FROM pages WHERE source_id=$1 ORDER BY slug", [DAILY_MEMORY_SOURCE_ID]);
+    const before = await snapshot();
+    // A watermark newer than the page can still predate the extractor implementation.
+    await engine.executeRaw("UPDATE pages SET updated_at=$2::timestamptz - interval '2 seconds', links_extracted_at=$2::timestamptz - interval '1 second' WHERE source_id=$1",
+      [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+    const unchanged = await snapshot();
+    const stale = await writeSeptember30();
+    expect(stale.written).toBe(false);
+    expect(stale.needs_extract).toBe(true);
+    expect(await snapshot()).toEqual(unchanged);
+    await queueDailyMemoryExtract(engine, stale);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND status='waiting'")).toHaveLength(1);
+    await engine.executeRaw("UPDATE pages SET links_extracted_at=$2::timestamptz WHERE source_id=$1", [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+    expect((await writeSeptember30()).needs_extract).toBe(false);
+    // Day-only freshness cannot hide an older reference watermark.
+    await engine.executeRaw("UPDATE pages SET links_extracted_at=$2::timestamptz - interval '1 second' WHERE source_id=$1 AND slug<>$3",
+      [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS, first.slug]);
+    expect((await writeSeptember30()).needs_extract).toBe(true);
+    expect(before).toHaveLength(2);
   });
 
   test('record no-op requires private visibility and every source identity marker', async () => {

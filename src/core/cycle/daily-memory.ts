@@ -17,6 +17,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
@@ -213,6 +214,8 @@ function renderNote(day: string, input: RenderInput): string {
     lines.push(`${input.rows.length} of ${input.pageTotal} pages are linked. The rest stay on their source pages.`, '');
   }
 
+  if (input.pageTotal === 0 && input.records.length === 0) lines.push('No stored page or source record activity remains for this day.', '');
+
   if (input.records.length) {
     lines.push('## Comms', '');
     for (const group of input.records) {
@@ -304,16 +307,16 @@ export async function writeDailyMemoryFromSources(
       afterSlug = last.slug;
     }
     const records = await loadSourceRecordGroups(engine, zone, day);
-    if (rows.length === 0 && records.length === 0) {
-      return { written: false, day, slug, pages: 0, reason: 'no_source_activity' };
-    }
-
     const existing = await engine.getPage(slug, {
       sourceId: DAILY_MEMORY_SOURCE_ID,
       includeDeleted: true,
     });
     if (existing && existing.frontmatter?.dream_generated !== true) {
       return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page' };
+    }
+
+    if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: 0, reason: 'no_source_activity' };
     }
 
     let recordsWrote = false;
@@ -361,8 +364,9 @@ export async function writeDailyMemoryFromSources(
       `SELECT EXISTS (SELECT 1 FROM pages
         WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
           AND frontmatter @> '{"dream_generated":true}'::jsonb
-          AND (links_extracted_at IS NULL OR updated_at > links_extracted_at)) AS needed`,
-      [DAILY_MEMORY_SOURCE_ID, targets],
+          AND (links_extracted_at IS NULL OR links_extracted_at < $3::timestamptz
+            OR updated_at > links_extracted_at)) AS needed`,
+      [DAILY_MEMORY_SOURCE_ID, targets, LINK_EXTRACTOR_VERSION_TS],
     );
     const needs_extract = readiness.needed;
 
