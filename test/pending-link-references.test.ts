@@ -60,6 +60,74 @@ test('another source target does not wake isolated origin', async () => {
   expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
 });
 
+for (const federated of [true, false]) test(`qualified target arrival requeues its origin without widening the target-source drain (${federated})`, async () => {
+  const a = 'pending-origin', b = 'pending-target';
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,$2::text::jsonb),($3,$3,'{}'::jsonb)",
+    [a, JSON.stringify({ federated }), b]);
+  const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
+    dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+  });
+  await engine.putPage('people/origin', page(`[[${b}:people/later]]`), { sourceId: a });
+  await scoped(a);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+  expect(await loadPendingLinkReferences(engine, a)).toHaveLength(1);
+  await engine.putPage('people/later', page(), { sourceId: b });
+  const pending = await loadPendingLinkReferences(engine, a);
+  expect((await scoped(b, true)).staleRemaining).toBe(1); // Only B is extracted by this invocation.
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+  const read = engine.readPageSnapshot;
+  engine.readPageSnapshot = async function(...args) {
+    if (args[1]?.sourceId === a) throw new Error('Target-source drain must not read origin body');
+    return read.apply(this, args);
+  };
+  try { expect((await scoped(b)).pagesProcessed).toBe(1); }
+  finally { engine.readPageSnapshot = read; }
+  if (!federated) {
+    expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+    expect(await loadPendingLinkReferences(engine, a)).toHaveLength(1);
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    expect((await scoped(b)).pagesProcessed).toBe(0);
+  }
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+  expect((await scoped(a)).pagesProcessed).toBe(1);
+  expect((await engine.getLinks('people/origin', { sourceId: a })).some(link =>
+    link.to_source_id === b && link.to_slug === 'people/later')).toBe(true);
+  expect((await scoped(a)).pagesProcessed).toBe(0);
+});
+
+test('only the configured fallback source wakes an unqualified foreign origin', async () => {
+  const a = 'pending-fallback-origin', b = 'pending-configured-default', other = 'pending-nondefault';
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb),($3,$3,'{}'::jsonb)", [a,b,other]);
+  await engine.setConfig('sources.default', b);
+  const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
+    dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+  });
+  await engine.putPage('people/fallback-origin', page('[[people/fallback-later]]'), { sourceId: a });
+  await scoped(a);
+  const pending = await loadPendingLinkReferences(engine, a);
+  await engine.putPage('people/fallback-later', page(), { sourceId: other });
+  await scoped(other);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  await engine.putPage('people/fallback-later', page(), { sourceId: b });
+  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
+  const read = engine.readPageSnapshot;
+  engine.readPageSnapshot = async function(...args) {
+    if (args[1]?.sourceId === a) throw new Error('Fallback drain must not read foreign body');
+    return read.apply(this, args);
+  };
+  try { expect((await scoped(b)).pagesProcessed).toBe(1); }
+  finally { engine.readPageSnapshot = read; }
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(1);
+  expect((await scoped(a)).pagesProcessed).toBe(1);
+  expect((await engine.getLinks('people/fallback-origin', { sourceId: a })).some(link =>
+    link.to_source_id === b && link.to_slug === 'people/fallback-later')).toBe(true);
+});
+
 test('registry write failure preserves stale watermark', async () => {
   await engine.putPage('people/origin', page('[[people/missing]]'));
   const execute = engine.executeRaw;
@@ -221,6 +289,13 @@ test('pending registry scans only the requested source in bounded keyset batches
   expect(batches.flat().every(row => row.reference.sourceId === 'default')).toBe(true);
   expect(new Set(batches.flat().map(row => row.key)).size).toBe(105);
   expect(await loadPendingLinkReferences(engine, 'unrelated')).toHaveLength(205);
+  await engine.setConfig('internal.pending-links.malformed-text', '{broken');
+  await engine.setConfig('internal.pending-links.malformed-shape', JSON.stringify({
+    sourceId: 'default', candidates: [{ targetSourceId: 'default' }],
+  }));
+  expect(await loadPendingLinkReferences(engine, 'default')).toHaveLength(105);
+  expect(await loadPendingLinkReferences(engine)).toHaveLength(310);
+  expect(await engine.getConfig('internal.pending-links.malformed-text')).toBe('{broken');
   const iterator = pendingLinkReferenceBatches(engine, 'default');
   expect((await iterator.next()).value).toHaveLength(100);
   expect(await iterator.return()).toEqual({ value: undefined, done: true });

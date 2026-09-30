@@ -2130,8 +2130,9 @@ export async function extractStaleFromDB(
 
   // Count stale watermarks first; ready dormant references add work without a stale watermark.
   let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
+  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline, defaultSourceId: linkDefaultSourceId });
   let pendingLinks = (await pendingBatches.next()).value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
@@ -2167,15 +2168,13 @@ export async function extractStaleFromDB(
   const packs = new Map<string, LinkExtractionPack | null>();
   // Issue #2589: mirrors extractLinksFromDB (see resolveCandidateSources).
   const crossSource = await isCrossSourceLinksEnabled(engine);
-  // #4611: mirrors extractLinksFromDB — configured default, resolved once.
-  const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
   if (pendingLinks.length) {
     let readyPending = 0;
     do {
       readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
-        deadline: pendingDeadline, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
+        deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
       pendingLinks = (await pendingBatches.next()).value ?? [];

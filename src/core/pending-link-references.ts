@@ -19,22 +19,44 @@ function keyFor(origin: PendingLinkOrigin): string {
   return PREFIX + createHash('sha256').update(JSON.stringify([origin.sourceId, origin.slug])).digest('hex');
 }
 
+function parseReference(value: string): PendingLinkReference | null {
+  try {
+    const ref = JSON.parse(value) as PendingLinkReference;
+    if (!ref || !['slug', 'sourceId', 'revision', 'sourceIncarnation'].every(key =>
+      typeof ref[key as keyof PendingLinkOrigin] === 'string' && ref[key as keyof PendingLinkOrigin].length)
+      || !Array.isArray(ref.candidates) || !ref.candidates.every(candidate => candidate
+        && typeof candidate.targetSlug === 'string' && candidate.targetSlug.length
+        && (candidate.targetSourceId === undefined || typeof candidate.targetSourceId === 'string')
+        && (candidate.fromSlug === undefined || typeof candidate.fromSlug === 'string'))) return null;
+    return ref;
+  } catch { return null; }
+}
+
 const PENDING_BATCH_SIZE = 100;
 
-/** Keyset batches filter the origin source in SQL before parsing registry values. */
+/** Keyset batches filter origin or explicitly recorded target source before parsing. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], void> {
+  opts: { signal?: AbortSignal; deadline?: number; defaultSourceId?: string } = {}): AsyncGenerator<PendingLinkRow[], void> {
   let after = '';
   while (true) {
     opts.signal?.throwIfAborted();
     if (Date.now() >= (opts.deadline ?? Infinity)) return;
     const rows = await engine.executeRaw<{ key: string; value: string }>(
       `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
-        AND ($2::text IS NULL OR CASE WHEN key LIKE $1 THEN value::jsonb->>'sourceId' END=$2)
-        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
+        AND ($2::text IS NULL OR CASE WHEN key LIKE $1 AND pg_input_is_valid(value,'jsonb') THEN
+          value::jsonb->>'sourceId'=$2 OR (value::jsonb->'candidates') @>
+            jsonb_build_array(jsonb_build_object('targetSourceId',$2::text))
+          OR ($2=$5 AND EXISTS (SELECT 1 FROM jsonb_array_elements(
+            CASE WHEN jsonb_typeof(value::jsonb->'candidates')='array' THEN value::jsonb->'candidates' ELSE '[]'::jsonb END) candidate
+            WHERE NOT candidate ? 'targetSourceId')) END)
+        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE, opts.defaultSourceId ?? null]);
     opts.signal?.throwIfAborted();
     if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
-    yield rows.map(row => ({ ...row, reference: JSON.parse(row.value) as PendingLinkReference }));
+    const parsed = rows.flatMap(row => {
+      const reference = parseReference(row.value);
+      return reference ? [{ ...row, reference }] : [];
+    });
+    if (parsed.length) yield parsed;
     if (rows.length < PENDING_BATCH_SIZE) return;
     after = rows.at(-1)!.key;
   }
@@ -81,7 +103,7 @@ export async function storePendingLinkReferences(engine: Store, origin: PendingL
 export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkRow[],
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference) => boolean,
   signal?: AbortSignal, deadline = Infinity,
-  opts: { dryRun?: boolean; versionTs?: string } = {}): Promise<number> {
+  opts: { dryRun?: boolean; versionTs?: string; sourceId?: string } = {}): Promise<number> {
   signal?.throwIfAborted();
   if (!rows.length || Date.now() >= deadline) return 0;
   const identities = rows.map(row => ({ key: row.key, value: row.value,
@@ -110,7 +132,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
     } else if (ref.candidates.some(candidate => resolves({ ...candidate, linkType: '', context: '' }, ref))) {
       if (opts.dryRun) {
         // Already-stale origins are included in the normal preflight count.
-        if (current && !current.already_stale) requeued++;
+        if (current && !current.already_stale && (!opts.sourceId || ref.sourceId === opts.sourceId)) requeued++;
         continue;
       }
       // The config CAS and origin revision/incarnation check belong to the same statement.
@@ -129,7 +151,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
 
 /** Probe stored names only; normal basename semantics remain source-local. */
 export async function probePendingLinkReferences(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string; sourceId?: string },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   let ready = 0;
@@ -142,7 +164,7 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
 }
 
 async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string; sourceId?: string },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   const slugs = [...new Set(rows.flatMap(row => [row.reference.slug,

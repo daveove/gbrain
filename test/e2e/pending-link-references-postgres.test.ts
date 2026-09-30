@@ -65,6 +65,39 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
     expect((await drain()).pagesProcessed).toBe(0);
   }, 60_000);
 
+  for (const qualified of [true, false]) test(`a target-scoped drain wakes a foreign origin without reading its body (qualified=${qualified})`, async () => {
+    const engine = fixture.engine;
+    const originSource = `pending-origin-native-${qualified}`, targetSource = `pending-target-native-${qualified}`;
+    await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb)", [originSource, targetSource]);
+    const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
+      dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+    });
+    if (!qualified) await engine.setConfig('sources.default', targetSource);
+    await engine.putPage('people/qualified-origin', { type: 'person', title: 'Qualified origin fixture',
+      compiled_truth: qualified ? `[[${targetSource}:people/qualified-later]]` : '[[people/qualified-later]]' }, { sourceId: originSource });
+    await scoped(originSource);
+    expect(await loadPendingLinkReferences(engine, originSource)).toHaveLength(1);
+    await engine.putPage('people/qualified-later', { type: 'person', title: 'Qualified target fixture',
+      compiled_truth: 'Synthetic fixture' }, { sourceId: targetSource });
+    const pending = await loadPendingLinkReferences(engine, originSource);
+    expect((await scoped(targetSource, true)).staleRemaining).toBe(1);
+    expect(await loadPendingLinkReferences(engine, originSource)).toEqual(pending);
+    expect(await engine.countStalePagesForExtraction({ sourceId: originSource })).toBe(0);
+    const read = engine.readPageSnapshot;
+    engine.readPageSnapshot = async function(...args) {
+      if (args[1]?.sourceId === originSource) throw new Error('Target drain must not read foreign origin');
+      return read.apply(this, args);
+    };
+    try { expect((await scoped(targetSource)).pagesProcessed).toBe(1); }
+    finally { engine.readPageSnapshot = read; }
+    expect(await engine.countStalePagesForExtraction({ sourceId: originSource })).toBe(1);
+    expect(await loadPendingLinkReferences(engine, originSource)).toHaveLength(0);
+    expect((await scoped(originSource)).pagesProcessed).toBe(1);
+    expect((await engine.getLinks('people/qualified-origin', { sourceId: originSource })).some(link =>
+      link.to_source_id === targetSource && link.to_slug === 'people/qualified-later')).toBe(true);
+    expect((await scoped(originSource)).pagesProcessed).toBe(0);
+  }, 60_000);
+
   test('registry keyset batches exclude unrelated source origins on PostgreSQL', async () => {
     const engine = fixture.engine;
     const rows = Array.from({ length: 310 }, (_, i) => ({
@@ -75,16 +108,20 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
     }));
     await engine.executeRaw(`INSERT INTO config(key,value)
       SELECT key,value FROM jsonb_to_recordset(($1::jsonb)->'rows') AS r(key text,value text)`, [{ rows }]);
+    await engine.setConfig('internal.pending-links.native-malformed-text', '{broken');
+    await engine.setConfig('internal.pending-links.native-malformed-shape', JSON.stringify({ sourceId, candidates: [] }));
     try {
       const batches = [];
       for await (const batch of pendingLinkReferenceBatches(engine, sourceId)) batches.push(batch);
-      expect(batches.map(batch => batch.length)).toEqual([100, 5]);
+      expect(batches.flat()).toHaveLength(105);
+      expect(batches.every(batch => batch.length <= 100)).toBe(true);
       expect(batches.flat().every(row => row.reference.sourceId === sourceId)).toBe(true);
       expect(new Set(batches.flat().map(row => row.key)).size).toBe(105);
       const expired = pendingLinkReferenceBatches(engine, sourceId, { deadline: Date.now() - 1 });
       expect(await expired.next()).toEqual({ value: undefined, done: true });
     } finally {
-      await engine.executeRaw('DELETE FROM config WHERE key=ANY($1::text[])', [rows.map(row => row.key)]);
+      await engine.executeRaw('DELETE FROM config WHERE key=ANY($1::text[])', [[...rows.map(row => row.key),
+        'internal.pending-links.native-malformed-text', 'internal.pending-links.native-malformed-shape']]);
     }
   }, 60_000);
 
