@@ -31,6 +31,7 @@ import { writeFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
+import { DAILY_MEMORY_SOURCE_ID } from '../core/cycle/daily-memory.ts';
 import {
   assessDestructiveImpact,
   checkDestructiveConfirmation,
@@ -932,8 +933,8 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  if (id === 'default') {
-    console.error('Error: cannot archive the "default" source.');
+  if (id === 'default' || id === DAILY_MEMORY_SOURCE_ID) {
+    console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
   }
 
