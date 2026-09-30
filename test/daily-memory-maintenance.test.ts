@@ -471,7 +471,7 @@ describe('daily memory from sources the brain already holds', () => {
   });
 
   test('unrenderable stored slugs are skipped without inventing a link target', async () => {
-    for (const slug of ['notes/safe', 'notes/bad[[phantom]]']) {
+    for (const slug of ['notes/safe', 'notes/bad[[phantom]]', 'notes/bad|alias', 'notes/bad#heading', 'notes/bad^block']) {
       await engine.putPage(slug, { type: 'note', title: 'Label [[injected]]', compiled_truth: 'Synthetic fixture' });
       await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z', effective_date_source='filename' WHERE source_id='default' AND slug=$1", [slug]);
     }
@@ -480,7 +480,8 @@ describe('daily memory from sources the brain already holds', () => {
     expect(daily.compiled_truth).toContain('[[default:notes/safe]]');
     expect(daily.compiled_truth).not.toContain('[[default:notes/bad');
     expect(daily.compiled_truth).not.toContain('[[injected]]');
-    expect(daily.compiled_truth).toContain('1 of 2 pages are linked.');
+    for (const delimiter of ['|', '#', '^']) expect(daily.compiled_truth).not.toContain(`[[default:notes/bad${delimiter}`);
+    expect(daily.compiled_truth).toContain('1 of 5 pages are linked.');
     expect(await engine.getPage('notes/bad[[phantom]]')).not.toBeNull();
   });
 
