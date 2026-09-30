@@ -1,4 +1,4 @@
-import { prepareSyncDailyMemory } from '../core/sync-daily-memory.ts';
+import { prepareSyncDailyMemory, readFullSyncAffectedSlugs } from '../core/sync-daily-memory.ts';
 import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { assertSyncDispatchActive, resolveSyncPersistenceMode } from '../core/persistence/sync-authority.ts';
 import { formatManagedSyncFailure, readManagedSyncFailures, syncFailureJsonFields, type ManagedSyncFailure } from '../core/persistence/sync-failures.ts';
@@ -4149,8 +4149,14 @@ async function performFullSync(
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
   let reconciledDeletes = 0;
+  let fullPagesAffected: string[] = [];
   const advanceFull = async (): Promise<void> => {
     await reconcileFullSource();
+    fullPagesAffected = await readFullSyncAffectedSlugs(engine, {
+      sourceId: fullSourceId, signal: opts.signal,
+      scope: slugRoot && syncScopeRoot !== gitContextRoot ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '',
+      acceptsPath: path => isSyncable(path, opts.strategy ? { strategy: opts.strategy } : undefined) || isPoisonedPath(path),
+    });
     await dailyFollowup?.accept();
     // Persist sync state so the next sync is incremental. Routed through
     // writeSyncAnchor so --source pins the right sources row.
@@ -4421,7 +4427,7 @@ async function performFullSync(
   // is the operator's usual reset move, and it should converge in one run.
   await sweepOrphanedRenameSentinels(engine, fullSourceId, fullFailureSet);
 
-  // Full sync doesn't track pagesAffected, so fall back to embed --stale.
+  // Full imports defer embeddings to their stale sweep.
   // v0.37 fix wave (Lane D.3 + CDX2-8): switched to runEmbedCore for the
   // same reason as the incremental path — surface dim-mismatch via hint
   // instead of silently swallowing or killing the process.
@@ -4452,7 +4458,7 @@ async function performFullSync(
     renamed: 0,
     chunksCreated: result.chunksCreated,
     embedded,
-    pagesAffected: [],
+    pagesAffected: fullPagesAffected,
     // Warning aggregates ride the result for worker/JSON consumers — a full
     // sync that only prints to a daemon's stderr hides them from cron
     // topologies (codex re-review; same rationale as the incremental path).

@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { performSync } from '../src/commands/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -69,4 +70,43 @@ describe('standalone sync daily-memory durable handoff', () => {
       expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='sync-daily-memory'")).toHaveLength(0);
     });
   }
+  test('queued-cycle full sync reports imported and retired dates without duplicate standalone jobs', async () => {
+    renameSync(join(repo, 'notes/old.md'), join(repo, 'notes/new.md'));
+    write('notes/new.md', '2026-01-05');
+    rmSync(join(repo, 'notes/remove.md'));
+    git('add', '-A'); git('commit', '-m', 'full cycle changes');
+    const result = await performSync(engine, { ...opts(), full: true, dailyMemoryFollowup: false });
+    expect(result.pagesAffected).toEqual(expect.arrayContaining(['notes/old', 'notes/new', 'notes/remove']));
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', result.pagesAffected);
+    expect(days).toEqual(expect.arrayContaining(['2026-01-03', '2026-01-04', '2026-01-05']));
+    await queueStandaloneSyncDailyMemory(engine, { sourceId: 'default', commit: result.toCommit!, days });
+    const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(batches.some(row => days.every(day => row.data.daily_memory_dates?.includes(day)))).toBe(true);
+  });
+
+  test('a second working-tree edit at the same HEAD receives fresh maintenance after completed jobs', async () => {
+    const head = git('rev-parse', 'HEAD');
+    write('notes/old.md', '2026-01-05');
+    await performSync(engine, { ...opts(), workingTree: true });
+    const queue = new MinionQueue(engine);
+    const completed: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      const token = `fixture-daily-${i}`;
+      const job = await queue.claim(token, 60_000, 'default', ['autopilot-daily-memory']);
+      if (!job) break;
+      expect(await queue.completeJob(job.id, token, {})).not.toBeNull();
+      completed.push(job.id);
+    }
+    expect(completed.length).toBeGreaterThan(0);
+    write('notes/old.md', '2026-01-06');
+    await performSync(engine, { ...opts(), workingTree: true });
+    expect(git('rev-parse', 'HEAD')).toBe(head);
+    const fresh = await engine.executeRaw<{ id: number; status: string; data: { daily_memory_dates?: string[] } }>(
+      "SELECT id,status,data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(fresh.some(row => !completed.includes(row.id) && ['waiting', 'delayed'].includes(row.status)
+      && row.data.daily_memory_dates?.includes('2026-01-06'))).toBe(true);
+  });
+
 });

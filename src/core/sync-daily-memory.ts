@@ -4,6 +4,26 @@ import type { BrainEngine } from './engine.ts';
 import { appendCompleted, clearOpCheckpoint } from './op-checkpoint.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
+/** Source-scoped full-sync reporting includes tombstones retired by reconciliation. */
+export async function readFullSyncAffectedSlugs(engine: BrainEngine, opts: {
+  sourceId: string; scope: string; signal?: AbortSignal; paths?: string[];
+  acceptsPath?: (path: string) => boolean;
+}): Promise<string[]> {
+  const slugs: string[] = [];
+  let after = '';
+  for (;;) {
+    opts.signal?.throwIfAborted();
+    const rows = await engine.executeRaw<{ slug: string; source_path: string }>(
+      `SELECT slug, source_path FROM pages WHERE source_id = $1 AND slug > $2
+        AND source_path IS NOT NULL AND ($3 = '' OR starts_with(source_path, $3))
+        AND ($4::text[] IS NULL OR source_path = ANY($4::text[]))
+        ORDER BY slug LIMIT 100`, [opts.sourceId, after, opts.scope, opts.paths ?? null]);
+    for (const row of rows) if (!opts.acceptsPath || opts.acceptsPath(row.source_path)) slugs.push(row.slug);
+    if (rows.length < 100) return slugs;
+    after = rows[rows.length - 1]!.slug;
+  }
+}
+
 export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   sourceId: string; commit: string; scope: string; paths?: string[];
   acceptsPath?: (path: string) => boolean; signal?: AbortSignal;
@@ -20,20 +40,7 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   const entries = new Set(saved.map(row => row.path));
   const capture = async () => {
     const slugs = new Set([...entries].filter(s => s.startsWith('slug:')).map(s => s.slice(5)));
-    let after = '';
-    do {
-      opts.signal?.throwIfAborted();
-      const rows = await engine.executeRaw<{ slug: string; source_path: string }>(
-        `SELECT slug, source_path FROM pages WHERE source_id = $1 AND slug > $2
-          AND source_path IS NOT NULL AND ($3 = '' OR starts_with(source_path, $3))
-          AND ($4::text[] IS NULL OR source_path = ANY($4::text[]))
-          ORDER BY slug LIMIT 100`, [opts.sourceId, after, opts.scope, opts.paths ?? null]);
-      for (const row of rows) {
-        if (!opts.acceptsPath || opts.acceptsPath(row.source_path)) slugs.add(row.slug);
-      }
-      if (rows.length < 100) break;
-      after = rows[rows.length - 1]!.slug;
-    } while (true);
+    for (const slug of await readFullSyncAffectedSlugs(engine, opts)) slugs.add(slug);
     const delta = [...slugs].map(slug => `slug:${slug}`);
     for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal })) delta.push(`day:${day}`);
     opts.signal?.throwIfAborted();
