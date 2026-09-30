@@ -101,7 +101,11 @@ export async function dateProvenanceForWrite(engine: Pick<BrainEngine, 'executeR
   if (!ambiguous.length) return frontmatter;
   const [prior] = await engine.executeRaw<{ frontmatter: Record<string, unknown> }>(
     'SELECT frontmatter FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
-  const fresh = ambiguous.filter(key => prior?.frontmatter?.[key] !== frontmatter[key]);
+  const previousMarker = prior?.frontmatter?.[DATE_INSTANT_PROVENANCE];
+  const previousInstants = previousMarker && typeof previousMarker === 'object' && !Array.isArray(previousMarker)
+    ? previousMarker as Record<string, unknown> : {};
+  const fresh = ambiguous.filter(key => prior?.frontmatter?.[key] !== frontmatter[key]
+    || previousInstants[key] === frontmatter[key]);
   if (!fresh.length) return frontmatter;
   return { ...frontmatter, [DATE_INSTANT_PROVENANCE]: {
     ...(marked && typeof marked === 'object' && !Array.isArray(marked) ? marked : {}),

@@ -14,7 +14,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
 import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
-import { computeEffectiveDate } from '../src/core/effective-date.ts';
+import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
@@ -185,6 +185,31 @@ describe('daily memory from sources the brain already holds', () => {
     await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
     expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth)
       .toContain('[[notes/fresh-date-object]]');
+  });
+
+  test('replacement frontmatter retains known instant provenance and explicit calendar edits clear it', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    const iso = '2026-09-30T00:00:00.000Z';
+    const input = {
+      type: 'note', title: 'Replacement fixture', compiled_truth: 'fixture',
+      frontmatter: { date: iso }, effective_date: new Date(iso), effective_date_source: 'date' as const,
+    };
+    await engine.putPage('notes/replacement-instant', input);
+    // Programmatic callers need not carry internal metadata in replacement frontmatter.
+    await engine.putPage('notes/replacement-instant', { ...input, compiled_truth: 'edited fixture' });
+    expect((await engine.getPage('notes/replacement-instant'))!.frontmatter[DATE_INSTANT_PROVENANCE])
+      .toEqual({ date: iso });
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    expect((await engine.getPage(dailyMemorySlug('2026-09-29')))!.compiled_truth)
+      .toContain('[[notes/replacement-instant]]');
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect(await engine.getPage(dailyMemorySlug('2026-09-30'))).toBeNull();
+    await engine.putPage('notes/replacement-instant', { ...input, frontmatter: { date: '2026-09-30' } });
+    expect((await engine.getPage('notes/replacement-instant'))!.frontmatter[DATE_INSTANT_PROVENANCE])
+      .toBeUndefined();
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth)
+      .toContain('[[notes/replacement-instant]]');
   });
 
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
