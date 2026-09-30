@@ -3,6 +3,8 @@ import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACTOR_VERSION_TS, type LinkCandidate } from './link-extraction.ts';
 
 const PREFIX = 'internal.pending-links.';
+type PendingProbeOptions = { dryRun?: boolean; versionTs?: string; sourceId?: string;
+  onReadyForeign?: (sourceId: string) => Promise<void> };
 type Store = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
 export interface PendingLinkOrigin {
   slug: string;
@@ -103,7 +105,7 @@ export async function storePendingLinkReferences(engine: Store, origin: PendingL
 export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkRow[],
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference) => boolean,
   signal?: AbortSignal, deadline = Infinity,
-  opts: { dryRun?: boolean; versionTs?: string; sourceId?: string } = {}): Promise<number> {
+  opts: PendingProbeOptions = {}): Promise<number> {
   signal?.throwIfAborted();
   if (!rows.length || Date.now() >= deadline) return 0;
   const identities = rows.map(row => ({ key: row.key, value: row.value,
@@ -135,6 +137,24 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
         if (current && !current.already_stale && (!opts.sourceId || ref.sourceId === opts.sourceId)) requeued++;
         continue;
       }
+      if (opts.sourceId && ref.sourceId !== opts.sourceId) {
+        if (!opts.onReadyForeign) throw new Error('Pending foreign origin extraction handoff is unavailable');
+        const changed = await engine.executeRaw(`UPDATE pages p SET links_extracted_at=NULL FROM sources s,config c
+          WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL
+            AND p.knowledge_revision=$3 AND s.id=p.source_id AND s.incarnation=$4
+            AND c.key=$5 AND c.value=$6 RETURNING p.id`,
+          [ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation, row.key, row.value]);
+        if (changed.length) {
+          signal?.throwIfAborted();
+          await opts.onReadyForeign(ref.sourceId);
+          await engine.executeRaw(`DELETE FROM config WHERE key=$1 AND value=$2 AND EXISTS (
+            SELECT 1 FROM pages p JOIN sources s ON s.id=p.source_id WHERE p.slug=$3 AND p.source_id=$4
+              AND p.knowledge_revision=$5 AND p.deleted_at IS NULL AND s.incarnation=$6)`,
+            [row.key, row.value, ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation]);
+          requeued += changed.length;
+        }
+        continue;
+      }
       // The config CAS and origin revision/incarnation check belong to the same statement.
       const changed = await engine.executeRaw(`WITH ready AS (
         UPDATE pages p SET links_extracted_at=NULL FROM sources s,config c
@@ -149,9 +169,17 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
   return requeued;
 }
 
+/** Mark-before-queue callers retain the registry until this durable handoff succeeds. */
+export async function queuePendingOriginExtraction(engine: BrainEngine, sourceId: string, targetSourceId: string): Promise<void> {
+  const { queueDeferredStaleSweep } = await import('./deferred-stale-extract.ts');
+  const accepted = await queueDeferredStaleSweep(engine, { sourceId, commit: `pending-target:${targetSourceId}`,
+    reason: 'pending_cross_source_target' });
+  if (accepted === null) throw new Error('Pending foreign origin extraction handoff was not accepted');
+}
+
 /** Probe stored names only; normal basename semantics remain source-local. */
 export async function probePendingLinkReferences(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string; sourceId?: string },
+  opts: PendingProbeOptions & { globalBasename: boolean; signal?: AbortSignal; deadline?: number },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   let ready = 0;
@@ -164,7 +192,7 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
 }
 
 async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string; sourceId?: string },
+  opts: PendingProbeOptions & { globalBasename: boolean; signal?: AbortSignal; deadline?: number },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   const slugs = [...new Set(rows.flatMap(row => [row.reference.slug,

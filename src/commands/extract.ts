@@ -38,7 +38,7 @@
  * whole corpus through getPage.
  */
 
-import { pendingLinkReferenceBatches, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates } from '../core/pending-link-references.ts';
+import { pendingLinkReferenceBatches, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates, queuePendingOriginExtraction } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
@@ -2174,7 +2174,8 @@ export async function extractStaleFromDB(
     let readyPending = 0;
     do {
       readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
-        deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter }, (candidate, origin, pendingSlugs, pendingSources) =>
+        deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter,
+        onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
       pendingLinks = (await pendingBatches.next()).value ?? [];

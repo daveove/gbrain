@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { extractLinksForSlugs, extractStaleFromDB, runExtract, runExtractCore, stampExtracted } from '../src/commands/extract.ts';
@@ -10,14 +11,19 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLin
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
 let engine: PGLiteEngine;
 let reopenedEngine: PGLiteEngine;
+let schemaVersion: string | null;
 beforeAll(async () => {
   engine = new PGLiteEngine();
   reopenedEngine = new PGLiteEngine();
   await engine.connect({ database_path: home });
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => { await engine.disconnect(); rmSync(home, { recursive: true, force: true }); });
-beforeEach(async () => { await resetPgliteState(engine); });
+beforeEach(async () => {
+  await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
+});
 const page = (body = '') => ({ type: 'person', title: 'Example', compiled_truth: body, timeline: '' });
 const drain = (signal?: AbortSignal) => extractStaleFromDB(engine, {
   dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, catchUp: false, signal,
@@ -126,6 +132,37 @@ test('only the configured fallback source wakes an unqualified foreign origin', 
   expect((await scoped(a)).pagesProcessed).toBe(1);
   expect((await engine.getLinks('people/fallback-origin', { sourceId: a })).some(link =>
     link.to_source_id === b && link.to_slug === 'people/fallback-later')).toBe(true);
+});
+
+for (const failure of ['throw', 'null']) test(`foreign wake retries a failed durable handoff (${failure})`, async () => {
+  const a = 'pending-retry-origin', b = 'pending-retry-target';
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,$1,'{\"federated\":true}'::jsonb),($2,$2,'{}'::jsonb)", [a,b]);
+  const scoped = (sourceId: string, dryRun = false) => extractStaleFromDB(engine, {
+    dryRun, jsonMode: true, quiet: true, includeFrontmatter: false, sourceIdFilter: sourceId, catchUp: false,
+  });
+  await engine.putPage('people/retry-origin', page(`[[${b}:people/retry-target]]`), { sourceId: a });
+  await scoped(a);
+  const pending = await loadPendingLinkReferences(engine, a);
+  await engine.putPage('people/retry-target', page(), { sourceId: b });
+  const enqueue = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => {
+    if (failure === 'throw') throw new Error('Synthetic queue failure');
+    return { id: 0, status: 'completed', data: {} } as never;
+  });
+  try { await expect(scoped(b)).rejects.toThrow(failure === 'throw' ? 'Synthetic queue failure' : 'handoff was not accepted'); }
+  finally { enqueue.mockRestore(); }
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(1);
+  const jobsBefore = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'");
+  expect((await scoped(b, true)).staleRemaining).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toEqual(pending);
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toEqual(jobsBefore);
+  expect((await scoped(b)).pagesProcessed).toBe(1);
+  expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+  const jobs = await engine.executeRaw<{ data: { sourceId?: string }; status: string }>("SELECT data,status FROM minion_jobs WHERE name='extract'");
+  expect(jobs.some(job => job.data.sourceId === a && job.status === 'waiting')).toBe(true);
+  expect((await scoped(a)).pagesProcessed).toBe(1);
+  expect((await engine.getLinks('people/retry-origin', { sourceId: a })).some(link =>
+    link.to_source_id === b && link.to_slug === 'people/retry-target')).toBe(true);
 });
 
 test('registry write failure preserves stale watermark', async () => {
@@ -416,4 +453,56 @@ for (const incremental of [true, false]) test(`file all-mode abort after snapsho
     expect(await engine.countStalePagesForExtraction()).toBe(1);
     expect(await engine.getLinks('people/origin')).toHaveLength(0);
   } finally { engine.readPageSnapshot = read; rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('B-scoped stale sweep wakes A pending on [[B:later]] and enqueues A extract', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[src-b:people/later]].'), { sourceId: 'src-a' });
+  expect(await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  })).toMatchObject({ staleRemaining: 0 });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(1);
+  expect(await loadPendingLinkReferences(engine, 'src-b')).toHaveLength(1);
+
+  await engine.putPage('people/later', page(), { sourceId: 'src-b' });
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/later', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+
+  // Origin-only filter would miss A's pending; targeting filter must see it.
+  const targeting: Awaited<ReturnType<typeof loadPendingLinkReferences>> = [];
+  for await (const batch of pendingLinkReferenceBatches(engine, 'src-b', {})) {
+    targeting.push(...batch);
+  }
+  expect(targeting.some(row => row.reference.sourceId === 'src-a')).toBe(true);
+
+  const beforeJobs = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM minion_jobs WHERE name='extract'");
+  const result = await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(result.pagesProcessed).toBe(0); // B itself was already stamped
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+  const jobs = await engine.executeRaw<{ idempotency_key: string | null; data: Record<string, unknown> }>(
+    "SELECT idempotency_key, data FROM minion_jobs WHERE name='extract' ORDER BY id",
+  );
+  expect(jobs.length).toBeGreaterThan(beforeJobs[0]!.n);
+  expect(jobs.some(job =>
+    job.idempotency_key === 'extract-stale:src-a:pending-target:src-b'
+    || (job.data?.sourceId === 'src-a' && job.data?.reason === 'pending_cross_source_target'),
+  )).toBe(true);
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  });
+  expect((await engine.getLinks('people/origin', { sourceId: 'src-a' }))
+    .some(link => link.to_slug === 'people/later' && link.to_source_id === 'src-b')).toBe(true);
 });

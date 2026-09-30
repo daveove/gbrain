@@ -119,6 +119,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // …bound to the consumed commit so webhook redeliveries coalesce…
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
     expect(jobs[0].data.deferred_commit).toBe(headCommit());
+    expect(jobs[0].data.sourceId).toBe('default');
     // …and it carries an explicit wall-clock budget covering the sweep.
     const rows = await engine.executeRaw<{ timeout_ms: number | null }>(
       `SELECT timeout_ms FROM minion_jobs WHERE id = $1`, [jobs[0].id],
@@ -247,6 +248,10 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(await stampOf('notes/page-7')).toBeNull();
     expect(await engine.getLinks('notes/page-7')).toHaveLength(0);
 
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('scope-other','Scope fixture')");
+    await engine.putPage('notes/other-origin', { type: 'note', title: 'Other fixture', compiled_truth: 'See [[notes/other-target]].' }, { sourceId: 'scope-other' });
+    await engine.putPage('notes/other-target', { type: 'note', title: 'Target fixture', compiled_truth: 'Synthetic fixture' }, { sourceId: 'scope-other' });
+
     // Run the registered handler exactly as a jobs worker would.
     const { MinionWorker } = await import('../src/core/minions/worker.ts');
     const { registerBuiltinHandlers } = await import('../src/commands/jobs.ts');
@@ -276,5 +281,10 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     const links = await engine.getLinks('notes/page-7');
     expect(links.some(l => l.to_slug === 'people/alice')).toBe(true);
     expect(await stampOf('notes/page-7')).not.toBeNull();
+    const untouched = await engine.executeRaw<{ links_extracted_at: string | null }>(
+      "SELECT links_extracted_at FROM pages WHERE source_id='scope-other' ORDER BY slug");
+    expect(untouched).toHaveLength(2);
+    expect(untouched.every(row => row.links_extracted_at === null)).toBe(true);
+    expect(await engine.getLinks('notes/other-origin', { sourceId: 'scope-other' })).toHaveLength(0);
   }, 180_000);
 });

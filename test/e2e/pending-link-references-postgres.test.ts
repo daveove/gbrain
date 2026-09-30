@@ -90,6 +90,8 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
     };
     try { expect((await scoped(targetSource)).pagesProcessed).toBe(1); }
     finally { engine.readPageSnapshot = read; }
+    const jobs = await engine.executeRaw<{ data: { sourceId?: string }; status: string }>("SELECT data,status FROM minion_jobs WHERE name='extract'");
+    expect(jobs.some(job => job.data.sourceId === originSource && job.status === 'waiting')).toBe(true);
     expect(await engine.countStalePagesForExtraction({ sourceId: originSource })).toBe(1);
     expect(await loadPendingLinkReferences(engine, originSource)).toHaveLength(0);
     expect((await scoped(originSource)).pagesProcessed).toBe(1);
