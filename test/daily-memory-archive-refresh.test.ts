@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
 import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
-import { runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
+import { refreshDailyMemoryAfterPageMutation, runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -146,4 +146,30 @@ describe('daily memory refresh on source archive/restore', () => {
     const { assertSourceNotSystemIndex } = await import('../src/core/destructive-guard.ts');
     await expect(assertSourceNotSystemIndex(engine, DAILY_MEMORY_SOURCE_ID)).rejects.toThrow(/system index/);
   });
+
+  test('page mutation refresh queues affected days and surfaces queue failures', async () => {
+    const sourceId = 'page-mutation-refresh', day = '2026-09-28', slug = 'notes/day';
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Page mutation fixture')", [sourceId]);
+    await engine.putPage(slug, {
+      type: 'note', title: 'Fixture', compiled_truth: 'Body', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
+    const days = await refreshDailyMemoryAfterPageMutation(engine, {
+      sourceId, slug, operation: 'put_page', requestId: '11111111-1111-4111-8111-111111111111',
+    });
+    expect(days).toContain(day);
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
+    const rejected = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('synthetic page refresh outage'));
+    try {
+      await expect(refreshDailyMemoryAfterPageMutation(engine, {
+        sourceId, slug, operation: 'delete_page', requestId: '22222222-2222-4222-8222-222222222222',
+      })).rejects.toThrow('synthetic page refresh outage');
+    } finally {
+      rejected.mockRestore();
+    }
+  });
+
 });

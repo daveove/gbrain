@@ -241,6 +241,23 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 }
 
 
+/** Schedule historical daily-index refresh after a committed page mutation. */
+export async function refreshDailyMemoryAfterPageMutation(
+  engine: BrainEngine,
+  opts: { sourceId: string; slug: string; operation: string; requestId: string },
+): Promise<string[]> {
+  if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
+  if (!['put_page', 'delete_page', 'restore_page', 'capture'].includes(opts.operation)) return [];
+  const days = await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug]);
+  if (!days.length) return [];
+  const queue = new MinionQueue(engine);
+  const key = `page:${opts.operation}:${opts.sourceId}:${opts.slug}:${opts.requestId}`;
+  for (const day of days) {
+    await queueFanoutDailyMemory(queue, { day, ids: [], key });
+  }
+  return days;
+}
+
 /** After archive/restore, refresh every day that source still owns or used to own. */
 export async function refreshDailyMemoryAfterSourceArchiveChange(
   engine: BrainEngine,

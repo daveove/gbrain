@@ -820,9 +820,6 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   // catch-and-retry degrade inside a tx; missing table ⇒ empty column set ⇒
   // no FK ⇒ skip); the FK constraint itself is the backstop for a
   // registration committing between the re-check and the DELETE.
-  const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
-  await refreshDailyMemoryAfterSourceArchiveChange(engine, id);
-
   class SourceReferencedError extends Error {}
   try {
     await engine.transaction(async (tx) => {
@@ -835,6 +832,10 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
         );
         if (Number(rows[0]?.n ?? 0) > 0) throw new SourceReferencedError();
       }
+      // Discover + enqueue inside the delete TX so workers cannot finish a refresh
+      // against the still-live source before DELETE commits (managed path does the same).
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
       await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
     });
   } catch (e) {
