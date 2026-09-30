@@ -62,14 +62,14 @@ test('wait-zero publication and idempotent replay accept settled daily work for 
     await drainDaily(engine);
     const link = `[[${sourceId}:${slug}]]`;
     expect(await dailyBody(engine, '2026-09-20')).toContain(link);
-    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, content: content('2026-09-21'), request_id: randomUUID() }, waitMs: 30_000 });
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, expected_revision: (await engine.readPageSnapshot(slug, { sourceId }))!.revision, content: content('2026-09-21'), request_id: randomUUID() }, waitMs: 30_000 });
     await drainDaily(engine);
     expect(await dailyBody(engine, '2026-09-20')).not.toContain(link);
     expect(await dailyBody(engine, '2026-09-21')).toContain(link);
-    await submitPageMutation(ctx, { operation: 'delete_page', params: { slug, request_id: randomUUID() }, waitMs: 30_000 });
+    await submitPageMutation(ctx, { operation: 'delete_page', params: { slug, expected_revision: (await engine.readPageSnapshot(slug, { sourceId }))!.revision, request_id: randomUUID() }, waitMs: 30_000 });
     await drainDaily(engine);
     expect(await dailyBody(engine, '2026-09-21')).not.toContain(link);
-    await submitPageMutation(ctx, { operation: 'restore_page', params: { slug, request_id: randomUUID() }, waitMs: 30_000 });
+    await submitPageMutation(ctx, { operation: 'restore_page', params: { slug, expected_revision: (await engine.readPageSnapshot(slug, { sourceId, includeDeleted: true }))!.revision, request_id: randomUUID() }, waitMs: 30_000 });
     await drainDaily(engine);
     expect(await dailyBody(engine, '2026-09-21')).toContain(link);
     await submitPageMutation(ctx, { operation: 'capture', params: { slug: 'notes/captured', content: content('2026-09-22'), request_id: randomUUID() }, waitMs: 30_000 });
@@ -122,7 +122,7 @@ test('pre-apply dates survive updated-at fallback replacement and hard purge wit
     await engine.putPage('notes/undated', { type: 'note', title: 'Undated fixture', compiled_truth: 'Before', frontmatter: {} }, { sourceId });
     await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE source_id=$1 AND slug='notes/undated'", [sourceId]);
     expect(await engine.getPage('daily-memory/2026-09-23', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
-    await submitPageMutation(ctx, { operation: 'put_page', params: { slug: 'notes/undated', content: content('2026-09-24'), request_id: randomUUID() }, waitMs: 30_000 });
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug: 'notes/undated', expected_revision: (await engine.readPageSnapshot('notes/undated', { sourceId }))!.revision, content: content('2026-09-24'), request_id: randomUUID() }, waitMs: 30_000 });
     const handoffs = await engine.executeRaw<{ data: Record<string, unknown> }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
     expect(handoffs.some(row => Array.isArray(row.data.daily_memory_dates)
       && row.data.daily_memory_dates.includes('2026-09-23') && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
@@ -130,7 +130,7 @@ test('pre-apply dates survive updated-at fallback replacement and hard purge wit
     await engine.executeRaw("UPDATE pages SET effective_date='2026-09-25'::date::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug='notes/purged'", [sourceId]);
     const doomed = (await engine.getPage('notes/purged', { sourceId }))!;
     await engine.createVersion('notes/purged', { sourceId });
-    await submitPageMutation(ctx, { operation: 'delete_page', params: { slug: 'notes/purged', purge: true, request_id: randomUUID() }, waitMs: 30_000 });
+    await submitPageMutation(ctx, { operation: 'delete_page', params: { slug: 'notes/purged', expected_revision: (await engine.readPageSnapshot('notes/purged', { sourceId }))!.revision, purge: true, request_id: randomUUID() }, waitMs: 30_000 });
     expect(await engine.getPage('notes/purged', { sourceId, includeDeleted: true })).toBeNull();
     expect(await engine.executeRaw('SELECT id FROM page_versions WHERE page_id=$1', [doomed.id])).toHaveLength(0);
     const purgedHandoffs = await engine.executeRaw<{ data: Record<string, unknown> }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
