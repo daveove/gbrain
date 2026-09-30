@@ -23,15 +23,23 @@ const PENDING_BATCH_SIZE = 100;
 
 /** Keyset batches filter the origin source in SQL before parsing registry values. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], void> {
+  opts: { signal?: AbortSignal; deadline?: number; includeTargetingOrigins?: boolean } = {}): AsyncGenerator<PendingLinkRow[], void> {
   let after = '';
+  // When scoped, also probe origins that pending-qualified a target in this source
+  // so a B-scoped sweep can wake A after `[[B:later]]` arrives.
+  const includeTargets = Boolean(opts.includeTargetingOrigins && sourceId);
   while (true) {
     opts.signal?.throwIfAborted();
     if (Date.now() >= (opts.deadline ?? Infinity)) return;
     const rows = await engine.executeRaw<{ key: string; value: string }>(
       `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
-        AND ($2::text IS NULL OR CASE WHEN key LIKE $1 THEN value::jsonb->>'sourceId' END=$2)
-        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
+        AND ($2::text IS NULL
+          OR value::jsonb->>'sourceId' = $2
+          OR ($5::boolean AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(COALESCE(value::jsonb->'candidates', '[]'::jsonb)) AS c
+            WHERE c->>'targetSourceId' = $2)))
+        ORDER BY key LIMIT $4`,
+      [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE, includeTargets]);
     opts.signal?.throwIfAborted();
     if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
     yield rows.map(row => ({ ...row, reference: JSON.parse(row.value) as PendingLinkReference }));
@@ -81,7 +89,7 @@ export async function storePendingLinkReferences(engine: Store, origin: PendingL
 export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkRow[],
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference) => boolean,
   signal?: AbortSignal, deadline = Infinity,
-  opts: { dryRun?: boolean; versionTs?: string } = {}): Promise<number> {
+  opts: { dryRun?: boolean; versionTs?: string; onRequeued?: (sourceId: string) => void } = {}): Promise<number> {
   signal?.throwIfAborted();
   if (!rows.length || Date.now() >= deadline) return 0;
   const identities = rows.map(row => ({ key: row.key, value: row.value,
@@ -122,6 +130,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
         DELETE FROM config WHERE key=$5 AND value=$6 AND EXISTS(SELECT 1 FROM ready)
         RETURNING key`, [ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation, row.key, row.value]);
       requeued += changed.length;
+      if (changed.length) opts.onRequeued?.(ref.sourceId);
     }
   }
   return requeued;
@@ -129,7 +138,8 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
 
 /** Probe stored names only; normal basename semantics remain source-local. */
 export async function probePendingLinkReferences(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string;
+    onRequeued?: (sourceId: string) => void },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   let ready = 0;
@@ -142,7 +152,8 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
 }
 
 async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRow[],
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string;
+    onRequeued?: (sourceId: string) => void },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   const slugs = [...new Set(rows.flatMap(row => [row.reference.slug,
@@ -166,7 +177,7 @@ async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRo
     if (!opts.globalBasename || candidate.targetSourceId || candidate.targetSlug.includes('/')) return false;
     return queryBasenameIndex(indexes.get(origin.sourceId)!, candidate.targetSlug).some(targetSlug =>
       resolves({ ...candidate, targetSlug }, origin, allSlugs, sources));
-  }, opts.signal, opts.deadline, opts);
+  }, opts.signal, opts.deadline, { dryRun: opts.dryRun, versionTs: opts.versionTs, onRequeued: opts.onRequeued });
 }
 
 /** A resolved basename edge satisfies its parser-generated bare direct candidate. */

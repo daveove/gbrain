@@ -2131,7 +2131,9 @@ export async function extractStaleFromDB(
   // Count stale watermarks first; ready dormant references add work without a stale watermark.
   let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
+  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, {
+    signal: opts.signal, deadline: pendingDeadline, includeTargetingOrigins: true,
+  });
   let pendingLinks = (await pendingBatches.next()).value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
@@ -2171,11 +2173,16 @@ export async function extractStaleFromDB(
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
+  const wokenForeignOrigins = new Set<string>();
   if (pendingLinks.length) {
     let readyPending = 0;
     do {
-      readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
-        deadline: pendingDeadline, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
+      readyPending += await probePendingLinkReferences(engine, pendingLinks, {
+        globalBasename, signal: opts.signal, deadline: pendingDeadline, dryRun, versionTs,
+        onRequeued: (originSourceId) => {
+          if (sourceIdFilter && originSourceId !== sourceIdFilter) wokenForeignOrigins.add(originSourceId);
+        },
+      }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
       pendingLinks = (await pendingBatches.next()).value ?? [];
@@ -2183,6 +2190,23 @@ export async function extractStaleFromDB(
     opts.signal?.throwIfAborted();
     totalStale = dryRun ? totalStale + readyPending
       : await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  }
+  // Target-source sweeps mark foreign origins stale above; enqueue their extract
+  // so DB-only brains do not wait forever for an A-scoped or brain-wide pass.
+  if (!dryRun && wokenForeignOrigins.size > 0) {
+    try {
+      const { queueDeferredStaleSweep } = await import('../core/deferred-stale-extract.ts');
+      for (const originSourceId of wokenForeignOrigins) {
+        await queueDeferredStaleSweep(engine, {
+          sourceId: originSourceId,
+          commit: `pending-target:${sourceIdFilter}`,
+          reason: 'pending_cross_source_target',
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[extract --stale] foreign origin wake enqueue skipped: ${message}`);
+    }
   }
   if (dryRun) return reportDryRun();
   if (totalStale === 0)

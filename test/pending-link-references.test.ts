@@ -10,14 +10,19 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLin
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
 let engine: PGLiteEngine;
 let reopenedEngine: PGLiteEngine;
+let schemaVersion: string | null;
 beforeAll(async () => {
   engine = new PGLiteEngine();
   reopenedEngine = new PGLiteEngine();
   await engine.connect({ database_path: home });
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => { await engine.disconnect(); rmSync(home, { recursive: true, force: true }); });
-beforeEach(async () => { await resetPgliteState(engine); });
+beforeEach(async () => {
+  await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
+});
 const page = (body = '') => ({ type: 'person', title: 'Example', compiled_truth: body, timeline: '' });
 const drain = (signal?: AbortSignal) => extractStaleFromDB(engine, {
   dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, catchUp: false, signal,
@@ -341,4 +346,56 @@ for (const incremental of [true, false]) test(`file all-mode abort after snapsho
     expect(await engine.countStalePagesForExtraction()).toBe(1);
     expect(await engine.getLinks('people/origin')).toHaveLength(0);
   } finally { engine.readPageSnapshot = read; rmSync(dir, { recursive: true, force: true }); }
+});
+
+
+test('B-scoped stale sweep wakes A pending on [[B:later]] and enqueues A extract', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[src-b:people/later]].'), { sourceId: 'src-a' });
+  expect(await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  })).toMatchObject({ staleRemaining: 0 });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(1);
+  expect(await loadPendingLinkReferences(engine, 'src-b')).toHaveLength(0);
+
+  await engine.putPage('people/later', page(), { sourceId: 'src-b' });
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/later', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+
+  // Origin-only filter would miss A's pending; targeting filter must see it.
+  const targeting: Awaited<ReturnType<typeof loadPendingLinkReferences>> = [];
+  for await (const batch of pendingLinkReferenceBatches(engine, 'src-b', { includeTargetingOrigins: true })) {
+    targeting.push(...batch);
+  }
+  expect(targeting.some(row => row.reference.sourceId === 'src-a')).toBe(true);
+
+  const beforeJobs = await engine.executeRaw<{ n: number }>("SELECT count(*)::int AS n FROM minion_jobs WHERE name='extract'");
+  const result = await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(result.pagesProcessed).toBe(0); // B itself was already stamped
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+  const jobs = await engine.executeRaw<{ idempotency_key: string | null; data: Record<string, unknown> }>(
+    "SELECT idempotency_key, data FROM minion_jobs WHERE name='extract' ORDER BY id",
+  );
+  expect(jobs.length).toBeGreaterThan(beforeJobs[0]!.n);
+  expect(jobs.some(job =>
+    job.idempotency_key === 'extract-stale:src-a:pending-target:src-b'
+    || (job.data?.sourceId === 'src-a' && job.data?.reason === 'pending_cross_source_target'),
+  )).toBe(true);
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  });
+  expect((await engine.getLinks('people/origin', { sourceId: 'src-a' }))
+    .some(link => link.to_slug === 'people/later' && link.to_source_id === 'src-b')).toBe(true);
 });
