@@ -691,3 +691,33 @@ for (const qualified of [true, false]) test(`foreign origin is stale before an e
   expect((await engine.getLinks('people/race-origin', { sourceId: a })).some(link =>
     link.to_source_id === b && link.to_slug === 'people/race-later')).toBe(true);
 });
+
+test('pending target resolves through page aliases', async () => {
+  await engine.setConfig('link_resolution.cross_source', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES('src-a','A','{\"federated\":true}'::jsonb),('src-b','B','{\"federated\":true}'::jsonb) ON CONFLICT(id) DO UPDATE SET config=EXCLUDED.config",
+  );
+  await engine.putPage('people/origin', page('See [[src-b:people/old]].'), { sourceId: 'src-a' });
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-a', catchUp: false,
+  });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(1);
+
+  await engine.putPage('people/new', page(), { sourceId: 'src-b' });
+  await engine.executeRaw(
+    "INSERT INTO slug_aliases (source_id, alias_slug, canonical_slug) VALUES ('src-b', 'people/old', 'people/new')",
+  );
+  await engine.markPagesExtractedBatch(
+    [{ slug: 'people/new', source_id: 'src-b' }],
+    new Date(Date.now() + 1000).toISOString(),
+  );
+
+  await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+    sourceIdFilter: 'src-b', catchUp: false,
+  });
+  expect(await loadPendingLinkReferences(engine, 'src-a')).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'src-a' })).toBe(1);
+});
+

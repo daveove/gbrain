@@ -23,6 +23,7 @@ import { isPathContained } from './path-confine.ts';
 import { defaultCloneDir } from './sources-ops.ts';
 import { gbrainPath } from './config.ts';
 import { isUndefinedColumnError, isUndefinedTableError } from './utils.ts';
+import { randomUUID } from 'node:crypto';
 
 // ── Types ───────────────────────────────────────────────────
 
@@ -355,17 +356,13 @@ async function refreshDailyMemoryAfterArchiveTransition(
   transition: string,
   label: 'archive' | 'restore',
 ): Promise<void> {
+  await markDailyMemoryArchiveRefreshPending(engine, sourceId, transition);
   try {
     const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
     await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId, { transition });
     await clearDailyMemoryArchiveRefreshPending(engine, sourceId);
   } catch (error) {
     console.error(`[sources] daily memory refresh after ${label} failed for ${sourceId}:`, error);
-    try {
-      await markDailyMemoryArchiveRefreshPending(engine, sourceId, transition);
-    } catch (markError) {
-      console.error(`[sources] daily memory refresh retry marker failed for ${sourceId}:`, markError);
-    }
   }
 }
 
@@ -377,7 +374,10 @@ async function retryPendingDailyMemoryArchiveRefresh(
 ): Promise<void> {
   const pending = await readDailyMemoryArchiveRefreshPending(engine, sourceId);
   if (!pending) return;
-  await refreshDailyMemoryAfterArchiveTransition(engine, sourceId, pending, label);
+  // Fresh key: a prior attempt may have completed some day jobs under `pending`.
+  await refreshDailyMemoryAfterArchiveTransition(
+    engine, sourceId, `${pending}:retry:${randomUUID()}`, label,
+  );
 }
 
 // ── Soft Delete ─────────────────────────────────────────────
@@ -476,7 +476,7 @@ export async function restoreSource(
       return false;
     }
     await refreshDailyMemoryAfterArchiveTransition(
-      engine, sourceId, `restore:${new Date().toISOString()}`, 'restore',
+      engine, sourceId, `restore:${randomUUID()}`, 'restore',
     );
     return true;
   }
@@ -497,7 +497,7 @@ export async function restoreSource(
     return false;
   }
   await refreshDailyMemoryAfterArchiveTransition(
-    engine, sourceId, `restore:${new Date().toISOString()}`, 'restore',
+    engine, sourceId, `restore:${randomUUID()}`, 'restore',
   );
   return true;
 }
