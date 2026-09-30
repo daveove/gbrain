@@ -4415,9 +4415,9 @@ async function performFullSync(
 
   }
 
-  // #3479 blocker 2 — the post-gate sweep above ran BEFORE this reconcile,
-  // so a `<rename:…>` sentinel whose stale row the reconcile just removed
-  // would stay open until the NEXT run. Sweep again afterwards: a full sync
+  // #3479 blocker 2 — verify sentinel convergence after gated reconciliation.
+  // A `<rename:…>` row removed by reconciliation must clear during this run.
+  // Sweep again afterwards: a full sync
   // is the operator's usual reset move, and it should converge in one run.
   await sweepOrphanedRenameSentinels(engine, fullSourceId, fullFailureSet);
 
