@@ -418,6 +418,12 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     await engine.executeRaw("UPDATE pages SET effective_date='2026-09-20'::date::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug=$2", [sourceId, slug]);
     expect((await writeDailyMemoryFromSources(engine, { date: '2026-09-20' })).written).toBe(true);
     const old = (await engine.getPage('daily-memory/2026-09-20', { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    if (sourceId === 'default') await engine.putPage(old.slug, {
+      type: old.type, title: old.title, frontmatter: old.frontmatter,
+      compiled_truth: old.compiled_truth.replaceAll('[[default:', '[['),
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const target = sourceId === 'default' ? slug : `${sourceId}:${slug}`;
+    expect((await engine.getPage(old.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${target}]]`);
     expect(await engine.executeRaw('SELECT id FROM links WHERE from_page_id=$1', [old.id])).toHaveLength(0);
     await engine.putPage(slug, { type: 'note', title: 'Moved date fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-21' } }, { sourceId });
     await engine.executeRaw("UPDATE pages SET effective_date='2026-09-21'::date::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug=$2", [sourceId, slug]);
@@ -433,9 +439,8 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
       const result = await handler(daily);
       await queue.completeJob(daily.id, 'moved-daily-lock', result);
     }
-    const target = sourceId === 'default' ? slug : `${sourceId}:${slug}`;
     expect((await engine.getPage('daily-memory/2026-09-20', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(`[[${target}]]`);
-    expect((await engine.getPage('daily-memory/2026-09-21', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${target}]]`);
+    expect((await engine.getPage('daily-memory/2026-09-21', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${sourceId}:${slug}]]`);
   });
 
   test('autopilot-cycle handler normalizes a legacy per-source payload down to freshness phases', async () => {
