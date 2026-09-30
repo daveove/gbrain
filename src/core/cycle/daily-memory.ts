@@ -243,6 +243,29 @@ function renderNote(day: string, input: RenderInput): string {
  * and swallowed so a note failure does not cancel the rest of the maintenance
  * job; an abort still propagates.
  */
+/** Calendar days an imported slug set should refresh in the daily index. */
+export async function dailyMemoryDaysForSlugs(
+  engine: BrainEngine,
+  sourceId: string,
+  slugs: string[],
+): Promise<string[]> {
+  if (slugs.length === 0) return [];
+  const zone = await resolveCycleTimeZone(engine);
+  const rows = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
+    `SELECT source_id, slug, title, effective_date, effective_date_source, frontmatter,
+       to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+       to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
+     FROM pages
+     WHERE deleted_at IS NULL AND source_id = $2 AND slug = ANY($3::text[])`,
+    [zone, sourceId, slugs],
+  );
+  const days = new Set<string>();
+  for (const row of rows) {
+    days.add(row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day);
+  }
+  return [...days].sort();
+}
+
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
   opts: { signal?: AbortSignal; now?: () => Date; date?: string } = {},

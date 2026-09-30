@@ -47,6 +47,9 @@ if [[ $# -eq 0 ]]; then
     printf 'codex ingest day=%s files=%s\n' "$day" "${#files[@]}" >> "$LOG"
     run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone Asia/Manila "${files[@]}"
   fi
+  # Writer prefers cycle.timezone over process TZ; pass the Manila day already
+  # used for selector/ingest so the index cannot land on a different date.
+  set -- "$day"
 fi
 printf 'daily-memory start %s\n' "$(TZ=Asia/Manila date '+%Y-%m-%d %H:%M:%S %z')" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"

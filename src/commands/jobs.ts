@@ -2844,6 +2844,35 @@ export async function registerBuiltinHandlers(
       },
     });
 
+    // Non-deadlocking daily-index refresh: global maintenance must not wait on
+    // sibling source jobs (that can stall the only worker). After a source sync
+    // imports pages, regenerate the calendar days those pages belong to.
+    if (sourceId && report.status !== 'failed') {
+      const syncPhase = report.phases.find((phase) => phase.phase === 'sync') as
+        { pagesAffected?: string[] } | undefined;
+      const pagesAffected = syncPhase?.pagesAffected ?? [];
+      if (pagesAffected.length > 0) {
+        try {
+          const {
+            dailyMemoryDaysForSlugs,
+            writeDailyMemoryFromSources,
+            queueDailyMemoryExtract,
+          } = await import('../core/cycle/daily-memory.ts');
+          const days = await dailyMemoryDaysForSlugs(engine, sourceId, pagesAffected);
+          for (const day of days.slice(0, 8)) {
+            await queueDailyMemoryExtract(
+              engine,
+              await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day }),
+            );
+          }
+        } catch (e) {
+          console.warn(
+            `[autopilot-cycle] daily memory regen after sync failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    }
+
     return {
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,
@@ -2877,10 +2906,9 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    // Daily snapshot after maintenance phases so concurrent per-source cycles
-    // from the same fan-out usually finish importing before the scan. Avoid a
-    // hard wait on those siblings: holding this worker slot can deadlock when
-    // concurrency is tight.
+    // Daily snapshot after maintenance phases. Sibling source cycles regenerate
+    // the days they import (see autopilot-cycle), so this lane does not wait on
+    // them and cannot deadlock a single worker.
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls

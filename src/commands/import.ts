@@ -914,6 +914,9 @@ export async function runImport(
   // batches, then rethrown.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
+  // True only when the inline sweep finished or a deferred stale-sweep job
+  // was accepted. --no-extract / empty imports must not clear a prior failure.
+  let linkExtractionHandoff = false;
   const recordLinkFailure = (message: string): void => {
     preserveCompletedPaths();
     linkExtractionError = message;
@@ -961,6 +964,7 @@ export async function runImport(
         reason,
       });
       if (queuedJobId == null) throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
+      linkExtractionHandoff = true;
       throwIfInterrupted();
     } catch (e) {
       rethrowIfCancelled(e);
@@ -983,6 +987,7 @@ export async function runImport(
         quiet: true,
         signal,
       });
+      linkExtractionHandoff = true;
       structuralLinks = extracted.linksCreated;
       if (extracted.staleRemaining > 0) {
         console.error(
@@ -1058,7 +1063,7 @@ export async function runImport(
     // sentinel (it starts with `<`, so --skip-failed never acknowledges it).
     const healedPaths = [
       ...succeededPaths,
-      ...(!linkExtractionError ? ['<link-extraction>'] as const : []),
+      ...(linkExtractionHandoff && !linkExtractionError ? ['<link-extraction>'] as const : []),
     ];
     if (healedPaths.length > 0) {
       const { clearFailures } = await import('../core/sync.ts');

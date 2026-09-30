@@ -134,6 +134,7 @@ finally:
     expect(args.slice(-2)).toEqual([input.precedingUtc, input.currentUtc]);
     expect(args).not.toContain(input.before);
     expect(args).not.toContain(input.after);
+    expect(result.calls[1].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), input.day]);
   });
 
   it('regenerates an explicit date without ingesting existing transcripts', () => {
@@ -146,9 +147,13 @@ finally:
   });
 
   it('writes when the current day has no Codex files', () => {
-    const result = fixture().run();
+    const { home, run } = fixture();
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date());
+    const result = run();
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
+    expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
+    void home;
   });
 
   it('aborts writing after an importer error without retrying unrelated failures', () => {

@@ -430,5 +430,16 @@ describe('autopilot-global-maintenance daily memory order', () => {
     const writeIdx = body.indexOf('writeDailyMemoryFromSources(engine');
     expect(runIdx).toBeGreaterThan(-1);
     expect(writeIdx).toBeGreaterThan(runIdx);
+    expect(body).toContain('cannot deadlock a single worker');
+  });
+
+  test('per-source cycles regenerate daily memory for imported slugs', () => {
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'jobs.ts'), 'utf8');
+    const start = src.indexOf("registerBuiltinJob(worker, engine, 'autopilot-cycle'");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("worker.register('autopilot-global-maintenance'", start);
+    const body = src.slice(start, end > start ? end : undefined);
+    expect(body).toContain('dailyMemoryDaysForSlugs');
+    expect(body.indexOf('dailyMemoryDaysForSlugs')).toBeGreaterThan(body.indexOf('const report = await runCycle(engine,'));
   });
 });
