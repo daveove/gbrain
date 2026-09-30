@@ -52,7 +52,11 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
           OR EXISTS (SELECT 1 FROM jsonb_array_elements(
             CASE WHEN jsonb_typeof(value::jsonb->'candidates')='array' THEN value::jsonb->'candidates' ELSE '[]'::jsonb END) candidate
             WHERE COALESCE(candidate->>'targetSourceId','')='' AND EXISTS (SELECT 1 FROM pages p
-              WHERE p.deleted_at IS NULL AND p.source_id=$2 AND p.slug=candidate->>'targetSlug')) END)
+              WHERE p.deleted_at IS NULL AND p.source_id=$2 AND (
+                p.slug=candidate->>'targetSlug'
+                OR (position('/' in COALESCE(candidate->>'targetSlug',''))=0
+                  AND (p.slug LIKE '%/' || (candidate->>'targetSlug')
+                    OR lower(regexp_replace(p.slug,'^.*/',''))=lower(candidate->>'targetSlug')))))) END)
         ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
     if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
