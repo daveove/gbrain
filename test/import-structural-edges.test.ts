@@ -208,8 +208,10 @@ describe('import structural edges', () => {
   }, 120_000);
 
   test('incomplete inline extraction queues a durable continuation instead of succeeding clean', async () => {
+    const sourceId = 'incomplete-inline-src';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-incomplete-'));
-    writeFileSync(join(dir, 'note.md'), '---\ntype: concept\n---\n# Note\n\nbody\n');
+    writeFileSync(join(dir, 'incomplete-inline.md'), '---\ntype: concept\n---\n# Note\n\nbody\n');
     const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
     const extractMod = await import('../src/commands/extract.ts');
     const spy = spyOn(extractMod, 'extractStaleFromDB').mockResolvedValue({
@@ -220,13 +222,13 @@ describe('import structural edges', () => {
     });
     try {
       await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
-        const result = await runImport(engine, [dir, '--no-embed', '--json']);
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
         expect(result.imported).toBe(1);
         expect(result.errors).toBe(0);
         expect(result.linkExtractionError).toBeUndefined();
         expect(spy).toHaveBeenCalled();
         const jobs = await engine.executeRaw<{ data: unknown }>(
-          `SELECT data FROM minion_jobs WHERE name = 'extract'`,
+          `SELECT data FROM minion_jobs WHERE name = 'extract' AND data->>'sourceId'=$1`, [sourceId],
         );
         expect(jobs).toHaveLength(1);
         const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { reason?: string; stale?: boolean };
