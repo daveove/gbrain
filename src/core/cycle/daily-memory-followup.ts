@@ -329,7 +329,7 @@ async function settleDailyDateChildren(
     const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000, job.id, replayRound);
     return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_days_queued: days };
   }
-  const failed = rows.filter(row => row.status === 'dead' || row.status === 'failed');
+  const failed = rows.filter(row => row.status === 'dead' || row.status === 'failed' || row.status === 'cancelled');
   if (failed.length && replayRound >= 2) {
     throw new Error(`Daily memory child replay exhausted after ${replayRound} rounds; jobs=${failed.map(row => row.id).join(',')}; days=${days.join(',')}`);
   }
