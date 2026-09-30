@@ -1,9 +1,9 @@
 /** A durable daily-only barrier releases its worker while fanout siblings finish. */
-import { DATE_INSTANT_PROVENANCE } from '../effective-date.ts';
+import { DATE_INSTANT_PROVENANCE, computeEffectiveDate } from '../effective-date.ts';
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { MinionQueue } from '../minions/queue.ts';
-import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
+import { calendarDateInTimeZone, resolveCycleDate, resolveCycleTimeZone, utcDate } from './cycle-date.ts';
 import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffectiveDate, DAILY_MEMORY_SOURCE_ID, type SourcePageRow } from './daily-memory.ts';
 
 export type DailyJob = { id: number; data: Record<string, unknown>; signal?: AbortSignal };
@@ -75,11 +75,13 @@ export async function dailyMemoryDaysForSlugs(
   engine: BrainEngine,
   sourceId: string,
   slugs: string[],
+  opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
   if (slugs.length === 0) return [];
   const zone = await resolveCycleTimeZone(engine);
   const days = new Set<string>();
   for (let offset = 0; offset < slugs.length; offset += 100) {
+    opts.signal?.throwIfAborted();
     const rows = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
       `SELECT source_id, slug, title, effective_date, effective_date_source,
          jsonb_build_object(COALESCE(effective_date_source,'date'),frontmatter->COALESCE(effective_date_source,'date'),
@@ -99,6 +101,7 @@ export async function dailyMemoryDaysForSlugs(
     // Exact rendered links also cover indexes whose graph extraction is still pending.
     let cursor = '';
     for (;;) {
+      opts.signal?.throwIfAborted();
       const prior = await engine.executeRaw<{ slug: string }>(
         `SELECT p.slug FROM pages p JOIN sources s ON s.id=p.source_id
          WHERE (s.config @> '{"system_index":true}'::jsonb
@@ -119,6 +122,59 @@ export async function dailyMemoryDaysForSlugs(
       }
       if (prior.length < 100) break;
       cursor = prior[prior.length - 1].slug;
+    }
+    // page_versions keep prior effective days when links were never extracted.
+    let versionCursor = 0;
+    for (;;) {
+      opts.signal?.throwIfAborted();
+      const versions = await engine.executeRaw<{
+        id: number;
+        slug: string;
+        frontmatter: Record<string, unknown>;
+        created_at: Date | string;
+        updated_at: Date | string;
+        import_filename: string | null;
+        snapshot_at: Date | string;
+      }>(
+        `SELECT pv.id, p.slug,
+           jsonb_build_object('event_date',pv.frontmatter->'event_date','date',pv.frontmatter->'date',
+             'published',pv.frontmatter->'published','created',pv.frontmatter->'created',
+             'created_at',pv.frontmatter->'created_at','date_created',pv.frontmatter->'date_created',
+             'date created',pv.frontmatter->'date created',
+             '${DATE_INSTANT_PROVENANCE}',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}') AS frontmatter,
+           p.created_at, p.updated_at, p.import_filename, pv.snapshot_at
+         FROM page_versions pv
+         JOIN pages p ON p.id = pv.page_id
+         WHERE p.source_id = $1 AND p.slug = ANY($2::text[]) AND pv.id>$3
+         ORDER BY pv.id LIMIT 100`,
+        [sourceId, slugs.slice(offset, offset + 100), versionCursor],
+      );
+      for (const ver of versions) {
+        const frontmatter = ver.frontmatter ?? {};
+        const computed = computeEffectiveDate({
+          slug: ver.slug,
+          frontmatter,
+          filename: ver.import_filename,
+          createdAt: new Date(ver.created_at),
+          updatedAt: new Date(ver.snapshot_at ?? ver.updated_at),
+        });
+        // Content-date keys only; page fallback timestamps are not prior index days.
+        if (!computed.date || !computed.source || computed.source === 'fallback') continue;
+        const row: SourcePageRow = {
+          source_id: sourceId,
+          slug: ver.slug,
+          title: '',
+          effective_date: computed.date,
+          effective_date_source: computed.source,
+          frontmatter,
+        };
+        const day = isCalendarEffectiveDate(row)
+          ? utcDate(computed.date)
+          : calendarDateInTimeZone(computed.date, zone);
+        if (isDay(day)) days.add(day);
+      }
+      if (versions.length < 100) break;
+      versionCursor = versions[versions.length - 1].id;
     }
   }
   return [...days].sort();
@@ -144,7 +200,7 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
   const saved = job.data.daily_memory_affected_dates ?? [];
   if (!Array.isArray(saved) || !saved.every(isDay)) throw new Error('Invalid saved daily memory dates');
   const slugs = report.status === 'failed' ? [] : report.phases.find(phase => phase.phase === 'sync')?.pagesAffected ?? [];
-  const days = [...new Set([...saved, ...await dailyMemoryDaysForSlugs(engine, sourceId, slugs)])].sort();
+  const days = [...new Set([...saved, ...await dailyMemoryDaysForSlugs(engine, sourceId, slugs, { signal: job.signal })])].sort();
   job.signal?.throwIfAborted();
   if (!days.length) return;
   if (JSON.stringify(days) !== JSON.stringify(saved)) {
