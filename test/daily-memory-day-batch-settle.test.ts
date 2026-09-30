@@ -43,36 +43,52 @@ describe('daily memory day-batch settle and record lookback', () => {
     expect(days).toContain('2026-09-30');
   });
 
-  test('affected-day batch waits for children and replays dead ones', async () => {
-    const queue = new MinionQueue(engine);
-    // Create a fake source cycle job row the batch can reference.
-    const source = await queue.add('autopilot-cycle', { daily_memory_affected_dates: ['2026-09-28'] }, {
-      max_attempts: 1, timeout_ms: 60_000,
+  test('affected-day batches cap failed child replacements at two rounds', async () => {
+    const queue = new MinionQueue(engine), days = ['2026-09-28'];
+    const source = await queue.add('autopilot-cycle', {});
+    const child = await queue.add('autopilot-daily-memory', {
+      daily_memory_date: days[0], daily_memory_only: true, source_cycle_job_ids: [],
     });
-    const dayJob = await queue.add('autopilot-daily-memory', {
-      daily_memory_date: '2026-09-28',
-      daily_memory_only: true,
-      source_cycle_job_ids: [],
-    }, { max_attempts: 2, timeout_ms: 60_000 });
-    await engine.executeRaw(
-      "UPDATE minion_jobs SET status='dead', finished_at=now() WHERE id=$1",
-      [dayJob.id],
-    );
-    const result = await runDailyMemoryJob(engine, {
-      id: 0,
-      data: {
-        daily_memory_date: '2026-09-28',
-        daily_memory_dates: ['2026-09-28'],
-        daily_memory_source_job_id: source.id,
-        daily_memory_cursor: 1, // past end => settle/replay only
-        daily_memory_day_job_ids: [dayJob.id],
-      },
+    await queue.add('autopilot-daily-memory', {
+      daily_memory_date: days[0], daily_memory_dates: days, daily_memory_source_job_id: source.id,
+      daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id],
     });
-    expect(result.daily_memory_pending).toBe(true);
-    expect(result.daily_memory_replayed).toBe(1);
-    const jobs = await engine.executeRaw<{ status: string; data: Record<string, unknown>; idempotency_key: string }>(
-      "SELECT status,data,idempotency_key FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id",
-    );
-    expect(jobs.some(j => String(j.idempotency_key).includes('replay') && j.data.daily_memory_date === '2026-09-28')).toBe(true);
+    for (let round = 0; round <= 2; round++) {
+      const failedChild = (await queue.claim('child-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+      expect(failedChild.data.daily_memory_only).toBe(true);
+      await queue.failJob(failedChild.id, 'child-lock', 'Synthetic child failure', 'dead');
+      const batch = (await queue.claim('batch-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+      expect(batch.data.daily_memory_replay_round ?? 0).toBe(round);
+      if (round === 2) {
+        const before = await engine.executeRaw('SELECT id FROM minion_jobs');
+        await expect(runDailyMemoryJob(engine, batch)).rejects.toThrow('replay exhausted');
+        expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toEqual(before);
+        await queue.failJob(batch.id, 'batch-lock', 'Replay exhausted', 'dead');
+        const [stored] = await engine.executeRaw<{ data: Record<string, unknown>; status: string }>('SELECT data,status FROM minion_jobs WHERE id=$1', [batch.id]);
+        expect(stored.status).toBe('dead');
+        expect(stored.data.daily_memory_dates).toEqual(days);
+        expect(stored.data.daily_memory_day_job_ids).toEqual([failedChild.id]);
+      } else {
+        const result = await runDailyMemoryJob(engine, batch);
+        expect(result.daily_memory_replayed).toBe(1);
+        await queue.completeJob(batch.id, 'batch-lock', result);
+        await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE status='delayed'");
+        await queue.promoteDelayed();
+      }
+    }
+  });
+
+  test('pending polls preserve the finite replay round and invalid counters fail closed', async () => {
+    const queue = new MinionQueue(engine), days = ['2026-09-28'];
+    const child = await queue.add('autopilot-daily-memory', { daily_memory_date: days[0] });
+    const data = { daily_memory_dates: days, daily_memory_date: days[0], daily_memory_source_job_id: child.id,
+      daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id], daily_memory_replay_round: 2 };
+    const pending = await runDailyMemoryJob(engine, { id: 100, data });
+    const [poll] = await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [pending.daily_memory_job_id]);
+    expect(poll.data.daily_memory_replay_round).toBe(2);
+    expect(poll.data.daily_memory_day_job_ids).toEqual([child.id]);
+    for (const invalid of [-1, 3, '2']) {
+      await expect(runDailyMemoryJob(engine, { id: 101, data: { ...data, daily_memory_replay_round: invalid } })).rejects.toThrow('Invalid affected-day continuation');
+    }
   });
 });

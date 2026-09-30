@@ -54,6 +54,14 @@ async function queued(source:string,requestId=randomUUID()){
     worktreeId:binding.worktree_id,topologyGeneration:binding.topology_generation});
 }
 
+test('managed lifecycle rejects archive of an owned system source before topology changes',()=>fixture(async(_home,source)=>{
+  await engine.executeRaw("UPDATE sources SET config=config || '{\"system_index\":true}'::jsonb WHERE id=$1",[source]);
+  const before=await getWorktreeBinding(engine,source);
+  await expect(runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source})).rejects.toThrow('system index');
+  expect(await getWorktreeBinding(engine,source)).toEqual(before);
+  expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
+}),60_000);
+
 test('archive/restore advance topology and permanently invalidate accepted old bindings',()=>fixture(async(_home,source)=>{
   const old=(await getWorktreeBinding(engine,source))!;const accepted=await queued(source);
   const requestId=randomUUID();

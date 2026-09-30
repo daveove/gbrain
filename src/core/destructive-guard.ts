@@ -312,6 +312,16 @@ export function checkDestructiveConfirmation(
   );
 }
 
+/** System indexes are retained; archival and expiry must not remove their history. */
+export async function assertSourceNotSystemIndex(engine: BrainEngine, sourceId: string): Promise<void> {
+  const owned = await engine.executeRaw(
+    `SELECT id FROM sources WHERE id=$1 AND (
+      (${SOURCE_CONFIG_OBJECT_SQL})->>'system_index'='true'
+      OR (id='dream' AND name='Dream cycle indexes'
+        AND (${SOURCE_CONFIG_OBJECT_SQL})->>'federated'='false')) LIMIT 1`, [sourceId]);
+  if (owned.length) throw new Error(`Source '${sourceId}' is a system index and cannot be archived or purged.`);
+}
+
 // ── Soft Delete ─────────────────────────────────────────────
 
 /**
@@ -330,6 +340,7 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
+  await assertSourceNotSystemIndex(engine, sourceId);
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'archive',sourceId});
@@ -490,7 +501,7 @@ export async function purgeExpiredSources(
       AND archive_expires_at IS NOT NULL AND archive_expires_at<=now() ORDER BY id`);
     const result:PurgeExpiredResult={purged:[],blocked:[]};
     for(const source of candidates){
-      try{const receipt=await runManagedSourceLifecycle(engine,{operation:'purge',sourceId:source.id,expectedIncarnation:source.incarnation,confirmDestructive:true,expiredOnly:true});if(!receipt.noop)result.purged.push(source.id);}
+      try{await assertSourceNotSystemIndex(engine,source.id);const receipt=await runManagedSourceLifecycle(engine,{operation:'purge',sourceId:source.id,expectedIncarnation:source.incarnation,confirmDestructive:true,expiredOnly:true});if(!receipt.noop)result.purged.push(source.id);}
       catch(error){result.blocked.push({id:source.id,reason:error instanceof Error?error.message:'Source lifecycle could not finish.'});}
     }
     return result;
@@ -509,6 +520,7 @@ export async function purgeExpiredSources(
   for (const candidate of candidates) {
     const { id } = candidate;
     try {
+      await assertSourceNotSystemIndex(engine, id);
       const rows = await engine.executeRaw<{ id: string }>(
         `DELETE FROM sources
          WHERE id = $1

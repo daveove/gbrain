@@ -55,13 +55,21 @@ describe('daily memory refresh on source archive/restore', () => {
     expect(archive).not.toBeNull();
     await queue.completeJob(archive.id, 'archive-refresh-lock', await runDailyMemoryJob(engine, archive));
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(link);
+    const archiveWatcher = (await queue.claim('archive-watcher-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    const archiveDone = await runDailyMemoryJob(engine, archiveWatcher);
+    expect(archiveDone.daily_memory_pending).toBe(false);
+    await queue.completeJob(archiveWatcher.id, 'archive-watcher-lock', archiveDone);
     expect(await restoreSource(engine, sourceId)).toBe(true);
     const restored = (await queue.claim('restore-refresh-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
     expect(restored).not.toBeNull();
     expect(restored.id).not.toBe(archive.id);
     await queue.completeJob(restored.id, 'restore-refresh-lock', await runDailyMemoryJob(engine, restored));
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(link);
-    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='completed'")).toHaveLength(2);
+    const restoreWatcher = (await queue.claim('restore-watcher-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    const restoreDone = await runDailyMemoryJob(engine, restoreWatcher);
+    expect(restoreDone.daily_memory_pending).toBe(false);
+    await queue.completeJob(restoreWatcher.id, 'restore-watcher-lock', restoreDone);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='completed'")).toHaveLength(4);
   });
 
   test('failed archive and restore handoffs surface and retry after the state change', async () => {
@@ -78,7 +86,34 @@ describe('daily memory refresh on source archive/restore', () => {
       // The state change committed, but its no-op retry must still enqueue the refresh.
       expect(await operation(engine, sourceId)).toBe(operation === softDeleteSource ? null : false);
     }
-    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='waiting'")).toHaveLength(2);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='waiting'")).toHaveLength(4);
+  });
+
+  test('archive settlement replaces a dead day child and waits for real link cleanup', async () => {
+    const sourceId = 'archive-replay', day = '2026-09-30';
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Archive replay fixture')", [sourceId]);
+    await engine.putPage('notes/day', { type: 'note', title: 'Fixture', compiled_truth: '', frontmatter: { date: day } }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
+    await writeDailyMemoryFromSources(engine, { date: day });
+    const queue = new MinionQueue(engine), link = `[[${sourceId}:notes/day]]`;
+    await softDeleteSource(engine, sourceId);
+    const child = (await queue.claim('archive-dead-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    await queue.failJob(child.id, 'archive-dead-lock', 'Synthetic archive child failure', 'dead');
+    const watcher = (await queue.claim('archive-watch-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    const replay = await runDailyMemoryJob(engine, watcher);
+    expect(replay.daily_memory_replayed).toBe(1);
+    await queue.completeJob(watcher.id, 'archive-watch-lock', replay);
+    expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(link);
+    const replacement = (await queue.claim('archive-replace-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    expect(replacement.id).not.toBe(child.id);
+    await queue.completeJob(replacement.id, 'archive-replace-lock', await runDailyMemoryJob(engine, replacement));
+    await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE status='delayed'");
+    await queue.promoteDelayed();
+    const poll = (await queue.claim('archive-poll-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+    const done = await runDailyMemoryJob(engine, poll);
+    expect(done.daily_memory_pending).toBe(false);
+    await queue.completeJob(poll.id, 'archive-poll-lock', done);
+    expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(link);
   });
 
   test('restoring a source queues its affected daily memory days', async () => {

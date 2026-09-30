@@ -620,6 +620,18 @@ describe('daily memory from sources the brain already holds', () => {
     });
   }
 
+  test('an archived owned index is not written or silently restored', async () => {
+    await seedRecord('gmail:archived-index', 'gmail', '2026-09-30T00:00:00Z');
+    await writeSeptember30();
+    const before = await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.executeRaw('UPDATE sources SET archived=true WHERE id=$1', [DAILY_MEMORY_SOURCE_ID]);
+    const result = await writeSeptember30();
+    expect(result.reason).toBe('error');
+    expect(result.written).toBe(false);
+    expect(await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual(before);
+    expect((await engine.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [DAILY_MEMORY_SOURCE_ID]))[0]!.archived).toBe(true);
+  });
+
   test('a human default day still probes stale dream extraction work', async () => {
     await seedRecord('gmail:human-default-probe', 'gmail', '2026-09-30T00:00:00Z');
     const first = await writeSeptember30();

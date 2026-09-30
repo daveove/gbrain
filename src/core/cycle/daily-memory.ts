@@ -56,8 +56,8 @@ function isOwnedDailyMemorySource(
 /** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
   const config = JSON.stringify({ federated: false, system_index: true });
-  const existing = await engine.executeRaw<{ config: unknown; name: string | null }>(
-    `SELECT config, name FROM sources WHERE id = $1`,
+  const existing = await engine.executeRaw<{ config: unknown; name: string | null; archived: boolean }>(
+    `SELECT config, name, archived FROM sources WHERE id = $1`,
     [DAILY_MEMORY_SOURCE_ID],
   );
   if (existing.length === 0) {
@@ -70,6 +70,7 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
   const row = existing[0]!;
   const parsed = parseSourceConfig(row.config);
   if (isOwnedDailyMemorySource(parsed, row.name)) {
+    if (row.archived) throw new Error(`System index '${DAILY_MEMORY_SOURCE_ID}' is archived; restore it before daily memory can write.`);
     // Keep trusted-index markers sticky for our owned dream index.
     await engine.executeRaw(
       `UPDATE sources

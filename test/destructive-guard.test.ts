@@ -222,6 +222,23 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     await engine.disconnect();
   });
 
+  test('owned and legacy system sources reject archive and survive expiry', async () => {
+    for (const [id, name, config] of [
+      ['system-fixture', 'System fixture', { system_index: true }],
+      ['dream', 'Dream cycle indexes', { federated: false }],
+    ] as const) {
+      await engine.executeRaw('INSERT INTO sources(id,name,config) VALUES($1,$2,$3::jsonb)', [id, name, JSON.stringify(config)]);
+      await engine.putPage('notes/system-history', { type: 'note', title: 'History', compiled_truth: 'Synthetic fixture' }, { sourceId: id });
+      await expect(softDeleteSource(engine, id)).rejects.toThrow('system index');
+      await engine.executeRaw("UPDATE sources SET archived=true,archive_expires_at=now()-interval '1 hour' WHERE id=$1", [id]);
+      const purged = await purgeExpiredSources(engine);
+      expect(purged.purged).not.toContain(id);
+      expect(purged.blocked.some(row => row.id === id && row.reason.includes('system index'))).toBe(true);
+      expect(await engine.getPage('notes/system-history', { sourceId: id, includeDeleted: true })).not.toBeNull();
+      await engine.executeRaw('DELETE FROM sources WHERE id=$1', [id]);
+    }
+  });
+
   test('softDeleteSource flips column shape + sets TTL', async () => {
     const id = 'sd-flips';
     await seedSource(engine, id, { withPages: 2 });
