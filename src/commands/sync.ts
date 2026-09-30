@@ -4544,13 +4544,21 @@ async function performFullSync(
   // Full sync returns pagesAffected: [] by design (no incremental delta).
   // Schedule an authoritative source-wide daily-index refresh so imported and
   // reconciled-deleted historical dates are not left to current-day maintenance.
+  // Marker first: bookmark already advanced, so a queue/DB failure must leave
+  // a durable retry for the next sync.
+  try {
+    await retryPendingManualSyncDailyMemoryRefresh(engine, fullSourceId);
+  } catch { /* prior marker retried below or on a later sync */ }
+  const fullRefreshKey = manualSyncDailyMemoryRefreshKey(fullSourceId);
+  await engine.setConfig(fullRefreshKey, JSON.stringify({
+    pin: headCommit, pagesAffected: [], fullSource: true,
+  }));
   try {
     await (await import('../core/cycle/daily-memory-followup.ts'))
       .refreshDailyMemoryAfterSourceArchiveChange(engine, fullSourceId);
+    await engine.unsetConfig(fullRefreshKey);
   } catch {
-    await engine.setConfig(manualSyncDailyMemoryRefreshKey(fullSourceId), JSON.stringify({
-      pin: headCommit, pagesAffected: [], fullSource: true,
-    }));
+    // Marker retained for durable retry on the next sync.
   }
 
   return {
