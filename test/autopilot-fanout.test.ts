@@ -444,6 +444,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      getConfig: async () => null,
       listAllSources: async () => sources,
     } as unknown as BrainEngine;
     const queue = {

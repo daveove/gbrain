@@ -1417,11 +1417,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
             fanoutMax,
             jsonMode,
           });
-          // #2194 fix #3 / #2227 bug #3: dispatch the single brain-wide
-          // maintenance job (embed/orphans/purge/…) once per window — the per-
-          // source cycles above no longer run global phases, so this is where
-          // the brain-wide work happens (single-flight, no RSS blowout). Only on
-          // the per-source path (legacy single-source still runs everything).
+          // Per-source cycles run freshness phases; global maintenance runs
+          // mixed/global work once per window. Legacy cycles still run everything.
           if (!result.legacy_fallback) {
             try {
               await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode,

@@ -2857,10 +2857,7 @@ export async function registerBuiltinHandlers(
     };
   });
 
-  // Brain-wide maintenance. Runs mixed + global phases ONCE per window instead
-  // of repeating cross-source transcript/reflection reads in every source.
-  // No source_id → uses the legacy global cycle lock; stamps autopilot.last_global_at
-  // on success so the dispatch gate backs off.
+  // Separate the pinned daily barrier from brain-wide mixed/global maintenance.
   worker.register('autopilot-daily-memory', job => import('../core/cycle/daily-memory-followup.ts').then(m => m.runDailyMemoryJob(engine, job)));
   worker.register('autopilot-global-maintenance', async (job) => {
     const { pinDailyMemoryJob, finishFanoutDailyMemory } = await import('../core/cycle/daily-memory-followup.ts');
