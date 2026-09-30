@@ -207,6 +207,37 @@ describe('import structural edges', () => {
     });
   }, 120_000);
 
+  test('incomplete inline extraction queues a durable continuation instead of succeeding clean', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-incomplete-'));
+    writeFileSync(join(dir, 'note.md'), '---\ntype: concept\n---\n# Note\n\nbody\n');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    const extractMod = await import('../src/commands/extract.ts');
+    const spy = spyOn(extractMod, 'extractStaleFromDB').mockResolvedValue({
+      pagesProcessed: 0,
+      linksCreated: 0,
+      timelineCreated: 0,
+      staleRemaining: 3,
+    });
+    try {
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json']);
+        expect(result.imported).toBe(1);
+        expect(result.errors).toBe(0);
+        expect(result.linkExtractionError).toBeUndefined();
+        expect(spy).toHaveBeenCalled();
+        const jobs = await engine.executeRaw<{ data: unknown }>(
+          `SELECT data FROM minion_jobs WHERE name = 'extract'`,
+        );
+        expect(jobs).toHaveLength(1);
+        const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { reason?: string; stale?: boolean };
+        expect(data.stale).toBe(true);
+        expect(data.reason).toBe('import_inline_incomplete');
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
   test('large unchanged imports queue only real stale work and retain full-sync handoff', async () => {
     const sourceId = 'unchanged-large-src';
     await engine.executeRaw('INSERT INTO sources (id,name) VALUES ($1,$1)', [sourceId]);

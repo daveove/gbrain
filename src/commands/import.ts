@@ -987,10 +987,25 @@ export async function runImport(
         signal,
       });
       structuralLinks = extracted.linksCreated;
-      linkExtractionRecovered = extracted.staleRemaining === 0;
-      if (extracted.staleRemaining > 0) {
+      if (extracted.staleRemaining === 0) {
+        linkExtractionRecovered = true;
+      } else {
         console.error(
           `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
+        );
+        // Incomplete inline sweep must not look like a clean import: either
+        // hand off a durable continuation or count as <link-extraction>.
+        const queuedJobId = await queueDeferredStaleSweep(engine, {
+          sourceId: sourceId ?? 'default',
+          commit: opts.commit ?? 'import',
+          reason: 'import_inline_incomplete',
+        });
+        if (queuedJobId == null) {
+          throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
+        }
+        linkExtractionRecovered = true;
+        console.error(
+          `  Queued stale-sweep job #${queuedJobId} to finish link extraction.`,
         );
       }
     } catch (e) {
