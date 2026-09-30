@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
 import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -58,5 +59,60 @@ describe('daily memory refresh on source archive/restore', () => {
       "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
     );
     expect(jobs.some(j => j.data.daily_memory_date === '2026-09-29')).toBe(true);
+  });
+
+  test('restoring after archive uses a fresh fanout key', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES('rearchive','Rearchive',false)");
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Day', compiled_truth: 'Body',
+      frontmatter: { date: '2026-09-28' },
+    }, { sourceId: 'rearchive' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-28T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='rearchive'",
+    );
+    expect(await softDeleteSource(engine, 'rearchive')).not.toBeNull();
+    const afterArchive = await engine.executeRaw<{ id: number; status: string; idempotency_key: string | null }>(
+      "SELECT id,status,idempotency_key FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id",
+    );
+    expect(afterArchive.some(j => (j.idempotency_key ?? '').includes('archive:rearchive:archive:'))).toBe(true);
+    for (const job of afterArchive) {
+      await engine.executeRaw("UPDATE minion_jobs SET status='completed' WHERE id=$1", [job.id]);
+    }
+    expect(await restoreSource(engine, 'rearchive')).toBe(true);
+    const afterRestore = await engine.executeRaw<{ idempotency_key: string | null; status: string }>(
+      "SELECT idempotency_key,status FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id",
+    );
+    expect(afterRestore.some(j => (j.idempotency_key ?? '').includes('archive:rearchive:restore:') && j.status === 'waiting')).toBe(true);
+  });
+
+  test('failed archive refresh stays retryable on a later noop archive', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES('retry-refresh','Retry refresh',false)");
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Day', compiled_truth: 'Body',
+      frontmatter: { date: '2026-09-27' },
+    }, { sourceId: 'retry-refresh' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-27T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='retry-refresh'",
+    );
+    const original = MinionQueue.prototype.add;
+    MinionQueue.prototype.add = async function () { throw new Error('Synthetic archive refresh failure'); };
+    try {
+      expect(await softDeleteSource(engine, 'retry-refresh')).not.toBeNull();
+    } finally {
+      MinionQueue.prototype.add = original;
+    }
+    const pending = await engine.executeRaw<{ pending: string | null }>(
+      "SELECT config->>'daily_memory_refresh_pending' AS pending FROM sources WHERE id='retry-refresh'",
+    );
+    expect(pending[0]?.pending?.startsWith('archive:')).toBe(true);
+    expect(await softDeleteSource(engine, 'retry-refresh')).toBeNull();
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === '2026-09-27')).toBe(true);
+    const cleared = await engine.executeRaw<{ pending: string | null }>(
+      "SELECT config->>'daily_memory_refresh_pending' AS pending FROM sources WHERE id='retry-refresh'",
+    );
+    expect(cleared[0]?.pending).toBeNull();
   });
 });

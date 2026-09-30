@@ -217,9 +217,11 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 export async function refreshDailyMemoryAfterSourceArchiveChange(
   engine: BrainEngine,
   sourceId: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; transition: string },
 ): Promise<string[]> {
   if (!sourceId || sourceId === DAILY_MEMORY_SOURCE_ID) return [];
+  const transition = opts.transition.trim();
+  if (!transition) throw new Error('Archive-state daily memory refresh requires a transition key');
   const slugs: string[] = [];
   let cursor = '';
   for (;;) {
@@ -236,9 +238,10 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   if (!days.length) return [];
   const queue = new MinionQueue(engine);
   // Empty sibling ids: finishFanoutDailyMemory writes immediately for each day.
+  // Transition identity keeps archive→restore from coalescing onto a completed job.
   for (const day of days) {
     opts.signal?.throwIfAborted();
-    await queueFanoutDailyMemory(queue, { day, ids: [], key: `archive:${sourceId}` });
+    await queueFanoutDailyMemory(queue, { day, ids: [], key: `archive:${sourceId}:${transition}` });
   }
   return days;
 }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACTOR_VERSION_TS, type LinkCandidate } from './link-extraction.ts';
+import { isUndefinedTableError } from './utils.ts';
 
 const PREFIX = 'internal.pending-links.';
 type PendingProbeOptions = { dryRun?: boolean; versionTs?: string; sourceId?: string;
@@ -206,17 +207,70 @@ async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRo
   const bareNames = opts.globalBasename ? [...new Set(slugs.filter(slug => !slug.includes('/')).flatMap(slug =>
     [slug, slug.toLowerCase(), normalizeBasename(slug)]))] : [];
   opts.signal?.throwIfAborted();
+  const originSources = [...new Set(rows.map(row => row.reference.sourceId))];
+  const probeSources = [...new Set([
+    ...originSources,
+    ...rows.flatMap(row => row.reference.candidates
+      .map(candidate => candidate.targetSourceId)
+      .filter((sourceId): sourceId is string => Boolean(sourceId))),
+  ])];
   const refs = await engine.executeRaw<{ slug: string; source_id: string }>(
     `SELECT slug,source_id FROM pages WHERE deleted_at IS NULL AND
       (slug=ANY($1::text[]) OR (source_id=ANY($3::text[])
         AND lower(regexp_replace(slug,'^.*/',''))=ANY($2::text[])))`,
-    [slugs, bareNames, [...new Set(rows.map(row => row.reference.sourceId))]]);
+    [slugs, bareNames, probeSources]);
   const allSlugs = new Set(refs.map(ref => ref.slug));
   const sources = new Map<string, string[]>();
-  for (const ref of refs) sources.set(ref.slug, [...(sources.get(ref.slug) ?? []), ref.source_id]);
+  const remember = (slug: string, sourceId: string) => {
+    allSlugs.add(slug);
+    sources.set(slug, [...new Set([...(sources.get(slug) ?? []), sourceId])]);
+  };
+  for (const ref of refs) remember(ref.slug, ref.source_id);
+  // Same alias semantics as extract: slug_aliases + frontmatter aliases unlock
+  // pending targets that now exist only under a renamed/aliased canonical slug.
+  const targets = [...new Set(rows.flatMap(row => row.reference.candidates.map(c => c.targetSlug)))];
+  const targetLower = targets.map(target => target.toLowerCase());
+  try {
+    const aliasRows = await engine.executeRaw<{ alias: string; slug: string; source_id: string }>(
+      `SELECT a.alias_slug AS alias, p.slug, p.source_id FROM slug_aliases a
+         JOIN pages p ON p.source_id=a.source_id AND p.slug=a.canonical_slug AND p.deleted_at IS NULL
+         WHERE a.alias_slug=ANY($1::text[]) AND a.source_id=ANY($2::text[])
+       UNION ALL
+       SELECT alias.value AS alias, p.slug, p.source_id FROM pages p
+         CROSS JOIN LATERAL jsonb_array_elements_text(
+           CASE WHEN jsonb_typeof(p.frontmatter->'aliases')='array'
+             THEN p.frontmatter->'aliases' ELSE '[]'::jsonb END) AS alias(value)
+         WHERE p.deleted_at IS NULL AND p.source_id=ANY($2::text[])
+           AND lower(alias.value)=ANY($3::text[])`,
+      [targets, probeSources, targetLower]);
+    for (const row of aliasRows) {
+      remember(row.slug, row.source_id);
+      const match = targets.find(target => target === row.alias || target.toLowerCase() === row.alias.toLowerCase());
+      if (match) remember(match, row.source_id);
+      else remember(row.alias, row.source_id);
+    }
+  } catch (error) {
+    if (!isUndefinedTableError(error)) throw error;
+    const aliasRows = await engine.executeRaw<{ alias: string; slug: string; source_id: string }>(
+      `SELECT alias.value AS alias, p.slug, p.source_id FROM pages p
+         CROSS JOIN LATERAL jsonb_array_elements_text(
+           CASE WHEN jsonb_typeof(p.frontmatter->'aliases')='array'
+             THEN p.frontmatter->'aliases' ELSE '[]'::jsonb END) AS alias(value)
+         WHERE p.deleted_at IS NULL AND p.source_id=ANY($1::text[])
+           AND lower(alias.value)=ANY($2::text[])`,
+      [probeSources, targetLower]);
+    for (const row of aliasRows) {
+      remember(row.slug, row.source_id);
+      const match = targets.find(target => target === row.alias || target.toLowerCase() === row.alias.toLowerCase());
+      if (match) remember(match, row.source_id);
+      else remember(row.alias, row.source_id);
+    }
+  }
   const indexes = new Map<string, Map<string, string[]>>();
-  for (const sourceId of new Set(rows.map(row => row.reference.sourceId)))
-    indexes.set(sourceId, buildBasenameIndex(refs.filter(ref => ref.source_id === sourceId).map(ref => ref.slug)));
+  for (const sourceId of originSources)
+    indexes.set(sourceId, buildBasenameIndex(
+      [...allSlugs].filter(slug => (sources.get(slug) ?? []).includes(sourceId)),
+    ));
   return requeueReadyPendingLinks(engine, rows, (candidate, origin) => {
     if (resolves(candidate, origin, allSlugs, sources)) return true;
     if (!opts.globalBasename || candidate.targetSourceId || candidate.targetSlug.includes('/')) return false;

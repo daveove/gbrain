@@ -312,6 +312,74 @@ export function checkDestructiveConfirmation(
   );
 }
 
+
+const DAILY_MEMORY_REFRESH_PENDING_KEY = 'daily_memory_refresh_pending';
+
+async function markDailyMemoryArchiveRefreshPending(
+  engine: BrainEngine,
+  sourceId: string,
+  transition: string,
+): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE sources SET config = ${SOURCE_CONFIG_OBJECT_SQL} || $2::jsonb WHERE id = $1`,
+    [sourceId, JSON.stringify({ [DAILY_MEMORY_REFRESH_PENDING_KEY]: transition })],
+  );
+}
+
+async function clearDailyMemoryArchiveRefreshPending(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<void> {
+  await engine.executeRaw(
+    `UPDATE sources SET config = (${SOURCE_CONFIG_OBJECT_SQL}) - $2 WHERE id = $1`,
+    [sourceId, DAILY_MEMORY_REFRESH_PENDING_KEY],
+  );
+}
+
+async function readDailyMemoryArchiveRefreshPending(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<string | null> {
+  const rows = await engine.executeRaw<{ pending: string | null }>(
+    `SELECT config->>$2 AS pending FROM sources WHERE id = $1`,
+    [sourceId, DAILY_MEMORY_REFRESH_PENDING_KEY],
+  );
+  const pending = rows[0]?.pending;
+  return typeof pending === 'string' && pending.trim() ? pending.trim() : null;
+}
+
+/** Queue daily-memory days for an archive/restore; persist a retry marker on failure. */
+async function refreshDailyMemoryAfterArchiveTransition(
+  engine: BrainEngine,
+  sourceId: string,
+  transition: string,
+  label: 'archive' | 'restore',
+): Promise<void> {
+  try {
+    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+    await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId, { transition });
+    await clearDailyMemoryArchiveRefreshPending(engine, sourceId);
+  } catch (error) {
+    console.error(`[sources] daily memory refresh after ${label} failed for ${sourceId}:`, error);
+    try {
+      await markDailyMemoryArchiveRefreshPending(engine, sourceId, transition);
+    } catch (markError) {
+      console.error(`[sources] daily memory refresh retry marker failed for ${sourceId}:`, markError);
+    }
+  }
+}
+
+/** Already-archived / already-restored paths are no-ops; still drain a pending refresh. */
+async function retryPendingDailyMemoryArchiveRefresh(
+  engine: BrainEngine,
+  sourceId: string,
+  label: 'archive' | 'restore',
+): Promise<void> {
+  const pending = await readDailyMemoryArchiveRefreshPending(engine, sourceId);
+  if (!pending) return;
+  await refreshDailyMemoryAfterArchiveTransition(engine, sourceId, pending, label);
+}
+
 // ── Soft Delete ─────────────────────────────────────────────
 
 /**
@@ -333,16 +401,16 @@ export async function softDeleteSource(
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'archive',sourceId});
-    if(result.noop)return null;
+    if(result.noop){
+      await retryPendingDailyMemoryArchiveRefresh(engine, sourceId, 'archive');
+      return null;
+    }
     const [row]=await engine.executeRaw<{name:string;archived_at:string;archive_expires_at:string;n:number}>(`SELECT name,archived_at,archive_expires_at,
       (SELECT count(*)::integer FROM pages WHERE source_id=$1) AS n FROM sources WHERE id=$1`,[sourceId]);
     if(row){
-      try {
-        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-        await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
-      } catch (error) {
-        console.error(`[sources] daily memory refresh after archive failed for ${sourceId}:`, error);
-      }
+      await refreshDailyMemoryAfterArchiveTransition(
+        engine, sourceId, `archive:${row.archived_at}`, 'archive',
+      );
       return {id:sourceId,name:row.name,deletedAt:new Date(row.archived_at),expiresAt:new Date(row.archive_expires_at),pageCount:row.n};
     }
     return null;
@@ -362,7 +430,10 @@ export async function softDeleteSource(
      RETURNING id, name, archived_at, archive_expires_at`,
     [sourceId],
   );
-  if (rows.length === 0) return null;
+  if (rows.length === 0) {
+    await retryPendingDailyMemoryArchiveRefresh(engine, sourceId, 'archive');
+    return null;
+  }
   const row = rows[0];
 
   const pageRows = await engine.executeRaw<{ n: number }>(
@@ -371,12 +442,9 @@ export async function softDeleteSource(
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
-  try {
-    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-    await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
-  } catch (error) {
-    console.error(`[sources] daily memory refresh after archive failed for ${sourceId}:`, error);
-  }
+  await refreshDailyMemoryAfterArchiveTransition(
+    engine, sourceId, `archive:${row.archived_at}`, 'archive',
+  );
 
   return {
     id: sourceId,
@@ -403,15 +471,14 @@ export async function restoreSource(
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});
-    if(!result.noop){
-      try {
-        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-        await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
-      } catch (error) {
-        console.error(`[sources] daily memory refresh after restore failed for ${sourceId}:`, error);
-      }
+    if(result.noop){
+      await retryPendingDailyMemoryArchiveRefresh(engine, sourceId, 'restore');
+      return false;
     }
-    return !result.noop;
+    await refreshDailyMemoryAfterArchiveTransition(
+      engine, sourceId, `restore:${new Date().toISOString()}`, 'restore',
+    );
+    return true;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources restore');
   const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
@@ -425,15 +492,14 @@ export async function restoreSource(
      RETURNING id`,
     [federatedPatch, sourceId],
   );
-  if (rows.length > 0) {
-    try {
-      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-      await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
-    } catch (error) {
-      console.error(`[sources] daily memory refresh after restore failed for ${sourceId}:`, error);
-    }
+  if (rows.length === 0) {
+    await retryPendingDailyMemoryArchiveRefresh(engine, sourceId, 'restore');
+    return false;
   }
-  return rows.length > 0;
+  await refreshDailyMemoryAfterArchiveTransition(
+    engine, sourceId, `restore:${new Date().toISOString()}`, 'restore',
+  );
+  return true;
 }
 
 /**

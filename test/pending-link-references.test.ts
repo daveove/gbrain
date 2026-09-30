@@ -341,6 +341,20 @@ test('pending registry scans only the requested source in bounded keyset batches
   expect(await iterator.return()).toEqual({ value: undefined, done: true });
 });
 
+test('pending probe wakes when the target arrives under a frontmatter alias', async () => {
+  await engine.putPage('people/origin', page('[[people/old]]')); await drain();
+  expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
+  await engine.putPage('people/new', {
+    type: 'person', title: 'New', compiled_truth: 'Body', timeline: '',
+    frontmatter: { aliases: ['people/old'] },
+  });
+  const rows = await loadPendingLinkReferences(engine);
+  const ready = await probePendingLinkReferences(engine, rows, { globalBasename: false }, (candidate, _origin, slugs, sources) =>
+    slugs.has(candidate.targetSlug) && (sources.get(candidate.targetSlug) ?? []).includes('default'));
+  expect(ready).toBe(1);
+  expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBeGreaterThan(0);
+});
+
 test('expired and cancelled pending probes issue no readiness queries', async () => {
   await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
   const rows = await loadPendingLinkReferences(engine);
