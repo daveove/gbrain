@@ -336,7 +336,16 @@ export async function softDeleteSource(
     if(result.noop)return null;
     const [row]=await engine.executeRaw<{name:string;archived_at:string;archive_expires_at:string;n:number}>(`SELECT name,archived_at,archive_expires_at,
       (SELECT count(*)::integer FROM pages WHERE source_id=$1) AS n FROM sources WHERE id=$1`,[sourceId]);
-    return row?{id:sourceId,name:row.name,deletedAt:new Date(row.archived_at),expiresAt:new Date(row.archive_expires_at),pageCount:row.n}:null;
+    if(row){
+      try {
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+      } catch (error) {
+        console.error(`[sources] daily memory refresh after archive failed for ${sourceId}:`, error);
+      }
+      return {id:sourceId,name:row.name,deletedAt:new Date(row.archived_at),expiresAt:new Date(row.archive_expires_at),pageCount:row.n};
+    }
+    return null;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources archive');
   // Atomic: only flip rows that are currently active. Returns the metadata
@@ -362,6 +371,13 @@ export async function softDeleteSource(
   );
   const pageCount = pageRows[0]?.n ?? 0;
 
+  try {
+    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+    await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+  } catch (error) {
+    console.error(`[sources] daily memory refresh after archive failed for ${sourceId}:`, error);
+  }
+
   return {
     id: sourceId,
     name: row.name,
@@ -386,7 +402,16 @@ export async function restoreSource(
 ): Promise<boolean> {
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
-    const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});return !result.noop;
+    const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});
+    if(!result.noop){
+      try {
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+      } catch (error) {
+        console.error(`[sources] daily memory refresh after restore failed for ${sourceId}:`, error);
+      }
+    }
+    return !result.noop;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources restore');
   const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
@@ -400,6 +425,14 @@ export async function restoreSource(
      RETURNING id`,
     [federatedPatch, sourceId],
   );
+  if (rows.length > 0) {
+    try {
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+    } catch (error) {
+      console.error(`[sources] daily memory refresh after restore failed for ${sourceId}:`, error);
+    }
+  }
   return rows.length > 0;
 }
 

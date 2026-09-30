@@ -212,6 +212,37 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
   await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0);
 }
 
+
+/** After archive/restore, refresh every day that source still owns or used to own. */
+export async function refreshDailyMemoryAfterSourceArchiveChange(
+  engine: BrainEngine,
+  sourceId: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<string[]> {
+  if (!sourceId || sourceId === DAILY_MEMORY_SOURCE_ID) return [];
+  const slugs: string[] = [];
+  let cursor = '';
+  for (;;) {
+    opts.signal?.throwIfAborted();
+    const rows = await engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE source_id=$1 AND slug>$2 ORDER BY slug LIMIT 500`,
+      [sourceId, cursor],
+    );
+    for (const row of rows) slugs.push(row.slug);
+    if (rows.length < 500) break;
+    cursor = rows[rows.length - 1]!.slug;
+  }
+  const days = await dailyMemoryDaysForSlugs(engine, sourceId, slugs, opts);
+  if (!days.length) return [];
+  const queue = new MinionQueue(engine);
+  // Empty sibling ids: finishFanoutDailyMemory writes immediately for each day.
+  for (const day of days) {
+    opts.signal?.throwIfAborted();
+    await queueFanoutDailyMemory(queue, { day, ids: [], key: `archive:${sourceId}` });
+  }
+  return days;
+}
+
 async function dispatchDailyDateBatch(engine: BrainEngine, job: DailyJob) {
   const days = job.data.daily_memory_dates;
   const cursor = job.data.daily_memory_cursor, sourceJobId = job.data.daily_memory_source_job_id;

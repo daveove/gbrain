@@ -100,8 +100,9 @@ export interface DailyMemoryWrite {
 export async function queueDailyMemoryExtract(engine: BrainEngine, result: DailyMemoryWrite): Promise<void> {
   if (!result.written && !result.needs_extract) return;
   const { queueDeferredStaleSweep } = await import('../deferred-stale-extract.ts');
+  // Dream indexes own extraction; a human default day still wakes this source.
   const jobId = await queueDeferredStaleSweep(engine, {
-    sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID,
+    sourceId: DAILY_MEMORY_SOURCE_ID,
     commit: `daily-memory:${result.day}`,
     reason: 'daily_memory_write',
   });
@@ -244,6 +245,17 @@ function renderNote(day: string, input: RenderInput): string {
  * and swallowed so a note failure does not cancel the rest of the maintenance
  * job; an abort still propagates.
  */
+async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
+  const [historical] = await engine.executeRaw<{ needed: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL
+      AND frontmatter @> '{"dream_generated":true}'::jsonb
+      AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
+        AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
+      AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
+        OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+  return historical.needed;
+}
+
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
   opts: { signal?: AbortSignal; now?: () => Date; date?: string } = {},
@@ -262,7 +274,9 @@ export async function writeDailyMemoryFromSources(
     // A pre-existing human default index remains authoritative, even when deleted.
     const legacy = await engine.getPage(slug, { sourceId: 'default', includeDeleted: true });
     if (legacy && legacy.frontmatter.dream_generated !== true) {
-      return { written: false, day, slug, source_id: 'default', pages: 0, reason: 'human_page' };
+      // Keep the human default index; still wake stale dream extraction work.
+      return { written: false, day, slug, source_id: 'default', pages: 0, reason: 'human_page',
+        needs_extract: await dreamIndexesNeedExtract(engine) };
     }
     await ensureDailyMemorySource(engine);
 
@@ -313,19 +327,13 @@ export async function writeDailyMemoryFromSources(
       includeDeleted: true,
     });
     if (existing && existing.frontmatter?.dream_generated !== true) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page' };
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page',
+        needs_extract: await dreamIndexesNeedExtract(engine) };
     }
 
     if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
-      const [historical] = await engine.executeRaw<{ needed: boolean }>(
-        `SELECT EXISTS (SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL
-          AND frontmatter @> '{"dream_generated":true}'::jsonb
-          AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
-            AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
-          AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
-            OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract: historical.needed,
-        pages: 0, reason: 'no_source_activity' };
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID,
+        needs_extract: await dreamIndexesNeedExtract(engine), pages: 0, reason: 'no_source_activity' };
     }
 
     let recordsWrote = false;
