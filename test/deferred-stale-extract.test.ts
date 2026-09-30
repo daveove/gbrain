@@ -23,13 +23,13 @@ test('parallel same-pin callers share one successor of each active sweep', async
   expect(active.id).toBe(base);
   const firstWave = await Promise.all(Array.from({ length: 12 }, () => queueDeferredStaleSweep(engine, pin)));
   expect(new Set(firstWave).size).toBe(1);
-  expect(firstWave[0]).not.toBe(base);
+  expect(firstWave[0]).not.toEqual(base);
   await queue.completeJob(active.id, 'base-lock', {});
   const successor = (await queue.claim('successor-lock', 60_000, 'default', ['extract']))!;
   expect(successor.id).toBe(firstWave[0]);
   const secondWave = await Promise.all(Array.from({ length: 12 }, () => queueDeferredStaleSweep(engine, pin)));
   expect(new Set(secondWave).size).toBe(1);
-  expect(secondWave[0]).not.toBe(successor.id);
+  expect(secondWave[0]).not.toEqual(successor.id);
   expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(3);
   await queue.completeJob(successor.id, 'successor-lock', {});
   expect(await queueDeferredStaleSweep(engine, pin)).toBe(secondWave[0]);
