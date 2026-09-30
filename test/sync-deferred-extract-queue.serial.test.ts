@@ -194,6 +194,40 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(waiting[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}:after:${first.id}`);
   }, 120_000);
 
+
+  test('a completed successor does not strand later same-pin writes — chain another generation', async () => {
+    // Codex tip P1 on 3023b6e: after base finishes, every probe reused the
+    // single `after:<baseId>` key; once that successor completed, later
+    // calls returned null and left daily-memory / pending-target handoffs
+    // permanently stale. Chain from the returned tip instead.
+    const { performSync } = await import('../src/commands/sync.ts');
+    const baseCommit = headCommit();
+    writeLinkedPages(101);
+    git('git add -A && git commit -m "big drop"');
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const [first] = await staleExtractJobs();
+    await engine.executeRaw(`UPDATE minion_jobs SET status = 'completed' WHERE id = $1`, [first.id]);
+    // First re-sync mints after:<baseId>.
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const afterBase = (await staleExtractJobs()).filter(j => j.status === 'waiting');
+    expect(afterBase).toHaveLength(1);
+    expect(afterBase[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}:after:${first.id}`);
+    // Complete that successor, then re-sync again — must mint after:<successorId>.
+    await engine.executeRaw(`UPDATE minion_jobs SET status = 'completed' WHERE id = $1`, [afterBase[0].id]);
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test-2' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const waiting = (await staleExtractJobs()).filter(j => j.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].id).not.toBe(first.id);
+    expect(waiting[0].id).not.toBe(afterBase[0].id);
+    expect(waiting[0].idempotency_key).toBe(
+      `extract-stale:default:${headCommit()}:after:${afterBase[0].id}`,
+    );
+  }, 120_000);
+
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {
     // Blocker-3 regression (#3561 review): the idempotency fast path returns
     // a COMPLETED row as-is. A re-sync of the same range (checkpoint-resume /

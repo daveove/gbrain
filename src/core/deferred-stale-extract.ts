@@ -39,13 +39,24 @@ export async function queueDeferredStaleSweep(
     job.data?.stale === true && job.data.sourceId === payload.sourceId
     && job.data.deferred_commit === opts.commit && ['waiting', 'delayed', 'active'].includes(job.status);
   let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-  if (!isLiveSweep(job) || !['waiting', 'delayed'].includes(job.status)) {
-    // Deterministic successor keyed to the existing row: many concurrent
-    // pending-target probes must not mint a UUID flood behind one active sweep.
+  // Chain deterministic successors past finished/active rows. A single
+  // `after:<baseId>` generation strands later same-pin writes once that
+  // successor completes; each non-waiting tip becomes the next coalesce key.
+  for (let gen = 0; gen < 64; gen++) {
+    if (isLiveSweep(job) && ['waiting', 'delayed'].includes(job.status)) {
+      return job.id;
+    }
+    const predecessorId = job.id;
     job = await queue.add('extract', payload, {
-      idempotency_key: `${key}:after:${job.id}`,
+      idempotency_key: `${key}:after:${predecessorId}`,
       timeout_ms: timeoutMs,
     });
+    if (isLiveSweep(job) && job.status === 'active') {
+      return job.id;
+    }
+    if (job.id === predecessorId) {
+      break;
+    }
   }
   return isLiveSweep(job) ? job.id : null;
 }

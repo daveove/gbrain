@@ -1339,6 +1339,93 @@ async function verifyOrRestoreClearedSentinels(
   }
 }
 
+
+/** Config key for a durable manual-sync daily-index refresh that still needs a retry. */
+function manualSyncDailyMemoryRefreshKey(sourceId: string): string {
+  return `sync.daily_memory_refresh_pending:${sourceId}`;
+}
+
+/**
+ * Queue daily-memory refresh after a CLI/manual sync. Persists a retry marker
+ * before the handoff so a transient queue/DB failure cannot leave historical
+ * indexes permanently stale after the sync bookmark advances. Working-tree
+ * syncs mint a fresh synthetic job id each invocation so successive edits at
+ * the same HEAD do not coalesce onto completed day/batch keys.
+ */
+async function queueManualSyncDailyMemoryRefresh(
+  engine: BrainEngine,
+  opts: {
+    sourceId: string;
+    pin: string;
+    pagesAffected: string[];
+    workingTree: boolean;
+  },
+): Promise<void> {
+  if (opts.pagesAffected.length === 0) return;
+  const { createHash, randomUUID } = await import('node:crypto');
+  const markerKey = manualSyncDailyMemoryRefreshKey(opts.sourceId);
+  const pagesKey = [...opts.pagesAffected].sort().join('\n');
+  // Fresh invocation every call: working-tree and committed re-syncs can share
+  // a pin while page content changed; never coalesce onto completed day keys.
+  const invocation = randomUUID();
+  const digest = createHash('sha256')
+    .update(`manual-sync:${opts.sourceId}:${opts.pin}:${pagesKey}:${invocation}`)
+    .digest('hex')
+    .slice(0, 8);
+  const syntheticId = (Number.parseInt(digest, 16) % 0x7fffffff) + 1;
+  const marker = JSON.stringify({
+    pin: opts.pin,
+    pagesAffected: opts.pagesAffected,
+    syntheticId,
+    workingTree: opts.workingTree,
+  });
+  await engine.setConfig(markerKey, marker);
+  await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(
+    engine,
+    { id: syntheticId, data: {} },
+    opts.sourceId,
+    { status: 'ok', phases: [{ phase: 'sync', pagesAffected: opts.pagesAffected }] },
+  );
+  await engine.unsetConfig(markerKey);
+}
+
+/** Retry a previously persisted manual-sync daily-memory refresh, if any. */
+async function retryPendingManualSyncDailyMemoryRefresh(
+  engine: BrainEngine,
+  sourceId: string,
+): Promise<void> {
+  const markerKey = manualSyncDailyMemoryRefreshKey(sourceId);
+  const raw = await engine.getConfig(markerKey);
+  if (!raw) return;
+  let parsed: { pin?: string; pagesAffected?: string[]; syntheticId?: number; workingTree?: boolean; fullSource?: boolean };
+  try {
+    parsed = JSON.parse(raw) as typeof parsed;
+  } catch {
+    await engine.unsetConfig(markerKey);
+    return;
+  }
+  if (parsed.fullSource === true) {
+    await (await import('../core/cycle/daily-memory-followup.ts'))
+      .refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+    await engine.unsetConfig(markerKey);
+    return;
+  }
+  const pagesAffected = Array.isArray(parsed.pagesAffected)
+    ? parsed.pagesAffected.filter((s): s is string => typeof s === 'string')
+    : [];
+  if (!pagesAffected.length || !Number.isSafeInteger(parsed.syntheticId) || (parsed.syntheticId ?? 0) <= 0) {
+    await engine.unsetConfig(markerKey);
+    return;
+  }
+  await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(
+    engine,
+    { id: parsed.syntheticId!, data: {} },
+    sourceId,
+    { status: 'ok', phases: [{ phase: 'sync', pagesAffected }] },
+  );
+  await engine.unsetConfig(markerKey);
+}
+
 async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<SyncResult> {
   const company = currentCompanyBrainSync(opts.sourceId);
   // v0.41.8.0 (D9 / #1342): phase breadcrumbs. The #1342 reporter saw
@@ -3978,19 +4065,19 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // Keep historical daily indexes current after a manual/CLI sync too — not
   // only queued autopilot-cycle jobs (Codex: refreshDailyMemoryAfterSourceSync
   // was otherwise unreachable from `gbrain sync`).
+  const refreshSourceId = opts.sourceId ?? 'default';
+  try {
+    await retryPendingManualSyncDailyMemoryRefresh(engine, refreshSourceId);
+  } catch { /* prior marker retried on a later sync */ }
   if (pagesAffected.length > 0) {
     try {
-      const { createHash } = await import('node:crypto');
-      const sourceId = opts.sourceId ?? 'default';
-      const digest = createHash('sha256').update(`manual-sync:${sourceId}:${pin}`).digest('hex').slice(0, 8);
-      const syntheticId = (Number.parseInt(digest, 16) % 0x7fffffff) + 1;
-      await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(
-        engine,
-        { id: syntheticId, data: {} },
-        sourceId,
-        { status: 'ok', phases: [{ phase: 'sync', pagesAffected }] },
-      );
-    } catch { /* best-effort index refresh */ }
+      await queueManualSyncDailyMemoryRefresh(engine, {
+        sourceId: refreshSourceId,
+        pin,
+        pagesAffected,
+        workingTree: importWorkingTree,
+      });
+    } catch { /* marker retained for durable retry on the next sync */ }
   }
 
   return {
@@ -4452,6 +4539,18 @@ async function performFullSync(
       }
       // Other errors stay best-effort.
     }
+  }
+
+  // Full sync returns pagesAffected: [] by design (no incremental delta).
+  // Schedule an authoritative source-wide daily-index refresh so imported and
+  // reconciled-deleted historical dates are not left to current-day maintenance.
+  try {
+    await (await import('../core/cycle/daily-memory-followup.ts'))
+      .refreshDailyMemoryAfterSourceArchiveChange(engine, fullSourceId);
+  } catch {
+    await engine.setConfig(manualSyncDailyMemoryRefreshKey(fullSourceId), JSON.stringify({
+      pin: headCommit, pagesAffected: [], fullSource: true,
+    }));
   }
 
   return {
