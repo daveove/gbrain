@@ -37,6 +37,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
 let repoPath: string;
+let schemaVersion: string | null = null;
 
 function git(cmd: string): void { execSync(cmd, { cwd: repoPath, stdio: 'pipe' }); }
 
@@ -58,6 +59,7 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -66,6 +68,7 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-stamp-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
     execSync('git config user.email "t@t.com"', { cwd: repoPath, stdio: 'pipe' });
@@ -217,12 +220,18 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     mkdirSync(join(repoPath, '.github'), { recursive: true });
     writeFileSync(join(repoPath, '.github/note.md'), '[Alice](../people/alice.md) again.');
 
-    const slugs = ['_note', '.github/note', 'companies/ghost', 'companies/acme'];
+    // Inline sync hooks run after page admission; these hidden files must
+    // have their source-scoped origins before links can be safe to stamp.
+    for (const slug of ['_note', '.github/note']) await engine.putPage(slug, {
+      type: 'concept', title: 'Note', compiled_truth: '[[people/alice]]', timeline: '',
+    });
+    writeFileSync(join(repoPath, 'companies/unadmitted.md'), '[Alice](../people/alice.md).');
+    const slugs = ['_note', '.github/note', 'companies/ghost', 'companies/unadmitted', 'companies/acme'];
     const links = await extractLinksForSlugs(engine, repoPath, slugs);
     const timeline = await extractTimelineForSlugs(engine, repoPath, slugs);
 
     expect(links.processed).toEqual(['_note', '.github/note', 'companies/acme']);
-    expect(timeline.processed).toEqual(['_note', '.github/note', 'companies/acme']);
+    expect(timeline.processed).toEqual(['_note', '.github/note', 'companies/unadmitted', 'companies/acme']);
     expect(slugsSafeToStamp(links, timeline)).toEqual(['_note', '.github/note', 'companies/acme']);
   }, 60_000);
 });
