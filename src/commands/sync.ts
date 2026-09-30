@@ -1,3 +1,4 @@
+import { prepareSyncDailyMemory } from '../core/sync-daily-memory.ts';
 import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { assertSyncDispatchActive, resolveSyncPersistenceMode } from '../core/persistence/sync-authority.ts';
 import { formatManagedSyncFailure, readManagedSyncFailures, syncFailureJsonFields, type ManagedSyncFailure } from '../core/persistence/sync-failures.ts';
@@ -331,6 +332,8 @@ export {
 } from '../core/sync-cost-gate.ts';
 
 export interface SyncOpts {
+  /** Standalone entrypoints accept affected-day maintenance before advancing. */
+  dailyMemoryFollowup?: boolean;
   repoPath?: string;
   dryRun?: boolean;
   full?: boolean;
@@ -2272,33 +2275,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     };
   }
 
-  // Delete pages that became un-syncable (modified but filtered out).
-  // v0.20.0 Cathedral II SP-5: resolveSlugForPath picks the right slug shape
-  // (markdown vs code) based on the chunker's classifier, so a Rust file that
-  // became un-syncable (e.g., moved under `.gitignore` or filtered by
-  // strategy=markdown) deletes the actual code-slug page, not a ghost
-  // markdown-slug that never existed.
-  //
-  // v0.41.13 (#1433): the original cleanup loop deleted EVERY pre-existing
-  // page for unsyncable-modified paths, including `log.md`, `schema.md`,
-  // `index.md`, `README.md` — files that fail `isSyncable` precisely
-  // because they're metafiles by convention, not because the user
-  // "removed" them from the strategy. infiniteGameExp's domain `log.md`
-  // pages had been indexed by an older gbrain version (or via direct
-  // put_page) and were silently dropped on every subsequent sync. The
-  // fix uses `unsyncableReason` (factored from `isSyncable` so they
-  // cannot drift) to skip the delete when the reason is `'metafile'`.
-  //
-  // Honest scope: this guard only fixes the `manifest.modified` case.
-  // `manifest.deleted` is filtered upstream at sync.ts:757 via the same
-  // `isSyncable` call, so `rm log.md` followed by sync also doesn't
-  // delete the page. That's the same pre-fix behavior — removing the
-  // page requires `gbrain pages purge-deleted` or a direct MCP delete.
-  // Filed as v0.42+ follow-up for a `gbrain pages remove <slug>` surface.
+  // Retire only genuinely unsyncable modifications; metafiles and pruned paths
+  // remain protected below. Capture old dates before those rows become tombstones.
   const unsyncableModified = manifest.modified.filter(p => inScope(p) && !isSelectedForRun(p, syncOpts));
   // v0.18.0+ multi-source: scope getPage + deletePage to opts.sourceId so
   // unsyncable cleanup in source A doesn't accidentally sweep same-slug
   // pages in sources B/C/D.
+  const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: pin, scope: '', signal: opts.signal,
+    paths: [...filtered.added, ...filtered.modified, ...filtered.deleted,
+      ...filtered.renamed.flatMap(row => [row.from, row.to]), ...unsyncableModified].map(modePath),
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
   const pageOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   // #4786: pages this loop retires count as `deleted` in the result (only rows
   // that actually transitioned), so a sweep-only run never reports up_to_date.
@@ -2369,10 +2357,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // (#1794): advance to the PINNED target, and clear any checkpoint (a resume
     // whose remaining range turned out to have no syncable changes still
     // completes cleanly here).
+    await dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await dailyFollowup?.clear();
     // A commit whose ONLY changes are malformed filenames lands here with
     // totalChanges === 0 — the anchor advances past those files forever, so
     // this early return must surface the skips too (structured-review P2).
@@ -3640,11 +3630,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // "fresh". The checkpoint rows clear here — CONVERGENCE CONTRACT: sync
     // convergence == IMPORT convergence; downstream extract/facts/embed is
     // decoupled (its own resumable stale sweeps).
+    await dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await dailyFollowup?.clear();
   };
 
   // issue #1939 adversarial finding #1: a file that failed to parse (open ledger
@@ -4077,6 +4069,14 @@ async function performFullSync(
   // v0.30.x: thread sourceId so performFullSync routes pages to the named
   // source (incremental path already does this).
   // #753/#774: thread exclude (--exclude CLI) + slugRoot (monorepo subdir).
+  const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: headCommit,
+    scope: slugRoot && syncScopeRoot !== gitContextRoot ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '',
+    signal: opts.signal,
+    acceptsPath: path => isSyncable(path, opts.strategy ? { strategy: opts.strategy } : undefined)
+      || isPoisonedPath(path),
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
   const _fullImportT0 = Date.now();
   serr(`[gbrain phase] sync.fullsync.import start strategy=${opts.strategy ?? 'markdown'}`);
   opts.onProgress?.({ phase: 'full_import' });
@@ -4148,13 +4148,17 @@ async function performFullSync(
   const fullSucceeded = loadSyncFailures()
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
+  let reconciledDeletes = 0;
   const advanceFull = async (): Promise<void> => {
+    await reconcileFullSource();
+    await dailyFollowup?.accept();
     // Persist sync state so the next sync is incremental. Routed through
     // writeSyncAnchor so --source pins the right sources row.
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(gitContextRoot), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
+    await dailyFollowup?.clear();
   };
 
   const fullGate = await applySyncFailureGate({
@@ -4261,7 +4265,7 @@ async function performFullSync(
   //      used, so paths are in the identical relative form as source_path).
   // Skipped on the legacy no-sourceId path (the batch delete primitives require
   // a sourceId; matches every other source-scoped feature).
-  let reconciledDeletes = 0;
+  async function reconcileFullSource(): Promise<void> {
   if (opts.sourceId) {
     const sid = opts.sourceId;
     const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
@@ -4407,6 +4411,8 @@ async function performFullSync(
         }
       }
     }
+  }
+
   }
 
   // #3479 blocker 2 — the post-gate sweep above ran BEFORE this reconcile,
@@ -5097,6 +5103,7 @@ See also:
         : undefined;
       timer?.unref?.();
       const repoOpts: SyncOpts = {
+        dailyMemoryFollowup: true,
         repoPath: msysToNativePath(src.local_path!), // #2955: heal MSYS /c/... before joins
         dryRun, full, noPull,
         noEmbed: effectiveNoEmbed,
@@ -5336,6 +5343,7 @@ See also:
   const singleSourceInterrupt = new AbortController();
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
+    dailyMemoryFollowup: true,
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, includeGitignored, workingTree, sourceId,
     strategy: strategyArg, concurrency,
     srcSubpath,

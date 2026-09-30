@@ -1270,7 +1270,7 @@ async function runPhaseSync(
       sourceId,
       dryRun,
       noPull: !pull,
-      noEmbed: true,                       // embed is a separate phase
+      noEmbed: true, dailyMemoryFollowup: false, // cycle owns its durable affected-day handoff
       noExtract: willRunExtractPhase,      // dedupe ONLY when cycle's extract phase will also run.
                                            // If extract isn't scheduled (e.g. `gbrain dream --phase sync`),
                                            // sync's inline extract still runs to preserve prior behavior.

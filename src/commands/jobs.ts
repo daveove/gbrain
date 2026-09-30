@@ -2263,7 +2263,7 @@ export async function registerBuiltinHandlers(
     let result;
     try {
       result = await performSync(engine, {
-        repoPath, sourceId, noPull, noEmbed, noExtract, signal: job.signal,
+        repoPath, sourceId, noPull, noEmbed, noExtract, signal: job.signal, dailyMemoryFollowup: true,
         concurrency: concurrencyOverride,
         ...(githubItem ? { githubItem } : {}),
       });
