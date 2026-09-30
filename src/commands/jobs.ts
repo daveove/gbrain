@@ -2861,7 +2861,10 @@ export async function registerBuiltinHandlers(
   // of repeating cross-source transcript/reflection reads in every source.
   // No source_id → uses the legacy global cycle lock; stamps autopilot.last_global_at
   // on success so the dispatch gate backs off.
+  worker.register('autopilot-daily-memory', job => import('../core/cycle/daily-memory-followup.ts').then(m => m.runDailyMemoryJob(engine, job)));
   worker.register('autopilot-global-maintenance', async (job) => {
+    const { pinDailyMemoryJob, finishFanoutDailyMemory } = await import('../core/cycle/daily-memory-followup.ts');
+    const dailyJob = await pinDailyMemoryJob(engine, job);
     const { runCycle, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = await import('../core/cycle.ts');
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
@@ -2877,10 +2880,7 @@ export async function registerBuiltinHandlers(
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
 
-    // Daily snapshot after maintenance phases so concurrent per-source cycles
-    // from the same fan-out usually finish importing before the scan. Avoid a
-    // hard wait on those siblings: holding this worker slot can deadlock when
-    // concurrency is tight.
+    // Fanout snapshots use a queued completion barrier; this worker never waits on siblings.
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls
@@ -2895,8 +2895,7 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
-    const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
-    await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
+    if (job.data.daily_memory_deferred !== true) await finishFanoutDailyMemory(engine, dailyJob);
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {

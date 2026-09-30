@@ -33,6 +33,8 @@
  */
 
 import { existsSync } from 'fs';
+import { resolveCycleDate } from '../core/cycle/cycle-date.ts';
+import { queueFanoutDailyMemory } from '../core/cycle/daily-memory-followup.ts';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
 import { SOURCE_FRESHNESS_PHASES, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } from '../core/cycle.ts';
@@ -58,6 +60,7 @@ export interface CooldownOpts { baseMin: number; capMin: number; }
 
 export interface FanoutOpts {
   repoPath: string;
+  now?: () => Date;
   slot: string;
   timeoutMs: number;
   /**
@@ -75,6 +78,8 @@ export interface FanoutOpts {
 }
 
 export interface FanoutResult {
+  source_job_ids?: number[];
+  daily_memory_date?: string;
   /** Source ids whose submission INSERTED a fresh job this tick. */
   dispatched: string[];
   /** Source ids whose submission coalesced onto an existing pending job
@@ -409,6 +414,7 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
+  const dailyMemoryDate = await resolveCycleDate(engine, { now: opts.now });
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
@@ -504,6 +510,7 @@ export async function dispatchPerSource(
 
   const dispatched: string[] = [];
   const coalesced: string[] = [];
+  const sourceJobIds: number[] = [];
   for (const src of dispatch) {
     try {
       // #4399: config.syncEnabled=false excludes the source from automatic
@@ -540,6 +547,7 @@ export async function dispatchPerSource(
           maxPending: 1,
         },
       );
+      sourceJobIds.push(job.id);
       if (job.coalesced) {
         coalesced.push(src.id);
         if (opts.jsonMode) {
@@ -600,6 +608,7 @@ export async function dispatchPerSource(
   }
 
   return {
+    source_job_ids: sourceJobIds, daily_memory_date: dailyMemoryDate,
     dispatched,
     coalesced,
     skipped_fresh: skippedFresh.map(s => s.id),
@@ -636,7 +645,7 @@ export function isGlobalMaintenanceStale(lastGlobalAtIso: string | null, now = D
 export async function dispatchGlobalMaintenance(
   engine: BrainEngine,
   queue: MinionQueue,
-  opts: { repoPath: string; slot: string; timeoutMs: number; jsonMode: boolean; emit?: (l: string) => void; log?: (l: string) => void },
+  opts: { repoPath: string; slot: string; timeoutMs: number; jsonMode: boolean; dailyMemoryDate?: string; sourceJobIds?: number[]; emit?: (l: string) => void; log?: (l: string) => void },
 ): Promise<{ dispatched: boolean; coalesced?: boolean; reason: 'stale' | 'fresh' }> {
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
@@ -649,12 +658,14 @@ export async function dispatchGlobalMaintenance(
   }
   const lastGlobalAt = await engine.getConfig(LAST_GLOBAL_AT_KEY);
   if (!isGlobalMaintenanceStale(lastGlobalAt, Date.now(), floorMin)) {
+    if (opts.dailyMemoryDate) await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate, ids: opts.sourceJobIds ?? [], key: opts.slot });
     return { dispatched: false, reason: 'fresh' };
   }
 
   const job = await queue.add(
     'autopilot-global-maintenance',
-    { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES },
+    { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES,
+      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate, daily_memory_deferred: true } : {}) },
     {
       queue: 'default',
       // Structural single-flight: one global job per slot; maxPending:1
@@ -666,6 +677,8 @@ export async function dispatchGlobalMaintenance(
       maxPending: 1,
     },
   );
+  if (opts.dailyMemoryDate) await queueFanoutDailyMemory(queue, { day: opts.dailyMemoryDate,
+    ids: [...(opts.sourceJobIds ?? []), job.id], key: opts.slot });
   if (job.coalesced) {
     if (opts.jsonMode) {
       emit(JSON.stringify({ event: 'dispatch_coalesced', job_id: job.id, mode: 'global_maintenance', slot: opts.slot }));

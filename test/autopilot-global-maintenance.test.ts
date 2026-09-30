@@ -10,10 +10,13 @@
  * global handler stamping autopilot.last_global_at.
  */
 
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { MinionQueue } from '../src/core/minions/queue.ts';
+import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
+import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
@@ -196,6 +199,35 @@ describe('dispatchGlobalMaintenance — single-flight gate', () => {
     expect(added[0].data.phases).toEqual(MAINTENANCE_PHASES);
   });
 
+  test('a coalesced global cycle still gets an independent exact-sibling daily barrier', async () => {
+    const { engine } = stubs(null);
+    const added: Array<{ name: string; data: Record<string, unknown>; opts: any }> = [];
+    const queue = { add: async (name: string, data: Record<string, unknown>, opts: any) => {
+      added.push({ name, data, opts });
+      return { id: name === 'autopilot-global-maintenance' ? 10 : 11, status: 'waiting', data,
+        coalesced: name === 'autopilot-global-maintenance' };
+    } } as never;
+    await dispatchGlobalMaintenance(engine, queue, { repoPath: '/tmp', slot: 'slot-fixture', timeoutMs: 1,
+      jsonMode: true, emit: () => {}, dailyMemoryDate: '2026-09-30', sourceJobIds: [4,3] });
+    expect(added.map(job => job.name)).toEqual(['autopilot-global-maintenance', 'autopilot-daily-memory']);
+    expect(added[1].data.source_cycle_job_ids).toEqual([3,4,10]);
+    expect(added[1].data.daily_memory_date).toBe('2026-09-30');
+    expect(added[1].opts.maxPending).toBeUndefined();
+    expect(added[0].data.daily_memory_deferred).toBe(true);
+  });
+
+  test('fresh global maintenance does not suppress a source fanout daily barrier', async () => {
+    const { engine } = stubs(new Date().toISOString());
+    const added: Array<{ name: string; data: Record<string, unknown> }> = [];
+    const queue = { add: async (name: string, data: Record<string, unknown>) => {
+      added.push({ name, data }); return { id: 12, status: 'waiting', data };
+    } } as never;
+    await dispatchGlobalMaintenance(engine, queue, { repoPath: '/tmp', slot: 'fresh-slot', timeoutMs: 1,
+      jsonMode: true, emit: () => {}, dailyMemoryDate: '2026-09-30', sourceJobIds: [3] });
+    expect(added.map(job => job.name)).toEqual(['autopilot-daily-memory']);
+    expect(added[0].data.source_cycle_job_ids).toEqual([3]);
+  });
+
   test('fresh → does NOT dispatch', async () => {
     const { engine, queue, added } = stubs(new Date().toISOString());
     const r = await dispatchGlobalMaintenance(engine, queue, { repoPath: '/tmp', slot: 's1', timeoutMs: 1, jsonMode: true, emit: () => {} });
@@ -249,9 +281,10 @@ describe('dispatchPerSource — per-source jobs carry SOURCE phases only', () =>
 
 describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', () => {
   let engine: PGLiteEngine;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 30000);
+  let schemaVersion: string | null;
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 30000);
   afterAll(async () => { await engine.disconnect(); });
-  beforeEach(async () => { await resetPgliteState(engine); });
+  beforeEach(async () => { await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); });
 
   async function captureHandlers() {
     const handlers = new Map<string, (job: any) => Promise<any>>();
@@ -259,6 +292,83 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     await registerBuiltinHandlers(fakeWorker as never, engine);
     return handlers;
   }
+
+  test('daily barrier releases a single worker until every sibling is terminal and keeps its original day', async () => {
+    const queue = new MinionQueue(engine);
+    const dailyHandler = (await captureHandlers()).get('autopilot-daily-memory');
+    expect(dailyHandler).toBeTruthy();
+    const siblings = [await queue.add('autopilot-cycle', { source_id: 'fixture-a' }),
+      await queue.add('autopilot-cycle', { source_id: 'fixture-b' })];
+    const day = '2026-09-30';
+    const id = await queueFanoutDailyMemory(queue, { day, ids: siblings.map(job => job.id), key: 'fixture-slot' });
+    const barrier = (await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [id]))[0];
+    const pending = await dailyHandler!({ id, data: barrier.data });
+    expect(pending.daily_memory_pending).toBe(true);
+    expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+    const successor = (await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
+      "SELECT id,status,data FROM minion_jobs WHERE name='autopilot-daily-memory' AND id<>$1", [id]))[0];
+    expect(successor.status).toBe('delayed');
+    expect(successor.data.daily_memory_date).toBe(day);
+    // Source jobs are still claimable: the barrier never occupies this worker while waiting.
+    const first = await queue.claim('fixture-lock-a', 60_000, 'default', ['autopilot-cycle']);
+    expect(first).not.toBeNull();
+    await queue.completeJob(first!.id, 'fixture-lock-a', {});
+    expect((await finishFanoutDailyMemory(engine, { id: successor.id, data: successor.data })).daily_memory_pending).toBe(true);
+    const last = await queue.claim('fixture-lock-b', 60_000, 'default', ['autopilot-cycle']);
+    expect(last).not.toBeNull();
+    await engine.putPage('notes/fanout-last', { type: 'note', title: 'Late sibling fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug='notes/fanout-last'", [day]);
+    await queue.failJob(last!.id, 'fixture-lock-b', 'Synthetic terminal failure', 'dead');
+    // The original payload stays pinned even though its continuation is admitted after midnight.
+    const pinned = await pinDailyMemoryJob(engine, { id: successor.id, data: successor.data });
+    const done = await dailyHandler!(pinned);
+    expect(done.daily_memory_pending).toBe(false);
+    expect(done.day).toBe(day);
+    expect(done.dependency_failures).toEqual([{ id: last!.id, status: 'dead' }]);
+    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain('[[default:notes/fanout-last]]');
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND status='waiting'")).toHaveLength(1);
+    expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+  });
+
+  test('completed identical daily barriers are idempotent but changed dependency sets get a new job', async () => {
+    const queue = new MinionQueue(engine), day = '2026-09-30';
+    const id = await queueFanoutDailyMemory(queue, { day, ids: [], key: 'same-slot' });
+    const claimed = await queue.claim('daily-complete-lock', 60_000, 'default', ['autopilot-daily-memory']);
+    expect(claimed!.id).toBe(id);
+    await queue.completeJob(id, 'daily-complete-lock', {});
+    expect(await queueFanoutDailyMemory(queue, { day, ids: [], key: 'same-slot' })).toBe(id);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(1);
+    const sibling = await queue.add('autopilot-cycle', {});
+    expect(await queueFanoutDailyMemory(queue, { day, ids: [sibling.id], key: 'same-slot' })).not.toBe(id);
+  });
+
+  test('replaying a parent after its completed child handed off does not duplicate or fail the live chain', async () => {
+    const queue = new MinionQueue(engine), sibling = await queue.add('autopilot-cycle', {});
+    const parentId = await queueFanoutDailyMemory(queue, { day: '2026-09-30', ids: [sibling.id], key: 'replay-slot' });
+    const parent = await queue.claim('parent-lock', 60_000, 'default', ['autopilot-daily-memory']);
+    expect(parent!.id).toBe(parentId);
+    const parentResult = await finishFanoutDailyMemory(engine, parent!);
+    await queue.completeJob(parentId, 'parent-lock', parentResult);
+    await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE name='autopilot-daily-memory' AND status='delayed'");
+    await queue.promoteDelayed();
+    const child = await queue.claim('child-lock', 60_000, 'default', ['autopilot-daily-memory']);
+    const childResult = await finishFanoutDailyMemory(engine, child!);
+    expect(childResult.daily_memory_pending).toBe(true);
+    await queue.completeJob(child!.id, 'child-lock', childResult);
+    const before = await engine.executeRaw("SELECT id,status FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
+    expect((await finishFanoutDailyMemory(engine, parent!)).daily_memory_job_id).toBe(child!.id);
+    expect(await engine.executeRaw("SELECT id,status FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id")).toEqual(before);
+  });
+
+  test('daily barrier refuses missing dependencies and rejected durable successors', async () => {
+    const missing = { id: 77, data: { daily_memory_date: '2026-09-30', source_cycle_job_ids: [999999] } };
+    await expect(finishFanoutDailyMemory(engine, missing)).rejects.toThrow('missing or unknown');
+    const queue = new MinionQueue(engine), sibling = await queue.add('autopilot-cycle', {});
+    const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => null as never);
+    try { await expect(finishFanoutDailyMemory(engine, { id: 78, data: { daily_memory_date: '2026-09-30', source_cycle_job_ids: [sibling.id] } })).rejects.toThrow('was not accepted'); }
+    finally { add.mockRestore(); }
+    expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+  });
 
   test('autopilot-cycle handler normalizes a legacy per-source payload down to freshness phases', async () => {
     // Pre-v0.46.20 fanout payloads carried NON_GLOBAL_PHASES (mixed +
@@ -415,20 +525,5 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const stamped = await engine.getConfig(LAST_GLOBAL_AT_KEY);
     expect(stamped).not.toBeNull();
     expect(Number.isFinite(new Date(stamped!).getTime())).toBe(true);
-  });
-});
-
-
-describe('autopilot-global-maintenance daily memory order', () => {
-  test('daily memory write follows runCycle in the handler source', () => {
-    const src = readFileSync(join(import.meta.dir, '..', 'src', 'commands', 'jobs.ts'), 'utf8');
-    const start = src.indexOf("worker.register('autopilot-global-maintenance'");
-    expect(start).toBeGreaterThan(-1);
-    const end = src.indexOf("worker.register('shell'", start);
-    const body = src.slice(start, end > start ? end : undefined);
-    const runIdx = body.indexOf('const report = await runCycle(engine,');
-    const writeIdx = body.indexOf('writeDailyMemoryFromSources(engine');
-    expect(runIdx).toBeGreaterThan(-1);
-    expect(writeIdx).toBeGreaterThan(runIdx);
   });
 });

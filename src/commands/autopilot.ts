@@ -1424,7 +1424,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           // the per-source path (legacy single-source still runs everything).
           if (!result.legacy_fallback) {
             try {
-              await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode });
+              await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode,
+                dailyMemoryDate: result.daily_memory_date, sourceJobIds: result.source_job_ids });
             } catch (e) {
               if (jsonMode) process.stderr.write(JSON.stringify({ event: 'global_maintenance_dispatch_failed', error: e instanceof Error ? e.message : String(e) }) + '\n');
             }

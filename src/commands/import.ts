@@ -914,6 +914,7 @@ export async function runImport(
   // batches, then rethrown.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
+  let linkExtractionRecovered = false;
   const recordLinkFailure = (message: string): void => {
     preserveCompletedPaths();
     linkExtractionError = message;
@@ -966,7 +967,8 @@ export async function runImport(
       rethrowIfCancelled(e);
       recordLinkFailure(e instanceof Error ? e.message : String(e));
     }
-    if (queuedJobId != null && !linkExtractionError) console.error(
+    linkExtractionRecovered = queuedJobId != null && !linkExtractionError;
+    if (linkExtractionRecovered) console.error(
       `  Large import: deferring link extraction` +
       (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
       ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
@@ -984,6 +986,7 @@ export async function runImport(
         signal,
       });
       structuralLinks = extracted.linksCreated;
+      linkExtractionRecovered = extracted.staleRemaining === 0;
       if (extracted.staleRemaining > 0) {
         console.error(
           `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
@@ -1058,7 +1061,7 @@ export async function runImport(
     // sentinel (it starts with `<`, so --skip-failed never acknowledges it).
     const healedPaths = [
       ...succeededPaths,
-      ...(!linkExtractionError ? ['<link-extraction>'] as const : []),
+      ...(linkExtractionRecovered ? ['<link-extraction>'] as const : []),
     ];
     if (healedPaths.length > 0) {
       const { clearFailures } = await import('../core/sync.ts');

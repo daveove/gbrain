@@ -200,10 +200,11 @@ finally:
   it('reapplies Asia/Manila after env.sh exports TZ', () => {
     const { home, run } = fixture();
     writeFileSync(join(home, '.gbrain/env.sh'), 'export TZ=UTC\n');
-    const result = run(['2026-09-29']);
+    const result = run();
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].tz).toBe('Asia/Manila');
+    expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts')]);
   });
 
 });

@@ -229,6 +229,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      getConfig: async () => null,
       listAllSources: async () => {
         if (opts?.listThrows) throw new Error('sources table missing');
         return sources;
@@ -254,6 +255,14 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     };
     return { engine, queue, added, events, logs, fanoutOpts };
   }
+
+  test('fanout pins the calendar day before submitting its source jobs', async () => {
+    const { engine, queue, fanoutOpts } = makeStubs([src('repo-a')]);
+    engine.getConfig = async key => key === 'cycle.timezone' ? 'Asia/Manila' : null;
+    const result = await dispatchPerSource(engine, queue, { ...fanoutOpts, now: () => new Date('2026-09-30T15:59:00Z') });
+    expect(result.daily_memory_date).toBe('2026-09-30');
+    expect(result.source_job_ids).toEqual([100]);
+  });
 
   test('empty sources list falls back to legacy single-job dispatch', async () => {
     const { engine, queue, added, fanoutOpts } = makeStubs([]);
@@ -518,6 +527,8 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     });
     expect(result.dispatched).toEqual(['a']);
     expect(result.coalesced).toEqual(['b']);
+    expect(result.source_job_ids).toEqual([200, 201]);
+    expect(result.daily_memory_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const kinds = events.map(e => JSON.parse(e).event);
     expect(kinds).toContain('dispatched');
     expect(kinds).toContain('dispatch_coalesced');

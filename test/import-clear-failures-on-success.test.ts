@@ -14,7 +14,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -92,9 +92,18 @@ describe('transient <link-extraction> sentinel clears after a successful handoff
       recordFailures('default', [{ path: '<link-extraction>', error: 'stale count timed out' }], 'c1');
       expect(loadSyncFailures().some((f) => f.path === '<link-extraction>' && f.state === 'open')).toBe(true);
 
+      await runImport(engine, [repo, '--fresh', '--no-embed', '--json'], { noExtract: true });
+      expect(loadSyncFailures().some(f => f.path === '<link-extraction>' && f.state === 'open')).toBe(true);
+      const empty = join(repo, 'empty');
+      mkdirSync(empty);
+      await runImport(engine, [empty, '--fresh', '--no-embed', '--json']);
+      expect(loadSyncFailures().some(f => f.path === '<link-extraction>' && f.state === 'open')).toBe(true);
       await runImport(engine, [repo, '--fresh', '--no-embed', '--json']);
-
       expect(loadSyncFailures().filter((f) => f.path === '<link-extraction>')).toEqual([]);
+      recordFailures('default', [{ path: '<link-extraction>', error: 'queue failed' }], 'c2');
+      await runImport(engine, [repo, '--fresh', '--no-embed', '--json'], { fullSync: true });
+      expect(loadSyncFailures().filter((f) => f.path === '<link-extraction>')).toEqual([]);
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND status='waiting'")).not.toHaveLength(0);
     });
   });
 });
