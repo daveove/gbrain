@@ -4092,6 +4092,7 @@ async function performFullSync(
       includeGitignored: opts.includeGitignored,
       slugRoot,
       fullSync: true,
+      noExtract: opts.noExtract,
       // issue #1939: performFullSync owns the failure ledger + bookmark via the
       // shared gate below; don't let runImport double-record or write its own.
       managedBookmark: true,

@@ -1388,18 +1388,10 @@ async function runPhaseExtract(
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
     const incremental = changedSlugs !== undefined;
-    // #4062: the targeted pass above only covers what sync reported (or the
-    // fs walk found) — pages left stale for any OTHER reason (extractor
-    // version bump, DB-only writes, a prior aborted sweep) never re-extracted
-    // on the cycle, so the links_extracted_at backlog grew unboundedly until
-    // someone hand-ran `gbrain extract --stale`. Drain it here: DB-source,
-    // source-scoped, capped at CYCLE_STALE_DRAIN_BUDGET_MS per cycle (the
-    // full ~30-min STALE_TIME_BUDGET_MS stays with the explicit
-    // `gbrain extract --stale` command — an unbounded in-cycle drain would
-    // starve every later phase behind a big backlog; the remainder drains
-    // across subsequent cycles), no-op when nothing is stale. Failures
-    // degrade to details (the targeted pass already succeeded — a drain
-    // hiccup must not fail the phase).
+    // Drain source-scoped DB pages left stale by version bumps, DB-only
+    // writes or aborted sweeps. The cycle budget bounds each drain; later
+    // cycles continue any backlog. Ordinary failures degrade to details,
+    // while cancellation propagates through the phase.
     let staleRemaining: number | undefined;
     let staleDetails: Record<string, unknown> = {};
     try {
@@ -1412,6 +1404,7 @@ async function runPhaseExtract(
         sourceIdFilter: sourceId,
         catchUp: false,
         timeBudgetMs: CYCLE_STALE_DRAIN_BUDGET_MS,
+        signal,
       });
       staleRemaining = drained.staleRemaining;
       staleDetails = {
@@ -1421,6 +1414,7 @@ async function runPhaseExtract(
         staleRemaining: drained.staleRemaining,
       };
     } catch (e) {
+      if (signal?.aborted || (e instanceof Error && e.name === 'AbortError')) throw e;
       staleDetails = { stale_drain_error: e instanceof Error ? e.message : String(e) };
     }
     return {
@@ -1440,6 +1434,7 @@ async function runPhaseExtract(
       },
     };
   } catch (e) {
+    if (signal?.aborted || (e instanceof Error && e.name === 'AbortError')) throw e;
     return {
       phase: 'extract',
       status: 'fail',

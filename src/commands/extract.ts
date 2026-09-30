@@ -38,6 +38,7 @@
  * whole corpus through getPage.
  */
 
+import { loadPendingLinkReferences, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
@@ -2089,6 +2090,7 @@ export async function extractStaleFromDB(
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
+  const startMs = Date.now();
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
   const log = opts.quiet ? (..._args: unknown[]) => {} : console.log;
   const timeBudgetMs = opts.timeBudgetMs ?? STALE_TIME_BUDGET_MS;
@@ -2096,7 +2098,7 @@ export async function extractStaleFromDB(
   opts.signal?.throwIfAborted();
 
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
-  const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
   if (dryRun) {
     if (jsonMode && !opts.quiet) {
       process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale }) + '\n');
@@ -2105,7 +2107,9 @@ export async function extractStaleFromDB(
     }
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
   }
-  if (totalStale === 0) {
+  const pendingLinks = await loadPendingLinkReferences(engine, sourceIdFilter);
+  opts.signal?.throwIfAborted();
+  if (totalStale === 0 && pendingLinks.length === 0) {
     if (!jsonMode) log('No stale pages — extraction is up to date.');
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
   }
@@ -2131,6 +2135,19 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   // #4611: mirrors extractLinksFromDB — configured default, resolved once.
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
+  const federatedSourceIds = new Set(
+    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+  );
+  if (pendingLinks.length) {
+    await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
+      deadline: catchUp ? Infinity : startMs + timeBudgetMs }, (candidate, origin, pendingSlugs, pendingSources) =>
+      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
+        federatedSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+    opts.signal?.throwIfAborted();
+    totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  }
+  if (totalStale === 0)
+    return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
   const allRefs = await engine.listAllPageRefs();
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
@@ -2140,17 +2157,11 @@ export async function extractStaleFromDB(
     list.push(ref.source_id);
     slugToSources.set(ref.slug, list);
   }
-  // #3478: mirrors extractLinksFromDB — only federated sources keep the
-  // cross-source 'default' fallback; absent/archived rows fail closed.
-  const federatedSourceIds = new Set(
-    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
-  );
   const targetMetadata = new Map((await loadLinkPageMetadata(engine)).map(p => [`${p.source_id}\0${p.slug}`, p]));
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('extract.stale', totalStale);
 
-  const startMs = Date.now();
   let afterPageId = 0;
   let linksCreated = 0, timelineCreated = 0, pagesProcessed = 0;
   let skippedAttendanceIncomplete = 0;
@@ -2201,11 +2212,7 @@ export async function extractStaleFromDB(
         } },
       );
       if (!extracted.attendanceComplete) { skippedAttendanceIncomplete++; continue; }
-      // A target that is not a page yet must leave this page unstamped.
-      // Importing that page later re-enters the sweep and creates the edge.
-      // Stamping here made the miss permanent until the extractor version
-      // bumped or the page was edited.
-      let holdStamp = false;
+      const missingCandidates: LinkCandidate[] = [];
       for (const c of extracted.candidates) {
         const r = resolveCandidateSources(
           c, page.slug, page.source_id, allSlugs, slugToSources,
@@ -2215,14 +2222,17 @@ export async function extractStaleFromDB(
         if (!r.ok) {
           if (r.reason === 'cross_source') skippedCrossSource++;
           else skippedMissingTarget++;
-          if (r.reason === 'missing_target') holdStamp = true;
+          if (r.reason === 'missing_target') missingCandidates.push(c);
           continue;
         }
         linkRows.push(resolvedLinkCandidate(c, page.slug, page.source_id, r));
       }
+      opts.signal?.throwIfAborted();
       const written = await engine.replaceDerivedLinks({ slug: page.slug, sourceId: page.source_id,
         expectedRevision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation }, linkRows, { includeFrontmatter,
         expectedEndpoints: capturedLinkEndpoints(linkRows, targetMetadata) });
+      await storePendingLinkReferences(engine, { slug: page.slug, sourceId: page.source_id,
+        revision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation }, pendingCandidates(missingCandidates, linkRows, globalBasename, page.slug, page.source_id), opts.signal);
       linksCreated += written.created;
       for (const entry of parseTimelineEntries(fullContent)) {
         // #3957: carry the parsed source label — omitting it wrote source=''
@@ -2231,8 +2241,8 @@ export async function extractStaleFromDB(
         // summary, source) dedup index.
         timelineRows.push({ slug: page.slug, date: entry.date, source: entry.source, summary: entry.summary, detail: entry.detail || '', source_id: page.source_id });
       }
-      // Pages with no held target are stamped (incl. zero-link pages).
-      // A missing_target hold skips the stamp. D4 race fix:
+      // Missing targets now live in the durable registry, so successful pages
+      // can leave the stale backlog. D4 race fix:
       // stamp with the row's READ updated_at, NOT now() — a concurrent edit
       // landing between this SELECT and the stamp advances updated_at past the
       // stamped value, so the page stays stale and re-extracts next run instead
@@ -2250,19 +2260,19 @@ export async function extractStaleFromDB(
       // GREATEST(updated_at, versionTs) preserves the race semantics (a real
       // future edit advances updated_at > versionTs >= stamp → re-extracts)
       // while lifting old pages to the threshold so they clear.
-      if (!holdStamp) {
-        const stampIso = page.updated_at.getTime() >= Date.parse(versionTs)
-          ? page.updated_at_iso
-          : versionTs;
-        processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: stampIso });
-      }
+      const stampIso = page.updated_at.getTime() >= Date.parse(versionTs)
+        ? page.updated_at_iso
+        : versionTs;
+      processedRefs.push({ slug: page.slug, source_id: page.source_id, extractedAt: stampIso });
     }
 
     for (let i = 0; i < timelineRows.length; i += BATCH_SIZE) {
+      opts.signal?.throwIfAborted();
       timelineCreated += await engine.addTimelineEntriesBatch(timelineRows.slice(i, i + BATCH_SIZE), { auditSite: 'extract.stale' });
     }
     // Stamp LAST, directly (not the swallowing stampExtracted) so a stamp
     // failure surfaces instead of looping forever.
+    opts.signal?.throwIfAborted();
     await engine.markPagesExtractedBatch(processedRefs, new Date().toISOString());
 
     pagesProcessed += processedRefs.length;

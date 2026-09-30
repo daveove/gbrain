@@ -15,7 +15,12 @@ const calendarTimestamp = new Type('tag:yaml.org,2002:timestamp', {
     const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
     return d.getUTCFullYear() === +m[1] && d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3];
   },
-  construct: baseTimestamp.construct,
+  // Calendar dates have no instant. Preserve their spelling through JSON
+  // storage; converting them to Date would erase that distinction from an
+  // explicit UTC-midnight datetime. Datetimes retain js-yaml's Date behavior.
+  construct: (data: string) => /^\d{4}-\d{1,2}-\d{1,2}$/.test(data)
+    ? data
+    : baseTimestamp.construct(data),
   instanceOf: Date,
   represent: baseTimestamp.represent,
 });

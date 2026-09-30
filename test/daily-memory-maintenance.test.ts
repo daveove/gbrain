@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -14,6 +14,10 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
 import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { computeEffectiveDate } from '../src/core/effective-date.ts';
+import { importFromContent } from '../src/core/import-file.ts';
+import { extractEntityRefs } from '../src/core/link-extraction.ts';
+import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { dailyMemoryArgs } from '../scripts/write-daily-memory.ts';
 
 describe('daily memory from sources the brain already holds', () => {
@@ -70,8 +74,8 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page).not.toBeNull();
     expect(page!.frontmatter.dream_generated).toBe(true);
     expect(page!.frontmatter.dream_cycle_date).toBe(day);
-    expect(page!.compiled_truth).toContain('[[meetings/standup]]');
-    expect(page!.compiled_truth).toContain('[[threads/acme-example]]');
+    expect(page!.compiled_truth).toContain('[[notes:meetings/standup]]');
+    expect(page!.compiled_truth).toContain('[[mail:threads/acme-example]]');
     expect(page!.compiled_truth).toContain('## notes');
     expect(page!.compiled_truth).toContain('## mail');
     expect(page!.compiled_truth).not.toContain('archive/old-note');
@@ -90,6 +94,107 @@ describe('daily memory from sources the brain already holds', () => {
       compiled_truth: 'talked about the rollout',
     }, { sourceId: 'notes' });
   }
+
+  test('timestamped effective dates use Manila while date-only values keep their calendar day', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    for (const [slug, date] of [
+      ['notes/instant', '2026-09-30T00:30:00+08:00'],
+      ['notes/calendar', '2026-09-30'],
+      ['notes/previous-calendar', '2026-09-29'],
+    ]) {
+      await engine.putPage(slug, { type: 'note', title: slug, compiled_truth: 'body', frontmatter: { event_date: date } });
+      const effective = computeEffectiveDate({ slug, frontmatter: { event_date: date }, createdAt: new Date(), updatedAt: new Date() });
+      await engine.executeRaw(`UPDATE pages SET effective_date = $1, effective_date_source = $2 WHERE slug = $3`, [effective.date!.toISOString(), effective.source, slug]);
+    }
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    const page = await engine.getPage(dailyMemorySlug('2026-09-30'));
+    expect(page!.compiled_truth).toContain('[[notes/instant]]');
+    expect(page!.compiled_truth).toContain('[[notes/calendar]]');
+    expect(page!.compiled_truth).not.toContain('[[notes/previous-calendar]]');
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
+    expect(previous!.compiled_truth).not.toContain('[[notes/instant]]');
+  });
+
+  test('imported unquoted YAML calendar dates survive JSON storage while midnight datetimes remain instants', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    for (const [slug, value] of [
+      ['notes/yaml-calendar', '2026-09-30'],
+      ['notes/yaml-utc-midnight', '2026-09-30T00:00:00Z'],
+      ['notes/yaml-local-midnight', '2026-09-30T00:00:00-07:00'],
+    ]) {
+      await importFromContent(engine, slug, `---\ndate: ${value}\n---\n# Fixture\n\nA dated fixture.\n`, { noEmbed: true });
+    }
+    const imported = await engine.getPage('notes/yaml-calendar');
+    expect(imported!.frontmatter.date).toBe('2026-09-30');
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    const today = await engine.getPage(dailyMemorySlug('2026-09-30'));
+    expect(today!.compiled_truth).toContain('[[notes/yaml-calendar]]');
+    expect(today!.compiled_truth).toContain('[[notes/yaml-local-midnight]]');
+    expect(today!.compiled_truth).not.toContain('[[notes/yaml-utc-midnight]]');
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    const previous = await engine.getPage(dailyMemorySlug('2026-09-29'));
+    expect(previous!.compiled_truth).toContain('[[notes/yaml-utc-midnight]]');
+    expect(previous!.compiled_truth).not.toContain('[[notes/yaml-calendar]]');
+    expect(previous!.compiled_truth).not.toContain('[[notes/yaml-local-midnight]]');
+  });
+
+  test('UTC-midnight timestamps and fallback anchors use the local day west of UTC', async () => {
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await engine.putPage('notes/midnight', { type: 'note', title: 'Midnight', compiled_truth: 'body', frontmatter: { date: '2026-09-30T00:00:00Z' } });
+    await engine.putPage('notes/calendar-value', { type: 'note', title: 'Calendar', compiled_truth: 'body', frontmatter: { date: '2026-09-30' } });
+    await engine.executeRaw(`UPDATE pages SET effective_date = '2026-09-30T00:00:00Z', effective_date_source = 'date' WHERE slug IN ('notes/midnight', 'notes/calendar-value')`);
+    await engine.putPage('notes/anchor', { type: 'note', title: 'Anchor', compiled_truth: 'body' });
+    await engine.executeRaw(`UPDATE pages SET effective_date = '2026-09-30T00:00:00Z', effective_date_source = 'fallback' WHERE slug = 'notes/anchor'`);
+    await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+    const page = await engine.getPage(dailyMemorySlug('2026-09-29'));
+    expect(page!.compiled_truth).toContain('[[notes/midnight]]');
+    expect(page!.compiled_truth).toContain('[[notes/anchor]]');
+    expect(page!.compiled_truth).not.toContain('[[notes/calendar-value]]');
+  });
+
+  test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-codex-manila-day-'));
+    const file = join(dir, 'session.jsonl');
+    const timestamp = '2026-09-29T16:30:00.000Z';
+    writeFileSync(file, [
+      { timestamp, type: 'session_meta', payload: { id: 'manila-day-fixture', session_id: 'manila-day-fixture', timestamp, cwd: dir } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'A daily index fixture.' } },
+      { timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixture acknowledged.' }] } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    try {
+      const ingested = await runTranscriptsIngest(engine, {
+        paths: [file], format: 'codex', sourceId: DAILY_MEMORY_SOURCE_ID,
+        dateZone: 'Asia/Manila', sinceIso: '2026-09-29T16:00:00.000Z',
+      });
+      expect(ingested.pages.imported).toBe(1);
+      expect(ingested.cleanScan).toBe(true);
+      const slug = ingested.slugsTouched[0]!;
+      expect(slug).toContain('2026-09-29');
+      const session = await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      expect(session!.frontmatter.date).toBe('2026-09-30');
+      expect(new Date(session!.effective_date!).toISOString()).toBe('2026-09-30T00:00:00.000Z');
+      await engine.setConfig('cycle.timezone', 'Asia/Manila');
+      await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+      expect((await engine.getPage(dailyMemorySlug('2026-09-30')))!.compiled_truth).toContain(`[[${slug}]]`);
+      const previous = await writeDailyMemoryFromSources(engine, { date: '2026-09-29' });
+      expect(previous.reason).toBe('no_source_activity');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('same-slug pages retain their distinct source routing in the daily index', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('alpha', 'alpha'), ('beta', 'beta')`);
+    for (const sourceId of ['alpha', 'beta']) {
+      await engine.putPage('notes/shared', { type: 'note', title: sourceId, compiled_truth: 'A source fixture.' }, { sourceId });
+    }
+    const result = await writeDailyMemoryFromSources(engine);
+    const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const refs = extractEntityRefs(page!.compiled_truth);
+    expect(refs.filter(ref => ref.slug === 'notes/shared').map(ref => ref.sourceId)).toEqual(['alpha', 'beta']);
+    expect(page!.compiled_truth).not.toContain('[[notes/shared]]');
+  });
 
   test('a live human page at the daily slug is unchanged', async () => {
     await seedTodayPage();
@@ -251,7 +356,7 @@ describe('daily memory from sources the brain already holds', () => {
     const result = await writeDailyMemoryFromSources(engine);
     expect(result.written).toBe(true);
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    expect(page!.compiled_truth).toContain('[[meetings/standup]]');
+    expect(page!.compiled_truth).toContain('[[notes:meetings/standup]]');
   });
 
   test('a UTC-midnight effective_date stays on that calendar day west of UTC', async () => {

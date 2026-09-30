@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
+import { parseDateLoose } from '../effective-date.ts';
 
 export const DAILY_MEMORY_SOURCE_ID = 'default';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
@@ -41,7 +42,29 @@ interface SourcePageRow {
   source_id: string;
   slug: string;
   title: string;
-  total: number | string;
+  effective_date: Date | string | null;
+  effective_date_source: string | null;
+  frontmatter: Record<string, unknown>;
+}
+
+function isCalendarEffectiveDate(row: SourcePageRow): boolean {
+  if (row.effective_date_source === 'filename') return true;
+  if (row.effective_date_source === 'fallback') return false;
+  const date = new Date(row.effective_date!);
+  // Old rows without provenance used UTC midnight for calendar dates.
+  if (!row.effective_date_source) return date.toISOString().endsWith('T00:00:00.000Z');
+  const keys = row.effective_date_source === 'created'
+    ? ['created', 'created_at', 'date_created', 'date created']
+    : [row.effective_date_source];
+  for (const key of keys) {
+    const value = row.frontmatter[key];
+    if (parseDateLoose(value)?.getTime() !== date.getTime()) continue;
+    if (typeof value !== 'string') return false;
+    // The parser's date-only shapes. Datetimes, including UTC midnight,
+    // are instants and must use the cycle timezone.
+    return /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:[a-z]+,?\s+)?[a-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}|\d{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,9}\.?,?\s+\d{4})$/i.test(value.trim());
+  }
+  return false;
 }
 
 function oneLine(title: string): string {
@@ -83,7 +106,8 @@ function renderNote(day: string, input: RenderInput): string {
       source = row.source_id;
       lines.push(`## ${source}`, '');
     }
-    lines.push(`- [[${row.slug}]] — ${oneLine(row.title)}`);
+    const target = row.source_id === DAILY_MEMORY_SOURCE_ID ? row.slug : `${row.source_id}:${row.slug}`;
+    lines.push(`- [[${target}]] — ${oneLine(row.title)}`);
   }
   if (input.rows.length) lines.push('');
   if (input.pageTotal > input.rows.length) {
@@ -133,29 +157,25 @@ export async function writeDailyMemoryFromSources(
     slug = dailyMemorySlug(day);
     throwIfAborted(opts.signal, '[dream] daily memory');
 
-    const rows = await engine.executeRaw<SourcePageRow>(
-      `SELECT source_id, slug, title, (COUNT(*) OVER ())::int AS total
+    const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
+      `SELECT source_id, slug, title, effective_date, effective_date_source, frontmatter,
+         to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+         to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
        FROM pages
        WHERE deleted_at IS NULL
          AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
          AND NOT (source_id = $4 AND slug = $3)
-         -- Date-only values are stored as UTC midnight. Any other effective_date
-         -- is a real instant and must be projected through the cycle zone.
-         -- A null effective_date falls back to updated_at in that same zone.
-         AND COALESCE(
-           CASE
-             WHEN effective_date IS NULL THEN NULL
-             WHEN (effective_date AT TIME ZONE 'UTC')
-               = date_trunc('day', effective_date AT TIME ZONE 'UTC')
-               THEN (effective_date AT TIME ZONE 'UTC')::date
-             ELSE (effective_date AT TIME ZONE $1)::date
-           END,
-           (updated_at AT TIME ZONE $1)::date
-         ) = $2::date
-       ORDER BY source_id, slug
-       LIMIT $5`,
-      [zone, day, slug, DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_PAGE_CAP],
+         AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
+           OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
+       ORDER BY source_id, slug`,
+      [zone, day, slug, DAILY_MEMORY_SOURCE_ID],
     );
+    // Filter before applying the cap or counting: date-only values retain
+    // their calendar day; timestamped values retain their actual instant.
+    const matching = candidates.filter(row =>
+      (row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) === day);
+    const pageTotal = matching.length;
+    const rows = matching.slice(0, DAILY_MEMORY_PAGE_CAP);
     const records = await loadSourceRecordGroups(engine, zone, day);
     if (rows.length === 0 && records.length === 0) {
       return { written: false, day, slug, pages: 0, reason: 'no_source_activity' };
@@ -178,7 +198,6 @@ export async function writeDailyMemoryFromSources(
       group.links = available;
     }
 
-    const pageTotal = rows.length ? (Number(rows[0].total) || rows.length) : 0;
     await engine.putPage(slug, {
       type: 'note',
       title: `Daily memory ${day}`,

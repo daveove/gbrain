@@ -95,7 +95,8 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     ].join('\n'));
     git('git add -A && git commit -m "initial"');
     const { performSync } = await import('../src/commands/sync.ts');
-    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true });
+    // This suite measures incremental deferral, separate from the full-sync job.
+    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true, noExtract: true });
   });
 
   afterEach(() => {

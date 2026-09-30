@@ -4,7 +4,7 @@
  * extract sweep was not run. This pins that the sweep runs and the edge
  * exists.
  */
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, spyOn } from 'bun:test';
 import { execSync } from 'child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'fs';
 import { join } from 'path';
@@ -12,7 +12,9 @@ import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { ImportAbortError, runImport } from '../src/commands/import.ts';
 import { INLINE_EXTRACT_CHANGE_LIMIT } from '../src/core/deferred-stale-extract.ts';
+import { loadPendingLinkReferences } from '../src/core/pending-link-references.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 
 describe('import structural edges', () => {
   let engine: PGLiteEngine;
@@ -87,7 +89,13 @@ describe('import structural edges', () => {
         `SELECT slug, links_extracted_at::text AS links_extracted_at
          FROM pages WHERE slug = 'pending' AND deleted_at IS NULL`,
       );
-      expect(before).toEqual([{ slug: 'pending', links_extracted_at: null }]);
+      expect(before).toEqual([{ slug: 'pending', links_extracted_at: expect.any(String) }]);
+      expect(await engine.countStalePagesForExtraction()).toBe(0);
+      expect((await loadPendingLinkReferences(engine)).filter(row => row.reference.slug === 'pending'))
+        .toEqual([expect.objectContaining({ reference: expect.objectContaining({
+          slug: 'pending', sourceId: 'default',
+          candidates: [expect.objectContaining({ targetSlug: 'later' })],
+        }) })]);
 
       await runImport(engine, [targetDir, '--no-embed', '--json']);
       const rows = await engine.executeRaw<{ from_slug: string; to_slug: string }>(
@@ -98,6 +106,8 @@ describe('import structural edges', () => {
          WHERE pf.slug = 'pending' AND pt.slug = 'later'`,
       );
       expect(rows).toEqual([{ from_slug: 'pending', to_slug: 'later' }]);
+      expect((await loadPendingLinkReferences(engine)).filter(row => row.reference.slug === 'pending'))
+        .toHaveLength(0);
     });
   }, 60_000);
 
@@ -205,6 +215,56 @@ describe('import structural edges', () => {
       const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { reason?: string; stale?: boolean };
       expect(data.stale).toBe(true);
       expect(data.reason).toBe('import_stale_backlog');
+    });
+  }, 120_000);
+
+  test('failed or non-live deferred jobs block full-sync bookmarks and retain resume state', async () => {
+    const previousRepo = await engine.getConfig('sync.repo_path');
+    const previousCommit = await engine.getConfig('sync.last_commit');
+    try {
+      for (const outcome of ['throw', 'non-live']) {
+        const repo = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-queue-failure-')));
+        writeFileSync(join(repo, 'note.md'), '# Note\n\nA queue failure fixture.\n');
+        execSync('git init -q && git add -A && git -c user.name=Tester -c user.email=t@example.com -c commit.gpgsign=false commit -qm init', { cwd: repo });
+        await engine.setConfig('sync.repo_path', repo);
+        await engine.setConfig('sync.last_commit', 'old-queue-anchor');
+        const enqueue = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => {
+          if (outcome === 'throw') throw new Error('queue unavailable');
+          return { id: 6837, status: 'completed', data: { stale: true } } as never;
+        });
+        const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+        try {
+          await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+            const { performSync } = await import('../src/commands/sync.ts');
+            const result = await performSync(engine, { repoPath: repo, full: true, noPull: true, noEmbed: true });
+            expect(result.status).toBe('blocked_by_failures');
+            expect(await engine.getConfig('sync.last_commit')).toBe('old-queue-anchor');
+            const checkpoint = join(gbrainHome, '.gbrain', 'import-checkpoint.json');
+            expect(JSON.parse(readFileSync(checkpoint, 'utf8')).completedPaths).toContain('note.md');
+          });
+        } finally {
+          enqueue.mockRestore();
+        }
+      }
+    } finally {
+      await engine.setConfig('sync.repo_path', previousRepo ?? '');
+      await engine.setConfig('sync.last_commit', previousCommit ?? '');
+    }
+  }, 120_000);
+
+  test('an extraction opt-out skips full-import queues and inline sweeps', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('optout-src', 'optout-src')`);
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-no-extract-'));
+    writeFileSync(join(dir, 'one.md'), '# One\n\nSee [Two](two.md).\n');
+    writeFileSync(join(dir, 'two.md'), '# Two\n\nTarget page.\n');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      for (const fullSync of [true, false]) {
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'optout-src', fullSync, noExtract: true });
+        expect(result.errors).toBe(0);
+      }
+      expect(await engine.executeRaw(`SELECT id FROM minion_jobs WHERE name = 'extract' AND data->>'sourceId' = 'optout-src'`)).toHaveLength(0);
+      expect(await engine.executeRaw(`SELECT l.id FROM links l JOIN pages p ON p.id = l.from_page_id WHERE p.source_id = 'optout-src'`)).toHaveLength(0);
     });
   }, 120_000);
 

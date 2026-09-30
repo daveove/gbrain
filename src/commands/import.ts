@@ -184,6 +184,8 @@ export async function runImport(
     managedBookmark?: boolean;
     /** Full sync imports the whole tree. Never drain the stale sweep inline. */
     fullSync?: boolean;
+    /** Preserve the caller's explicit extraction opt-out. */
+    noExtract?: boolean;
     /**
      * #753/#774: glob patterns to exclude from the import (same semantics as
      * `isSyncable`'s `exclude` — matched against the dir-relative path).
@@ -911,6 +913,7 @@ export async function runImport(
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
   const recordLinkFailure = (message: string): void => {
+    preserveCompletedPaths();
     linkExtractionError = message;
     errors++;
     failures.push({ path: '<link-extraction>', error: message });
@@ -926,7 +929,7 @@ export async function runImport(
   };
   const deferForSize = opts.fullSync === true || allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT;
   let deferForBacklog = false;
-  if (!deferForSize && allFiles.length > 0) {
+  if (!opts.noExtract && !deferForSize && allFiles.length > 0) {
     try {
       throwIfInterrupted();
       const { LINK_EXTRACTOR_VERSION_TS } = await import('../core/link-extraction.ts');
@@ -941,7 +944,7 @@ export async function runImport(
       recordLinkFailure(e instanceof Error ? e.message : String(e));
     }
   }
-  if (!linkExtractionError && (deferForSize || deferForBacklog)) {
+  if (!opts.noExtract && !linkExtractionError && (deferForSize || deferForBacklog)) {
     const reason = opts.fullSync
       ? 'import_full_sync'
       : (allFiles.length > INLINE_EXTRACT_CHANGE_LIMIT ? 'import_size_gate' : 'import_stale_backlog');
@@ -953,16 +956,18 @@ export async function runImport(
         commit: opts.commit ?? 'import',
         reason,
       });
+      if (queuedJobId == null) throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
+      throwIfInterrupted();
     } catch (e) {
       rethrowIfCancelled(e);
-      /* best-effort — the hint below still names the manual sweep */
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
     }
-    console.error(
+    if (queuedJobId != null && !linkExtractionError) console.error(
       `  Large import: deferring link extraction` +
       (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
       ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
     );
-  } else if (!linkExtractionError && allFiles.length > 0) {
+  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0) {
     try {
       throwIfInterrupted();
       const { extractStaleFromDB } = await import('./extract.ts');

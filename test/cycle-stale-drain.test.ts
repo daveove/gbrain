@@ -65,6 +65,28 @@ afterEach(() => {
 });
 
 describe('cycle extract phase stale drain (#4062)', () => {
+  test('checkout-free cancellation stops the drain before graph writes', async () => {
+    const controller = new AbortController();
+    const original = engine.listStalePagesForExtraction.bind(engine);
+    const read = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
+      const rows = await original(opts);
+      controller.abort(new Error('lease lost'));
+      return rows;
+    });
+    try {
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        await expect(runCycle(engine, {
+          brainDir: null, sourceId: 'wiki', phases: ['extract'], signal: controller.signal,
+        })).rejects.toThrow('lease lost');
+      });
+      expect(await engine.executeRaw('SELECT id FROM links')).toHaveLength(0);
+      const stamps = await engine.executeRaw('SELECT links_extracted_at FROM pages');
+      expect(stamps.every(row => row.links_extracted_at === null)).toBe(true);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('extraction totals count scanned pages rather than links', async () => {
     writeFileSync(join(brainDir, 'quiet.md'), '# Quiet page\nNo outgoing links.\n');
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
