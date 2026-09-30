@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { extractStaleFromDB } from '../src/commands/extract.ts';
+import { extractLinksForSlugs, extractStaleFromDB, stampExtracted } from '../src/commands/extract.ts';
 import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
@@ -241,4 +241,40 @@ test('expired and cancelled pending probes issue no readiness queries', async ()
     }, () => true)).toBe(0);
     expect(await requeueReadyPendingLinks(engine, rows, () => true, undefined, Date.now() - 1)).toBe(0);
   } finally { engine.executeRaw = original; }
+});
+
+
+test('incremental file extraction hands missing targets off before stamping', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-pending-'));
+  try {
+    mkdirSync(join(dir, 'people'));
+    writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/later]]');
+    await engine.putPage('people/origin', page('[[people/later]]'));
+    const result = await extractLinksForSlugs(engine, dir, ['people/origin']);
+    expect(result.processed).toEqual(['people/origin']);
+    await stampExtracted(engine, result.processed.map(slug => ({ slug, source_id: 'default' })));
+    expect(await engine.countStalePagesForExtraction()).toBe(0);
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
+    await engine.putPage('people/later', page());
+    await drain();
+    expect((await engine.getLinks('people/origin')).some(link => link.to_slug === 'people/later')).toBe(true);
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+    expect((await drain()).pagesProcessed).toBe(0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('incremental registry failure does not report the origin safe to stamp', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-pending-fail-'));
+  mkdirSync(join(dir, 'people'));
+  writeFileSync(join(dir, 'people/origin.md'), '---\ntype: person\n---\n[[people/missing]]');
+  await engine.putPage('people/origin', page('[[people/missing]]'));
+  const execute = engine.executeRaw;
+  engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
+    if (sql.includes('INSERT INTO config(key,value)')) throw new Error('registry unavailable');
+    return execute.call(this, sql, params);
+  }) as typeof engine.executeRaw;
+  try {
+    expect((await extractLinksForSlugs(engine, dir, ['people/origin'])).processed).toEqual([]);
+    expect(await engine.countStalePagesForExtraction()).toBe(1);
+  } finally { engine.executeRaw = execute; rmSync(dir, { recursive: true, force: true }); }
 });

@@ -1655,10 +1655,26 @@ export async function extractLinksForSlugs(
     // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal -- relPath comes from the slug→path index built by walkMarkdownFiles(repoPath) (repo-relative entries of that walk) or the validated-slug legacy fallback, never from a caller
     const filePath = join(repoPath, relPath);
     try {
-      const snapshot = ownership.metadata.get(`${sourceId}\0${slug}`)?.type === 'meeting' || ownership.origins.has(slug)
-        ? await engine.readPageSnapshot(slug, { sourceId }) : null;
+      const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+      if (!snapshot) continue;
       const content = readFileSync(filePath, 'utf-8');
       const links = await extractLinksFromFile(content, relPath, allSlugs, { globalBasename, includeFrontmatter, pack, pageTypes, aliases });
+      const missing: LinkCandidate[] = [];
+      const resolvedRows: LinkBatchInput[] = [];
+      if (snapshot) {
+        const parsed = parseMarkdown(content, relPath, { activePack: pack.page_types ? { page_types: pack.page_types } : undefined });
+        const extracted = await extractPageLinks(slug, content, parsed.frontmatter, snapshot.page.type, ownership.resolver,
+          { pack, globalBasename, skipFrontmatter: !includeFrontmatter, targetType: (targetSlug, targetSourceId) => {
+            const resolved = ownership.resolve(slug, { targetSlug, targetSourceId, linkType: '', context: '' });
+            return resolved.ok ? ownership.metadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
+          } });
+        if (!extracted.attendanceComplete) continue;
+        for (const candidate of extracted.candidates) {
+          const resolved = ownership.resolve(slug, candidate);
+          if (resolved.ok) resolvedRows.push(resolvedLinkCandidate(candidate, slug, sourceId, resolved));
+          else if (resolved.reason === 'missing_target') missing.push(candidate);
+        }
+      }
       let written: number | null | undefined;
       if (snapshot?.page.type === 'meeting' || ownership.origins.has(slug) || links.some(link => link.link_type === 'attended' && link.origin_slug === slug && link.to_slug === slug)) {
         if (!snapshot) throw new Error('Link extraction origin is missing');
@@ -1666,6 +1682,9 @@ export async function extractLinksForSlugs(
         if (written === null) continue;
       }
       created += written ?? await replacePageFileLinks(engine, slug, sourceId, links, includeFrontmatter, ownership) ?? 0;
+      if (snapshot) await storePendingLinkReferences(engine, { slug, sourceId,
+        revision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation },
+        pendingCandidates(missing, resolvedRows, globalBasename, slug, sourceId));
       processed.push(slug);
     } catch { /* skip: unreadable — not processed, stays stale */ }
   }

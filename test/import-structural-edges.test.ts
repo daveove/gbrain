@@ -70,6 +70,27 @@ describe('import structural edges', () => {
     });
   }, 60_000);
 
+  test('small directory import honors configured frontmatter extraction', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-configured-frontmatter-'));
+    writeFileSync(join(dir, 'fm-origin.md'), '---\ntype: concept\nrelated: [fm-target]\n---\nOrigin without body links.');
+    writeFileSync(join(dir, 'fm-target.md'), '---\ntype: concept\n---\nTarget without body links.');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    const key = 'autopilot.incremental_extract_include_frontmatter';
+    const previous = await engine.getConfig(key);
+    await engine.setConfig(key, 'true');
+    try {
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json']);
+        expect(result.errors).toBe(0);
+        expect((await engine.getLinks('fm-origin')).some(link => link.to_slug === 'fm-target' && link.link_source === 'frontmatter')).toBe(true);
+        expect(await engine.countStalePagesForExtraction()).toBe(0);
+      });
+    } finally {
+      if (previous == null) await engine.executeRaw('DELETE FROM config WHERE key=$1', [key]);
+      else await engine.setConfig(key, previous);
+    }
+  }, 60_000);
+
   test('importing the target later still creates the edge', async () => {
     const sourceDir = mkdtempSync(join(tmpdir(), 'gbrain-import-pending-'));
     writeFileSync(

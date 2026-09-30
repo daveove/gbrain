@@ -974,7 +974,6 @@ export async function runImport(
       const extracted = await extractStaleFromDB(engine, {
         dryRun: false,
         jsonMode: false,
-        includeFrontmatter: false,
         sourceIdFilter: sourceId ?? 'default',
         catchUp: false,
         quiet: true,
