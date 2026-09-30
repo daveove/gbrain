@@ -4,7 +4,8 @@ import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACT
 
 const PREFIX = 'internal.pending-links.';
 type PendingProbeOptions = { dryRun?: boolean; versionTs?: string; sourceId?: string;
-  onReadyForeign?: (sourceId: string) => Promise<void> };
+  onReadyForeign?: (sourceId: string) => Promise<void>;
+  onReadyOrigin?: (sourceId: string) => Promise<void> };
 type Store = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
 export interface PendingLinkOrigin {
   slug: string;
@@ -140,8 +141,10 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
         if (current && (foreign || !current.already_stale)) requeued++;
         continue;
       }
-      if (opts.sourceId && ref.sourceId !== opts.sourceId) {
-        if (!opts.onReadyForeign) throw new Error('Pending foreign origin extraction handoff is unavailable');
+      const foreign = Boolean(opts.sourceId && ref.sourceId !== opts.sourceId);
+      const handoff = opts.onReadyOrigin ?? (foreign ? opts.onReadyForeign : undefined);
+      if (foreign || handoff) {
+        if (!handoff) throw new Error('Pending origin extraction handoff is unavailable');
         const changed = await engine.executeRaw(`UPDATE pages p SET links_extracted_at=NULL FROM sources s,config c
           WHERE p.slug=$1 AND p.source_id=$2 AND p.deleted_at IS NULL
             AND p.knowledge_revision=$3 AND s.id=p.source_id AND s.incarnation=$4
@@ -149,7 +152,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
           [ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation, row.key, row.value]);
         if (changed.length) {
           signal?.throwIfAborted();
-          await opts.onReadyForeign(ref.sourceId);
+          await handoff(ref.sourceId);
           await engine.executeRaw(`DELETE FROM config WHERE key=$1 AND value=$2 AND EXISTS (
             SELECT 1 FROM pages p JOIN sources s ON s.id=p.source_id WHERE p.slug=$3 AND p.source_id=$4
               AND p.knowledge_revision=$5 AND p.deleted_at IS NULL AND s.incarnation=$6)`,

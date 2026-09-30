@@ -393,12 +393,19 @@ test('small sync target arrival wakes a pending origin without a stale sweep', a
 
     writeFileSync(join(dir, 'people/later.md'), '---\ntype: person\n---\nSynthetic later');
     await engine.putPage('people/later', page());
-    // Small sync path: only the arrived target is extracted/stamped.
+    const pending = await loadPendingLinkReferences(engine);
+    const rejected = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('Synthetic inline handoff rejection'); });
+    try { await expect(extractLinksForSlugs(engine, dir, ['people/later'])).rejects.toThrow('Synthetic inline handoff rejection'); }
+    finally { rejected.mockRestore(); }
+    expect(await loadPendingLinkReferences(engine)).toEqual(pending);
+    expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBe(2);
     const targetResult = await extractLinksForSlugs(engine, dir, ['people/later']);
     expect(targetResult.processed).toEqual(['people/later']);
     await stampExtracted(engine, targetResult.processed.map(slug => ({ slug, source_id: 'default' })));
 
     expect(await loadPendingLinkReferences(engine)).toHaveLength(0);
+    const jobs = await engine.executeRaw<{ data: { sourceId?: string }; status: string }>("SELECT data,status FROM minion_jobs WHERE name='extract'");
+    expect(jobs.some(job => job.data.sourceId === 'default' && job.status === 'waiting')).toBe(true);
     expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBe(1);
     expect((await drain()).pagesProcessed).toBe(1);
     expect((await engine.getLinks('people/origin')).some(link => link.to_slug === 'people/later')).toBe(true);

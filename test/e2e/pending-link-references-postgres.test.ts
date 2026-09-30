@@ -82,7 +82,7 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
     await engine.putPage(targetSlug, { type: 'person', title: 'Qualified target fixture',
       compiled_truth: 'Synthetic fixture' }, { sourceId: targetSource });
     const pending = await loadPendingLinkReferences(engine, originSource);
-    expect((await scoped(targetSource, true)).staleRemaining).toBe(1);
+    expect((await scoped(targetSource, true)).staleRemaining).toBe(2);
     expect(await loadPendingLinkReferences(engine, originSource)).toEqual(pending);
     expect(await engine.countStalePagesForExtraction({ sourceId: originSource })).toBe(0);
     const read = engine.readPageSnapshot;

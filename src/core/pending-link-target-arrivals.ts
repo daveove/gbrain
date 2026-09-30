@@ -20,7 +20,7 @@ export async function probePendingOriginsForArrivedTargets(
     await probePendingLinkReferences(engine, pendingLinks, {
       globalBasename: opts.globalBasename, signal: opts.signal, deadline: opts.deadline,
       versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
-      onReadyForeign: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
+      onReadyOrigin: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
     }, (candidate, origin, pendingSlugs, pendingSources) =>
       resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
         outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);

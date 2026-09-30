@@ -15,7 +15,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync } from '../src/core/cycle/daily-memory-followup.ts';
+import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -408,6 +408,34 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(batchSizes).toEqual([8,1]);
     for (const day of days) expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
     expect((await engine.getPage(`daily-memory/${days[0]}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('[[affected-source:notes/affected-0]]');
+  });
+
+  for (const sourceId of ['default','moved-date-source']) test(`date moves refresh ${sourceId} old index before graph extraction`, async () => {
+    const slug = 'notes/moved-date';
+    if (sourceId !== 'default') await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Moved date fixture')", [sourceId]);
+    const { writeDailyMemoryFromSources } = await import('../src/core/cycle/daily-memory.ts');
+    await engine.putPage(slug, { type: 'note', title: 'Moved date fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-20' } }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date='2026-09-20'::date::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug=$2", [sourceId, slug]);
+    expect((await writeDailyMemoryFromSources(engine, { date: '2026-09-20' })).written).toBe(true);
+    const old = (await engine.getPage('daily-memory/2026-09-20', { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(await engine.executeRaw('SELECT id FROM links WHERE from_page_id=$1', [old.id])).toHaveLength(0);
+    await engine.putPage(slug, { type: 'note', title: 'Moved date fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-21' } }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date='2026-09-21'::date::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug=$2", [sourceId, slug]);
+    expect(await dailyMemoryDaysForSlugs(engine, sourceId, [slug])).toEqual(['2026-09-20', '2026-09-21']);
+    const queue = new MinionQueue(engine), source = await queue.add('autopilot-cycle', { source_id: sourceId });
+    const claimed = (await queue.claim('moved-source-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, { status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }] });
+    await queue.completeJob(source.id, 'moved-source-lock', {});
+    const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
+    for (let i = 0; i < 4; i++) {
+      const daily = await queue.claim('moved-daily-lock', 60_000, 'default', ['autopilot-daily-memory']);
+      if (!daily) break;
+      const result = await handler(daily);
+      await queue.completeJob(daily.id, 'moved-daily-lock', result);
+    }
+    const target = sourceId === 'default' ? slug : `${sourceId}:${slug}`;
+    expect((await engine.getPage('daily-memory/2026-09-20', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(`[[${target}]]`);
+    expect((await engine.getPage('daily-memory/2026-09-21', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(`[[${target}]]`);
   });
 
   test('autopilot-cycle handler normalizes a legacy per-source payload down to freshness phases', async () => {

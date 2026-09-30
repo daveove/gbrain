@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
-import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffectiveDate, type SourcePageRow } from './daily-memory.ts';
+import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffectiveDate, DAILY_MEMORY_SOURCE_ID, type SourcePageRow } from './daily-memory.ts';
 
 export type DailyJob = { id: number; data: Record<string, unknown>; signal?: AbortSignal };
 const TERMINAL = new Set(['completed', 'failed', 'dead', 'cancelled']);
@@ -94,6 +94,31 @@ export async function dailyMemoryDaysForSlugs(
     );
     for (const row of rows) {
       days.add(row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day);
+    }
+    // Date edits can remove the old date from the target row before this refresh.
+    // Exact rendered links also cover indexes whose graph extraction is still pending.
+    let cursor = '';
+    for (;;) {
+      const prior = await engine.executeRaw<{ slug: string }>(
+        `SELECT p.slug FROM pages p JOIN sources s ON s.id=p.source_id
+         WHERE (s.config @> '{"system_index":true}'::jsonb
+           OR (s.name='Dream cycle indexes' AND s.config @> '{"federated":false}'::jsonb)) AND p.source_id=$1 AND p.deleted_at IS NULL
+           AND p.frontmatter @> '{"dream_generated":true}'::jsonb
+           AND p.slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' AND p.slug>$4
+           AND (EXISTS (SELECT 1 FROM links l JOIN pages t ON t.id=l.to_page_id
+             WHERE l.from_page_id=p.id AND t.source_id=$2 AND t.slug=ANY($3::text[]))
+             OR EXISTS (SELECT 1 FROM unnest($3::text[]) AS wanted(slug)
+               WHERE strpos(COALESCE(p.compiled_truth,''),'[[' || $2 || ':' || wanted.slug || ']]')>0
+                 OR ($2='default' AND strpos(COALESCE(p.compiled_truth,''),'[[' || wanted.slug || ']]')>0)))
+         ORDER BY p.slug LIMIT 100`,
+        [DAILY_MEMORY_SOURCE_ID, sourceId, slugs.slice(offset, offset + 100), cursor],
+      );
+      for (const row of prior) {
+        const day = row.slug.slice('daily-memory/'.length);
+        if (isDay(day)) days.add(day);
+      }
+      if (prior.length < 100) break;
+      cursor = prior[prior.length - 1].slug;
     }
   }
   return [...days].sort();
