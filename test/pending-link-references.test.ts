@@ -341,6 +341,27 @@ test('pending registry scans only the requested source in bounded keyset batches
   expect(await iterator.return()).toEqual({ value: undefined, done: true });
 });
 
+for (const qualified of [false, true]) test(`slash frontmatter aliases do not create exact body targets (qualified=${qualified})`, async () => {
+  const targetSource = qualified ? 'alias-target' : 'default';
+  if (qualified) {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Alias fixture')", [targetSource]);
+    await engine.setConfig('link_resolution.cross_source', 'true');
+  }
+  const target = `${qualified ? targetSource + ':' : ''}people/old`;
+  await engine.putPage('people/origin', page(`[[${target}]]`));
+  await drain();
+  await engine.putPage('people/new', {
+    ...page(), frontmatter: { aliases: ['people/old'] },
+  }, { sourceId: targetSource });
+  await drain();
+  // Force normal extraction too: waking alone cannot resolve this unsupported alias form.
+  await engine.executeRaw("UPDATE pages SET links_extracted_at=NULL WHERE source_id='default' AND slug='people/origin'");
+  await drain();
+  expect(await engine.getLinks('people/origin')).toHaveLength(0);
+  expect(await loadPendingLinkReferences(engine)).toHaveLength(1);
+  expect(await engine.countStalePagesForExtraction()).toBe(0);
+});
+
 test('expired and cancelled pending probes issue no readiness queries', async () => {
   await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
   const rows = await loadPendingLinkReferences(engine);
