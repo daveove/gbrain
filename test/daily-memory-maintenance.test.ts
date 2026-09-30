@@ -482,6 +482,15 @@ describe('daily memory from sources the brain already holds', () => {
     expect(targets).not.toContain('notes/injected');
   });
 
+  test('repeat daily writes with unchanged content report unchanged', async () => {
+    await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    expect(first.written).toBe(true);
+    const second = await writeSeptember30();
+    expect(second.written).toBe(false);
+    expect(second.reason).toBe('unchanged');
+  });
+
   test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
     await engine.setConfig('version', '7');
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');

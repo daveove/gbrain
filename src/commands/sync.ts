@@ -3845,7 +3845,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     let queuedJobId: number | string | null = null;
     try {
       queuedJobId = await queueDeferredStaleSweep(engine, {
-        sourceId: opts.sourceId,
+        sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID,
         commit: pin,
         reason: 'sync_size_gate',
       });

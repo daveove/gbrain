@@ -19,6 +19,19 @@ async function main(): Promise<void> {
   try {
     await engine.connect(engineConfig);
     const result = await writeDailyMemoryFromSources(engine, dailyMemoryArgs(process.argv[2]));
+    if (result.written) {
+      try {
+        const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
+        await queueDeferredStaleSweep(engine, {
+          sourceId: DAILY_MEMORY_SOURCE_ID,
+          commit: `daily-memory:${result.day}`,
+          reason: 'daily_memory_write',
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(JSON.stringify({ enqueue_error: message }));
+      }
+    }
     const page = result.slug ? await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true }) : null;
     console.log(JSON.stringify({ ...result, dream_generated: page?.frontmatter?.dream_generated === true, deleted: Boolean(page?.deleted_at) }));
     if (result.reason === 'error') process.exitCode = 1;
