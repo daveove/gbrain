@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
 import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
@@ -62,6 +62,23 @@ describe('daily memory refresh on source archive/restore', () => {
     await queue.completeJob(restored.id, 'restore-refresh-lock', await runDailyMemoryJob(engine, restored));
     expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain(link);
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='completed'")).toHaveLength(2);
+  });
+
+  test('failed archive and restore handoffs surface and retry after the state change', async () => {
+    const sourceId = 'retry-refresh', day = '2026-09-30';
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES($1,'Retry fixture',false)", [sourceId]);
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Retry fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
+    for (const operation of [softDeleteSource, restoreSource]) {
+      const rejected = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('synthetic queue outage'));
+      try { await expect(operation(engine, sourceId)).rejects.toThrow('synthetic queue outage'); }
+      finally { rejected.mockRestore(); }
+      // The state change committed, but its no-op retry must still enqueue the refresh.
+      expect(await operation(engine, sourceId)).toBe(operation === softDeleteSource ? null : false);
+    }
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='waiting'")).toHaveLength(2);
   });
 
   test('restoring a source queues its affected daily memory days', async () => {
