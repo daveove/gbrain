@@ -19,6 +19,9 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { dailyMemoryArgs } from '../scripts/write-daily-memory.ts';
+import { operationsByName } from '../src/core/operations.ts';
+import { serializeMarkdown } from '../src/core/markdown.ts';
+import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
 
 describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
@@ -349,6 +352,51 @@ describe('daily memory from sources the brain already holds', () => {
     }
     const allPages = await engine.executeRaw<{ total: number }>('SELECT count(*)::int AS total FROM pages', []);
     expect(allPages[0].total).toBe(22);
+  });
+
+  test('brain-wide generated indexes remain owner-readable and hidden from scoped remote reads', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('restricted','Restricted fixture')", []);
+    await engine.putPage('notes/restricted-fixture', {
+      type: 'note', title: 'Restricted fixture', compiled_truth: 'Synthetic fixture',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'restricted' });
+    await seedRecord('record-fixture', 'gmail', '2026-09-30T00:00:00Z');
+    const result = await writeSeptember30();
+    const daily = (await engine.getPage(result.slug))!;
+    expect(daily.compiled_truth).toContain('[[restricted:notes/restricted-fixture]]');
+    const reference = daily.compiled_truth.match(/\[\[(source-records\/[^\]]+)\]\]/)![1];
+    // Build current safe search projections so hiding isn't a missing-index side effect.
+    for (const slug of [result.slug, reference]) {
+      const page = (await engine.getPage(slug))!;
+      expect(page.frontmatter.visibility).toBe('private');
+      await importFromContent(engine, slug, serializeMarkdown(page.frontmatter, page.compiled_truth, '', {
+        type: page.type, title: page.title, tags: [],
+      }), { noEmbed: true, noExtract: true, forceRechunk: true });
+    }
+    await engine.setConfig('search.mcp_keyword_only', 'true');
+    __resetPrivateVisibilityCacheForTests();
+    const context = (remote: boolean) => ({
+      engine, remote, sourceId: 'default', config: { engine: 'pglite' }, dryRun: false,
+      logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'fixture', clientId: 'fixture', scopes: ['read'], allowedSources: ['default'] },
+    }) as never;
+    for (const slug of [result.slug, reference]) {
+      await expect(operationsByName.get_page.handler(context(true), { slug })).rejects.toThrow(/Page not found/);
+      const owner = await operationsByName.get_page.handler(context(false), { slug }) as { slug: string };
+      expect(owner.slug).toBe(slug);
+    }
+    const remoteList = await operationsByName.list_pages.handler(context(true), { limit: 100 }) as { slug: string }[];
+    const ownerList = await operationsByName.list_pages.handler(context(false), { limit: 100 }) as { slug: string }[];
+    for (const slug of [result.slug, reference]) {
+      expect(remoteList.map(row => row.slug)).not.toContain(slug);
+      expect(ownerList.map(row => row.slug)).toContain(slug);
+    }
+    for (const [query, slug] of [['Daily memory', result.slug], ['Source reference', reference]]) {
+      const remote = await operationsByName.search.handler(context(true), { query }) as { slug: string }[];
+      const owner = await operationsByName.search.handler(context(false), { query }) as { slug: string }[];
+      expect(remote.map(row => row.slug)).not.toContain(slug);
+      expect(owner.map(row => row.slug)).toContain(slug);
+    }
   });
 
   test('source record day boundaries use Manila midnight and count record-only activity', async () => {

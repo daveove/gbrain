@@ -38,7 +38,7 @@
  * whole corpus through getPage.
  */
 
-import { loadPendingLinkReferences, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates } from '../core/pending-link-references.ts';
+import { pendingLinkReferenceBatches, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
@@ -2099,7 +2099,9 @@ export async function extractStaleFromDB(
 
   // Count stale watermarks first; ready dormant references add work without a stale watermark.
   let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
-  const pendingLinks = await loadPendingLinkReferences(engine, sourceIdFilter);
+  const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
+  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
+  let pendingLinks = (await pendingBatches.next()).value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
@@ -2140,10 +2142,14 @@ export async function extractStaleFromDB(
     (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
   );
   if (pendingLinks.length) {
-    const readyPending = await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
-      deadline: catchUp ? Infinity : startMs + timeBudgetMs, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
-      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-        federatedSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+    let readyPending = 0;
+    do {
+      readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
+        deadline: pendingDeadline, dryRun, versionTs }, (candidate, origin, pendingSlugs, pendingSources) =>
+        resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
+          federatedSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+      pendingLinks = (await pendingBatches.next()).value ?? [];
+    } while (pendingLinks.length);
     opts.signal?.throwIfAborted();
     totalStale = dryRun ? totalStale + readyPending
       : await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });

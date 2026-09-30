@@ -8,7 +8,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { extractStaleFromDB } from '../../src/commands/extract.ts';
-import { loadPendingLinkReferences } from '../../src/core/pending-link-references.ts';
+import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../src/core/pending-link-references.ts';
 
 (process.env.DATABASE_URL ? describe : describe.skip)('pending link references on PostgreSQL', () => {
   let fixture: Awaited<ReturnType<typeof isolatedPersistencePostgres>>;
@@ -64,4 +64,28 @@ import { loadPendingLinkReferences } from '../../src/core/pending-link-reference
     expect(await loadPendingLinkReferences(engine, sourceId)).toHaveLength(0);
     expect((await drain()).pagesProcessed).toBe(0);
   }, 60_000);
+
+  test('registry keyset batches exclude unrelated source origins on PostgreSQL', async () => {
+    const engine = fixture.engine;
+    const rows = Array.from({ length: 310 }, (_, i) => ({
+      key: `internal.pending-links.native-batch-${String(i).padStart(4, '0')}`,
+      value: JSON.stringify({ slug: `people/native-fixture-${i}`,
+        sourceId: i < 205 ? 'unrelated-native-fixture' : sourceId,
+        revision: 'fixture-revision', sourceIncarnation: 'fixture-incarnation', candidates: [] }),
+    }));
+    await engine.executeRaw(`INSERT INTO config(key,value)
+      SELECT key,value FROM jsonb_to_recordset(($1::jsonb)->'rows') AS r(key text,value text)`, [{ rows }]);
+    try {
+      const batches = [];
+      for await (const batch of pendingLinkReferenceBatches(engine, sourceId)) batches.push(batch);
+      expect(batches.map(batch => batch.length)).toEqual([100, 5]);
+      expect(batches.flat().every(row => row.reference.sourceId === sourceId)).toBe(true);
+      expect(new Set(batches.flat().map(row => row.key)).size).toBe(105);
+      const expired = pendingLinkReferenceBatches(engine, sourceId, { deadline: Date.now() - 1 });
+      expect(await expired.next()).toEqual({ value: undefined, done: true });
+    } finally {
+      await engine.executeRaw('DELETE FROM config WHERE key=ANY($1::text[])', [rows.map(row => row.key)]);
+    }
+  }, 60_000);
+
 });

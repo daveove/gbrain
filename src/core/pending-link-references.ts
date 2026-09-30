@@ -19,12 +19,32 @@ function keyFor(origin: PendingLinkOrigin): string {
   return PREFIX + createHash('sha256').update(JSON.stringify([origin.sourceId, origin.slug])).digest('hex');
 }
 
+const PENDING_BATCH_SIZE = 100;
+
+/** Keyset batches filter the origin source in SQL before parsing registry values. */
+export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
+  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], void> {
+  let after = '';
+  while (true) {
+    opts.signal?.throwIfAborted();
+    if (Date.now() >= (opts.deadline ?? Infinity)) return;
+    const rows = await engine.executeRaw<{ key: string; value: string }>(
+      `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
+        AND ($2::text IS NULL OR CASE WHEN key LIKE $1 THEN value::jsonb->>'sourceId' END=$2)
+        ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
+    opts.signal?.throwIfAborted();
+    if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
+    yield rows.map(row => ({ ...row, reference: JSON.parse(row.value) as PendingLinkReference }));
+    if (rows.length < PENDING_BATCH_SIZE) return;
+    after = rows.at(-1)!.key;
+  }
+}
+
 /** Internal DB config rows survive process restarts and checkpoint GC. No page text is stored. */
 export async function loadPendingLinkReferences(engine: Store, sourceId?: string): Promise<PendingLinkRow[]> {
-  const rows = await engine.executeRaw<{ key: string; value: string }>(
-    'SELECT key,value FROM config WHERE key LIKE $1 ORDER BY key', [PREFIX + '%']);
-  return rows.map(row => ({ ...row, reference: JSON.parse(row.value) as PendingLinkReference }))
-    .filter(row => !sourceId || row.reference.sourceId === sourceId);
+  const rows: PendingLinkRow[] = [];
+  for await (const batch of pendingLinkReferenceBatches(engine, sourceId)) rows.push(...batch);
+  return rows;
 }
 
 export async function storePendingLinkReferences(engine: Store, origin: PendingLinkOrigin,
@@ -62,6 +82,8 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference) => boolean,
   signal?: AbortSignal, deadline = Infinity,
   opts: { dryRun?: boolean; versionTs?: string } = {}): Promise<number> {
+  signal?.throwIfAborted();
+  if (!rows.length || Date.now() >= deadline) return 0;
   const identities = rows.map(row => ({ key: row.key, value: row.value,
     slug: row.reference.slug, sourceId: row.reference.sourceId }));
   const origins = await engine.executeRaw<{ slug: string; source_id: string; knowledge_revision: string; incarnation: string; already_stale: boolean }>(
@@ -110,6 +132,19 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
   opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
   resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
     slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
+  let ready = 0;
+  for (let offset = 0; offset < rows.length; offset += PENDING_BATCH_SIZE) {
+    opts.signal?.throwIfAborted();
+    if (Date.now() >= (opts.deadline ?? Infinity)) break;
+    ready += await probePendingLinkReferenceBatch(engine, rows.slice(offset, offset + PENDING_BATCH_SIZE), opts, resolves);
+  }
+  return ready;
+}
+
+async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRow[],
+  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number; dryRun?: boolean; versionTs?: string },
+  resolves: (candidate: LinkCandidate, origin: PendingLinkReference,
+    slugs: Set<string>, sources: Map<string, string[]>) => boolean): Promise<number> {
   const slugs = [...new Set(rows.flatMap(row => [row.reference.slug,
     ...row.reference.candidates.flatMap(candidate => [candidate.targetSlug, candidate.fromSlug].filter((slug): slug is string => Boolean(slug)))]))];
   const bareNames = opts.globalBasename ? [...new Set(slugs.filter(slug => !slug.includes('/')).flatMap(slug =>
@@ -117,7 +152,9 @@ export async function probePendingLinkReferences(engine: Store, rows: PendingLin
   opts.signal?.throwIfAborted();
   const refs = await engine.executeRaw<{ slug: string; source_id: string }>(
     `SELECT slug,source_id FROM pages WHERE deleted_at IS NULL AND
-      (slug=ANY($1::text[]) OR lower(regexp_replace(slug,'^.*/',''))=ANY($2::text[]))`, [slugs, bareNames]);
+      (slug=ANY($1::text[]) OR (source_id=ANY($3::text[])
+        AND lower(regexp_replace(slug,'^.*/',''))=ANY($2::text[])))`,
+    [slugs, bareNames, [...new Set(rows.map(row => row.reference.sourceId))]]);
   const allSlugs = new Set(refs.map(ref => ref.slug));
   const sources = new Map<string, string[]>();
   for (const ref of refs) sources.set(ref.slug, [...(sources.get(ref.slug) ?? []), ref.source_id]);

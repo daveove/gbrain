@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
-import { loadPendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
+import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
 let engine: PGLiteEngine;
@@ -203,4 +203,42 @@ test('dry-run does not double-count an already-stale ready origin or clean obsol
   const registry = await loadPendingLinkReferences(engine);
   expect((await preview()).staleRemaining).toBe(0);
   expect(await loadPendingLinkReferences(engine)).toEqual(registry);
+});
+
+
+test('pending registry scans only the requested source in bounded keyset batches', async () => {
+  await engine.setConfig('unrelated-non-json', 'ordinary configuration');
+  const rows = Array.from({ length: 310 }, (_, i) => ({
+    key: `internal.pending-links.batch-${String(i).padStart(4, '0')}`,
+    value: JSON.stringify({ slug: `people/fixture-${i}`, sourceId: i < 205 ? 'unrelated' : 'default',
+      revision: 'fixture-revision', sourceIncarnation: 'fixture-incarnation', candidates: [] }),
+  }));
+  await engine.executeRaw(`INSERT INTO config(key,value)
+    SELECT key,value FROM jsonb_to_recordset(($1::jsonb)->'rows') AS r(key text,value text)`, [{ rows }]);
+  const batches = [];
+  for await (const batch of pendingLinkReferenceBatches(engine, 'default')) batches.push(batch);
+  expect(batches.map(batch => batch.length)).toEqual([100, 5]);
+  expect(batches.flat().every(row => row.reference.sourceId === 'default')).toBe(true);
+  expect(new Set(batches.flat().map(row => row.key)).size).toBe(105);
+  expect(await loadPendingLinkReferences(engine, 'unrelated')).toHaveLength(205);
+  const iterator = pendingLinkReferenceBatches(engine, 'default');
+  expect((await iterator.next()).value).toHaveLength(100);
+  expect(await iterator.return()).toEqual({ value: undefined, done: true });
+});
+
+test('expired and cancelled pending probes issue no readiness queries', async () => {
+  await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
+  const rows = await loadPendingLinkReferences(engine);
+  const controller = new AbortController(); controller.abort();
+  const original = engine.executeRaw;
+  engine.executeRaw = async () => { throw new Error('expired probe must not query'); };
+  try {
+    const expired = pendingLinkReferenceBatches(engine, 'default', { deadline: Date.now() - 1 });
+    expect(await expired.next()).toEqual({ value: undefined, done: true });
+    await expect(pendingLinkReferenceBatches(engine, 'default', { signal: controller.signal }).next()).rejects.toThrow();
+    expect(await probePendingLinkReferences(engine, rows, {
+      globalBasename: true, deadline: Date.now() - 1,
+    }, () => true)).toBe(0);
+    expect(await requeueReadyPendingLinks(engine, rows, () => true, undefined, Date.now() - 1)).toBe(0);
+  } finally { engine.executeRaw = original; }
 });

@@ -213,6 +213,7 @@ export async function writeDailyMemoryFromSources(
       timeline: '',
       frontmatter: {
         dream_generated: true,
+        visibility: 'private',
         dream_cycle_date: day,
         dream_created_cycle_date: day,
         raw_trace_exempt: true,
@@ -296,6 +297,7 @@ async function putSourceRecordIndex(
     timeline: '',
     frontmatter: {
       dream_generated: true,
+      visibility: 'private',
       source_record_id: record.id,
       source_record_type: sourceType,
       source_record_ref: record.source_ref,
