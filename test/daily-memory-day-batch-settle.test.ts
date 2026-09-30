@@ -4,6 +4,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import {
   previousCalendarDay,
+  queueFanoutDailyMemory,
   queueFanoutDailyMemoryWithRecordLookback,
   runDailyMemoryJob,
 } from '../src/core/cycle/daily-memory-followup.ts';
@@ -167,4 +168,31 @@ describe('daily memory day-batch settle and record lookback', () => {
     const after = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
     expect(after.length).toBe(before.length);
   });
+
+  test('settlement replays a cancelled daily-memory child', async () => {
+    const queue = new MinionQueue(engine);
+    const source = await queue.add('autopilot-cycle', { daily_memory_affected_dates: ['2026-09-26'] }, {
+      max_attempts: 1, timeout_ms: 60_000,
+    });
+    const dayJob = await queue.add('autopilot-daily-memory', {
+      daily_memory_date: '2026-09-26',
+      daily_memory_only: true,
+      source_cycle_job_ids: [],
+    }, { max_attempts: 2, timeout_ms: 60_000 });
+    await engine.executeRaw("UPDATE minion_jobs SET status='cancelled', finished_at=now() WHERE id=$1", [dayJob.id]);
+    const result = await runDailyMemoryJob(engine, {
+      id: 0,
+      data: {
+        daily_memory_date: '2026-09-26',
+        daily_memory_dates: ['2026-09-26'],
+        daily_memory_source_job_id: source.id,
+        daily_memory_cursor: 1,
+        daily_memory_day_job_ids: [dayJob.id],
+        daily_memory_replay_round: 0,
+      },
+    });
+    if (!('daily_memory_replayed' in result)) throw new Error('Expected settlement result');
+    expect(result.daily_memory_replayed).toBe(1);
+  });
+
 });
