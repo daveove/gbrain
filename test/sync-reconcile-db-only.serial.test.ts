@@ -27,6 +27,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { listEverCommittedPaths } from '../src/commands/sync.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string;
 let repoPath: string;
 
 function gitInit(repo: string): void {
@@ -68,6 +69,7 @@ describe('#2426 — full-sync reconcile keeps never-committed (DB-only) pages', 
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = (await engine.getConfig('version'))!;
   }, 60_000);
 
   afterAll(async () => {
@@ -76,6 +78,7 @@ describe('#2426 — full-sync reconcile keeps never-committed (DB-only) pages', 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-dbonly-'));
     gitInit(repoPath);
     mkdirSync(join(repoPath, 'topics'), { recursive: true });

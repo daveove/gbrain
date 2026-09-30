@@ -34,6 +34,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string;
 let repoPath: string;
 
 const JUNK_NAME = '[foo.md](https-example).md';
@@ -64,6 +65,7 @@ describe('malformed-path sync semantics (poisoned-filename incident)', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = (await engine.getConfig('version'))!;
   }, 60_000);
 
   afterAll(async () => {
@@ -72,6 +74,7 @@ describe('malformed-path sync semantics (poisoned-filename incident)', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-malformed-'));
     gitInit(repoPath);
     mkdirSync(join(repoPath, 'topics'), { recursive: true });
