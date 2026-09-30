@@ -27,9 +27,10 @@ import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/privat
 
 describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 30000);
+  let schemaVersion: string | null;
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 30000);
   afterAll(async () => { await engine.disconnect(); });
-  beforeEach(async () => { await resetPgliteState(engine); await ensureDailyMemorySource(engine); });
+  beforeEach(async () => { await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); await ensureDailyMemorySource(engine); });
 
   test('autopilot-global-maintenance writes one note linking today\'s pages and skips older and dream pages', async () => {
     await engine.executeRaw(
@@ -537,7 +538,6 @@ describe('daily memory from sources the brain already holds', () => {
   });
 
   test('a successful daily write can enqueue a dream-scoped deferred extract', async () => {
-    await engine.setConfig('version', '7');
     await seedRecord('gmail:1', 'gmail', '2026-09-30T00:00:00Z');
     const result = await writeSeptember30();
     expect(result.written).toBe(true);
