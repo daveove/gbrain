@@ -234,6 +234,18 @@ describe('import structural edges', () => {
         const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as { reason?: string; stale?: boolean };
         expect(data.stale).toBe(true);
         expect(data.reason).toBe('import_inline_incomplete');
+        for (const failure of ['throw', 'non-live']) {
+          const rejected = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => {
+            if (failure === 'throw') throw new Error('Synthetic incomplete continuation rejection');
+            return { id: 0, status: 'completed', data: {} } as never;
+          });
+          try {
+            const failed = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+            expect(failed.errors).toBe(1);
+            expect(failed.linkExtractionError).toContain(failure === 'throw'
+              ? 'Synthetic incomplete continuation rejection' : 'did not obtain a live stale-sweep job');
+          } finally { rejected.mockRestore(); }
+        }
       });
     } finally {
       spy.mockRestore();
