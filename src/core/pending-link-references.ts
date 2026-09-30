@@ -4,7 +4,8 @@ import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACT
 
 const PREFIX = 'internal.pending-links.';
 type PendingProbeOptions = { dryRun?: boolean; versionTs?: string; sourceId?: string;
-  onReadyForeign?: (sourceId: string) => Promise<void> };
+  onReadyForeign?: (sourceId: string) => Promise<void>;
+  onReadyLocal?: () => Promise<void> };
 type Store = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
 export interface PendingLinkOrigin {
   slug: string;
@@ -166,6 +167,10 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
           AND c.key=$5 AND c.value=$6 RETURNING p.id)
         DELETE FROM config WHERE key=$5 AND value=$6 AND EXISTS(SELECT 1 FROM ready)
         RETURNING key`, [ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation, row.key, row.value]);
+      if (changed.length && opts.onReadyLocal) {
+        signal?.throwIfAborted();
+        await opts.onReadyLocal();
+      }
       requeued += changed.length;
     }
   }

@@ -441,6 +441,7 @@ describe('autopilot-global-maintenance daily memory order', () => {
     const body = src.slice(start, end > start ? end : undefined);
     expect(body).toContain('dailyMemoryDaysForSlugs');
     expect(body).toContain('claimDailyMemoryRegenDays');
+    expect(body).toContain('acknowledgeDailyMemoryRegenDays');
     expect(body).not.toContain('days.slice(0, 8)');
     expect(body.indexOf('dailyMemoryDaysForSlugs')).toBeGreaterThan(body.indexOf('const report = await runCycle(engine,'));
   });
@@ -455,5 +456,6 @@ describe('autopilot-global-maintenance daily memory order', () => {
     const pendingDrain = body.indexOf('claimDailyMemoryRegenDays(engine, [])');
     expect(todayWrite).toBeGreaterThan(-1);
     expect(pendingDrain).toBeGreaterThan(todayWrite);
+    expect(body).toContain('acknowledgeDailyMemoryRegenDays');
   });
 });

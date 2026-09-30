@@ -262,27 +262,79 @@ function parsePendingDailyMemoryDays(raw: string | null | undefined): string[] {
 }
 
 /**
- * Merge discovered days with any stashed backlog. Return up to `limit` oldest
- * days and persist the remainder so a later cycle or global maintenance drains them.
+ * CAS-merge `next` into the pending-days config. Concurrent source jobs cannot
+ * clobber each other's unclaimed remainder.
+ */
+async function writePendingDailyMemoryDays(
+  engine: BrainEngine,
+  expectedRaw: string | null,
+  next: string[],
+): Promise<boolean> {
+  const key = DAILY_MEMORY_PENDING_DAYS_KEY;
+  if (next.length === 0) {
+    if (expectedRaw === null) return (await engine.getConfig(key)) === null;
+    const deleted = await engine.executeRaw<{ key: string }>(
+      `DELETE FROM config WHERE key=$1 AND value IS NOT DISTINCT FROM $2 RETURNING key`,
+      [key, expectedRaw],
+    );
+    return deleted.length > 0;
+  }
+  const value = JSON.stringify(next);
+  if (expectedRaw === null) {
+    const inserted = await engine.executeRaw<{ key: string }>(
+      `INSERT INTO config(key,value) VALUES ($1,$2)
+       ON CONFLICT (key) DO NOTHING RETURNING key`,
+      [key, value],
+    );
+    return inserted.length > 0;
+  }
+  const updated = await engine.executeRaw<{ key: string }>(
+    `UPDATE config SET value=$2 WHERE key=$1 AND value IS NOT DISTINCT FROM $3 RETURNING key`,
+    [key, value, expectedRaw],
+  );
+  return updated.length > 0;
+}
+
+async function mutatePendingDailyMemoryDays(
+  engine: BrainEngine,
+  mutate: (pending: string[]) => string[],
+): Promise<string[]> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const expectedRaw = await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY);
+    const pending = parsePendingDailyMemoryDays(expectedRaw);
+    const next = mutate(pending);
+    if (await writePendingDailyMemoryDays(engine, expectedRaw, next)) return next;
+  }
+  throw new Error('Daily memory pending-days CAS exhausted');
+}
+
+/**
+ * Merge discovered days into the durable backlog with CAS, then return up to
+ * `limit` oldest days WITHOUT removing them. Callers must
+ * `acknowledgeDailyMemoryRegenDays` after each day write+handoff succeeds.
  */
 export async function claimDailyMemoryRegenDays(
   engine: BrainEngine,
   discovered: string[],
   limit = DAILY_MEMORY_REGEN_DAY_BATCH,
 ): Promise<string[]> {
-  const pending = parsePendingDailyMemoryDays(await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY));
-  const all = [...new Set([
-    ...pending,
-    ...discovered.filter((day) => isCalendarDateSpelling(day)),
-  ])].sort();
-  const claim = all.slice(0, Math.max(0, limit));
-  const rest = all.slice(claim.length);
-  if (rest.length === 0) {
-    if (pending.length > 0) await engine.unsetConfig(DAILY_MEMORY_PENDING_DAYS_KEY);
-  } else {
-    await engine.setConfig(DAILY_MEMORY_PENDING_DAYS_KEY, JSON.stringify(rest));
-  }
-  return claim;
+  const valid = discovered.filter((day) => isCalendarDateSpelling(day));
+  const pending = valid.length === 0
+    ? parsePendingDailyMemoryDays(await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY))
+    : await mutatePendingDailyMemoryDays(engine, (current) =>
+      [...new Set([...current, ...valid])].sort());
+  return pending.slice(0, Math.max(0, limit));
+}
+
+/** Drop finished days from the durable backlog after write+handoff succeed. */
+export async function acknowledgeDailyMemoryRegenDays(
+  engine: BrainEngine,
+  finished: string[],
+): Promise<void> {
+  const done = new Set(finished.filter((day) => isCalendarDateSpelling(day)));
+  if (done.size === 0) return;
+  await mutatePendingDailyMemoryDays(engine, (pending) =>
+    pending.filter((day) => !done.has(day)));
 }
 
 /** Calendar days an imported slug set should refresh in the daily index. */
@@ -306,6 +358,39 @@ export async function dailyMemoryDaysForSlugs(
   const days = new Set<string>();
   for (const row of rows) {
     days.add(row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day);
+  }
+  // When a page moves between calendar days, the current row only has the new
+  // date. Prior dream indexes that already link to the slug must also regen.
+  const prior = await engine.executeRaw<{ day: string }>(
+    `SELECT DISTINCT substring(fp.slug from '^daily-memory/([0-9]{4}-[0-9]{2}-[0-9]{2})$') AS day
+     FROM links l
+     JOIN pages tp ON tp.id = l.to_page_id
+     JOIN pages fp ON fp.id = l.from_page_id
+     WHERE tp.source_id = $1 AND tp.slug = ANY($2::text[])
+       AND fp.source_id = $3
+       AND fp.deleted_at IS NULL
+       AND fp.slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$'`,
+    [sourceId, slugs, DAILY_MEMORY_SOURCE_ID],
+  );
+  for (const row of prior) {
+    if (row.day && isCalendarDateSpelling(row.day)) days.add(row.day);
+  }
+  // page_versions keep prior frontmatter dates when links were never extracted.
+  const versions = await engine.executeRaw<{ day: string | null }>(
+    `SELECT DISTINCT
+       CASE
+         WHEN pg_input_is_valid(COALESCE(pv.frontmatter->>'date', ''), 'date')
+           THEN (pv.frontmatter->>'date')::date::text
+         ELSE NULL
+       END AS day
+     FROM page_versions pv
+     JOIN pages p ON p.id = pv.page_id
+     WHERE p.source_id = $1 AND p.slug = ANY($2::text[])
+       AND pv.frontmatter ? 'date'`,
+    [sourceId, slugs],
+  );
+  for (const row of versions) {
+    if (row.day && isCalendarDateSpelling(row.day)) days.add(row.day);
   }
   return [...days].sort();
 }

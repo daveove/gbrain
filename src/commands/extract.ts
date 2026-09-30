@@ -1723,6 +1723,8 @@ async function probePendingOriginsForArrivedTargets(
       globalBasename: opts.globalBasename, signal: opts.signal, deadline: opts.deadline,
       versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
       onReadyForeign: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
+      // Small sync stamps only pagesAffected; same-source wakes need a durable sweep.
+      onReadyLocal: () => queuePendingOriginExtraction(engine, sourceId, sourceId),
     }, (candidate, origin, pendingSlugs, pendingSources) =>
       resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
         outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);

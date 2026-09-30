@@ -15,7 +15,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
-import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_PENDING_DAYS_KEY, DAILY_MEMORY_REGEN_DAY_BATCH, claimDailyMemoryRegenDays, dailyMemoryDaysForSlugs, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_PENDING_DAYS_KEY, DAILY_MEMORY_REGEN_DAY_BATCH, claimDailyMemoryRegenDays, acknowledgeDailyMemoryRegenDays, dailyMemoryDaysForSlugs, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
@@ -1008,14 +1008,64 @@ describe('daily memory from sources the brain already holds', () => {
     expect(days).toEqual(['2026-09-20']);
   });
 
-  test('claimDailyMemoryRegenDays batches eight days and stashes the rest', async () => {
+  test('claimDailyMemoryRegenDays peeks eight days and keeps all durable until ack', async () => {
     const discovered = Array.from({ length: 10 }, (_, i) => `2026-09-${String(i + 1).padStart(2, '0')}`);
     const first = await claimDailyMemoryRegenDays(engine, discovered, DAILY_MEMORY_REGEN_DAY_BATCH);
     expect(first).toEqual(discovered.slice(0, 8));
+    expect(JSON.parse((await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY))!)).toEqual(discovered);
+    await acknowledgeDailyMemoryRegenDays(engine, first);
     expect(JSON.parse((await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY))!)).toEqual(discovered.slice(8));
     const second = await claimDailyMemoryRegenDays(engine, [], DAILY_MEMORY_REGEN_DAY_BATCH);
     expect(second).toEqual(discovered.slice(8));
+    await acknowledgeDailyMemoryRegenDays(engine, second);
     expect(await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY)).toBeNull();
+  });
+
+  test('claimDailyMemoryRegenDays CAS-merges concurrent discoveries without losing days', async () => {
+    const a = Array.from({ length: 10 }, (_, i) => `2026-08-${String(i + 1).padStart(2, '0')}`);
+    const b = Array.from({ length: 10 }, (_, i) => `2026-09-${String(i + 1).padStart(2, '0')}`);
+    const [left, right] = await Promise.all([
+      claimDailyMemoryRegenDays(engine, a, DAILY_MEMORY_REGEN_DAY_BATCH),
+      claimDailyMemoryRegenDays(engine, b, DAILY_MEMORY_REGEN_DAY_BATCH),
+    ]);
+    expect(left).toHaveLength(8);
+    expect(right).toHaveLength(8);
+    const pending = JSON.parse((await engine.getConfig(DAILY_MEMORY_PENDING_DAYS_KEY))!);
+    expect(pending).toEqual([...a, ...b].sort());
+  });
+
+  test('dailyMemoryDaysForSlugs includes prior dates when a page moves', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await engine.putPage('notes/moving', {
+      type: 'note', title: 'Moving', compiled_truth: 'was Sep 10',
+      frontmatter: { date: '2026-09-10' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-10T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/moving'",
+    );
+    // Prior index link still points at the old day after the move.
+    await engine.putPage(dailyMemorySlug('2026-09-10'), {
+      type: 'note', title: 'Daily memory 2026-09-10',
+      compiled_truth: 'See [[notes/moving]].',
+      frontmatter: { dream_generated: true, dream_cycle_date: '2026-09-10', visibility: 'private' },
+    }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const from = await engine.getPage(dailyMemorySlug('2026-09-10'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const to = await engine.getPage('notes/moving', { sourceId: 'default' });
+    await engine.executeRaw(
+      `INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
+       VALUES ($1, $2, '', 'markdown')`,
+      [from!.id, to!.id],
+    );
+    await engine.putPage('notes/moving', {
+      type: 'note', title: 'Moving', compiled_truth: 'now Sep 20',
+      frontmatter: { date: '2026-09-20' },
+    }, { sourceId: 'default' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/moving'",
+    );
+    const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/moving']);
+    expect(days).toContain('2026-09-10');
+    expect(days).toContain('2026-09-20');
   });
 
 });

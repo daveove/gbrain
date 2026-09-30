@@ -2856,16 +2856,17 @@ export async function registerBuiltinHandlers(
           const {
             dailyMemoryDaysForSlugs,
             claimDailyMemoryRegenDays,
+            acknowledgeDailyMemoryRegenDays,
             writeDailyMemoryFromSources,
             queueDailyMemoryExtract,
           } = await import('../core/cycle/daily-memory.ts');
           const discovered = await dailyMemoryDaysForSlugs(engine, sourceId, pagesAffected);
           const days = await claimDailyMemoryRegenDays(engine, discovered);
           for (const day of days) {
-            await queueDailyMemoryExtract(
-              engine,
-              await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day }),
-            );
+            const written = await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day });
+            if (written.reason === 'error') continue;
+            await queueDailyMemoryExtract(engine, written);
+            await acknowledgeDailyMemoryRegenDays(engine, [day]);
           }
         } catch (e) {
           console.warn(
@@ -2929,15 +2930,16 @@ export async function registerBuiltinHandlers(
       writeDailyMemoryFromSources,
       queueDailyMemoryExtract,
       claimDailyMemoryRegenDays,
+      acknowledgeDailyMemoryRegenDays,
     } = await import('../core/cycle/daily-memory.ts');
     await queueDailyMemoryExtract(engine, await writeDailyMemoryFromSources(engine, { signal: job.signal }));
     // Drain any calendar days a source-cycle batch stashed past its cap.
     try {
       for (const day of await claimDailyMemoryRegenDays(engine, [])) {
-        await queueDailyMemoryExtract(
-          engine,
-          await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day }),
-        );
+        const written = await writeDailyMemoryFromSources(engine, { signal: job.signal, date: day });
+        if (written.reason === 'error') continue;
+        await queueDailyMemoryExtract(engine, written);
+        await acknowledgeDailyMemoryRegenDays(engine, [day]);
       }
     } catch (e) {
       console.warn(
