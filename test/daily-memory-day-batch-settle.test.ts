@@ -43,7 +43,7 @@ describe('daily memory day-batch settle and record lookback', () => {
     expect(days).toContain('2026-09-30');
   });
 
-  test('affected-day batches cap failed child replacements at two rounds', async () => {
+  for (const terminal of ['dead', 'cancelled']) test(`affected-day batches cap ${terminal} child replacements at two rounds`, async () => {
     const queue = new MinionQueue(engine), days = ['2026-09-28'];
     const source = await queue.add('autopilot-cycle', {});
     const child = await queue.add('autopilot-daily-memory', {
@@ -56,7 +56,8 @@ describe('daily memory day-batch settle and record lookback', () => {
     for (let round = 0; round <= 2; round++) {
       const failedChild = (await queue.claim('child-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
       expect(failedChild.data.daily_memory_only).toBe(true);
-      await queue.failJob(failedChild.id, 'child-lock', 'Synthetic child failure', 'dead');
+      if (terminal === 'cancelled') expect((await queue.cancelJob(failedChild.id))!.status).toBe('cancelled');
+      else await queue.failJob(failedChild.id, 'child-lock', 'Synthetic child failure', 'dead');
       const batch = (await queue.claim('batch-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
       expect(batch.data.daily_memory_replay_round ?? 0).toBe(round);
       if (round === 2) {
@@ -70,7 +71,7 @@ describe('daily memory day-batch settle and record lookback', () => {
         expect(stored.data.daily_memory_day_job_ids).toEqual([failedChild.id]);
       } else {
         const result = await runDailyMemoryJob(engine, batch);
-    if (!('daily_memory_replayed' in result)) throw new Error('Expected settlement result');
+        if (!('daily_memory_replayed' in result)) throw new Error('Expected settlement result');
         expect(result.daily_memory_replayed).toBe(1);
         await queue.completeJob(batch.id, 'batch-lock', result);
         await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE status='delayed'");
