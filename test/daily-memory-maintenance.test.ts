@@ -618,6 +618,54 @@ describe('daily memory from sources the brain already holds', () => {
     });
   }
 
+  test('an inactive day queues version-stale historical dream indexes without creating or resurrecting it', async () => {
+    await seedRecord('gmail:historical-version', 'gmail', '2026-09-30T00:00:00Z');
+    const historical = await writeSeptember30();
+    await engine.executeRaw('DELETE FROM source_records');
+    await engine.executeRaw("UPDATE pages SET updated_at=$2::timestamptz - interval '2 seconds', links_extracted_at=$2::timestamptz - interval '1 second' WHERE source_id=$1",
+      [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+    const snapshot = () => engine.executeRaw("SELECT slug,knowledge_revision,updated_at,deleted_at FROM pages WHERE source_id=$1 ORDER BY slug", [DAILY_MEMORY_SOURCE_ID]);
+    const before = await snapshot();
+    const day = '2026-10-02', slug = dailyMemorySlug(day);
+    const missing = await writeDailyMemoryFromSources(engine, { date: day });
+    expect(missing.reason).toBe('no_source_activity');
+    expect(missing.needs_extract).toBe(true);
+    expect(await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+    expect(await snapshot()).toEqual(before);
+    await queueDailyMemoryExtract(engine, missing);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND status='waiting'")).toHaveLength(1);
+    await engine.putPage(slug, { type: 'note', title: 'Deleted generated day', compiled_truth: 'Synthetic historical day',
+      frontmatter: { dream_generated: true } }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.softDeletePage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect((await writeDailyMemoryFromSources(engine, { date: day })).needs_extract).toBe(true);
+    expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID, includeDeleted: true }))!.deleted_at).toBeTruthy();
+    await engine.executeRaw("UPDATE pages SET links_extracted_at=$2::timestamptz WHERE source_id=$1", [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+    const healthy = await writeDailyMemoryFromSources(engine, { date: day });
+    expect(healthy.needs_extract).toBe(false);
+    expect(await engine.getPage(historical.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
+  });
+
+  test('archived page sources are excluded while source-record ingestion remains independent', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES('archived-fixture','Archived fixture',true),('active-fixture','Active fixture',false)");
+    for (const sourceId of ['archived-fixture', 'active-fixture']) {
+      await engine.putPage('notes/day', { type: 'note', title: 'Day fixture', compiled_truth: 'Synthetic fixture',
+        frontmatter: { date: '2026-09-30' } }, { sourceId });
+    }
+    await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id=ANY($1::text[])",
+      [['archived-fixture', 'active-fixture']]);
+    await seedRecord('archived:source-record', 'archived-fixture', '2026-09-30T00:00:00Z');
+    const first = await writeSeptember30();
+    expect(first.pages).toBe(1);
+    const page = (await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(page.compiled_truth).toContain('[[active-fixture:notes/day]]');
+    expect(page.compiled_truth).not.toContain('[[archived-fixture:notes/day]]');
+    expect(page.compiled_truth).toContain('archived-fixture: 1 record changed');
+    await engine.executeRaw("UPDATE sources SET archived=false WHERE id='archived-fixture'");
+    const restored = await writeSeptember30();
+    expect(restored.pages).toBe(2);
+    expect((await engine.getPage(first.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain('[[archived-fixture:notes/day]]');
+  });
+
   test('unchanged generated targets need extraction when their watermark predates the extractor version', async () => {
     await seedRecord('gmail:version', 'gmail', '2026-09-30T00:00:00Z');
     const first = await writeSeptember30();

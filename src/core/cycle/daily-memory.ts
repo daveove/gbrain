@@ -285,7 +285,7 @@ export async function writeDailyMemoryFromSources(
                'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
            to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
            to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
-         FROM pages
+         FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
          WHERE deleted_at IS NULL
            AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
            AND NOT (source_id = $4 AND slug = $3)
@@ -316,7 +316,15 @@ export async function writeDailyMemoryFromSources(
     }
 
     if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: 0, reason: 'no_source_activity' };
+      const [historical] = await engine.executeRaw<{ needed: boolean }>(
+        `SELECT EXISTS (SELECT 1 FROM pages WHERE source_id=$1 AND deleted_at IS NULL
+          AND frontmatter @> '{"dream_generated":true}'::jsonb
+          AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
+            AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
+          AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
+            OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract: historical.needed,
+        pages: 0, reason: 'no_source_activity' };
     }
 
     let recordsWrote = false;
