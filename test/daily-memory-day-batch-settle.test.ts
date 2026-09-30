@@ -4,7 +4,6 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import {
   previousCalendarDay,
-  queueFanoutDailyMemory,
   queueFanoutDailyMemoryWithRecordLookback,
   runDailyMemoryJob,
 } from '../src/core/cycle/daily-memory-followup.ts';
