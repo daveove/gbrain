@@ -195,7 +195,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
   }, 120_000);
 
 
-  test('a completed successor does not strand later same-pin writes — chain another generation', async () => {
+  test('a completed successor does not strand later same-pin writes: chain another generation', async () => {
     // Codex tip P1 on 3023b6e: after base finishes, every probe reused the
     // single `after:<baseId>` key; once that successor completed, later
     // calls returned null and left daily-memory / pending-target handoffs
