@@ -220,6 +220,28 @@ describe('daily memory from sources the brain already holds', () => {
       .toContain('[[default:notes/replacement-instant]]');
   });
 
+  test('transcript ingest fails closed when daily-memory handoff is rejected', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-handoff-fail-'));
+    const file = join(dir, 'session.jsonl');
+    const timestamp = '2026-02-01T12:00:00.000Z';
+    writeFileSync(file, [
+      { timestamp, type: 'session_meta', payload: { id: 'handoff-fail-fixture', session_id: 'handoff-fail-fixture', timestamp, cwd: dir } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'Handoff failure fixture.' } },
+      { timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixture acknowledged.' }] } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const failure = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('fixture queue unavailable'));
+    try {
+      await expect(runTranscriptsIngest(engine, {
+        paths: [file], format: 'codex', sourceId: 'default',
+      })).rejects.toThrow(/fixture queue unavailable|Daily-memory transcript ingest handoff rejected|Daily memory/);
+      const page = await engine.executeRaw("SELECT slug FROM pages WHERE source_id='default' AND deleted_at IS NULL");
+      expect(page.length).toBeGreaterThan(0);
+    } finally {
+      failure.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('transcript ingest queues affected-day refreshes for historical session dates', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-daily-handoff-'));
     const file = join(dir, 'session.jsonl');
