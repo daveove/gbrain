@@ -283,4 +283,59 @@ describe('daily memory refresh on source archive/restore', () => {
     }
   });
 
+
+  test('force-purge queues affected daily-memory days before delete', async () => {
+    const sourceId = 'purge-refresh', day = '2026-09-24';
+    await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES($1,'Purge refresh fixture',false)", [sourceId]);
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Fixture', compiled_truth: 'Synthetic', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2",
+      [day, sourceId],
+    );
+    await writeDailyMemoryFromSources(engine, { date: day });
+    await runSources(engine, ['purge', sourceId, '--confirm-destructive']);
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(0);
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
+  });
+
+  test('standalone import retries daily-memory handoff from checkpoint after enqueue failure', async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const { runImport } = await import('../src/commands/import.ts');
+    const { MinionQueue } = await import('../src/core/minions/queue.ts');
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-dm-retry-'));
+    try {
+      await engine.executeRaw("INSERT INTO sources(id,name) VALUES('import-dm-retry','Import retry fixture')");
+      writeFileSync(join(dir, 'day.md'), [
+        '---', 'title: Imported day', 'date: 2026-09-23', '---', '', 'Body.', '',
+      ].join('\n'));
+      const original = MinionQueue.prototype.add;
+      let calls = 0;
+      const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+        if (++calls === 2) throw new Error('synthetic import refresh outage');
+        return original.call(this, ...args);
+      });
+      try {
+        const first = await runImport(engine, [dir, '--no-embed'], { sourceId: 'import-dm-retry', noExtract: true });
+        expect(first.errors).toBeGreaterThan(0);
+      } finally {
+        add.mockRestore();
+      }
+      // Retry with no new imports (content hash skip); checkpoint must still enqueue the day.
+      await runImport(engine, [dir, '--no-embed'], { sourceId: 'import-dm-retry', noExtract: true });
+      const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+      );
+      expect(jobs.some(j => j.data.daily_memory_date === '2026-09-23')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 });

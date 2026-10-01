@@ -1045,7 +1045,12 @@ async function runPurge(engine: BrainEngine, args: string[]): Promise<void> {
     try { await assertSourceNotSystemIndex(engine, id); }
     catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
-    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    // Force-purge can target an active source; refresh historical indexes with the delete.
+    await engine.transaction(async (tx) => {
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
+      await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    });
     console.log(`Permanently deleted source "${id}" (${impact.pageCount} pages cascaded).`);
     return;
   }

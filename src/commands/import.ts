@@ -1016,23 +1016,45 @@ export async function runImport(
 
   // Standalone import: queue historical daily-memory refresh for imported pages.
   // Sync-driven imports already hand off via prepareSyncDailyMemory; skip those.
-  if (!opts.managedBookmark && !managedImport && importedSlugs.length > 0 && !signal?.aborted) {
+  // Persist slugs/days until enqueue succeeds so a retry still refreshes when
+  // checkpointed files no longer appear in importedSlugs.
+  if (!opts.managedBookmark && !managedImport && !signal?.aborted) {
     const sid = sourceId ?? 'default';
     const { DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
     if (sid !== DAILY_MEMORY_SOURCE_ID) {
       try {
         throwIfInterrupted();
+        const { createHash } = await import('node:crypto');
+        const { appendCompleted, clearOpCheckpoint, loadOpCheckpoint } = await import('../core/op-checkpoint.ts');
         const {
           dailyMemoryDaysForSlugs,
           queueStandaloneSyncDailyMemory,
         } = await import('../core/cycle/daily-memory-followup.ts');
-        const days = await dailyMemoryDaysForSlugs(engine, sid, importedSlugs, { signal });
+        const key = {
+          op: 'import-daily-memory',
+          fingerprint: createHash('sha256').update(JSON.stringify([sid, dir])).digest('hex').slice(0, 16),
+        };
+        const saved = await loadOpCheckpoint(engine, key);
+        const savedDays = saved.filter(v => v.startsWith('day:')).map(v => v.slice(4));
+        const savedSlugs = saved.filter(v => v.startsWith('slug:')).map(v => v.slice(5));
+        const slugs = [...new Set([...savedSlugs, ...importedSlugs])];
+        const days = [...new Set([
+          ...savedDays,
+          ...(slugs.length ? await dailyMemoryDaysForSlugs(engine, sid, slugs, { signal }) : []),
+        ])].sort();
         throwIfInterrupted();
+        if (slugs.length || days.length) {
+          const delta = [...slugs.map(s => `slug:${s}`), ...days.map(d => `day:${d}`)];
+          if (!await appendCompleted(engine, key, delta)) {
+            throw new Error('Daily-memory import checkpoint unavailable');
+          }
+        }
         if (days.length) {
           const commit = opts.commit ?? 'import';
           const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: sid, commit, days });
           if (accepted === null) throw new Error('Daily-memory import handoff rejected');
         }
+        await clearOpCheckpoint(engine, key);
       } catch (e) {
         rethrowIfCancelled(e);
         const message = e instanceof Error ? e.message : String(e);
