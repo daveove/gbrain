@@ -295,12 +295,33 @@ describe('daily memory refresh on source archive/restore', () => {
       [day, sourceId],
     );
     await writeDailyMemoryFromSources(engine, { date: day });
+    const original = MinionQueue.prototype.add;
+    let calls = 0;
+    const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+      if (++calls === 2) throw new Error('synthetic purge settlement outage');
+      return original.call(this, ...args);
+    });
+    try { await expect(runSources(engine, ['purge', sourceId, '--confirm-destructive'])).rejects.toThrow('synthetic purge settlement outage'); }
+    finally { add.mockRestore(); }
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
+    expect(await engine.getPage('notes/day', { sourceId })).not.toBeNull();
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
     await runSources(engine, ['purge', sourceId, '--confirm-destructive']);
     expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(0);
     const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
       "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
     );
     expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
+  });
+
+  test('force-purge protects a custom system index source before queue or deletion', async () => {
+    const sourceId = 'custom-owned-index';
+    await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,'Synthetic index','{\"system_index\":true}'::jsonb)", [sourceId]);
+    const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
+    try { await expect(runSources(engine, ['purge', sourceId, '--confirm-destructive'])).rejects.toThrow('fixture exit 3'); }
+    finally { exit.mockRestore(); }
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
   });
 
   test('standalone import retries daily-memory handoff from checkpoint after enqueue failure', async () => {

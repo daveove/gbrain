@@ -129,6 +129,37 @@ test('managed remove keeps source, binding, and accepted jobs atomic on queue fa
   }
 }),60_000);
 
+test('direct managed archive/restore accepts historical dates atomically with topology',()=>fixture(async(_home,source)=>{
+  await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
+    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+  for(const operation of ['archive','restore'] as const){
+    const before=await getWorktreeBinding(engine,source);
+    const prior=await engine.executeRaw<{id:number}>('SELECT id FROM minion_jobs ORDER BY id');
+    const archivedBefore=operation==='restore';
+    const original=MinionQueue.prototype.add;let calls=0;
+    const add=spyOn(MinionQueue.prototype,'add').mockImplementation(async function(this:MinionQueue,...args:Parameters<MinionQueue['add']>){
+      if(++calls===2)throw new Error('synthetic lifecycle settlement outage');
+      const accepted=await original.call(this,...args);
+      if(observer){
+        expect((await observer.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(archivedBefore);
+        expect(await observer.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(prior);
+      }
+      return accepted;
+    });
+    try{await expect(runManagedSourceLifecycle(engine,{operation,sourceId:source})).rejects.toThrow('synthetic lifecycle settlement outage');}
+    finally{add.mockRestore();}
+    expect(calls).toBe(2);
+    expect(await getWorktreeBinding(engine,source)).toEqual(before);
+    expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(archivedBefore);
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(prior);
+    await runManagedSourceLifecycle(engine,{operation,sourceId:source});
+    expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(!archivedBefore);
+    const jobs=await engine.executeRaw<{data:{daily_memory_date:string}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(jobs).toHaveLength(prior.length+2);
+    expect(jobs.every(job=>job.data.daily_memory_date==='2026-09-30')).toBe(true);
+  }
+}),60_000);
+
 test('remove/recreate retains old request IDs and creates a new source incarnation',()=>fixture(async(_home,source,root)=>{
   const original=(await getWorktreeBinding(engine,source))!;const accepted=await queued(source);const requestId=randomUUID();
   const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:source,confirmDestructive:true,requestId});

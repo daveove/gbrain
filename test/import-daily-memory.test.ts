@@ -1,0 +1,112 @@
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { runImport } from '../src/commands/import.ts';
+import { importFile } from '../src/core/import-file.ts';
+import { createImportDailyMemory } from '../src/core/import-daily-memory.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
+
+let engine: PGLiteEngine, version: string | null;
+const roots: string[] = [];
+const root = () => { const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-day-')); roots.push(dir); return dir; };
+const markdown = '---\ntype: note\ntitle: Synthetic fixture\ndate: "2026-09-24"\n---\n\nSynthetic fixture';
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); version = await engine.getConfig('version'); }, 60_000);
+afterAll(async () => { await engine.disconnect(); for (const dir of roots) rmSync(dir, { recursive: true, force: true }); });
+beforeEach(async () => { await resetPgliteState(engine); if (version) await engine.setConfig('version', version); });
+const batches = () => engine.executeRaw<{ data: { daily_memory_dates: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+
+test('post-import discovery failure banks slugs and withholds bookmark through a checkpoint-skipped retry', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  for (const args of [['init'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Fixture']]) {
+    execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  }
+  await engine.setConfig('sync.repo_path', dir); await engine.setConfig('sync.last_commit', 'before');
+  let discoveries = 0;
+  const execute = engine.executeRaw;
+  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function(this: PGLiteEngine, sql, params) {
+    if (sql.includes('SELECT source_id, slug, title, effective_date') && ++discoveries === 2) throw new Error('Synthetic day discovery outage');
+    return execute.call(this, sql, params);
+  });
+  try {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      const result = await runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], { noExtract: true });
+      expect(result.imported).toBe(1); expect(result.errors).toBe(1);
+      expect(result.failures.some(f => f.path === '<daily-memory-refresh>')).toBe(true);
+    });
+  } finally { failure.mockRestore(); }
+  expect(await engine.getConfig('sync.last_commit')).toBe('before');
+  expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path='slug:note'")).toHaveLength(1);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    const retried = await runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], { noExtract: true });
+    expect(retried.imported).toBe(0); expect(retried.errors).toBe(0);
+  });
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+  expect(await engine.getConfig('sync.last_commit')).toBe(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim());
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('pre-write bank recovers old undated day after interruption before post-write accounting and hash skip', async () => {
+  const dir = root(), file = join(dir, 'note.md'); writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const prior = (await createImportDailyMemory(engine, opts))!;
+  await prior.before(file, 'note.md');
+  expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('imported');
+  // Simulate process loss after the canonical write, before imported() and file checkpoint.
+  expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('skipped');
+  await (await createImportDailyMemory(engine, opts))!.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+});
+
+test('rejected daily handoff survives an unchanged retry and healthy no-op creates no jobs', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  const add = MinionQueue.prototype.add;
+  const failure = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, name, data, opts) {
+    if (name === 'autopilot-daily-memory') throw new Error('Synthetic daily handoff rejection');
+    return add.call(this, name, data, opts);
+  });
+  try { await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).errors).toBe(1);
+  }); } finally { failure.mockRestore(); }
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).errors).toBe(0);
+    const accepted = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(0);
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(accepted);
+  });
+});
+
+
+test('pre-write date discovery failure leaves the canonical page and bookmark untouched', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await engine.setConfig('sync.last_commit', 'before');
+  const execute = engine.executeRaw;
+  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function(this: PGLiteEngine, sql, params) {
+    if (sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic prior-date discovery outage');
+    return execute.call(this, sql, params);
+  });
+  try { await withEnv({ GBRAIN_HOME: home }, async () => {
+    const result = await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true });
+    expect(result.imported).toBe(0); expect(result.errors).toBeGreaterThan(0);
+  }); } finally { failure.mockRestore(); }
+  expect(await engine.getPage('note')).toBeNull();
+  expect(await engine.getConfig('sync.last_commit')).toBe('before');
+  expect(await batches()).toHaveLength(0);
+});
+
+test('managed bookmark imports leave daily handoff to the outer sync transaction', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true, managedBookmark: true })).imported).toBe(1);
+  });
+  expect(await engine.getPage('note')).not.toBeNull();
+  expect(await batches()).toHaveLength(0);
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});

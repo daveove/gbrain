@@ -938,10 +938,8 @@ export async function removeSource(
   try {
     await assertSourceNotSystemIndex(engine, opts.id);
   } catch (error) {
-    throw new SourceOpError(
-      (error as { code?: string })?.code === 'system_index_source' ? 'protected_id' : 'protected_id',
-      error instanceof Error ? error.message : String(error),
-    );
+    if ((error as { code?: string })?.code !== 'system_index_source') throw error;
+    throw new SourceOpError('protected_id', error instanceof Error ? error.message : String(error));
   }
 
   if(await managedPersistenceEnabled(engine)){
@@ -1009,8 +1007,7 @@ export async function removeSource(
           `Refusing to delete clone at ${src.local_path}: path is a symlink.`,
         );
       }
-      rmSync(src.local_path, { recursive: true, force: true });
-      cloneRemoved = true;
+      // Cleanup is delayed until the source deletion and refresh handoff commit.
     } catch (e) {
       if (e instanceof SourceOpError) throw e;
       // Don't fail the whole remove if rmSync had a permission hiccup — log
@@ -1026,6 +1023,19 @@ export async function removeSource(
     await refreshDailyMemoryAfterSourceArchiveChange(tx, opts.id);
     await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [opts.id]);
   });
+
+  if (!opts.keepStorage && src.local_path && (remoteUrl || ghManaged || gManaged)
+    && isPathContained(src.local_path, cloneRoot)) {
+    try {
+      // Repeat confinement after commit: never follow a replaced clone symlink.
+      if (lstatSync(src.local_path).isSymbolicLink()) throw new SourceOpError('symlink_escape', `Refusing clone cleanup at ${src.local_path}: path is a symlink.`);
+      rmSync(src.local_path, { recursive: true, force: true });
+      cloneRemoved = true;
+    } catch (error) {
+      if (error instanceof SourceOpError) throw error;
+      console.error(`[gbrain] WARN: clone cleanup at ${src.local_path} failed: ${(error as Error).message}`);
+    }
+  }
 
   return {
     id: opts.id,

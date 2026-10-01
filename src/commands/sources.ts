@@ -21,10 +21,6 @@
  *   gbrain sources push [<id>|--path <dir>] — scan-gated add→commit→pull→push
  *                               (agent-bootstrap; core in src/core/workspace-push.ts)
  *
- * NOT in scope for Step 6 (deferred per plan):
- *   - import-from-github (needs SSRF + clone integration)
- *   - prune (retention/TTL deferred to v0.18)
- *   - MCP tool-def regen for full source-scoping of all ops (part of Step 2+5)
  */
 
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
@@ -68,7 +64,6 @@ import {
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { preflightOauthClientColumns } from './auth.ts';
 
-// ── Validation ──────────────────────────────────────────────
 
 // Shared with source-resolver.ts — canonical shape.
 const SOURCE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
@@ -81,7 +76,6 @@ function validateSourceId(id: string): void {
   }
 }
 
-// ── Types ───────────────────────────────────────────────────
 
 interface SourceRow {
   id: string;
@@ -102,7 +96,6 @@ interface SourceListEntry {
   last_sync_at: string | null;
 }
 
-// ── Helpers ─────────────────────────────────────────────────
 
 // v0.40 (D7): shared helpers — re-exported as local names for back-compat
 // with existing call sites that import `parseConfig`/`isFederated` by intent.
@@ -126,7 +119,6 @@ async function countPages(engine: BrainEngine, sourceId: string): Promise<number
   return rows[0]?.n ?? 0;
 }
 
-// ── Subcommand: add ─────────────────────────────────────────
 
 async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
@@ -585,7 +577,6 @@ function deriveBrainId(created: OpsSourceRow, localPath: string): string {
   return `path:${createHash('sha256').update(localPath).digest('hex').slice(0, 16)}`;
 }
 
-// ── Subcommand: push (agent-bootstrap D6/G6/G8/G14) ─────────
 //
 // `gbrain sources push [<id>|--path <dir>]` — scan-gated add→commit→pull→push
 // of a workspace repo. The heavy lifting (single-flight lock, deny-glob

@@ -626,6 +626,11 @@ export async function runImport(
     progress.tick(1, `imported=${imported} skipped=${skipped} errors=${errors}`);
   }
 
+  const dailyMemory = opts.managedBookmark || managedImport ? undefined : await (await import('../core/import-daily-memory.ts')).createImportDailyMemory(engine, {
+    sourceId: sourceId ?? 'default', dir, commit: opts.commit, signal,
+    protect: company ? key => company.protect([{ ...key, kind: 'content' }]) : undefined,
+  });
+
   async function processFile(eng: BrainEngine, filePath: string) {
     if (signal?.aborted) return;
     const relativePath = singleFile ? basename(filePath) : relative(dir, filePath);
@@ -639,6 +644,7 @@ export async function runImport(
     // forever — without this, the agent can't see which file.
     const _fileT0 = Date.now();
     try {
+      await dailyMemory?.before(filePath, importRelPath);
       // v0.27.1 (F2): dispatch image extensions to importImageFile when
       // multimodal is enabled. The walker (collectMarkdownFiles) only picks
       // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
@@ -656,10 +662,10 @@ export async function runImport(
         console.error(`[gbrain phase] import.process_file slow ${_fileMs}ms ${relativePath}`);
       }
       if (result.status === 'imported') {
+        await dailyMemory?.imported(result.slug);
         imported++;
         chunksCreated += result.chunks;
         importedSlugs.push(result.slug);
-        // v0.33.2: path-based checkpoint — record only on success.
         completed.add(relativePath);
         succeededPaths.push(importRelPath); // #3839
       } else {
@@ -1014,54 +1020,15 @@ export async function runImport(
     }
   }
 
-  // Standalone import: queue historical daily-memory refresh for imported pages.
-  // Sync-driven imports already hand off via prepareSyncDailyMemory; skip those.
-  // Persist slugs/days until enqueue succeeds so a retry still refreshes when
-  // checkpointed files no longer appear in importedSlugs.
-  if (!opts.managedBookmark && !managedImport && !signal?.aborted) {
-    const sid = sourceId ?? 'default';
-    const { DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
-    if (sid !== DAILY_MEMORY_SOURCE_ID) {
-      try {
-        throwIfInterrupted();
-        const { createHash } = await import('node:crypto');
-        const { appendCompleted, clearOpCheckpoint, loadOpCheckpoint } = await import('../core/op-checkpoint.ts');
-        const {
-          dailyMemoryDaysForSlugs,
-          queueStandaloneSyncDailyMemory,
-        } = await import('../core/cycle/daily-memory-followup.ts');
-        const key = {
-          op: 'import-daily-memory',
-          fingerprint: createHash('sha256').update(JSON.stringify([sid, dir])).digest('hex').slice(0, 16),
-        };
-        const saved = await loadOpCheckpoint(engine, key);
-        const savedDays = saved.filter(v => v.startsWith('day:')).map(v => v.slice(4));
-        const savedSlugs = saved.filter(v => v.startsWith('slug:')).map(v => v.slice(5));
-        const slugs = [...new Set([...savedSlugs, ...importedSlugs])];
-        const days = [...new Set([
-          ...savedDays,
-          ...(slugs.length ? await dailyMemoryDaysForSlugs(engine, sid, slugs, { signal }) : []),
-        ])].sort();
-        throwIfInterrupted();
-        if (slugs.length || days.length) {
-          const delta = [...slugs.map(s => `slug:${s}`), ...days.map(d => `day:${d}`)];
-          if (!await appendCompleted(engine, key, delta)) {
-            throw new Error('Daily-memory import checkpoint unavailable');
-          }
-        }
-        if (days.length) {
-          const commit = opts.commit ?? 'import';
-          const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: sid, commit, days });
-          if (accepted === null) throw new Error('Daily-memory import handoff rejected');
-        }
-        await clearOpCheckpoint(engine, key);
-      } catch (e) {
-        rethrowIfCancelled(e);
-        const message = e instanceof Error ? e.message : String(e);
-        errors++;
-        failures.push({ path: '<daily-memory-refresh>', error: message });
-        console.error(`  Daily-memory refresh skipped: ${message}`);
-      }
+  if (dailyMemory && !signal?.aborted) {
+    try { await dailyMemory.finish(); }
+    catch (e) {
+      rethrowIfCancelled(e);
+      preserveCompletedPaths();
+      const message = e instanceof Error ? e.message : String(e);
+      errors++;
+      failures.push({ path: '<daily-memory-refresh>', error: message });
+      console.error(`  Daily-memory refresh skipped: ${message}`);
     }
   }
 
@@ -1170,30 +1137,12 @@ export async function runImport(
     // this import's to move (its sync anchors live on the `sources` row).
   }
 
-  // #1691: a named source registered with `local_path` but fed only via
-  // `gbrain import` (never `gbrain sync`) never got `sources.last_sync_at`
-  // touched, so doctor's `sync_freshness` read it as permanently
-  // "never synced". Stamp it on a clean run only (mirrors the bookmark
-  // gate above). `!opts.managedBookmark` excludes performFullSync's call —
-  // that path stamps its own, more-authoritative `last_sync_at` via
-  // writeSyncAnchor AFTER its full gate (applySyncFailureGate) decides the
-  // sync actually advanced; stamping here too would race ahead of that
-  // decision. remote_url sources are excluded too: autopilot's freshness
-  // dispatcher (autopilot.ts) reads last_sync_at to decide when to queue a
-  // real `git pull` for those, and a plain import never pulls. A git-tracked
-  // local_path is excluded too (scoped to #1691's actual "non-git local
-  // source" case): `gbrain import` never advances the source's own
-  // `last_commit`, so stamping last_sync_at for a git checkout would mask
-  // real commit-level staleness that `gbrain sync` (not `import`) is the
-  // correct pipeline to detect. Detection reuses sync's own
-  // `discoverGitRoot` (rev-parse --show-toplevel, walks UP) rather than a
-  // bare `.git`-at-local_path probe, so a source anchored at a SUBDIR of a
-  // git checkout (the #753/#774 monorepo shape) is excluded too — that is
-  // exactly the shape sync's git-root slug anchoring exists for.
-  // Malformed-filename exclusions/skips (tallied into `totalMalformed`
-  // below, NOT into `failures`) count toward the clean-run gate too — a run
-  // that silently dropped files isn't "clean" for freshness purposes even
-  // with zero recorded failures.
+  // Clean standalone imports refresh named, non-git local sources only.
+  // Managed sync owns its anchor gate; remote and git-backed sources need
+  // their own pull/commit evidence. discoverGitRoot also catches monorepo
+  // subdirectories, so importing one cannot conceal commit staleness.
+  // Malformed exclusions and per-file skips count against freshness even
+  // when the failure ledger is empty.
   const totalMalformed = malformedExcluded.length + malformedFileSkips;
   if (sourceId && failures.length === 0 && totalMalformed === 0 && !opts.managedBookmark && !managedImport) {
     try {
