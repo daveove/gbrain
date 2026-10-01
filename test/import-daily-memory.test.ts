@@ -122,8 +122,10 @@ test('oversized markdown skips body parse during prior-slug discovery', async ()
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz,effective_date_source='date' WHERE slug='note'");
   const prior = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
   await prior.before(file, 'note.md');
+  const saved = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path LIKE 'before:%'");
+  expect(JSON.parse(saved[0]!.path.slice(7)).days).toContain('2026-09-20');
   await prior.finish();
-  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-20'))).toBe(true);
+  expect(await batches()).toHaveLength(0);
 });
 
 
