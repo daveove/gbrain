@@ -42,7 +42,7 @@ describe('standalone sync daily-memory durable handoff', () => {
   });
   afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
 
-  async function filenameCycleFixture() {
+  async function filenameCycleFixture(sourceScoped=true) {
     const from='notes/zz-2026-01-06-fixture.md',to='notes/zz-2026-01-07-fixture.md';
     const oldSlug=from.slice(0,-3),newSlug=to.slice(0,-3);
     const body='---\ntitle: Synthetic filename fixture\n---\n\n'+Array.from({length:20},(_,i)=>`Synthetic unchanged paragraph ${i}.`).join('\n');
@@ -64,7 +64,7 @@ describe('standalone sync daily-memory durable handoff', () => {
     const handlers=new Map<string,(job:any)=>Promise<any>>();
     await registerBuiltinHandlers({register(name:string,fn:(job:any)=>Promise<any>){handlers.set(name,fn);}} as never,engine,{quiet:true});
     const queue=new MinionQueue(engine);
-    await queue.add('autopilot-cycle',{source_id:'default',phases:['sync'],pull:false});
+    await queue.add('autopilot-cycle',{...(sourceScoped?{source_id:'default'}:{repoPath:repo}),phases:['sync'],pull:false});
     const job=(await queue.claim('synthetic-cycle-owner',60_000,'default',['autopilot-cycle']))!;
     expect(job).not.toBeNull();
     return {seed,target,oldSlug,newSlug,job,handler:handlers.get('autopilot-cycle')!};
@@ -110,6 +110,20 @@ describe('standalone sync daily-memory durable handoff', () => {
       expect(await anchor()).toBe(fixture.target);
       const batches=await engine.executeRaw<{data:{daily_memory_dates:string[]}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
       expect(batches.some(row=>['2026-01-06','2026-01-07'].every(day=>row.data.daily_memory_dates.includes(day)))).toBe(true);
+    });} finally {rmSync(home,{recursive:true,force:true});}
+  });
+
+  test('legacy queued cycle without a source owner accepts standalone old and new filename days',async () => {
+    const home=mkdtempSync(join(tmpdir(),'gbrain-cycle-days-home-'));
+    try {await withEnv({GBRAIN_HOME:home},async () => {
+      const fixture=await filenameCycleFixture(false);
+      expect((await fixture.handler(fixture.job)).partial).toBe(false);
+      expect(await anchor()).toBe(fixture.target);
+      const batches=await engine.executeRaw<{data:{daily_memory_dates:string[];daily_memory_source_job_id:number}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+      expect(batches).toHaveLength(1);
+      expect(batches[0]!.data.daily_memory_dates).toEqual(expect.arrayContaining(['2026-01-06','2026-01-07']));
+      expect(batches[0]!.data.daily_memory_source_job_id).not.toBe(fixture.job.id);
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op IN ('sync-daily-memory','autopilot-sync-daily-memory')")).toHaveLength(0);
     });} finally {rmSync(home,{recursive:true,force:true});}
   });
 
