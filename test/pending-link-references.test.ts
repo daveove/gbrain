@@ -266,6 +266,17 @@ test('expired readiness deadline preserves dormant registry and watermark', asyn
   expect(await engine.countStalePagesForExtraction()).toBe(0);
 });
 
+test('pending registry deadline reports pendingScanIncomplete for continuation', async () => {
+  await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
+  expect(await engine.countStalePagesForExtraction()).toBe(0);
+  const result = await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, catchUp: false, timeBudgetMs: 0,
+  });
+  expect(result.pagesProcessed).toBe(0);
+  expect(result.staleRemaining).toBe(0);
+  expect(result.pendingScanIncomplete).toBe(true);
+});
+
 
 test('nearby different missing basename survives an edge with the same excerpt', async () => {
   await engine.setConfig('link_resolution.global_basename', 'true');

@@ -1422,7 +1422,8 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           if (!result.legacy_fallback) {
             try {
               await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode,
-                dailyMemoryDate: result.daily_memory_date, sourceJobIds: result.source_job_ids });
+                dailyMemoryDate: result.daily_memory_date, dailyMemoryTimezone: result.daily_memory_timezone,
+                sourceJobIds: result.source_job_ids });
             } catch (e) {
               if (jsonMode) process.stderr.write(JSON.stringify({ event: 'global_maintenance_dispatch_failed', error: e instanceof Error ? e.message : String(e) }) + '\n');
             }
