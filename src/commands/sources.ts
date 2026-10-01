@@ -757,7 +757,10 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   const _keepStorage = args.includes('--keep-storage');
   void _keepStorage;
 
-  if (id === 'default' || id === 'dream') {
+  // Keep default hard-reserved. Ordinary id=dream without ownership markers must
+  // be removable so ensureDailyMemorySource conflict recovery can proceed; owned
+  // system-index dream rows stay blocked by assertSourceNotSystemIndex below.
+  if (id === 'default') {
     console.error(`Error: cannot remove the "${id}" source.`);
     process.exit(3);
   }

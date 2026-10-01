@@ -272,6 +272,23 @@ describe('sources remove', () => {
     expect(code).toBe(3);
   });
 
+  test('refuses owned dream system index via ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: true }],
+    });
+    const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
+    expect(code).toBe(3);
+  });
+
+  test('does not hard-refuse ordinary dream before ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: false }],
+    });
+    // No source row: ownership guard passes, then not-found exits 4 (not reserved-id 3).
+    const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
+    expect(code).toBe(4);
+  });
+
   test('refuses without --yes', async () => {
     const { engine } = makeStub({
       'SELECT id, name, local_path, last_commit, last_sync_at, config, created_at': [

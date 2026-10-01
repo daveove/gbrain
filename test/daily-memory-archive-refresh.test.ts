@@ -213,6 +213,20 @@ describe('daily memory refresh on source archive/restore', () => {
     expect(await engine.executeRaw("SELECT id FROM sources WHERE id='dream'")).toHaveLength(1);
   });
 
+  test('CLI removal allows ordinary conflicting dream source without system-index ownership', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id='dream'");
+    await engine.executeRaw(
+      "INSERT INTO sources(id,name,config) VALUES('dream','Ordinary conflicting dream','{}'::jsonb)",
+    );
+    await runSources(engine, ['remove', 'dream', '--confirm-destructive']);
+    expect(await engine.executeRaw("SELECT id FROM sources WHERE id='dream'")).toHaveLength(0);
+    await ensureDailyMemorySource(engine);
+    const owned = await engine.executeRaw<{ system_index: boolean | null }>(
+      `SELECT (config->>'system_index')::boolean AS system_index FROM sources WHERE id='dream'`,
+    );
+    expect(owned[0]?.system_index).toBe(true);
+  });
+
   test('removeSource ops path refuses system-index sources', async () => {
     await engine.executeRaw(
       "INSERT INTO sources(id,name,config) VALUES('sys-ops','System fixture',$1::jsonb)",
