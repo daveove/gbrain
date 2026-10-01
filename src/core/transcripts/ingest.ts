@@ -334,11 +334,12 @@ export async function runTranscriptsIngest(
                 let renewError: unknown;
                 const renewTimer = dailyMemory
                   ? setInterval(() => {
-                    if (renewInFlight) return;
+                    if (renewInFlight) return renewInFlight;
                     renewInFlight = dailyMemory.renew()
                       .then(() => { lastLeaseRenewAt = Date.now(); })
                       .catch((err: unknown) => { renewError ??= err; })
                       .finally(() => { renewInFlight = undefined; });
+                    return renewInFlight;
                   }, LEASE_RENEW_EVERY_MS)
                   : undefined;
                 let r: Awaited<ReturnType<typeof importFromContent>>;
@@ -464,9 +465,34 @@ export async function runTranscriptsIngest(
               const num = m ? Number(m[1]) : NaN;
               if (Number.isFinite(num) && num > rendered.parts.length) {
                 await dailyMemory?.before([row.slug]);
-                await dailyMemory?.touched([row.slug]);
-                await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                await maybeRenewDailyMemoryLease();
+                let renewInFlight: Promise<void> | undefined;
+                let renewError: unknown;
+                const renewTimer = dailyMemory
+                  ? setInterval(() => {
+                    if (renewInFlight) return renewInFlight;
+                    renewInFlight = dailyMemory.renew()
+                      .then(() => { lastLeaseRenewAt = Date.now(); })
+                      .catch((err: unknown) => { renewError ??= err; })
+                      .finally(() => { renewInFlight = undefined; });
+                    return renewInFlight;
+                  }, LEASE_RENEW_EVERY_MS)
+                  : undefined;
+                try {
+                  await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                } finally {
+                  if (renewTimer) clearInterval(renewTimer);
+                  await renewInFlight;
+                }
                 result.partsDeleted++;
+                result.slugsTouched.push(row.slug);
+                // Hard deletion cannot reconstruct prior dates; re-bank the pre-write snapshot.
+                await dailyMemory?.touched([row.slug]);
+                if (renewError) {
+                  const error = new Error(`${RUN_ABORT_MARKER}: delete lease renewal failed on ${row.slug}`);
+                  (error as { cause?: unknown }).cause = renewError;
+                  throw error;
+                }
               }
             }
           }

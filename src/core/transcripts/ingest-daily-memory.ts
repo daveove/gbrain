@@ -17,6 +17,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     .update(JSON.stringify([opts.sourceId])).digest('hex').slice(0, 16) };
   const legacyFingerprint = createHash('sha256').update(JSON.stringify([opts.sourceId, opts.runKey])).digest('hex').slice(0, 16);
   const origin = randomUUID();
+  // Retain pre-write dates until post-commit banking, even if an expired peer adopted them.
+  const priorBySlug = new Map<string, Prior>();
   await opts.protect?.(key);
   const bank = async (entries: string[]) => {
     opts.signal?.throwIfAborted();
@@ -112,10 +114,15 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
         days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, unique, { signal: opts.signal }),
       };
       await bank([`before:${JSON.stringify(prior)}`]);
+      for (const slug of unique) priorBySlug.set(slug, prior);
     },
     async touched(slugs: string[]) {
       const unique = [...new Set(slugs.filter(Boolean))];
-      if (unique.length) await bank(unique.map(slug => `slug:${slug}`));
+      if (unique.length) {
+        const prior = [...new Set(unique.map(slug => priorBySlug.get(slug)).filter((record): record is Prior => !!record))];
+        await bank([...prior.map(record => `before:${JSON.stringify(record)}`), ...unique.map(slug => `slug:${slug}`)]);
+        for (const slug of unique) priorBySlug.delete(slug);
+      }
     },
     async finish() {
       try {
