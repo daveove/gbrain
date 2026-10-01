@@ -926,9 +926,7 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  // Keep default hard-reserved. Ordinary id=dream without ownership markers may
-  // be archived; owned system-index dream rows stay blocked by softDeleteSource /
-  // assertSourceNotSystemIndex below.
+  // default hard-reserved; ordinary id=dream allowed (owned dream blocked below).
   if (id === 'default') {
     console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
