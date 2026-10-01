@@ -7,6 +7,7 @@ import {
   writeDailyMemoryFromSources,
   type DailyMemoryWrite,
 } from '../src/core/cycle/daily-memory.ts';
+import { drainInlineDailyMemory } from '../src/core/cycle/inline-daily-memory-drain.ts';
 
 /** An explicit YYYY-MM-DD is a cycle date, not an instant in a timezone. */
 export function dailyMemoryArgs(day: string | undefined): { date?: string } {
@@ -53,6 +54,13 @@ export async function runOneShotDailyMemoryWrite(
 ): Promise<DailyMemoryWrite> {
   const result = await writeDailyMemoryFromSources(engine, dailyMemoryArgs(day));
   await extractOneShotDailyMemory(engine, result, deps);
+  // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
+  await drainInlineDailyMemory(engine, {
+    signal: deps.signal,
+    afterWrite: async (daily, signal) => {
+      await extractOneShotDailyMemory(engine, daily, { ...deps, signal });
+    },
+  });
   return result;
 }
 

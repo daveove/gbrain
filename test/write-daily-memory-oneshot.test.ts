@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import type { extractStaleFromDB } from '../src/commands/extract.ts';
 import { extractOneShotDailyMemory, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
@@ -23,13 +24,14 @@ const noExtract: typeof extractStaleFromDB = async () => ({
   linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0,
 });
 
-const seed = async () => {
-  await engine.putPage('notes/oneshot-day', {
+const seed = async (day = '2026-09-30', slug = 'notes/oneshot-day') => {
+  await engine.putPage(slug, {
     type: 'note', title: 'One-shot fixture', compiled_truth: 'Synthetic fixture',
-    frontmatter: { date: '2026-09-30' },
+    frontmatter: { date: day },
   });
   await engine.executeRaw(
-    "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/oneshot-day'",
+    "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug=$2",
+    [day, slug],
   );
 };
 
@@ -81,4 +83,34 @@ test('extractOneShotDailyMemory is a no-op without written or needs_extract', as
     written: false, day: '2026-09-30', slug: 'daily-memory/2026-09-30', pages: 0,
   }, { extract: async () => { called++; return noExtract(engine, {} as never); } });
   expect(called).toBe(0);
+});
+
+test('one-shot writer drains queued non-current autopilot-daily-memory jobs', async () => {
+  await seed('2026-09-30', 'notes/oneshot-current');
+  await seed('2026-09-28', 'notes/oneshot-historical');
+  const queue = new MinionQueue(engine);
+  const queued = await queue.add('autopilot-daily-memory', {
+    daily_memory_only: true,
+    daily_memory_date: '2026-09-28',
+    source_cycle_job_ids: [],
+  });
+  const extractedDays: string[] = [];
+  const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => {
+      // Capture which daily-memory page extract saw by reading latest dream page state after writes.
+      extractedDays.push('extract');
+      return noExtract(_engine, opts);
+    },
+  });
+  expect(result.day).toBe('2026-09-30');
+  expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/oneshot-current]]');
+  expect((await engine.getPage('daily-memory/2026-09-28', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/oneshot-historical]]');
+  expect((await queue.getJob(queued.id))?.status).toBe('completed');
+  expect(await engine.executeRaw(
+    "SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status NOT IN ('completed','delayed')",
+  )).toHaveLength(0);
+  // Current-day write + drained historical day each extract when written.
+  expect(extractedDays.length).toBeGreaterThanOrEqual(2);
 });
