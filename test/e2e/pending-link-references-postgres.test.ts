@@ -149,7 +149,7 @@ import { loadPendingLinkReferences, pendingLinkReferenceBatches } from '../../sr
       expect(batches.flat().every(row => row.reference.sourceId === sourceId)).toBe(true);
       expect(new Set(batches.flat().map(row => row.key)).size).toBe(105);
       const expired = pendingLinkReferenceBatches(engine, sourceId, { deadline: Date.now() - 1 });
-      expect(await expired.next()).toEqual({ value: undefined, done: true });
+      expect(await expired.next()).toEqual({ value: true, done: true });
     } finally {
       await engine.executeRaw('DELETE FROM config WHERE key=ANY($1::text[])', [[...rows.map(row => row.key),
         'internal.pending-links.native-malformed-text', 'internal.pending-links.native-malformed-shape']]);

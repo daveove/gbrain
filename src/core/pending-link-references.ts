@@ -39,11 +39,12 @@ const PENDING_BATCH_SIZE = 100;
 
 /** Keyset batches filter origins or changed-source target endpoints before parsing. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], void> {
+  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], boolean> {
   let after = '';
   while (true) {
     opts.signal?.throwIfAborted();
-    if (Date.now() >= (opts.deadline ?? Infinity)) return;
+    // true = incomplete (deadline); false = reached the end of the registry.
+    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
     const rows = await engine.executeRaw<{ key: string; value: string }>(
       `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
         AND ($2::text IS NULL OR CASE WHEN key LIKE $1 AND pg_input_is_valid(value,'jsonb') THEN
@@ -55,13 +56,14 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
               WHERE p.deleted_at IS NULL AND p.source_id=$2 AND p.slug=candidate->>'targetSlug')) END)
         ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
-    if (!rows.length || Date.now() >= (opts.deadline ?? Infinity)) return;
+    if (!rows.length) return false;
+    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
     const parsed = rows.flatMap(row => {
       const reference = parseReference(row.value);
       return reference ? [{ ...row, reference }] : [];
     });
     if (parsed.length) yield parsed;
-    if (rows.length < PENDING_BATCH_SIZE) return;
+    if (rows.length < PENDING_BATCH_SIZE) return false;
     after = rows.at(-1)!.key;
   }
 }

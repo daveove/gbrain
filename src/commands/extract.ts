@@ -2123,7 +2123,7 @@ export async function extractStaleFromDB(
     /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
     signal?: AbortSignal;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number }> {
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const startMs = Date.now();
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
@@ -2140,7 +2140,6 @@ export async function extractStaleFromDB(
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
   const pendingBatches = selected ? undefined : pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
-  let pendingLinks = (await pendingBatches?.next())?.value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
@@ -2150,11 +2149,6 @@ export async function extractStaleFromDB(
     }
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
   };
-  if (dryRun && pendingLinks.length === 0) return reportDryRun();
-  if (!dryRun && totalStale === 0 && pendingLinks.length === 0) {
-    if (!jsonMode) log('No stale pages — extraction is up to date.');
-    return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
-  }
 
   // Resolver + cross-source resolution map built ONCE before the loop (the
   // extractLinksFromDB:1069 precedent — avoids O(pages) rebuild per batch).
@@ -2177,23 +2171,29 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  if (pendingLinks.length) {
+  let pendingScanIncomplete = false;
+  if (pendingBatches) {
     let readyPending = 0;
-    do {
-      readyPending += await probePendingLinkReferences(engine, pendingLinks, { globalBasename, signal: opts.signal,
+    for (;;) {
+      const step = await pendingBatches.next();
+      if (step.done) { pendingScanIncomplete = step.value === true; break; }
+      readyPending += await probePendingLinkReferences(engine, step.value, { globalBasename, signal: opts.signal,
         deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter,
         onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
-      pendingLinks = (await pendingBatches?.next())?.value ?? [];
-    } while (pendingLinks.length);
+    }
     opts.signal?.throwIfAborted();
-    totalStale = dryRun ? totalStale + readyPending
-      : await countStale();
+    totalStale = dryRun ? totalStale + readyPending : await countStale();
   }
   if (dryRun) return reportDryRun();
-  if (totalStale === 0)
-    return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: totalStale };
+  if (totalStale === 0) {
+    if (pendingScanIncomplete) {
+      return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0, pendingScanIncomplete: true };
+    }
+    if (!jsonMode) log('No stale pages — extraction is up to date.');
+    return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
+  }
   const allRefs = await engine.listAllPageRefs();
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
@@ -2356,7 +2356,8 @@ export async function extractStaleFromDB(
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
-    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}) };
+    ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}),
+    ...(pendingScanIncomplete ? { pendingScanIncomplete: true } : {}) };
 }
 
 /**
