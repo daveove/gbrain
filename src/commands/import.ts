@@ -921,6 +921,7 @@ export async function runImport(
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
   // Clear only after a complete sweep or an accepted deferred job.
+  let dailyMemoryRefreshRecovered = false;
   let linkExtractionRecovered = false;
   const recordLinkFailure = (message: string): void => {
     preserveCompletedPaths();
@@ -1021,7 +1022,7 @@ export async function runImport(
   }
 
   if (dailyMemory && !signal?.aborted) {
-    try { await dailyMemory.finish(); }
+    try { await dailyMemory.finish(); dailyMemoryRefreshRecovered = true; }
     catch (e) {
       rethrowIfCancelled(e);
       preserveCompletedPaths();
@@ -1096,6 +1097,7 @@ export async function runImport(
     const healedPaths = [
       ...succeededPaths,
       ...(linkExtractionRecovered ? ['<link-extraction>'] as const : []),
+      ...(dailyMemoryRefreshRecovered ? ['<daily-memory-refresh>'] as const : []),
     ];
     if (healedPaths.length > 0) {
       const { clearFailures } = await import('../core/sync.ts');
@@ -1202,7 +1204,7 @@ export async function runImport(
   else if (existsSync(checkpointPath)) info(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
 
   const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
-  const fileFailures = failures.filter((f) => f.path !== '<link-extraction>').length;
+  const fileFailures = failures.filter((f) => !f.path.startsWith('<')).length;
   if (jsonOutput) {
     // `skipped` includes every per-file failure importFile RETURNS (invalid
     // frontmatter, oversize, symlink, slug mismatch) as well as content-hash

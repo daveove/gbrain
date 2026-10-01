@@ -980,7 +980,8 @@ export async function removeSource(
     );
   }
 
-  // Decide whether we own the clone dir before removing the row.
+  // Validate clone ownership before the row delete; remove the checkout only
+  // after the transaction commits so a failed refresh handoff cannot orphan it.
   const remoteUrl = getRemoteUrl(src.config);
   const ghCfg = (typeof src.config === 'string' ? JSON.parse(src.config) : (src.config ?? {})) as Record<string, unknown>;
   // v0.46: github-kind mirrors at the default clone location are owned by

@@ -2892,7 +2892,14 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
-    await finishFanoutDailyMemory(engine, dailyJob);
+    // Daily barrier owns its own retries; do not fail/retry global maintenance on it.
+    try {
+      await finishFanoutDailyMemory(engine, dailyJob);
+    } catch (e) {
+      console.warn(
+        `[autopilot-global-maintenance] daily-memory finish failed (not retrying global cycle): ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {

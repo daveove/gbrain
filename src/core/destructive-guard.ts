@@ -519,15 +519,24 @@ export async function purgeExpiredSources(
     const { id } = candidate;
     try {
       await assertSourceNotSystemIndex(engine, id);
-      const rows = await engine.executeRaw<{ id: string }>(
-        `DELETE FROM sources
-         WHERE id = $1
-           AND archived = true
-           AND archive_expires_at IS NOT NULL
-           AND archive_expires_at <= now()
-         RETURNING id`,
-        [id],
-      );
+      // Discover + enqueue before delete so archive-time refresh gaps cannot leave
+      // dead daily-memory links after pages cascade away.
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+      const deleteExpired = async (tx: BrainEngine) => {
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
+        return tx.executeRaw<{ id: string }>(
+          `DELETE FROM sources
+           WHERE id = $1
+             AND archived = true
+             AND archive_expires_at IS NOT NULL
+             AND archive_expires_at <= now()
+           RETURNING id`,
+          [id],
+        );
+      };
+      const rows = typeof engine.transaction === 'function'
+        ? await engine.transaction(deleteExpired)
+        : await deleteExpired(engine);
       if (rows.length > 0) {
         purged.push(id);
         // github-kind mirrors are gbrain-owned only when created at the
