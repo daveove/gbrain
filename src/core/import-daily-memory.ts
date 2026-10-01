@@ -47,26 +47,33 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
        WHERE op=$1 AND fingerprint=$2`,
       [key.op, key.fingerprint, origin]);
   };
-  const touchLive = async () => {
-    opts.signal?.throwIfAborted();
-    // Bank the replacement first so peers never see an unmarked gap.
-    const wrapped = JSON.stringify({ origin, value: `live:${new Date().toISOString()}` });
-    if (!await appendCompleted(engine, key, [wrapped])) {
-      throw new Error('Daily-memory import checkpoint unavailable');
-    }
-    await engine.executeRawDirect(
-      `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-         AND path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
-         AND path<>$4`,
-      [key.op, key.fingerprint, origin, wrapped]);
-    await engine.executeRawDirect(
-      `UPDATE op_checkpoints SET completed_keys=(
-         SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
-         FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
-         WHERE NOT (elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4)
-       ), updated_at=now()
-       WHERE op=$1 AND fingerprint=$2`,
-      [key.op, key.fingerprint, origin, wrapped]);
+  // Workers share this origin; serialize renewals so two deletes cannot wipe both markers.
+  let liveChain: Promise<void> = Promise.resolve();
+  const touchLive = () => {
+    const run = async () => {
+      opts.signal?.throwIfAborted();
+      // Bank the replacement first so peers never see an unmarked gap.
+      const wrapped = JSON.stringify({ origin, value: `live:${new Date().toISOString()}` });
+      if (!await appendCompleted(engine, key, [wrapped])) {
+        throw new Error('Daily-memory import checkpoint unavailable');
+      }
+      await engine.executeRawDirect(
+        `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           AND path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
+           AND path<>$4`,
+        [key.op, key.fingerprint, origin, wrapped]);
+      await engine.executeRawDirect(
+        `UPDATE op_checkpoints SET completed_keys=(
+           SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
+           FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
+           WHERE NOT (elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4)
+         ), updated_at=now()
+         WHERE op=$1 AND fingerprint=$2`,
+        [key.op, key.fingerprint, origin, wrapped]);
+    };
+    const next = liveChain.then(run, run);
+    liveChain = next.then(() => undefined, () => undefined);
+    return next;
   };
   // Lease marks this origin live so an empty peer finish cannot retire our banks.
   await touchLive();

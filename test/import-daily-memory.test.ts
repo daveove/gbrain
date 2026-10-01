@@ -324,3 +324,23 @@ test('future live lease is treated as abandoned', async () => {
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
     && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
 });
+
+test('concurrent renew keeps one live marker', async () => {
+  const dir = root();
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await Promise.all([daily.renew(), daily.renew(), daily.renew()]);
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(1);
+  await daily.release();
+});
+
+test('concurrent renewals leave one live lease', async () => {
+  const dir = root();
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await Promise.all([daily.renew(), daily.renew(), daily.renew(), daily.renew()]);
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(1);
+  await daily.finish();
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
