@@ -982,7 +982,8 @@ export async function removeSource(
     );
   }
 
-  // Decide whether we own the clone dir before removing the row.
+  // Validate clone ownership before the row delete; remove the checkout only
+  // after the transaction commits so a failed refresh handoff cannot orphan it.
   const remoteUrl = getRemoteUrl(src.config);
   const ghCfg = (typeof src.config === 'string' ? JSON.parse(src.config) : (src.config ?? {})) as Record<string, unknown>;
   // v0.46: github-kind mirrors at the default clone location are owned by
@@ -991,34 +992,24 @@ export async function removeSource(
   // v0.47: google-kind mirrors mark g_managed the same way.
   const gManaged = ghCfg.kind === 'google' && ghCfg.g_managed === true;
   const cloneRoot = gbrainPath('clones');
-  let cloneRemoved = false;
+  let shouldRemoveClone = false;
   if (
     !opts.keepStorage &&
     src.local_path &&
     (remoteUrl || ghManaged || gManaged) && // only auto-clean when gbrain managed the dir
     isPathContained(src.local_path, cloneRoot)
   ) {
-    try {
-      // Extra symlink-escape paranoia: lstat the resolved final path; if
-      // it's a symlink itself (not just contained under the parent), bail
-      // out rather than rm -rf following the link.
-      const lst = lstatSync(src.local_path);
-      if (lst.isSymbolicLink()) {
-        throw new SourceOpError(
-          'symlink_escape',
-          `Refusing to delete clone at ${src.local_path}: path is a symlink.`,
-        );
-      }
-      rmSync(src.local_path, { recursive: true, force: true });
-      cloneRemoved = true;
-    } catch (e) {
-      if (e instanceof SourceOpError) throw e;
-      // Don't fail the whole remove if rmSync had a permission hiccup — log
-      // and continue. The DB row deletion is the user-facing operation.
-      console.error(
-        `[gbrain] WARN: clone cleanup at ${src.local_path} failed: ${(e as Error).message}`,
+    // Extra symlink-escape paranoia: lstat the resolved final path; if
+    // it's a symlink itself (not just contained under the parent), bail
+    // out rather than rm -rf following the link.
+    const lst = lstatSync(src.local_path);
+    if (lst.isSymbolicLink()) {
+      throw new SourceOpError(
+        'symlink_escape',
+        `Refusing to delete clone at ${src.local_path}: path is a symlink.`,
       );
     }
+    shouldRemoveClone = true;
   }
 
   await engine.transaction(async (tx) => {
@@ -1026,6 +1017,20 @@ export async function removeSource(
     await refreshDailyMemoryAfterSourceArchiveChange(tx, opts.id);
     await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [opts.id]);
   });
+
+  let cloneRemoved = false;
+  if (shouldRemoveClone && src.local_path) {
+    try {
+      rmSync(src.local_path, { recursive: true, force: true });
+      cloneRemoved = true;
+    } catch (e) {
+      // Don't fail the whole remove if rmSync had a permission hiccup — the
+      // DB row deletion already committed.
+      console.error(
+        `[gbrain] WARN: clone cleanup at ${src.local_path} failed: ${(e as Error).message}`,
+      );
+    }
+  }
 
   return {
     id: opts.id,
