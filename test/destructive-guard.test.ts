@@ -775,14 +775,20 @@ describe('formatters (display helpers)', () => {
 
 describe('purgeExpiredSources — clone cleanup containment', () => {
   function purgeStubFor(id: string, localPath: string) {
-    return {
+    const stub = {
+      getConfig: async () => null,
       executeRaw: async (sql: string) => {
-        if (sql.trimStart().startsWith('SELECT')) {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) {
           return [{ id, config: { kind: 'github', gh_managed: true }, local_path: localPath }];
         }
         return [{ id }];
       },
-    } as never;
+      transaction: async <T>(fn: (tx: typeof stub) => Promise<T>) => fn(stub),
+    };
+    return stub as never;
   }
 
   test('a corrupt row whose local_path IS the clone root never deletes sibling mirrors; the pinned shape still cleans up', async () => {
