@@ -50,20 +50,22 @@ export async function extractOneShotDailyMemory(
 export async function runOneShotDailyMemoryWrite(
   engine: BrainEngine,
   day: string | undefined,
-  deps: Parameters<typeof extractOneShotDailyMemory>[2] = {},
+  deps: Parameters<typeof extractOneShotDailyMemory>[2] & { now?: () => Date } = {},
 ): Promise<DailyMemoryWrite> {
   // Launcher exports the resolved calendar zone so timestamp filters match day selection.
   const selected = (process.env.GBRAIN_DAILY_MEMORY_ZONE || '').trim();
+  const { now, ...extractDeps } = deps;
   const result = await writeDailyMemoryFromSources(engine, {
     ...dailyMemoryArgs(day),
     ...(selected ? { timezone: selected } : {}),
+    ...(now ? { now } : {}),
   });
-  await extractOneShotDailyMemory(engine, result, deps);
+  await extractOneShotDailyMemory(engine, result, extractDeps);
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
   await drainInlineDailyMemory(engine, {
     signal: deps.signal,
     afterWrite: async (daily, signal) => {
-      await extractOneShotDailyMemory(engine, daily, { ...deps, signal });
+      await extractOneShotDailyMemory(engine, daily, { ...extractDeps, signal });
     },
   });
   return result;

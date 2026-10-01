@@ -21,7 +21,7 @@ import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
-import { isValidTimeZone, resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
+import { calendarDateInTimeZone, isValidTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
 export const DAILY_MEMORY_SOURCE_ID = 'dream';
@@ -275,9 +275,9 @@ export async function writeDailyMemoryFromSources(
       throw new Error(`invalid timezone "${override}"`);
     }
     const zone = override || await resolveCycleTimeZone(engine);
-    // An explicit day is that calendar day in every zone. Timezone projection
-    // applies only when the day is derived from the clock.
-    day = await resolveCycleDate(engine, { now, explicitDate: opts.date });
+    // An explicit day is that calendar day in every zone. Implicit day must use
+    // the same zone as page filters (override or resolved), not a second reload.
+    day = opts.date || calendarDateInTimeZone(now(), zone);
     slug = dailyMemorySlug(day);
     throwIfAborted(opts.signal, '[dream] daily memory');
     // A pre-existing human default index remains authoritative, even when deleted.

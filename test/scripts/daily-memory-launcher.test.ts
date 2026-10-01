@@ -150,6 +150,25 @@ finally:
     expect(result.stdout.split('\0').filter(Boolean)).toEqual([input.precedingUtc, input.currentUtc]);
   });
 
+  it('bounds the Codex day at next local midnight across DST', () => {
+    const { home } = fixture();
+    // 2026-03-08 America/Los_Angeles springs forward: local day is 23h.
+    // start+24h would wrongly include 00:30 PDT on Mar 9 (07:30Z).
+    const day = '2026-03-08';
+    const zone = 'America/Los_Angeles';
+    const inDay = transcript(home, '2026-03-09T06:30:00.000Z', 'late-same-local');
+    const nextDay = transcript(home, '2026-03-09T07:30:00.000Z', 'early-next-local');
+    for (const [file, iso] of [[inDay, '2026-03-09T06:30:00.000Z'], [nextDay, '2026-03-09T07:30:00.000Z']] as const) {
+      const at = new Date(iso);
+      utimesSync(file, at, at);
+    }
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), day, zone], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    const selected = result.stdout.split('\0').filter(Boolean);
+    expect(selected).toContain(inDay);
+    expect(selected).not.toContain(nextDay);
+  });
+
   it('rescans older sessions modified during the target day', () => {
     const { home } = fixture();
     const input = todayInputs(home);

@@ -14,7 +14,8 @@ except Exception:
     zone = datetime.timezone.utc
     zone_name = 'UTC'
 start = datetime.datetime.combine(day, datetime.time(), zone).astimezone(datetime.timezone.utc)
-end = start + datetime.timedelta(days=1)
+# Next local midnight (not start+24h) so DST spring-forward/fall-back days stay exact.
+end = datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(), zone).astimezone(datetime.timezone.utc)
 # Optional prior-run watermark: sessions modified at/after this instant are
 # reselected even when their start time and mtime fall outside today's window
 # (e.g. final evening messages after an early same-day launcher run).

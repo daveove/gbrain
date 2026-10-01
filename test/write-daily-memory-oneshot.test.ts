@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
+import { DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import type { extractStaleFromDB } from '../src/commands/extract.ts';
 import { extractOneShotDailyMemory, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -137,3 +137,15 @@ test('one-shot writer uses GBRAIN_DAILY_MEMORY_ZONE for instant page filters', a
     else process.env.GBRAIN_DAILY_MEMORY_ZONE = previous;
   }
 });
+
+test('implicit day uses timezone override not cycle.timezone', async () => {
+  await engine.setConfig('cycle.timezone', 'UTC');
+  // 16:00Z is still 2026-09-30 UTC, but already 2026-10-01 in Asia/Manila.
+  const result = await writeDailyMemoryFromSources(engine, {
+    timezone: 'Asia/Manila',
+    now: () => new Date('2026-09-30T16:00:00.000Z'),
+  });
+  expect(result.day).toBe('2026-10-01');
+  expect(result.slug).toBe('daily-memory/2026-10-01');
+});
+
