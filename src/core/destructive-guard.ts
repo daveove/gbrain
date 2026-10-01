@@ -344,10 +344,8 @@ export async function softDeleteSource(
   await assertSourceNotSystemIndex(engine, sourceId);
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    // Archive refresh runs inside runManagedSourceLifecycle so admin ops get it too.
     const result=await runManagedSourceLifecycle(engine,{operation:'archive',sourceId});
-    // Repeating the lifecycle call retries any failed post-commit index handoff.
-    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-    await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
     if(result.noop)return null;
     const [row]=await engine.executeRaw<{name:string;archived_at:string;archive_expires_at:string;n:number}>(`SELECT name,archived_at,archive_expires_at,
       (SELECT count(*)::integer FROM pages WHERE source_id=$1) AS n FROM sources WHERE id=$1`,[sourceId]);
@@ -407,9 +405,8 @@ export async function restoreSource(
 ): Promise<boolean> {
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    // Restore refresh runs inside runManagedSourceLifecycle so admin ops get it too.
     const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});
-    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-    await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
     return !result.noop;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources restore');

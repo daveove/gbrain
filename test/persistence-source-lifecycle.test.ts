@@ -70,6 +70,20 @@ test('managed lifecycle rejects archive of an owned system source before topolog
   expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
 }),60_000);
 
+test('managed archive/restore enqueue daily-memory refresh for admin surface',()=>fixture(async(_home,source)=>{
+  await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
+    {type:'note',title:'Archive refresh',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-26'}},{sourceId:source})));
+  await engine.executeRaw("UPDATE pages SET effective_date='2026-09-26'::date::timestamptz,effective_date_source='date' WHERE source_id=$1",[source]);
+  await runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source});
+  const archived=await engine.executeRaw<{data:Record<string,unknown>}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+  expect(archived.some(j=>j.data.daily_memory_date==='2026-09-26')).toBe(true);
+  const beforeRestore=archived.length;
+  await runManagedSourceLifecycle(engine,{operation:'restore',sourceId:source});
+  const restored=await engine.executeRaw<{data:Record<string,unknown>}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+  expect(restored.length).toBeGreaterThan(beforeRestore);
+  expect(restored.some(j=>j.data.daily_memory_date==='2026-09-26')).toBe(true);
+}),60_000);
+
 test('archive/restore advance topology and permanently invalidate accepted old bindings',()=>fixture(async(_home,source)=>{
   const old=(await getWorktreeBinding(engine,source))!;const accepted=await queued(source);
   const requestId=randomUUID();

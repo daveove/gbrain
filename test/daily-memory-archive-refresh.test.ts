@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { softDeleteSource, restoreSource } from '../src/core/destructive-guard.ts';
+import { removeSource } from '../src/core/sources-ops.ts';
 import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { refreshDailyMemoryAfterPageMutation, runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -200,7 +201,9 @@ describe('daily memory refresh on source archive/restore', () => {
     const child = await queue.claim('removed-source-lock', 60_000, 'default', ['autopilot-daily-memory']);
     if (!child) throw new Error('Expected accepted removal refresh');
     await queue.completeJob(child.id, 'removed-source-lock', await runDailyMemoryJob(engine, child));
-    expect((await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain(`[[${sourceId}:notes/day]]`);
+    const daily = await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    // Empty days may delete the daily page; either way the removed source link must be gone.
+    expect(daily == null || !daily.compiled_truth.includes(`[[${sourceId}:notes/day]]`)).toBe(true);
   });
 
   test('CLI removal refuses reserved indexes without an undefined constant reference', async () => {
@@ -208,6 +211,34 @@ describe('daily memory refresh on source archive/restore', () => {
     try { await expect(runSources(engine, ['remove', 'dream', '--confirm-destructive'])).rejects.toThrow('fixture exit 3'); }
     finally { exit.mockRestore(); }
     expect(await engine.executeRaw("SELECT id FROM sources WHERE id='dream'")).toHaveLength(1);
+  });
+
+  test('removeSource ops path refuses system-index sources', async () => {
+    await engine.executeRaw(
+      "INSERT INTO sources(id,name,config) VALUES('sys-ops','System fixture',$1::jsonb)",
+      [JSON.stringify({ system_index: true })],
+    );
+    await expect(removeSource(engine, { id: 'sys-ops', confirmDestructive: true })).rejects.toThrow(/system index/);
+    expect(await engine.executeRaw("SELECT id FROM sources WHERE id='sys-ops'")).toHaveLength(1);
+  });
+
+  test('removeSource ops path enqueues affected daily-memory days before delete commits', async () => {
+    const sourceId = 'ops-remove-refresh', day = '2026-09-30';
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Ops remove fixture')", [sourceId]);
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Fixture', compiled_truth: 'Synthetic', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2",
+      [day, sourceId],
+    );
+    await writeDailyMemoryFromSources(engine, { date: day });
+    await removeSource(engine, { id: sourceId, confirmDestructive: true });
+    expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(0);
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
   });
 
 });
