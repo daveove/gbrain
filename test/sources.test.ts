@@ -313,6 +313,33 @@ describe('sources remove', () => {
   });
 });
 
+// ── archive ─────────────────────────────────────────────────
+
+describe('sources archive', () => {
+  test('refuses default', async () => {
+    const { engine } = makeStub();
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'default']));
+    expect(code).toBe(3);
+  });
+
+  test('refuses owned dream system index via ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: true }],
+    });
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
+    expect(code).toBe(3);
+  });
+
+  test('does not hard-refuse ordinary dream before ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: false }],
+    });
+    // Ownership guard passes; missing source exits 4 (not reserved-id 3).
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
+    expect(code).toBe(4);
+  });
+});
+
 // ── default ─────────────────────────────────────────────────
 
 describe('sources default', () => {

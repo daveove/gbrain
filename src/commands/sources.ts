@@ -926,10 +926,14 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
+  // default hard-reserved; ordinary id=dream allowed (owned dream blocked below).
   if (id === 'default') {
     console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   // Show impact preview
   const impact = await assessDestructiveImpact(engine, id);
