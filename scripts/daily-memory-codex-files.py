@@ -1,6 +1,5 @@
 import datetime
 import os
-import stat
 import json
 import pathlib
 import sys
@@ -29,9 +28,9 @@ if len(sys.argv) > 4 and sys.argv[4].strip():
         mtime_floor = min(watermark.astimezone(datetime.timezone.utc), start)
     except ValueError:
         pass
-# Sessions live under the UTC date of creation. Without a watermark, look back
-# 14 days for mtime overlap. With a watermark, walk every existing day folder
-# up to `last` so a resumed session older than 14 days is still found by mtime.
+# Sessions live under the UTC date of creation. Walk every existing day folder
+# up to `last` so a resumed session older than 14 days is found by mtime even
+# on the first scheduled run (before any watermark exists).
 last = (end - datetime.timedelta(microseconds=1)).date()
 selected: list[pathlib.Path] = []
 def fail_scan(action: str, target: pathlib.Path, exc: BaseException) -> None:
@@ -49,25 +48,10 @@ def scandir_sorted(directory: pathlib.Path):
         fail_scan('list', directory, exc)
 
 
-def day_directories(sessions_root: pathlib.Path, *, watermark: bool) -> list[pathlib.Path]:
-    if not watermark:
-        lookback_start = (start - datetime.timedelta(days=14)).date()
-        found: list[pathlib.Path] = []
-        utc_day = lookback_start
-        while utc_day <= last:
-            directory = sessions_root / utc_day.strftime('%Y/%m/%d')
-            try:
-                st = directory.stat()
-            except FileNotFoundError:
-                utc_day += datetime.timedelta(days=1)
-                continue
-            except OSError as exc:
-                fail_scan('stat', directory, exc)
-            if stat.S_ISDIR(st.st_mode):
-                found.append(directory)
-            utc_day += datetime.timedelta(days=1)
-        return found
-    # Watermark path: walk every existing YYYY/MM/DD (no 14-day creation cutoff).
+def day_directories(sessions_root: pathlib.Path) -> list[pathlib.Path]:
+    # Always walk every existing YYYY/MM/DD up to `last`. A first scheduled run
+    # (no watermark yet) must not omit resumed sessions older than 14 days —
+    # advancing scan_started afterward would hide them forever by mtime.
     found = []
     for year_ent in scandir_sorted(sessions_root):
         if not (year_ent.is_dir(follow_symlinks=False) and len(year_ent.name) == 4 and year_ent.name.isdigit()):
@@ -89,9 +73,7 @@ def day_directories(sessions_root: pathlib.Path, *, watermark: bool) -> list[pat
     return found
 
 
-# argv[4] present ⇒ walk all existing day dirs (no 14-day creation cutoff).
-has_watermark = len(sys.argv) > 4 and bool(sys.argv[4].strip())
-directories = day_directories(root, watermark=has_watermark)
+directories = day_directories(root)
 for directory in directories:
     try:
         # Include symlinks named *.jsonl so a broken/unreadable target fails

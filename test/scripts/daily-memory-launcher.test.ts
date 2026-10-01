@@ -238,6 +238,22 @@ finally:
     expect(result.stdout.split('\0').filter(Boolean)).toContain(file);
   });
 
+  it('selects a resumed session older than 14 days on the first run without a watermark', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const oldStart = new Date(input.start - 20 * 86400_000);
+    const oldDay = oldStart.toISOString().slice(0, 10).replaceAll('-', '/');
+    const file = join(home, '.codex/sessions', oldDay, 'ancient-first.jsonl');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { timestamp: oldStart.toISOString() } }) + '\n');
+    // mtime inside today's window so first-run selection (mtime_floor = day start) keeps it.
+    const midDay = new Date(input.start + 2 * 3600_000);
+    utimesSync(file, midDay, midDay);
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.split('\0').filter(Boolean)).toContain(file);
+  });
+
   it('uses the saved watermark as --since so cross-midnight rescans are not filtered', () => {
     const { home, run } = fixture();
     const input = todayInputs(home);

@@ -325,6 +325,7 @@ export async function runTranscriptsIngest(
             outcome.baseSlug = rendered.baseSlug;
             let resolvedBaseSlug = rendered.baseSlug;
             await dailyMemory?.before(rendered.parts.map((part) => part.slug));
+            await maybeRenewDailyMemoryLease();
             for (const part of rendered.parts) {
               try {
                 const r = await importFromContent(engine, part.slug, part.content, {
@@ -345,6 +346,9 @@ export async function runTranscriptsIngest(
                 if (r.status === 'imported' || r.status !== 'error' && actualSlug !== part.slug) {
                   await dailyMemory?.touched([actualSlug]);
                 }
+                // A single large session can exceed the 30m lease between
+                // session-boundary renewals; refresh inside the part loop.
+                await maybeRenewDailyMemoryLease();
               } catch (err) {
                 if (isPerSessionImportError(err)) throw err; // → per-session catch
                 const e = new Error(
