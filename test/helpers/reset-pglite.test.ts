@@ -85,16 +85,27 @@ describe('resetPgliteState', () => {
       await resetPgliteState(engine);
       const tables = await engine.executeRaw<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname='public'");
       for (const { tablename } of tables) {
-        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources'].includes(tablename)) continue;
+        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources', 'config'].includes(tablename)) continue;
         const rows = await engine.executeRaw(`SELECT count(*)::int AS n FROM public."${tablename.replaceAll('"', '""')}"`);
         expect(rows).toEqual([{ n: 0 }]);
       }
+      expect(await engine.executeRaw('SELECT key FROM config ORDER BY key')).toEqual([{ key: 'version' }]);
       expect(await engine.executeRaw('SELECT id, name, config, local_path FROM sources')).toEqual([
         { id: 'default', name: 'default', config: { federated: true }, local_path: null },
       ]);
     } finally {
       await engine.executeRaw('ALTER TABLE reset_fixture_parent DROP COLUMN child_id');
     }
+  });
+
+  test('restores initialized queue schema admission without retaining test config edits', async () => {
+    const initializedVersion = await engine.getConfig('version');
+    expect(Number(initializedVersion)).toBeGreaterThanOrEqual(7);
+    await engine.setConfig('version', '1');
+    await engine.setConfig('reset-fixture', 'discard');
+    await resetPgliteState(engine);
+    expect(await engine.getConfig('version')).toBe(initializedVersion);
+    expect(await engine.getConfig('reset-fixture')).toBeNull();
   });
 
   test('preserves schema and generation infrastructure but rotates the logical brain identity', async () => {

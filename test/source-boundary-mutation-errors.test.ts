@@ -295,7 +295,7 @@ describe('mutation-time deletion race reclassification (#4109)', () => {
         const page = pages.find(
           (candidate) => candidate.slug === slug && sources.includes(candidate.source_id),
         );
-        return page ? ({ ...page } as never) : null;
+        return page ? ({ ...page, frontmatter: {} } as never) : null;
       },
       async addLink(from: string, to: string) {
         const endpoint = raceDeleteSlug === from ? 'from' : 'to';
@@ -369,7 +369,7 @@ describe('mutation-time deletion race reclassification (#4109)', () => {
     // page is back (delete + restore race): never internal_error.
     const eng = {
       async getPage(slug: string) {
-        return { slug, source_id: WRITE_SRC } as never;
+        return { slug, source_id: WRITE_SRC, frontmatter: {} } as never;
       },
       async addLink() {
         throw new PageMissingError('addLink', 'to', 'topics/race-restored', WRITE_SRC);

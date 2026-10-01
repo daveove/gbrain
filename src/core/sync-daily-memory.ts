@@ -1,6 +1,7 @@
 /** Durable date handoff before a standalone sync consumes its Git anchor. */
 import { createHash } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
+import { currentSubmissionAuthority } from './minions/submission-authority.ts';
 import { appendCompleted, clearOpCheckpoint } from './op-checkpoint.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
@@ -29,6 +30,9 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   acceptsPath?: (path: string) => boolean; signal?: AbortSignal;
   protect?: (key: { op: string; fingerprint: string; kind: 'manifest' }) => Promise<void>;
 }) {
+  // Retained remote jobs cannot submit descendant maintenance work.
+  const authority = currentSubmissionAuthority();
+  if (authority && authority.kind !== 'application') return undefined;
   // Fingerprint is source+scope only. Including the target commit stranded
   // unfinished debt when HEAD moved before accept() (full sync retry).
   const key = { op: 'sync-daily-memory', fingerprint: createHash('sha256')

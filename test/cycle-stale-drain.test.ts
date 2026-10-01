@@ -302,6 +302,8 @@ describe('cycle extract phase stale drain (#4062)', () => {
     // Same two-channel contract as the links flush: under jsonMode a dropped
     // timeline batch must land on stderr as a batch_error event, never on stdout.
     writeFileSync(join(brainDir, 'carol.md'), '# Carol\n\n## Timeline\n- **2026-01-02** | Signed the term sheet\n');
+    // Filesystem extraction requires an imported canonical origin.
+    await engine.putPage('carol', { type: 'note', title: 'Carol', compiled_truth: '# Carol', timeline: '' }, { sourceId: 'wiki' });
     const addTimeline = spyOn(engine, 'addTimelineEntriesBatch').mockRejectedValueOnce(new Error('pool exhausted'));
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const stdout = spyOn(process.stdout, 'write').mockReturnValue(true);

@@ -145,6 +145,9 @@ export async function replaceFileLinks(engine: BrainEngine, slug: string, source
   if (!extracted.attendanceComplete) return null;
   const attendance = extracted.candidates.filter(candidate => candidate.canonicalAttendance
     || (candidate.linkType === 'attended' && candidate.fromSlug && candidate.targetSlug === slug));
+  // A file declaration cannot create a canonical attendance origin absent in DB.
+  if (snapshot.page.type !== 'meeting' && !ownership.origins.has(slug) && !attendance.length
+    && links.some(link => link.link_type === 'attended' && link.to_slug === slug && link.origin_slug === slug)) return null;
   if (!ownership.origins.has(slug) && !attendance.length
     && !links.some(link => link.link_type === 'attended' && link.to_slug === slug && link.origin_slug === slug)) return undefined;
   const rows: LinkBatchInput[] = links.filter(link => !(link.link_type === 'attended' && link.to_slug === slug && link.origin_slug === slug)

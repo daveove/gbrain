@@ -300,6 +300,15 @@ for (const kind of ['pglite', ...(process.env.DATABASE_URL ? ['postgres'] : [])]
     });
 
     for (const lane of ['fs-incremental', 'fs-sync']) {
+      test(`${lane}: a retyped prior attendance origin can clear its owned graph`, async () => {
+        await seed(meeting, 'meeting', positive);
+        await extract('db');
+        expect(await attendees()).toEqual([person]);
+        await seed(meeting, 'note', 'No attendance evidence remains.');
+        await extract(lane);
+        expect(await attendees()).toEqual([]);
+      });
+
       test(`${lane}: file-only meeting declarations cannot bypass the database origin type`, async () => {
         const hidden = '.github/not-a-meeting';
         await seed(hidden, 'note', positive);

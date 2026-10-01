@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, lstatSync } from 'node:fs';
 import type { BrainEngine } from './engine.ts';
+import { currentSubmissionAuthority } from './minions/submission-authority.ts';
 import { parseMarkdown } from './markdown.ts';
 import { MAX_FILE_SIZE } from './import-file.ts';
 import { isMarkdownFilePath, isCodeFilePath, slugifyPath, slugifyCodePath } from './sync.ts';
@@ -18,6 +19,9 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   sourceId: string; dir: string; commit?: string; signal?: AbortSignal;
   protect?: (key: OpCheckpointKey) => Promise<void>;
 }) {
+  // Retained remote jobs cannot submit descendant maintenance work.
+  const authority = currentSubmissionAuthority();
+  if (authority && authority.kind !== 'application') return undefined;
   if (opts.sourceId === DAILY_MEMORY_SOURCE_ID) return undefined;
   const key = { op: 'import-daily-memory', fingerprint: createHash('sha256')
     .update(JSON.stringify([opts.sourceId, opts.dir])).digest('hex').slice(0, 16) };
