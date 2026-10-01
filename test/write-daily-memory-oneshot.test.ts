@@ -114,3 +114,26 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
   // Current-day write + drained historical day each extract when written.
   expect(extractedDays.length).toBeGreaterThanOrEqual(2);
 });
+
+test('one-shot writer uses GBRAIN_DAILY_MEMORY_ZONE for instant page filters', async () => {
+  await engine.setConfig('cycle.timezone', 'UTC');
+  // 06:00Z on 2026-09-30 is still 2026-09-29 evening in America/Los_Angeles.
+  await engine.putPage('notes/boundary', {
+    type: 'note', title: 'Boundary fixture', compiled_truth: 'Synthetic boundary',
+    frontmatter: { created: '2026-09-30T06:00:00.000Z' },
+  });
+  await engine.executeRaw(
+    "UPDATE pages SET effective_date='2026-09-30T06:00:00Z'::timestamptz,effective_date_source='created' WHERE source_id='default' AND slug='notes/boundary'",
+  );
+  const previous = process.env.GBRAIN_DAILY_MEMORY_ZONE;
+  process.env.GBRAIN_DAILY_MEMORY_ZONE = 'America/Los_Angeles';
+  try {
+    const result = await runOneShotDailyMemoryWrite(engine, '2026-09-29', { extract: noExtract });
+    expect(result.written).toBe(true);
+    expect((await engine.getPage(result.slug!, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/boundary]]');
+  } finally {
+    if (previous === undefined) delete process.env.GBRAIN_DAILY_MEMORY_ZONE;
+    else process.env.GBRAIN_DAILY_MEMORY_ZONE = previous;
+  }
+});

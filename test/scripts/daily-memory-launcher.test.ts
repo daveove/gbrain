@@ -8,7 +8,7 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-codex-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null; tz?: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null };
 
 function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
@@ -34,7 +34,7 @@ if kind == 'tz':
         print(value, end='')
     sys.exit(0)
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE')}) + '\\n')
 if kind == 'resolve':
     if os.environ.get('TEST_RESOLVE_FAIL') == '1':
         print('fixture config resolver failed', file=sys.stderr)
@@ -192,6 +192,7 @@ finally:
     expect(args).not.toContain(input.before);
     expect(args).not.toContain(input.after);
     expect(result.calls[1].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), input.day]);
+    expect(result.calls[1].zone).toBe('Asia/Manila');
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
@@ -405,6 +406,7 @@ finally:
     const result = run([], { GBRAIN_DAILY_MEMORY_TZ: 'UTC' });
     expect(result.code).toBe(0);
     expect(result.calls[0].tz).toBe('UTC');
+    expect(result.calls[0].zone).toBe('UTC');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
   });
 

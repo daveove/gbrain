@@ -21,7 +21,7 @@ import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
 import { throwIfAborted } from '../abort-check.ts';
-import { resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
+import { isValidTimeZone, resolveCycleDate, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
 
 export const DAILY_MEMORY_SOURCE_ID = 'dream';
@@ -262,14 +262,19 @@ async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
  */
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
-  opts: { signal?: AbortSignal; now?: () => Date; date?: string } = {},
+  opts: { signal?: AbortSignal; now?: () => Date; date?: string; timezone?: string } = {},
 ): Promise<DailyMemoryWrite> {
   throwIfAborted(opts.signal, '[dream] daily memory');
   const now = opts.now ?? (() => new Date());
   let day = '';
   let slug = '';
   try {
-    const zone = await resolveCycleTimeZone(engine);
+    // Launcher may pass the same zone used for day selection (GBRAIN_DAILY_MEMORY_TZ).
+    const override = opts.timezone?.trim();
+    if (override && !isValidTimeZone(override)) {
+      throw new Error(`invalid timezone "${override}"`);
+    }
+    const zone = override || await resolveCycleTimeZone(engine);
     // An explicit day is that calendar day in every zone. Timezone projection
     // applies only when the day is derived from the clock.
     day = await resolveCycleDate(engine, { now, explicitDate: opts.date });

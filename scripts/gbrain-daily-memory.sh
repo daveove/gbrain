@@ -51,6 +51,8 @@ if ! python3 -c 'import sys; from zoneinfo import ZoneInfo; ZoneInfo(sys.argv[1]
   zone=UTC
 fi
 export TZ="$zone"
+# Writer reloads cycle.timezone from DB unless given this selected zone.
+export GBRAIN_DAILY_MEMORY_ZONE="$zone"
 if [[ "${GBRAIN_DAILY_LOCK_FD:-}" != 9 ]]; then
   exec python3 "$REPO/scripts/daily-memory-lock.py" "$0" "$@"
 fi
@@ -164,8 +166,8 @@ raise SystemExit(0 if clean is True else 1)
       echo 'codex ingest unclean (cleanScan!=true); holding mtime watermark' >> "$LOG"
     fi
   fi
-  # Writer prefers cycle.timezone over process TZ; pass the same calendar day
-  # already used for selector/ingest so the index cannot land on another date.
+  # Pass the same calendar day already used for selector/ingest; zone rides in
+  # GBRAIN_DAILY_MEMORY_ZONE so writer timestamp filters match day selection.
   set -- "$day"
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
