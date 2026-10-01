@@ -140,3 +140,37 @@ test('pre-apply dates survive updated-at fallback replacement and hard purge wit
     await disposePersistenceConsumer(engine);
   }
 }, 120_000);
+
+test('version reverts refresh prior and restored dates atomically and roll back rejected handoffs', async () => {
+  for (const engine of engines) {
+    const sourceId = `revert-day-${randomUUID()}`, slug = 'notes/version-date';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    const ctx = context(engine, sourceId);
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, content: content('2026-09-26'), request_id: randomUUID() }, waitMs: 30_000 });
+    const oldVersion = await engine.createVersion(slug, { sourceId });
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, content: content('2026-09-27'), expected_revision: (await engine.readPageSnapshot(slug, { sourceId }))!.revision, request_id: randomUUID() }, waitMs: 30_000 });
+    const newVersion = await engine.createVersion(slug, { sourceId });
+    await drainDaily(engine);
+    expect(await dailyBody(engine, '2026-09-27')).toContain(`[[${sourceId}:${slug}]]`);
+    const beforeJobs = await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs ORDER BY id');
+    await submitPageMutation(ctx, { operation: 'revert_version', params: { slug, version_id: oldVersion.id, expected_revision: (await engine.readPageSnapshot(slug, { sourceId }))!.revision, request_id: randomUUID() }, waitMs: 30_000 });
+    const handoffs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND id>$1", [Math.max(0, ...beforeJobs.map(row => Number(row.id)))]);
+    expect(handoffs.some(row => row.data.daily_memory_dates?.includes('2026-09-26') && row.data.daily_memory_dates.includes('2026-09-27'))).toBe(true);
+    await drainDaily(engine);
+    expect(await dailyBody(engine, '2026-09-26')).toContain(`[[${sourceId}:${slug}]]`);
+    expect(await dailyBody(engine, '2026-09-27')).not.toContain(`[[${sourceId}:${slug}]]`);
+    const before = (await engine.readPageSnapshot(slug, { sourceId }))!;
+    const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    const add = MinionQueue.prototype.add;
+    const rejected = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, name, data, opts) {
+      if (name === 'autopilot-daily-memory' && data && 'daily_memory_dates' in data) throw new Error('Synthetic version refresh rejection');
+      return add.call(this, name, data, opts);
+    });
+    try { await expect(submitPageMutation(ctx, { operation: 'revert_version', params: { slug, version_id: newVersion.id, expected_revision: before.revision, request_id: randomUUID() }, waitMs: 30_000 })).rejects.toThrow(); }
+    finally { rejected.mockRestore(); }
+    expect((await engine.readPageSnapshot(slug, { sourceId }))!.revision).toBe(before.revision);
+    expect((await engine.getPage(slug, { sourceId }))!.frontmatter).toEqual(before.page.frontmatter);
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
+    await disposePersistenceConsumer(engine);
+  }
+}, 120_000);

@@ -36,7 +36,7 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
       else await queue('facts-backstop', { visibility: await resolveDefaultVisibility(tx) });
     }
   }
-  if (['put_page', 'delete_page', 'restore_page', 'capture'].includes(row.operation)) {
+  if (['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(row.operation)) {
     const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
     const days = await refreshDailyMemoryAfterPageMutation(tx, {
       sourceId: row.source_id,

@@ -14,6 +14,8 @@ import { describe, test, expect, beforeAll, afterAll, beforeEach, spyOn } from '
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { appendCompleted } from '../src/core/op-checkpoint.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
@@ -479,6 +481,37 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(batchSizes[0]).toBe(8);
     for (const day of days) expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
     expect((await engine.getPage(`daily-memory/${days[0]}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('[[affected-source:notes/affected-0]]');
+  });
+
+  test('successful empty source discovery retires only captured debt and preserves a concurrent origin bank', async () => {
+    const sourceId = 'empty-debt-source';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    const queue = new MinionQueue(engine), source = await queue.add('autopilot-cycle', { source_id: sourceId });
+    const other = await queue.add('autopilot-cycle', { source_id: sourceId });
+    const claimed = (await queue.claim('empty-debt-owner', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(claimed.id).toBe(source.id);
+    const key = { op: 'autopilot-sync-daily-memory', fingerprint: createHash('sha256').update(sourceId).digest('hex').slice(0,16) };
+    const original = JSON.stringify({ jobId: source.id, slug: 'notes/never-existed' });
+    const concurrent = JSON.stringify({ jobId: other.id, slug: 'notes/concurrent-missing' });
+    let injected = false;
+    const execute = engine.executeRaw;
+    const spy = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
+      if (!injected && sql.includes('SELECT source_id, slug, title, effective_date')) {
+        injected = true; await appendCompleted(this, key, [concurrent]);
+      }
+      return execute.call(this, sql, params) as Promise<T[]>;
+    });
+    try { await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, { status: 'ok', phases: [{ phase: 'sync', pagesAffected: ['notes/never-existed'] }] }); }
+    finally { spy.mockRestore(); }
+    expect(injected).toBe(true);
+    const debt = await engine.executeRaw<{ path: string }>('SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2', [key.op,key.fingerprint]);
+    expect(debt.map(row => row.path)).toEqual([concurrent]);
+    expect(debt.some(row => row.path === original)).toBe(false);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+    await queue.completeJob(source.id, 'empty-debt-owner', {});
+    const next = (await queue.claim('empty-debt-next', 60_000, 'default', ['autopilot-cycle']))!;
+    await refreshDailyMemoryAfterSourceSync(engine, next, sourceId, { status: 'ok', phases: [{ phase: 'sync', pagesAffected: [] }] });
+    expect(await engine.executeRaw('SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2', [key.op,key.fingerprint])).toHaveLength(0);
   });
 
   for (const sourceId of ['default','moved-date-source']) test(`date moves refresh ${sourceId} old index before graph extraction`, async () => {
