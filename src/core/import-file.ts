@@ -119,6 +119,8 @@ export interface ImportEmbeddingResult {
   error?: string;
 }
 
+export type ImportBeforeCommit = (tx: BrainEngine, slug: string) => Promise<void>;
+
 export interface ImportResult {
   slug: string;
   status: 'imported' | 'skipped' | 'error';
@@ -297,7 +299,7 @@ export async function importFromContent(
      * and reindex leave it unset so the guard stays armed.
      */
     allowEmptyOverwrite?: boolean;
-    beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>;
+    beforeCommit?: ImportBeforeCommit;
     onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void;
   } = {},
 ): Promise<ImportResult> {
@@ -722,8 +724,13 @@ export async function importFromContent(
     sourceId: sourceId ?? 'default', slug, hash, frontmatterId: fmIdStr, sourcePath: opts.sourcePath, sourceRoot: opts.sourceRoot,
     body: { title: parsed.title, compiled_truth: parsed.compiled_truth, timeline: parsed.timeline || '' },
   });
-  if (identity.kind === 'move' && !existing && !opts.prepare
-    && await engine.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' }) > 0) {
+  const movedIdentity = identity.kind === 'move' && !existing && !opts.prepare
+    ? opts.beforeCommit ? await engine.transaction(async tx => {
+      const moved = await tx.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' });
+      if (moved > 0) await opts.beforeCommit?.(tx, slug);
+      return moved;
+    }) : await engine.updateSlug(identity.dupSlug, slug, { sourceId: sourceId ?? 'default' }) : 0;
+  if (identity.kind === 'move' && movedIdentity > 0) {
     process.stderr.write(
       `[import] ${opts.sourcePath} carries frontmatter.id=${fmIdStr} from moved file ${identity.dupSourcePath}; ` +
       `renamed ${identity.dupSlug} -> ${slug} in source ${sourceId ?? 'default'}.\n`
@@ -1166,6 +1173,7 @@ export async function importFromFile(
   filePath: string,
   relativePath: string,
   opts: {
+    beforeCommit?: ImportBeforeCommit;
     noEmbed?: boolean;
     inferFrontmatter?: boolean;
     sourceId?: string;
@@ -1217,6 +1225,7 @@ export async function importFromFile(
     return importCodeFile(engine, relativePath, content, {
       noEmbed: opts.noEmbed,
       sourceId: opts.sourceId,
+      beforeCommit: opts.beforeCommit,
     });
   }
 
@@ -1375,7 +1384,7 @@ export async function importCodeFile(
   engine: BrainEngine,
   relativePath: string,
   content: string,
-  opts: { noEmbed?: boolean; force?: boolean; sourceId?: string;
+  opts: { noEmbed?: boolean; force?: boolean; sourceId?: string; beforeCommit?: ImportBeforeCommit;
     prepare?: (prepared: import('./persistence/prepared-import.ts').PreparedContentImport) => Promise<ImportResult> } = {},
 ): Promise<ImportResult> {
   if (!opts.prepare) await assertUnmanagedCanonicalWriter(engine, 'direct file import');
@@ -1437,8 +1446,11 @@ export async function importCodeFile(
     if (!snapshot || snapshot.snapshot.revision !== existing.knowledge_revision) throw new Error('Code changed during import preparation. Retry the import.');
     const projection = await preparePageProjection(snapshot);
     const result: ImportResult = { slug, status: 'imported', chunks: projection.chunks.length };
-    const apply = (tx: BrainEngine) => installPageProjection(tx, snapshot, projection.chunks,
-      { seal: true, preserveEmbeddings: true, code: projection.code });
+    const apply = async (tx: BrainEngine) => {
+      await installPageProjection(tx, snapshot, projection.chunks,
+        { seal: true, preserveEmbeddings: true, code: projection.code });
+      await opts.beforeCommit?.(tx, slug);
+    };
     if (opts.prepare) return opts.prepare({ slug, parsedPage, observedRevision: snapshot.snapshot.revision, noop: false, result, validate: async () => {}, apply });
     await engine.transaction(apply);
     return result;
@@ -1546,6 +1558,7 @@ export async function importCodeFile(
       [MARKDOWN_CHUNKER_VERSION, txOpts.sourceId, slug]);
     await sealPageTextProjection(tx, slug, txOpts.sourceId);
     if (opts.prepare) await installCodeChunkEdges(tx, slug, txOpts.sourceId, code);
+    await opts.beforeCommit?.(tx, slug);
   };
   if (opts.prepare) {
     const result: ImportResult = { slug, status: 'imported', chunks: chunks.length };
@@ -1674,6 +1687,7 @@ const NEEDS_DECODE = new Set(['.heic', '.heif', '.avif']);
  * via the optional `after` callback, which runs INSIDE the same transaction.
  */
 export interface ImportTransactionSpec {
+  beforeCommit?: ImportBeforeCommit;
   slug: string;
   hadExisting: boolean;
   /** Page observed before image/OCR/provider preparation; null means create-only. */
@@ -1736,6 +1750,7 @@ async function applyImportTransaction(tx: BrainEngine, spec: ImportTransactionSp
     await sealPageTextProjection(tx, spec.slug, sourceId);
   }
   if (spec.after) await spec.after(tx);
+  await spec.beforeCommit?.(tx, spec.slug);
 }
 
 /**
@@ -2007,6 +2022,7 @@ async function maybeOcrGated(
 }
 
 export interface ImportImageOptions {
+  beforeCommit?: ImportBeforeCommit;
   prepare?: (prepared: Omit<import('./persistence/prepared-import.ts').PreparedContentImport, 'parsedPage'>) => Promise<ImportResult>;
   bytes?: Buffer;
   /** Override default OCR concurrency for tests. */
@@ -2176,6 +2192,7 @@ export async function importImageFile(
   };
 
   const spec: ImportTransactionSpec = {
+    beforeCommit: opts.beforeCommit,
     slug: imageSlug,
     hadExisting: !!existing,
     basePage: existing,

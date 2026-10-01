@@ -647,7 +647,7 @@ export async function runImport(
     // forever — without this, the agent can't see which file.
     const _fileT0 = Date.now();
     try {
-      await dailyMemory?.before(filePath, importRelPath);
+      const beforeCommit = await dailyMemory?.before(filePath, importRelPath);
       // Renew about every 10m (1/3 of the 30m peer-adoption window) so a single
       // long file cannot outlive the lease between before/imported renewals.
       const LEASE_RENEW_EVERY_MS = 10 * 60_000;
@@ -670,8 +670,8 @@ export async function runImport(
         result = company ? await importCompanyBrainFile(eng, filePath, sourceId!) : managedImport
           ? await importManagedFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, signal, slugRoot: opts.slugRoot })
           : isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
-          ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
-          : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack });
+          ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId, beforeCommit })
+          : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, beforeCommit });
       } finally {
         if (renewTimer) clearInterval(renewTimer);
         await renewInFlight;

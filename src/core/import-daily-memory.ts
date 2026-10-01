@@ -6,11 +6,11 @@ import { currentSubmissionAuthority } from './minions/submission-authority.ts';
 import { parseMarkdown } from './markdown.ts';
 import { MAX_FILE_SIZE } from './import-file.ts';
 import { isMarkdownFilePath, isCodeFilePath, slugifyPath, slugifyCodePath } from './sync.ts';
-import { appendCompleted, type OpCheckpointKey } from './op-checkpoint.ts';
+import { appendCompleted, appendCompletedInTransaction, type OpCheckpointKey } from './op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from './cycle/daily-memory.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
-type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[] };
+type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[]; bankId?: string };
 
 /** Active-origin lease window; empty finishes adopt foreign debt only after expiry. */
 const LIVE_TTL_MS = 30 * 60 * 1000;
@@ -29,10 +29,11 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   // imports do not collapse under appendCompleted's ON CONFLICT DO NOTHING.
   const origin = randomUUID();
   await opts.protect?.(key);
-  const bank = async (entries: string[], committed = false) => {
+  const bank = async (entries: string[], committed = false, transaction?: BrainEngine) => {
     if (!committed) opts.signal?.throwIfAborted();
     const wrapped = entries.map(value => JSON.stringify({ origin, value }));
-    if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
+    if (transaction) await appendCompletedInTransaction(transaction, key, wrapped);
+    else if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
       throw new Error('Daily-memory import checkpoint unavailable');
     }
     return wrapped;
@@ -90,23 +91,48 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       opts.signal?.throwIfAborted();
       const expected = isCodeFilePath(relativePath) ? slugifyCodePath(relativePath) : slugifyPath(relativePath);
       const names = new Set(expected ? [expected] : []);
+      let identityId: string | null = null;
       if (isMarkdownFilePath(relativePath)) {
         // Match importFromFile: skip oversized bodies so prior-slug discovery cannot stall workers.
         const file = lstatSync(filePath);
         if (file.isFile() && !file.isSymbolicLink() && file.size <= MAX_FILE_SIZE) {
           const parsed = parseMarkdown(readFileSync(filePath, 'utf8'), relativePath);
+          if (typeof parsed.frontmatter.id === 'string' && parsed.frontmatter.id.length) identityId = parsed.frontmatter.id;
           if (parsed.slug && (!expected || slugifyPath(parsed.slug) === expected)) names.add(parsed.slug);
         }
       }
       const existing = await engine.executeRaw<{ slug: string; revision: string }>(
-        'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND (slug=ANY($2::text[]) OR source_path=$3)',
-        [opts.sourceId, [...names], relativePath]);
+        `SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND (slug=ANY($2::text[]) OR source_path=$3 OR ($4::text IS NOT NULL AND frontmatter->>'id'=$4))`,
+        [opts.sourceId, [...names], relativePath, identityId]);
       for (const row of existing) names.add(row.slug);
       const prior: Prior = { targets: [...names].map(slug => ({ slug,
         revision: existing.find(row => row.slug === slug)?.revision ?? null })),
         days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...names], { signal: opts.signal }) };
       await touchLive();
-      await bank([`before:${JSON.stringify(prior)}`]);
+      const priorValue = `before:${JSON.stringify(prior)}`;
+      await bank([priorValue]);
+      // Each worker retains its own snapshot even if an expired peer settles
+      // the pre-write bank. Re-bank it with the actual canonical commit.
+      return async (tx: BrainEngine, actualSlug: string) => {
+        const targets = new Set([...prior.targets.map(target => target.slug), actualSlug]);
+        const current = await tx.executeRaw<{ slug: string; revision: string }>(
+          'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])',
+          [opts.sourceId, [...targets]]);
+        const changed = [...targets].some(slug =>
+          (current.find(row => row.slug === slug)?.revision ?? null)
+            !== (prior.targets.find(target => target.slug === slug)?.revision ?? null));
+        const currentDays = await dailyMemoryDaysForSlugs(tx, opts.sourceId, [...targets]);
+        const dayChanged = JSON.stringify([...currentDays].sort()) !== JSON.stringify([...prior.days].sort());
+        if (changed || dayChanged) {
+          // A peer can retain an old snapshot past our canonical commit. Mint
+          // a distinct bank so its later retirement cannot erase this write.
+          const mutationPrior: Prior = { ...prior, bankId: randomUUID(),
+            days: [...new Set([...prior.days, ...currentDays])],
+            targets: prior.targets.some(target => target.slug === actualSlug) ? prior.targets
+              : [...prior.targets, { slug: actualSlug, revision: null }] };
+          await bank([`before:${JSON.stringify(mutationPrior)}`, `slug:${actualSlug}`], true, tx);
+        } else await bank([priorValue], true, tx);
+      };
     },
     async imported(slug: string) {
       // The page has committed. Bank its debt before observing cancellation,
@@ -171,7 +197,8 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
             const parsed = JSON.parse(value.slice(7)) as Prior;
             if (!parsed || !Array.isArray(parsed.targets) || !Array.isArray(parsed.days)
               || !parsed.targets.every(target => target && typeof target.slug === 'string' && target.slug.length > 0 && (target.revision === null || typeof target.revision === 'string'))
-              || !parsed.days.every(day => typeof day === 'string')) throw new Error('Invalid daily-memory import checkpoint');
+              || !parsed.days.every(day => typeof day === 'string')
+              || (parsed.bankId !== undefined && (typeof parsed.bankId !== 'string' || parsed.bankId.length === 0))) throw new Error('Invalid daily-memory import checkpoint');
             prior.push(parsed);
           }
         }
@@ -180,7 +207,7 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
           const current = await engine.executeRaw<{ slug: string; revision: string }>(
             'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])',
             [opts.sourceId, record.targets.map(target => target.slug)]);
-          if (record.targets.some(target => slugs.has(target.slug)
+          if (record.bankId || record.targets.some(target => slugs.has(target.slug)
             || (current.find(row => row.slug === target.slug)?.revision ?? null) !== target.revision)) {
             for (const target of record.targets) slugs.add(target.slug);
             for (const day of record.days) days.add(day);
