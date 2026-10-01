@@ -43,7 +43,7 @@ describe('standalone sync daily-memory durable handoff', () => {
   afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
 
   async function filenameCycleFixture(sourceScoped=true) {
-    const from='notes/zz-2026-01-06-fixture.md',to='notes/zz-2026-01-07-fixture.md';
+    const from='notes/2026-01-06-zz-fixture.md',to='notes/2026-01-07-zz-fixture.md';
     const oldSlug=from.slice(0,-3),newSlug=to.slice(0,-3);
     const body='---\ntitle: Synthetic filename fixture\n---\n\n'+Array.from({length:20},(_,i)=>`Synthetic unchanged paragraph ${i}.`).join('\n');
     writeFileSync(join(repo,from),body); git('add','-A');git('commit','-m','seed filename date');
