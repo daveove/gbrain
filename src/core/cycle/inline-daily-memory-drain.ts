@@ -29,7 +29,10 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       if (stopped || renewal) return;
       renewal = queue.renewLock(job.id, token, lease, { signal: abort.signal }).then(owned => {
         if (!owned && !stopped) abort.abort(new Error('Inline daily memory lease lost'));
-      }, error => { if (!stopped) abort.abort(error); }).finally(() => { renewal = undefined; });
+      }, error => {
+        // Worker-parity lock-renewal-failed: wrap so the catch path skips failJob.
+        if (!stopped) abort.abort(new Error('Inline daily memory lock-renewal-failed', { cause: error }));
+      }).finally(() => { renewal = undefined; });
     }, Math.max(250, Math.floor(lease / 3)));
     try {
       abort.signal.throwIfAborted();
@@ -55,7 +58,9 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       const shutdown = Boolean(opts.signal?.aborted);
       const leaseLost = message === 'Inline daily memory lease lost'
         || abortReason === 'Inline daily memory lease lost';
-      if (shutdown || leaseLost) throw error;
+      const renewalFailed = message === 'Inline daily memory lock-renewal-failed'
+        || abortReason === 'Inline daily memory lock-renewal-failed';
+      if (shutdown || leaseLost || renewalFailed) throw error;
       const terminal = job.attempts_made + 1 >= job.max_attempts;
       const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));

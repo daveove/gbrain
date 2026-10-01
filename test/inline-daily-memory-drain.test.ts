@@ -134,3 +134,16 @@ test('lease-loss abort preserves the job without burning an attempt', async () =
   expect(row?.attempts_made).toBe(0);
   expect(row?.data.daily_memory_date).toBe(day);
 });
+
+test('lock-renewal failure aborts without burning an attempt', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-28'; await seed(day);
+  await writeDailyMemoryFromSources(engine, { date: day });
+  const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
+  await expect(drainInlineDailyMemory(engine, {
+    afterWrite: async () => { throw new Error('Inline daily memory lock-renewal-failed'); },
+  })).rejects.toThrow('Inline daily memory lock-renewal-failed');
+  const row = await queue.getJob(job.id);
+  expect(row?.status).toBe('active');
+  expect(row?.attempts_made).toBe(0);
+  expect(row?.data.daily_memory_date).toBe(day);
+});

@@ -47,7 +47,9 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     // Legacy unleased "running" has no lease — do not suppress adoption.
     if (!value.startsWith('running:')) return false;
     const stamped = Date.parse(value.slice('running:'.length));
-    return Number.isFinite(stamped) && at - stamped < RUNNING_LEASE_MS;
+    // Future stamps (clock skew / backward correction) are not active; otherwise
+    // peers suppress adoption until the future instant and GC can drop before: debt.
+    return Number.isFinite(stamped) && stamped <= at && at - stamped < RUNNING_LEASE_MS;
   };
   return {
     /** Drop the running marker without settling debt (abort / early exit). */

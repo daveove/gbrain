@@ -368,6 +368,32 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('future-dated running lease lets a peer adopt abandoned before: debt', async () => {
+    await engine.putPage('notes/future-lease-transcript', { type: 'note', title: 'Future lease', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-26' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/future-lease-transcript'");
+    const crashed = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'future-crash' }))!;
+    await crashed.before(['notes/future-lease-transcript']);
+    await engine.putPage('notes/future-lease-transcript', { type: 'note', title: 'Future lease', compiled_truth: 'Synthetic fixture changed', frontmatter: { date: '2026-01-27' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/future-lease-transcript'");
+    const markers = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'");
+    expect(markers.length).toBeGreaterThan(0);
+    for (const row of markers) {
+      const wrapped = JSON.parse(row.path) as { origin: string; value: string };
+      const future = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() + 8 * 86400_000).toISOString()}` });
+      await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [future, row.path]);
+      await engine.executeRawDirect(
+        "UPDATE op_checkpoints SET completed_keys=(completed_keys-$1::text[])||$2::jsonb WHERE op='transcript-ingest-daily-memory'",
+        [[row.path], JSON.stringify([future])]);
+    }
+    const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'peer-future' }))!;
+    await peer.finish();
+    const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-26'))).toBe(true);
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-27'))).toBe(true);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+  });
+
   test('renew refreshes the running lease so peers keep seeing the origin live', async () => {
     const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'live' }))!;
     const before = await engine.executeRaw<{ path: string }>(
