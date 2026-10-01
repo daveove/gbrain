@@ -1041,6 +1041,10 @@ async function runPurge(engine: BrainEngine, args: string[]): Promise<void> {
       process.exit(5);
     }
 
+    const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+    try { await assertSourceNotSystemIndex(engine, id); }
+    catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
+
     await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
     console.log(`Permanently deleted source "${id}" (${impact.pageCount} pages cascaded).`);
     return;

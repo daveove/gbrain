@@ -241,4 +241,46 @@ describe('daily memory refresh on source archive/restore', () => {
     expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
   });
 
+
+  test('direct sources purge refuses system-index sources', async () => {
+    await engine.executeRaw(
+      "INSERT INTO sources(id,name,archived,config) VALUES('sys-purge','System purge fixture',true,$1::jsonb)",
+      [JSON.stringify({ system_index: true })],
+    );
+    const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
+    try {
+      await expect(runSources(engine, ['purge', 'sys-purge', '--confirm-destructive'])).rejects.toThrow('fixture exit 3');
+    } finally {
+      exit.mockRestore();
+    }
+    expect(await engine.executeRaw("SELECT id FROM sources WHERE id='sys-purge'")).toHaveLength(1);
+  });
+
+  test('standalone import queues affected daily-memory days for imported slugs', async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import('fs');
+    const { join } = await import('path');
+    const { tmpdir } = await import('os');
+    const { runImport } = await import('../src/commands/import.ts');
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-dm-'));
+    try {
+      await engine.executeRaw("INSERT INTO sources(id,name) VALUES('import-dm','Import daily fixture')");
+      writeFileSync(join(dir, 'day.md'), [
+        '---',
+        'title: Imported day',
+        'date: 2026-09-25',
+        '---',
+        '',
+        'Body from standalone import.',
+        '',
+      ].join('\n'));
+      await runImport(engine, [dir, '--no-embed'], { sourceId: 'import-dm', noExtract: true });
+      const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+        "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+      );
+      expect(jobs.some(j => j.data.daily_memory_date === '2026-09-25')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 });

@@ -1014,6 +1014,35 @@ export async function runImport(
     }
   }
 
+  // Standalone import: queue historical daily-memory refresh for imported pages.
+  // Sync-driven imports already hand off via prepareSyncDailyMemory; skip those.
+  if (!opts.managedBookmark && !managedImport && importedSlugs.length > 0 && !signal?.aborted) {
+    const sid = sourceId ?? 'default';
+    const { DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
+    if (sid !== DAILY_MEMORY_SOURCE_ID) {
+      try {
+        throwIfInterrupted();
+        const {
+          dailyMemoryDaysForSlugs,
+          queueStandaloneSyncDailyMemory,
+        } = await import('../core/cycle/daily-memory-followup.ts');
+        const days = await dailyMemoryDaysForSlugs(engine, sid, importedSlugs, { signal });
+        throwIfInterrupted();
+        if (days.length) {
+          const commit = opts.commit ?? 'import';
+          const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: sid, commit, days });
+          if (accepted === null) throw new Error('Daily-memory import handoff rejected');
+        }
+      } catch (e) {
+        rethrowIfCancelled(e);
+        const message = e instanceof Error ? e.message : String(e);
+        errors++;
+        failures.push({ path: '<daily-memory-refresh>', error: message });
+        console.error(`  Daily-memory refresh skipped: ${message}`);
+      }
+    }
+  }
+
   // Log the ingest. #3969: skip the row when the run changed nothing
   // (imported=0, errors=0, chunks=0) unless --log-noop — see shouldLogIngest.
   // `sourceId ?? 'default'` mirrors the fallback `processFile` itself uses
