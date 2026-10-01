@@ -275,6 +275,31 @@ test('pending registry deadline reports pendingScanIncomplete for continuation',
   expect(result.pagesProcessed).toBe(0);
   expect(result.staleRemaining).toBe(0);
   expect(result.pendingScanIncomplete).toBe(true);
+  expect(result.pendingScanAfter).toBe('');
+});
+
+test('pending registry resume cursor skips the scanned prefix and preserves after on deadline', async () => {
+  for (let i = 0; i < 3; i++) {
+    await engine.putPage(`people/cursor-${i}`, page('[[people/missing]]'));
+  }
+  await drain();
+  const keys = (await engine.executeRaw<{ key: string }>(
+    "SELECT key FROM config WHERE key LIKE 'internal.pending-links.%' ORDER BY key")).map(row => row.key);
+  expect(keys.length).toBeGreaterThanOrEqual(3);
+  const after = keys[0]!;
+  const expired = pendingLinkReferenceBatches(engine, 'default', { deadline: Date.now() - 1, after });
+  expect(await expired.next()).toEqual({ value: { incomplete: true, after }, done: true });
+  const resumed = await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, catchUp: false,
+    timeBudgetMs: 0, pendingAfter: after,
+  });
+  expect(resumed.pendingScanIncomplete).toBe(true);
+  expect(resumed.pendingScanAfter).toBe(after);
+  const live = pendingLinkReferenceBatches(engine, 'default', { after });
+  const first = await live.next();
+  expect(first.done).toBe(false);
+  if (first.done) throw new Error('expected pending registry rows after cursor');
+  expect(first.value.every(row => row.key > after)).toBe(true);
 });
 
 

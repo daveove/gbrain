@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { appendCompleted } from '../src/core/op-checkpoint.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
+import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -391,6 +391,51 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
       .toContain('[[default:notes/tz-pin]]');
   });
+
+  test('affected-day and standalone batches pin timezone at handoff', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const sourceId = 'tz-affected-source';
+    const day = '2026-09-30';
+    const slug = 'notes/tz-affected';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    await engine.putPage(slug, {
+      type: 'note', title: 'Timezone affected fixture', compiled_truth: 'Synthetic fixture',
+      frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2 AND slug=$3",
+      [day, sourceId, slug]);
+    const queue = new MinionQueue(engine);
+    const source = await queue.add('autopilot-cycle', { source_id: sourceId });
+    const claimed = (await queue.claim('tz-affected-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, {
+      status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+    });
+    const batch = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates' ORDER BY id DESC LIMIT 1"))[0];
+    expect(batch.data.daily_memory_timezone).toBe('Asia/Manila');
+    expect(batch.data.daily_memory_dates).toEqual([day]);
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    // Batch already accepted with Manila; a later cycle.timezone flip must not rewrite it.
+    const batchAfterFlip = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates' ORDER BY id DESC LIMIT 1"))[0];
+    expect(batchAfterFlip.data.daily_memory_timezone).toBe('Asia/Manila');
+    const standaloneId = await queueStandaloneSyncDailyMemory(engine, {
+      sourceId, commit: 'tz-standalone', days: [day],
+    });
+    expect(standaloneId).not.toBeNull();
+    const standalone = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      'SELECT data FROM minion_jobs WHERE id=$1', [standaloneId!]))[0];
+    expect(standalone.data.daily_memory_timezone).toBe('America/Los_Angeles');
+    const pinnedStandalone = await queueStandaloneSyncDailyMemory(engine, {
+      sourceId, commit: 'tz-standalone-pin', days: [day], timezone: 'Asia/Manila',
+    });
+    const pinned = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      'SELECT data FROM minion_jobs WHERE id=$1', [pinnedStandalone!]))[0];
+    expect(pinned.data.daily_memory_timezone).toBe('Asia/Manila');
+    await queue.completeJob(source.id, 'tz-affected-lock', {});
+  });
+
 
   test('completed identical daily barriers are idempotent but changed dependency sets get a new job', async () => {
     const queue = new MinionQueue(engine), day = '2026-09-30';
