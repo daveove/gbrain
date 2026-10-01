@@ -5,6 +5,7 @@ export GBRAIN_POOL_SIZE=1 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POO
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"
+export GBRAIN_DAILY_MEMORY_STATE="$STATE"
 WATERMARK="$STATE/daily-memory-codex-mtime"
 mkdir -p "$(dirname "$LOG")" "$STATE"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then

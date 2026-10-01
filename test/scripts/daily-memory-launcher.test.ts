@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -357,6 +357,37 @@ finally:
     expect(result.code).toBe(0);
     expect(result.calls[0].tz).toBe('UTC');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
+  });
+
+  it('exits nonzero when a selected Codex transcript cannot be read', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Broken symlink under today's UTC folder: glob finds it, open fails.
+    const utcDate = new Date(input.start + 3600_000).toISOString().slice(0, 10).replaceAll('-', '/');
+    const broken = join(home, '.codex/sessions', utcDate, 'unreadable.jsonl');
+    mkdirSync(dirname(broken), { recursive: true });
+    // Point at a missing target so open() raises ENOENT.
+    try {
+      symlinkSync(join(home, 'missing-target.jsonl'), broken);
+    } catch {
+      // Fallback for environments that block symlinks: empty chmod-000 file.
+      writeFileSync(broken, '');
+      chmodSync(broken, 0o000);
+    }
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cannot (stat|read)/);
+    try { chmodSync(broken, 0o644); } catch { /* ignore */ }
+  });
+
+  it('places the flock under GBRAIN_DAILY_MEMORY_STATE on a fresh home', () => {
+    const { home, run } = fixture();
+    const state = join(home, 'custom-state');
+    const defaultState = join(home, '.local/state/gbrain');
+    const result = run(['2026-09-29'], { GBRAIN_DAILY_MEMORY_STATE: state });
+    expect(result.code).toBe(0);
+    expect(existsSync(join(state, 'daily-memory.flock'))).toBe(true);
+    expect(existsSync(join(defaultState, 'daily-memory.flock'))).toBe(false);
   });
 
 });

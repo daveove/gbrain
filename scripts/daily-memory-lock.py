@@ -3,7 +3,13 @@ import os
 import pathlib
 import sys
 
-path = pathlib.Path.home() / '.local/state/gbrain/daily-memory.flock'
+# Honor GBRAIN_DAILY_MEMORY_STATE (same default as gbrain-daily-memory.sh).
+state = pathlib.Path(
+    os.environ.get('GBRAIN_DAILY_MEMORY_STATE')
+    or (pathlib.Path.home() / '.local/state/gbrain')
+)
+state.mkdir(parents=True, exist_ok=True)
+path = state / 'daily-memory.flock'
 fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

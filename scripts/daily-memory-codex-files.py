@@ -58,8 +58,11 @@ for directory in directories:
     for path in sorted(directory.glob('*.jsonl')):
         try:
             mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc)
-        except OSError:
-            continue
+        except OSError as exc:
+            # Fail closed: a skipped unreadable session plus a clean watermark
+            # advance would hide it forever once mtime falls behind the stamp.
+            print(f'daily-memory-codex-files: cannot stat {path}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
         meta_in_window = False
         try:
             with path.open() as transcript:
@@ -77,8 +80,9 @@ for directory in directories:
                         break
                     except (ValueError, KeyError, TypeError):
                         continue
-        except OSError:
-            continue
+        except OSError as exc:
+            print(f'daily-memory-codex-files: cannot read {path}: {exc}', file=sys.stderr)
+            raise SystemExit(1)
         # Start-time match for the calendar day, or modified since the prior
         # run / today's start so late evening messages converge on the next run.
         if meta_in_window or (mtime_floor <= mtime < end):
