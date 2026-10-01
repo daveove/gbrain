@@ -395,7 +395,7 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
   });
 
-  test('source-sync refresh persists all affected days before rejection, retries no-op sync and clears tombstones', async () => {
+  test('source-sync refresh recovers terminal-job debt from a fresh no-op job and clears tombstones', async () => {
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES('affected-source','Affected fixture')");
     const slugs: string[] = [], days: string[] = [];
     for (let i = 0; i < 9; i++) {
@@ -411,16 +411,28 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const queue = new MinionQueue(engine), source = await queue.add('autopilot-cycle', { source_id: 'affected-source' });
     const claimed = (await queue.claim('affected-lock', 60_000, 'default', ['autopilot-cycle']))!;
     expect(claimed.id).toBe(source.id);
+    const execute = engine.executeRaw;
+    const discovery = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
+      if (sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic affected-day discovery failure');
+      return execute.call(this, sql, params) as Promise<T[]>;
+    });
+    try { await expect(refreshDailyMemoryAfterSourceSync(engine, claimed, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: slugs }] })).rejects.toThrow('Synthetic affected-day discovery failure'); }
+    finally { discovery.mockRestore(); }
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='autopilot-sync-daily-memory' AND path::jsonb ? 'slug'")).toHaveLength(slugs.length);
     const reject = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('Synthetic affected-day rejection'); });
     try { await expect(refreshDailyMemoryAfterSourceSync(engine, claimed, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: slugs }] })).rejects.toThrow('Synthetic affected-day rejection'); }
     finally { reject.mockRestore(); }
     const [saved] = await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [source.id]);
     expect(saved.data.daily_memory_affected_dates).toEqual(days);
-    await queue.failJob(source.id, 'affected-lock', 'Synthetic first handoff failure', 'delayed', 0);
-    await queue.promoteDelayed();
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='autopilot-sync-daily-memory' AND path::jsonb ? 'day'")).toHaveLength(days.length);
+    await queue.failJob(source.id, 'affected-lock', 'Synthetic terminal handoff failure', 'dead');
+    const fresh = await queue.add('autopilot-cycle', { source_id: 'affected-source' });
     const retried = (await queue.claim('affected-retry-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(retried.id).toBe(fresh.id);
+    expect(retried.data.daily_memory_affected_dates).toBeUndefined();
     await refreshDailyMemoryAfterSourceSync(engine, retried, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: [] }] });
-    await queue.completeJob(source.id, 'affected-retry-lock', {});
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='autopilot-sync-daily-memory'")).toHaveLength(0);
+    await queue.completeJob(fresh.id, 'affected-retry-lock', {});
     const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
     const batchSizes: number[] = [];
     for (let i = 0; i < 80; i++) {

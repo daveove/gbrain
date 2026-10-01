@@ -2,6 +2,7 @@
 import { DATE_INSTANT_PROVENANCE, computeEffectiveDate } from '../effective-date.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
+import { appendCompleted } from '../op-checkpoint.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { calendarDateInTimeZone, resolveCycleDate, resolveCycleTimeZone, utcDate } from './cycle-date.ts';
 import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffectiveDate, DAILY_MEMORY_SOURCE_ID, type SourcePageRow } from './daily-memory.ts';
@@ -228,7 +229,34 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
   const saved = job.data.daily_memory_affected_dates ?? [];
   if (!Array.isArray(saved) || !saved.every(isDay)) throw new Error('Invalid saved daily memory dates');
   const slugs = report.status === 'failed' ? [] : report.phases.find(phase => phase.phase === 'sync')?.pagesAffected ?? [];
-  const days = [...new Set([...saved, ...await dailyMemoryDaysForSlugs(engine, sourceId, slugs, { signal: job.signal })])].sort();
+  const key = { op: 'autopilot-sync-daily-memory', fingerprint: createHash('sha256').update(sourceId).digest('hex').slice(0, 16) };
+  const entries = [...new Set(saved)].map(day => JSON.stringify({ jobId: job.id, day }));
+  entries.push(...[...new Set(slugs)].map(slug => JSON.stringify({ jobId: job.id, slug })));
+  if (entries.length && !await appendCompleted(engine, key, entries)) throw new Error('Source daily memory debt was not persisted');
+  const debt: Array<{ path: string }> = [];
+  let cursor = '';
+  for (;;) {
+    job.signal?.throwIfAborted();
+    const rows = await engine.executeRaw<{ path: string }>(
+      'SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path>$3 ORDER BY path LIMIT 100',
+      [key.op, key.fingerprint, cursor]);
+    debt.push(...rows);
+    if (rows.length < 100) break;
+    cursor = rows[rows.length - 1]!.path;
+  }
+  const savedDays = new Set<string>(), savedSlugs = new Set<string>();
+  for (const { path } of debt) {
+    if (path.startsWith('day:') && isDay(path.slice(4))) { savedDays.add(path.slice(4)); continue; }
+    const entry = JSON.parse(path);
+    if (!entry || !Number.isSafeInteger(entry.jobId) || entry.jobId <= 0
+      || !(isDay(entry.day) || typeof entry.slug === 'string' && entry.slug.length > 0)) throw new Error('Invalid source daily memory debt');
+    if (isDay(entry.day)) savedDays.add(entry.day);
+    else savedSlugs.add(entry.slug);
+  }
+  const days = [...new Set([...savedDays, ...await dailyMemoryDaysForSlugs(engine, sourceId, [...savedSlugs], { signal: job.signal })])].sort();
+  const dateEntries = days.map(day => JSON.stringify({ jobId: job.id, day }));
+  if (dateEntries.length && !await appendCompleted(engine, key, dateEntries)) throw new Error('Source daily memory dates were not persisted');
+  debt.push(...dateEntries.map(path => ({ path })));
   job.signal?.throwIfAborted();
   if (!days.length) return;
   if (JSON.stringify(days) !== JSON.stringify(saved)) {
@@ -238,6 +266,11 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     job.data.daily_memory_affected_dates = days;
   }
   await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0);
+  // Remove only this accepted snapshot; another source job's bank remains durable.
+  for (let start = 0; start < debt.length; start += 100) {
+    await engine.executeRawDirect('DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=ANY($3::text[])',
+      [key.op, key.fingerprint, debt.slice(start, start + 100).map(row => row.path)]);
+  }
 }
 
 
