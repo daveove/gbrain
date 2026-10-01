@@ -511,13 +511,13 @@ async function putSourceRecordIndex(
       existing
       && !existing.deleted_at
       && existing.frontmatter?.dream_generated === true
-      && existing.frontmatter?.source_record_id === record.id
       && existing.frontmatter?.source_record_type === sourceType
       && existing.frontmatter?.source_record_ref === record.source_ref
       && typeof existingUpdated === 'string'
       && existingUpdated > updatedAt
     ) {
-      // A concurrent writer already stored newer metadata for this record.
+      // Prefer newer metadata on this stable slug/ref even when the mutable
+      // source_record_id was replaced by a concurrent writer.
       return { available: true, wrote: false };
     }
     if (

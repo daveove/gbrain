@@ -1530,7 +1530,7 @@ describe('daily memory from sources the brain already holds', () => {
           title: 'gmail message record',
           compiled_truth: [
             'Source: gmail',
-            'Record ID: cas-record',
+            'Record ID: cas-record-replacement',
             'Source reference: cas-record',
             'Entity type: message',
             'Entity ID: cas-record',
@@ -1541,7 +1541,7 @@ describe('daily memory from sources the brain already holds', () => {
           frontmatter: {
             dream_generated: true,
             visibility: 'private',
-            source_record_id: 'cas-record',
+            source_record_id: 'cas-record-replacement',
             source_record_type: 'gmail',
             source_record_ref: 'cas-record',
             source_record_updated_at: newerUpdated,
@@ -1569,6 +1569,12 @@ describe('daily memory from sources the brain already holds', () => {
     );
     expect(pages).toHaveLength(1);
     expect(pages[0]!.updated_at).toBe(newerUpdated);
+    const idRow = await engine.executeRaw<{ id: string }>(
+      `SELECT frontmatter->>'source_record_id' AS id
+       FROM pages WHERE source_id=$1 AND slug=$2 AND deleted_at IS NULL`,
+      [DAILY_MEMORY_SOURCE_ID, pages[0]!.slug],
+    );
+    expect(idRow[0]!.id).toBe('cas-record-replacement');
   });
 
 
