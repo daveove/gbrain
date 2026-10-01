@@ -154,9 +154,10 @@ test('direct managed archive/restore accepts historical dates atomically with to
     expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(prior);
     await runManagedSourceLifecycle(engine,{operation,sourceId:source});
     expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(!archivedBefore);
-    const jobs=await engine.executeRaw<{data:{daily_memory_date:string}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    const jobs=await engine.executeRaw<{data:{daily_memory_date?:string;daily_memory_dates?:string[]}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
     expect(jobs).toHaveLength(prior.length+2);
-    expect(jobs.every(job=>job.data.daily_memory_date==='2026-09-30')).toBe(true);
+    expect(jobs.filter(job=>job.data.daily_memory_date==='2026-09-30')).toHaveLength(operation==='archive'?1:2);
+    expect(jobs.filter(job=>job.data.daily_memory_dates?.includes('2026-09-30'))).toHaveLength(operation==='archive'?1:2);
   }
 }),60_000);
 
