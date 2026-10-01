@@ -209,6 +209,7 @@ export async function runTranscriptsIngest(
 
   for (const path of opts.paths) {
     if (limitTruncated) break;
+    await dailyMemory?.renew?.();
     const fileOutcome: IngestFileOutcome = {
       path,
       sessions: [],

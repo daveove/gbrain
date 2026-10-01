@@ -368,6 +368,30 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('renew refreshes the running lease so peers keep seeing the origin live', async () => {
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'live' }))!;
+    const before = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+    expect(before).toHaveLength(1);
+    await live.renew();
+    const refreshed = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+    expect(refreshed).toHaveLength(1);
+    expect(refreshed[0]!.path).not.toBe(before[0]!.path);
+    const stamp = Date.parse(JSON.parse(refreshed[0]!.path).value.slice('running:'.length));
+    expect(Date.now() - stamp).toBeLessThan(5_000);
+    await engine.putPage('notes/live-transcript', { type: 'note', title: 'Live', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-25' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/live-transcript'");
+    await live.before(['notes/live-transcript']);
+    const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'peer-live' }))!;
+    await peer.finish();
+    // Peer must not adopt live's before: while the renewed lease is fresh.
+    expect(await engine.executeRaw(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
+    await live.finish();
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+  });
+
   test('unchanged finish preserves a concurrent before: bank for later date recovery', async () => {
     await engine.putPage('notes/stable-transcript', { type: 'note', title: 'Stable', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-20' } });
     await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-21' } });

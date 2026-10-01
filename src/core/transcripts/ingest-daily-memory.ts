@@ -27,9 +27,10 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     return wrapped;
   };
   // Lease-backed running marker. Crashed hosts cannot clear finally; peers adopt
-  // debt once the lease expires (default 30m). Format: running:<iso>.
+  // debt once the lease expires (default 30m). Format: running:<iso>. Renew
+  // while the origin is active so long ingests are not mistaken for crashes.
   const RUNNING_LEASE_MS = 30 * 60_000;
-  const runningValue = `running:${new Date().toISOString()}`;
+  let runningValue = `running:${new Date().toISOString()}`;
   await bank([runningValue]);
   const clearRunning = async () => {
     const marker = JSON.stringify({ origin, value: runningValue });
@@ -51,6 +52,12 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
   return {
     /** Drop the running marker without settling debt (abort / early exit). */
     async release() { await clearRunning(); },
+    /** Refresh the lease timestamp so peers keep treating this origin as live. */
+    async renew() {
+      await clearRunning();
+      runningValue = `running:${new Date().toISOString()}`;
+      await bank([runningValue]);
+    },
     async before(slugs: string[]) {
       opts.signal?.throwIfAborted();
       const names = new Set(slugs.filter(Boolean));

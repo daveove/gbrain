@@ -80,6 +80,8 @@ run_command() {
 # Scheduled (no-arg) runs may scan Codex transcripts and may advance the
 # mtime watermark. Explicit-date backfills only rewrite the daily index.
 scheduled_run=0
+# 1 unless a scheduled ingest reported cleanScan!=true (partial errors).
+ingest_clean_scan=1
 # Prospective watermark captured before selection/ingest so appends during the
 # run stay at/after this floor on the next scheduled pass.
 scan_started=""
@@ -112,7 +114,32 @@ print(start.astimezone(timezone.utc).isoformat())
 ' "$day" "$zone")"
     fi
     printf 'codex ingest day=%s zone=%s files=%s\n' "$day" "$zone" "${#files[@]}" >> "$LOG"
-    run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone "$zone" "${files[@]}"
+    # --json so the launcher can gate the mtime watermark on cleanScan; partial
+    # file errors leave the process exit 0 (allFailed-only) and must not advance.
+    run_command bun "$REPO/src/cli.ts" transcripts ingest --json --format codex --since "$since" --source-id default --date-zone "$zone" "${files[@]}"
+    if ! python3 -c '
+import json, sys
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+decoder = json.JSONDecoder()
+clean = None
+i = 0
+while True:
+    j = text.find("{", i)
+    if j < 0:
+        break
+    try:
+        obj, end = decoder.raw_decode(text, j)
+    except json.JSONDecodeError:
+        i = j + 1
+        continue
+    if isinstance(obj, dict) and "cleanScan" in obj:
+        clean = obj["cleanScan"]
+    i = end
+raise SystemExit(0 if clean is True else 1)
+' "$TMP"; then
+      ingest_clean_scan=0
+      echo 'codex ingest unclean (cleanScan!=true); holding mtime watermark' >> "$LOG"
+    fi
   fi
   # Writer prefers cycle.timezone over process TZ; pass the same calendar day
   # already used for selector/ingest so the index cannot land on another date.
@@ -120,10 +147,12 @@ print(start.astimezone(timezone.utc).isoformat())
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
-# Advance the Codex mtime watermark only after a successful scheduled write.
+# Advance the Codex mtime watermark only after a successful scheduled write
+# with a clean ingest (or no ingest when the day had no selected files).
 # Explicit-date backfills skip transcript selection; advancing here would hide
-# ongoing sessions that were never scanned.
-if [[ "$scheduled_run" -eq 1 && -n "$scan_started" ]]; then
+# ongoing sessions that were never scanned. Partial unclean scans exit 0 but
+# must not move the watermark or failed sessions can be skipped forever.
+if [[ "$scheduled_run" -eq 1 && -n "$scan_started" && "$ingest_clean_scan" -eq 1 ]]; then
   # Commit the pre-scan stamp (not "now") so mid-run appends remain eligible.
   python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2] + "\n")' "$WATERMARK" "$scan_started"
 fi

@@ -49,7 +49,11 @@ if kind == os.environ.get('TEST_FAIL_KIND'):
 if kind == 'write' and os.environ.get('TEST_HOLD') == '1':
     pathlib.Path(os.environ['TEST_READY']).touch()
     time.sleep(1)
-print('fixture success')
+if kind == 'ingest':
+    # Launcher parses cleanScan from --json stdout before advancing watermark.
+    print(json.dumps({'cleanScan': os.environ.get('TEST_CLEAN_SCAN', '1') != '0'}))
+else:
+    print('fixture success')
 `);
   chmodSync(bun, 0o755);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GBRAIN_') && key !== 'DATABASE_URL'));
@@ -179,7 +183,7 @@ finally:
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
     const args = result.calls[0].args;
-    expect(args.slice(1, 5)).toEqual(['transcripts', 'ingest', '--format', 'codex']);
+    expect(args.slice(1, 6)).toEqual(['transcripts', 'ingest', '--json', '--format', 'codex']);
     // No prior watermark: --since falls back to the target day's midnight.
     expect(new Date(args[args.indexOf('--since') + 1]).getTime()).toBe(input.start);
     expect(args.slice(args.indexOf('--source-id'), args.indexOf('--source-id') + 2)).toEqual(['--source-id', 'default']);
@@ -203,6 +207,19 @@ finally:
     expect(Number.isFinite(stamp)).toBe(true);
     // Write fixture holds 1s after ingest; pre-scan stamp must predate that hold.
     expect(end - stamp).toBeGreaterThan(800);
+  });
+
+  it('holds the watermark when ingest reports cleanScan false', () => {
+    const { home, run } = fixture();
+    todayInputs(home);
+    const mark = join(home, '.local/state/gbrain/daily-memory-codex-mtime');
+    mkdirSync(dirname(mark), { recursive: true });
+    writeFileSync(mark, '2026-09-28T12:00:00Z\n');
+    const before = readFileSync(mark, 'utf8');
+    const result = run([], { TEST_CLEAN_SCAN: '0' });
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
+    expect(readFileSync(mark, 'utf8')).toBe(before);
   });
 
   it('selects a resumed session older than 14 days when watermark mtime matches', () => {
