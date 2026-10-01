@@ -652,10 +652,13 @@ export async function runImport(
       // long file cannot outlive the lease between before/imported renewals.
       const LEASE_RENEW_EVERY_MS = 10 * 60_000;
       let renewInFlight: Promise<void> | undefined;
+      let renewError: unknown;
       const renewTimer = dailyMemory
         ? setInterval(() => {
           if (renewInFlight) return;
-          renewInFlight = dailyMemory.renew().catch(() => undefined).finally(() => { renewInFlight = undefined; });
+          renewInFlight = dailyMemory.renew()
+            .catch((err: unknown) => { renewError ??= err; })
+            .finally(() => { renewInFlight = undefined; });
         }, LEASE_RENEW_EVERY_MS)
         : undefined;
       let result: Awaited<ReturnType<typeof importFile>>;
@@ -673,6 +676,8 @@ export async function runImport(
         if (renewTimer) clearInterval(renewTimer);
         await renewInFlight;
       }
+      // Renewals must not die silently: an expired lease lets peers retire before: debt.
+      if (renewError) throw renewError;
       // An import that landed while cancellation arrived is still complete.
       // Account for it before stopping, so resume never loses a successful path.
       noteTypeWarning((result as { type_warning?: Parameters<typeof noteTypeWarning>[0] }).type_warning);

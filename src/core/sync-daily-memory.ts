@@ -29,8 +29,10 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   acceptsPath?: (path: string) => boolean; signal?: AbortSignal;
   protect?: (key: { op: string; fingerprint: string; kind: 'manifest' }) => Promise<void>;
 }) {
+  // Fingerprint is source+scope only. Including the target commit stranded
+  // unfinished debt when HEAD moved before accept() (full sync retry).
   const key = { op: 'sync-daily-memory', fingerprint: createHash('sha256')
-    .update(JSON.stringify([opts.sourceId, opts.commit, opts.scope])).digest('hex').slice(0, 16) };
+    .update(JSON.stringify([opts.sourceId, opts.scope])).digest('hex').slice(0, 16) };
   opts.signal?.throwIfAborted();
   await opts.protect?.({ ...key, kind: 'manifest' });
   // Unlike a work-skipping checkpoint, losing this metadata is not recoverable
