@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -10,13 +10,13 @@ const selector = join(repo, 'scripts/daily-memory-codex-files.py');
 const homes: string[] = [];
 type Call = { kind: string; args: string[]; url: string | null; tz?: string | null };
 
-function fixture() {
+function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
   homes.push(home);
   mkdirSync(join(home, '.local/bin'), { recursive: true });
   mkdirSync(join(home, '.gbrain'), { recursive: true });
   const config = join(home, '.gbrain/config.json');
-  const original = '{"database_url":"postgres://example:example@127.0.0.1:5432/example"}\n';
+  const original = `${JSON.stringify({ database_url: 'postgres://example:example@127.0.0.1:5432/example', ...configExtra })}\n`;
   writeFileSync(config, original);
   const calls = join(home, 'calls.jsonl');
   const bun = join(home, '.local/bin/bun');
@@ -67,14 +67,33 @@ function transcript(home: string, timestamp: string, name: string) {
   return file;
 }
 
-function todayInputs(home: string) {
-  const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date());
-  const start = new Date(`${day}T00:00:00+08:00`).getTime();
+function todayInputs(home: string, timeZone = 'Asia/Manila') {
+  const day = new Intl.DateTimeFormat('sv-SE', { timeZone }).format(new Date());
+  // Build the zone offset for this calendar day via the formatter's instant math.
+  const start = Date.parse(`${day}T00:00:00${offsetFor(timeZone, day)}`);
   const before = transcript(home, new Date(start - 1).toISOString(), 'before');
   const precedingUtc = transcript(home, new Date(start).toISOString(), 'preceding-utc');
   const currentUtc = transcript(home, new Date(start + 12 * 3600_000).toISOString(), 'current-utc');
   const after = transcript(home, new Date(start + 24 * 3600_000).toISOString(), 'after');
-  return { day, start, before, precedingUtc, currentUtc, after };
+  // Pin mtimes to the session instants so "now" during the test does not
+  // accidentally select adjacent-day files via the overlap rule.
+  const pin = (file: string, ms: number) => {
+    const at = new Date(ms);
+    utimesSync(file, at, at);
+  };
+  pin(before, start - 1);
+  pin(precedingUtc, start);
+  pin(currentUtc, start + 12 * 3600_000);
+  pin(after, start + 24 * 3600_000);
+  return { day, start, before, precedingUtc, currentUtc, after, timeZone };
+}
+
+/** Fixed offset string for zones used in these tests (Manila +08, UTC +00). */
+function offsetFor(timeZone: string, _day: string): string {
+  if (timeZone === 'UTC') return 'Z';
+  if (timeZone === 'Asia/Manila') return '+08:00';
+  // Fallback: probe via Intl parts is heavier; tests stick to Manila/UTC.
+  return '+08:00';
 }
 
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
@@ -115,9 +134,22 @@ finally:
   it('selects both UTC folders within the Manila calendar day, excluding adjacent days', () => {
     const { home } = fixture();
     const input = todayInputs(home);
-    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day], { encoding: 'utf8' });
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
     expect(result.status).toBe(0);
     expect(result.stdout.split('\0').filter(Boolean)).toEqual([input.precedingUtc, input.currentUtc]);
+  });
+
+  it('rescans older sessions modified during the target day', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Session started before the Manila day (adjacent "before" file) but kept
+    // receiving messages today: mtime inside the day window must select it.
+    const touched = input.before;
+    const midDay = new Date(input.start + 6 * 3600_000);
+    utimesSync(touched, midDay, midDay);
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.split('\0').filter(Boolean)).toEqual([input.before, input.precedingUtc, input.currentUtc]);
   });
 
   it('ingests selected Codex files before writing with the default source and day boundary', () => {
@@ -201,14 +233,24 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
   });
 
-  it('reapplies Asia/Manila after env.sh exports TZ', () => {
-    const { home, run } = fixture();
+  it('uses cycle.timezone from config over env.sh TZ', () => {
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila' });
     writeFileSync(join(home, '.gbrain/env.sh'), 'export TZ=UTC\n');
     const result = run();
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].tz).toBe('Asia/Manila');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date())]);
+  });
+
+  it('honors GBRAIN_DAILY_MEMORY_TZ over config and env.sh', () => {
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila' });
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export TZ=UTC\n');
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'UTC' }).format(new Date());
+    const result = run([], { GBRAIN_DAILY_MEMORY_TZ: 'UTC' });
+    expect(result.code).toBe(0);
+    expect(result.calls[0].tz).toBe('UTC');
+    expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
   });
 
 });

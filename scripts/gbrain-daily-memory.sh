@@ -8,8 +8,31 @@ mkdir -p "$(dirname "$LOG")" "$HOME/.local/state/gbrain"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
-# env.sh may export TZ; force the launcher calendar after sourcing.
-export TZ=Asia/Manila
+# Launcher calendar zone: explicit setting > file-plane cycle.timezone >
+# TZ from env.sh/host > UTC. Do not force Asia/Manila over brain config.
+zone="$(python3 -c '
+import json, os
+from pathlib import Path
+explicit = (os.environ.get("GBRAIN_DAILY_MEMORY_TZ") or "").strip()
+if explicit:
+    print(explicit, end="")
+    raise SystemExit
+cfg = Path.home() / ".gbrain" / "config.json"
+if cfg.is_file():
+    try:
+        value = (json.loads(cfg.read_text()).get("cycle.timezone") or "").strip()
+        if value:
+            print(value, end="")
+            raise SystemExit
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        pass
+print((os.environ.get("TZ") or "UTC").strip() or "UTC", end="")
+')"
+# Validate IANA name; fall back to UTC when invalid.
+if ! python3 -c 'import sys; from zoneinfo import ZoneInfo; ZoneInfo(sys.argv[1])' "$zone" 2>/dev/null; then
+  zone=UTC
+fi
+export TZ="$zone"
 if [[ "${GBRAIN_DAILY_LOCK_FD:-}" != 9 ]]; then
   exec python3 "$REPO/scripts/daily-memory-lock.py" "$0" "$@"
 fi
@@ -38,19 +61,26 @@ run_command() {
   return "$ec"
 }
 if [[ $# -eq 0 ]]; then
-  day="$(TZ=Asia/Manila date +%Y-%m-%d)"
+  day="$(TZ="$zone" date +%Y-%m-%d)"
   files=()
-  python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" > "$TMP"
+  python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" "$zone" > "$TMP"
   while IFS= read -r -d '' path; do files+=("$path"); done < "$TMP"
   if [[ ${#files[@]} -gt 0 ]]; then
-    since="$(python3 -c 'import datetime,sys; d=datetime.datetime.fromisoformat(sys.argv[1]+"T00:00:00+08:00"); print(d.astimezone(datetime.timezone.utc).isoformat())' "$day")"
-    printf 'codex ingest day=%s files=%s\n' "$day" "${#files[@]}" >> "$LOG"
-    run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone Asia/Manila "${files[@]}"
+    since="$(python3 -c '
+import sys
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
+day, zone_name = sys.argv[1], sys.argv[2]
+start = datetime.combine(datetime.fromisoformat(day).date(), time(), ZoneInfo(zone_name))
+print(start.astimezone(timezone.utc).isoformat())
+' "$day" "$zone")"
+    printf 'codex ingest day=%s zone=%s files=%s\n' "$day" "$zone" "${#files[@]}" >> "$LOG"
+    run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone "$zone" "${files[@]}"
   fi
-  # Writer prefers cycle.timezone over process TZ; pass the Manila day already
-  # used for selector/ingest so the index cannot land on a different date.
+  # Writer prefers cycle.timezone over process TZ; pass the same calendar day
+  # already used for selector/ingest so the index cannot land on another date.
   set -- "$day"
 fi
-printf 'daily-memory start %s\n' "$(TZ=Asia/Manila date '+%Y-%m-%d %H:%M:%S %z')" >> "$LOG"
+printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
 echo 'daily-memory ok' >> "$LOG"
