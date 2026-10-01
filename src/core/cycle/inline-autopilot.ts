@@ -4,6 +4,7 @@ import type { CycleOpts, CycleReport } from '../cycle.ts';
 import { resolveCycleDate } from './cycle-date.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
 import { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } from './daily-memory.ts';
+import { drainInlineDailyMemory } from './inline-daily-memory-drain.ts';
 import { previousCalendarDay } from './daily-memory-followup.ts';
 
 export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOpts, deps: {
@@ -17,16 +18,20 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   const report = await cycle(engine, opts);
   if (['ok', 'clean', 'partial'].includes(report.status) && report.reason !== 'aborted' && !opts.signal?.aborted) {
     try {
-      for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
-        const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
-        if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
+      const afterWrite = async (daily: import('./daily-memory.ts').DailyMemoryWrite, signal = opts.signal) => {
         if (daily.written || daily.needs_extract) {
           const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
           const extracted = await extract(engine, { dryRun: false, jsonMode: true, quiet: true,
-            sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal: opts.signal });
+            sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal });
           if (extracted.staleRemaining > 0) throw new Error(`Inline daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
         }
+      };
+      for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
+        const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
+        if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
+        await afterWrite(daily);
       }
+      await drainInlineDailyMemory(engine, { signal: opts.signal, afterWrite });
     } catch (error) {
       if (!deps.onMaintenanceError) throw error;
       deps.onMaintenanceError(error);

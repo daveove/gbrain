@@ -63,7 +63,9 @@ export async function queueFanoutDailyMemoryWithRecordLookback(
 }
 
 
-export async function finishFanoutDailyMemory(engine: BrainEngine, job: DailyJob) {
+export type DailyMemoryAfterWrite = (result: import('./daily-memory.ts').DailyMemoryWrite, signal?: AbortSignal) => Promise<void>;
+
+export async function finishFanoutDailyMemory(engine: BrainEngine, job: DailyJob, afterWrite?: DailyMemoryAfterWrite) {
   job.signal?.throwIfAborted();
   const day = job.data.daily_memory_date;
   const rawIds = job.data.source_cycle_job_ids ?? [];
@@ -85,14 +87,15 @@ export async function finishFanoutDailyMemory(engine: BrainEngine, job: DailyJob
   }
   const result = await writeDailyMemoryFromSources(engine, { date: day, signal: job.signal });
   if (result.reason === 'error') throw new Error('Daily memory completion write failed');
-  await queueDailyMemoryExtract(engine, result);
+  if (afterWrite) await afterWrite(result, job.signal);
+  else await queueDailyMemoryExtract(engine, result);
   return { daily_memory_pending: false, day, daily_memory: result,
     dependency_failures: rows.filter(row => row.status !== 'completed').map(row => ({ id: row.id, status: row.status })) };
 }
 
-export async function runDailyMemoryJob(engine: BrainEngine, job: DailyJob) {
+export async function runDailyMemoryJob(engine: BrainEngine, job: DailyJob, afterWrite?: DailyMemoryAfterWrite) {
   if ('daily_memory_dates' in job.data) return dispatchDailyDateBatch(engine, job);
-  return finishFanoutDailyMemory(engine, await pinDailyMemoryJob(engine, job));
+  return finishFanoutDailyMemory(engine, await pinDailyMemoryJob(engine, job), afterWrite);
 }
 
 /** Calendar days an imported slug set should refresh in the daily index. */
