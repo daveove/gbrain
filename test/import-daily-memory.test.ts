@@ -259,3 +259,25 @@ test('empty finish adopts foreign debt after live lease expires', async () => {
   expect(await engine.executeRaw(
     "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
 });
+
+
+test('renew refreshes the live lease stamp and finish still settles', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Synthetic fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-24' }, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='note'");
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  const before = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  expect(before).toHaveLength(1);
+  await daily.renew();
+  const after = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  expect(after).toHaveLength(1);
+  expect(after[0]!.path).not.toBe(before[0]!.path);
+  await daily.before(file, 'note.md');
+  await daily.imported('note');
+  await daily.finish();
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});

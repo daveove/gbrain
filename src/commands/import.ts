@@ -645,15 +645,31 @@ export async function runImport(
     const _fileT0 = Date.now();
     try {
       await dailyMemory?.before(filePath, importRelPath);
-      // v0.27.1 (F2): dispatch image extensions to importImageFile when
-      // multimodal is enabled. The walker (collectMarkdownFiles) only picks
-      // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
-      // unreachable when the gate is off; defense-in-depth check anyway.
-      const result = company ? await importCompanyBrainFile(eng, filePath, sourceId!) : managedImport
-        ? await importManagedFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, signal, slugRoot: opts.slugRoot })
-        : isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
-        ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
-        : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack });
+      // Renew about every 10m (1/3 of the 30m peer-adoption window) so a single
+      // long file cannot outlive the lease between before/imported renewals.
+      const LEASE_RENEW_EVERY_MS = 10 * 60_000;
+      let renewInFlight: Promise<void> | undefined;
+      const renewTimer = dailyMemory
+        ? setInterval(() => {
+          if (renewInFlight) return;
+          renewInFlight = dailyMemory.renew().catch(() => undefined).finally(() => { renewInFlight = undefined; });
+        }, LEASE_RENEW_EVERY_MS)
+        : undefined;
+      let result: Awaited<ReturnType<typeof importFile>>;
+      try {
+        // v0.27.1 (F2): dispatch image extensions to importImageFile when
+        // multimodal is enabled. The walker (collectMarkdownFiles) only picks
+        // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
+        // unreachable when the gate is off; defense-in-depth check anyway.
+        result = company ? await importCompanyBrainFile(eng, filePath, sourceId!) : managedImport
+          ? await importManagedFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, signal, slugRoot: opts.slugRoot })
+          : isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
+          ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
+          : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack });
+      } finally {
+        if (renewTimer) clearInterval(renewTimer);
+        await renewInFlight;
+      }
       // An import that landed while cancellation arrived is still complete.
       // Account for it before stopping, so resume never loses a successful path.
       noteTypeWarning((result as { type_warning?: Parameters<typeof noteTypeWarning>[0] }).type_warning);

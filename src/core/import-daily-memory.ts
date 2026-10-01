@@ -58,6 +58,10 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   // Lease marks this origin live so an empty peer finish cannot retire our banks.
   await touchLive();
   return {
+    /** Refresh the live lease so peers keep treating this origin as active. */
+    async renew() { await touchLive(); },
+    /** Drop the live lease without settling debt (abort / early exit). */
+    async release() { await clearOwnLive(); },
     async before(filePath: string, relativePath: string) {
       opts.signal?.throwIfAborted();
       const expected = isCodeFilePath(relativePath) ? slugifyCodePath(relativePath) : slugifyPath(relativePath);
@@ -88,10 +92,21 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       opts.signal?.throwIfAborted();
       try {
         // Unlike loadOpCheckpoint's best-effort resume contract, lost daily debt must fail closed.
-        const rows = await engine.executeRaw<{ value: string }>(
-          `SELECT path AS value FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-           UNION ALL SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
-          [key.op, key.fingerprint]);
+        // Keyset batches: a large import can bank one before: per file.
+        const rows: Array<{ value: string }> = [];
+        let cursor = '';
+        for (;;) {
+          opts.signal?.throwIfAborted();
+          const batch = await engine.executeRaw<{ value: string }>(
+            `SELECT value FROM (
+               SELECT path AS value FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+               UNION SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2
+             ) debt WHERE value>$3 ORDER BY value LIMIT 100`,
+            [key.op, key.fingerprint, cursor]);
+          rows.push(...batch);
+          if (batch.length < 100) break;
+          cursor = batch[batch.length - 1]!.value;
+        }
         // Snapshot before recovery banks. Retire only snapshot∪recovery so a
         // concurrent import's later origin-tagged banks survive.
         const slugs = new Set<string>(), days = new Set<string>();
