@@ -1511,5 +1511,66 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).toContain('[[notes:notes/c]]');
   });
 
+  test('source-record revision conflict retries and keeps newer metadata', async () => {
+    await engine.setConfig('cycle.timezone', 'UTC');
+    await seedRecord('cas-record', 'gmail', '2026-09-30T00:00:00Z');
+    const newerUpdated = '2026-09-30T12:00:00.000Z';
+    let conflicts = 0;
+    const realPut = engine.putPage.bind(engine);
+    const putSpy = spyOn(engine, 'putPage').mockImplementation(async (slug, page, opts) => {
+      if (
+        opts?.sourceId === DAILY_MEMORY_SOURCE_ID
+        && typeof slug === 'string'
+        && slug.startsWith('source-records/')
+        && conflicts === 0
+      ) {
+        conflicts += 1;
+        await realPut(slug, {
+          type: 'note',
+          title: 'gmail message record',
+          compiled_truth: [
+            'Source: gmail',
+            'Record ID: cas-record',
+            'Source reference: cas-record',
+            'Entity type: message',
+            'Entity ID: cas-record',
+            `Updated: ${newerUpdated}`,
+            '',
+          ].join('\n'),
+          timeline: '',
+          frontmatter: {
+            dream_generated: true,
+            visibility: 'private',
+            source_record_id: 'cas-record',
+            source_record_type: 'gmail',
+            source_record_ref: 'cas-record',
+            source_record_updated_at: newerUpdated,
+            raw_trace_exempt: true,
+            raw_trace_exempt_reason: 'source record metadata index; payload stays in source_records',
+          },
+        }, { sourceId: DAILY_MEMORY_SOURCE_ID, force: true });
+        throw new PageRevisionConflictError(
+          '11111111-1111-1111-1111-111111111111',
+          '22222222-2222-2222-2222-222222222222',
+        );
+      }
+      return realPut(slug, page, opts);
+    });
+
+    const result = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    putSpy.mockRestore();
+    expect(conflicts).toBe(1);
+    expect(result.reason).not.toBe('error');
+    expect(result.written).toBe(true);
+    const pages = await engine.executeRaw<{ slug: string; updated_at: string }>(
+      `SELECT slug, frontmatter->>'source_record_updated_at' AS updated_at
+       FROM pages WHERE source_id=$1 AND slug LIKE 'source-records/%' AND deleted_at IS NULL`,
+      [DAILY_MEMORY_SOURCE_ID],
+    );
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.updated_at).toBe(newerUpdated);
+  });
+
+
 
 });

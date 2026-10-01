@@ -483,13 +483,6 @@ async function putSourceRecordIndex(
   record: SourceRecordLink,
 ): Promise<{ available: boolean; wrote: boolean }> {
   await ensureDailyMemorySource(engine);
-  const existing = await engine.getPage(record.slug, {
-    sourceId: DAILY_MEMORY_SOURCE_ID,
-    includeDeleted: true,
-  });
-  if (existing && existing.frontmatter?.dream_generated !== true) {
-    return { available: !existing.deleted_at, wrote: false };
-  }
   const updatedAt = new Date(record.updated_at).toISOString();
   const title = `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`;
   const compiled_truth = [
@@ -501,35 +494,71 @@ async function putSourceRecordIndex(
     `Updated: ${updatedAt}`,
     '',
   ].join('\n');
-  if (
-    existing
-    && !existing.deleted_at
-    && existing.title === title
-    && existing.compiled_truth === compiled_truth
-    && existing.frontmatter?.dream_generated === true
-    && existing.frontmatter?.visibility === 'private'
-    && existing.frontmatter?.source_record_type === sourceType
-    && existing.frontmatter?.source_record_ref === record.source_ref
-    && existing.frontmatter?.source_record_id === record.id
-    && existing.frontmatter?.source_record_updated_at === updatedAt
-  ) {
-    return { available: true, wrote: false };
+  const maxAttempts = 8;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    // Bound the write to the revision observed before put so a concurrent
+    // same-slug writer that commits first forces a retry instead of a stale overwrite.
+    const snapshot = await engine.readPageSnapshot(record.slug, {
+      sourceId: DAILY_MEMORY_SOURCE_ID,
+      includeDeleted: true,
+    });
+    const existing = snapshot?.page ?? null;
+    if (existing && existing.frontmatter?.dream_generated !== true) {
+      return { available: !existing.deleted_at, wrote: false };
+    }
+    const existingUpdated = existing?.frontmatter?.source_record_updated_at;
+    if (
+      existing
+      && !existing.deleted_at
+      && existing.frontmatter?.dream_generated === true
+      && existing.frontmatter?.source_record_id === record.id
+      && existing.frontmatter?.source_record_type === sourceType
+      && existing.frontmatter?.source_record_ref === record.source_ref
+      && typeof existingUpdated === 'string'
+      && existingUpdated > updatedAt
+    ) {
+      // A concurrent writer already stored newer metadata for this record.
+      return { available: true, wrote: false };
+    }
+    if (
+      existing
+      && !existing.deleted_at
+      && existing.title === title
+      && existing.compiled_truth === compiled_truth
+      && existing.frontmatter?.dream_generated === true
+      && existing.frontmatter?.visibility === 'private'
+      && existing.frontmatter?.source_record_type === sourceType
+      && existing.frontmatter?.source_record_ref === record.source_ref
+      && existing.frontmatter?.source_record_id === record.id
+      && existing.frontmatter?.source_record_updated_at === updatedAt
+    ) {
+      return { available: true, wrote: false };
+    }
+    const writeOpts = snapshot
+      ? { sourceId: DAILY_MEMORY_SOURCE_ID, expectedRevision: snapshot.revision }
+      : { sourceId: DAILY_MEMORY_SOURCE_ID, force: false as const };
+    try {
+      await engine.putPage(record.slug, {
+        type: 'note',
+        title,
+        compiled_truth,
+        timeline: '',
+        frontmatter: {
+          dream_generated: true,
+          visibility: 'private',
+          source_record_id: record.id,
+          source_record_type: sourceType,
+          source_record_ref: record.source_ref,
+          source_record_updated_at: updatedAt,
+          raw_trace_exempt: true,
+          raw_trace_exempt_reason: 'source record metadata index; payload stays in source_records',
+        },
+      }, writeOpts);
+      return { available: true, wrote: true };
+    } catch (err) {
+      if (err instanceof PageRevisionConflictError && attempt + 1 < maxAttempts) continue;
+      throw err;
+    }
   }
-  await engine.putPage(record.slug, {
-    type: 'note',
-    title,
-    compiled_truth,
-    timeline: '',
-    frontmatter: {
-      dream_generated: true,
-      visibility: 'private',
-      source_record_id: record.id,
-      source_record_type: sourceType,
-      source_record_ref: record.source_ref,
-      source_record_updated_at: updatedAt,
-      raw_trace_exempt: true,
-      raw_trace_exempt_reason: 'source record metadata index; payload stays in source_records',
-    },
-  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-  return { available: true, wrote: true };
+  throw new Error('Source record index write exhausted revision retries');
 }
