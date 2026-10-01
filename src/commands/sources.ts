@@ -926,7 +926,7 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  if (id === 'default' || id === 'dream') {
+  if (id === 'default') {
     console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
   }

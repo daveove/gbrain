@@ -334,6 +334,8 @@ export {
 export interface SyncOpts {
   /** Standalone entrypoints accept affected-day maintenance before advancing. */
   dailyMemoryFollowup?: boolean;
+  /** Internal cycle owner banks affected days without a duplicate standalone job. */
+  dailyMemoryOwnerJobId?: number;
   repoPath?: string;
   dryRun?: boolean;
   full?: boolean;
@@ -2282,6 +2284,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // unsyncable cleanup in source A doesn't accidentally sweep same-slug
   // pages in sources B/C/D.
   const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: opts.dailyMemoryOwnerJobId,
     sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: pin, scope: '', signal: opts.signal,
     paths: [...filtered.added, ...filtered.modified, ...filtered.deleted,
       ...filtered.renamed.flatMap(row => [row.from, row.to]), ...unsyncableModified].map(modePath),
@@ -4070,6 +4073,7 @@ async function performFullSync(
   // source (incremental path already does this).
   // #753/#774: thread exclude (--exclude CLI) + slugRoot (monorepo subdir).
   const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: opts.dailyMemoryOwnerJobId,
     sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: headCommit,
     scope: slugRoot && syncScopeRoot !== gitContextRoot ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '',
     signal: opts.signal,

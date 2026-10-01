@@ -28,11 +28,15 @@ export async function readFullSyncAffectedSlugs(engine: BrainEngine, opts: {
 export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   sourceId: string; commit: string; scope: string; paths?: string[];
   acceptsPath?: (path: string) => boolean; signal?: AbortSignal;
+  ownerJobId?: number;
   protect?: (key: { op: string; fingerprint: string; kind: 'manifest' }) => Promise<void>;
 }) {
   // Retained remote jobs cannot submit descendant maintenance work.
   const authority = currentSubmissionAuthority();
   if (authority && authority.kind !== 'application') return undefined;
+  if (opts.ownerJobId !== undefined && (!Number.isSafeInteger(opts.ownerJobId) || opts.ownerJobId <= 0)) {
+    throw new Error('Invalid daily-memory cycle owner job');
+  }
   // Fingerprint is source+scope only. Including the target commit stranded
   // unfinished debt when HEAD moved before accept() (full sync retry).
   const key = { op: 'sync-daily-memory', fingerprint: createHash('sha256')
@@ -53,12 +57,21 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
     const fresh = delta.filter(value => !entries.has(value));
     if (!await appendCompleted(engine, key, fresh)) throw new Error('Daily-memory sync checkpoint unavailable; anchor retained');
     fresh.forEach(value => entries.add(value));
+    if (opts.ownerJobId !== undefined) {
+      const ownedDays = [...entries].filter(value => value.startsWith('day:'))
+        .map(value => JSON.stringify({ jobId: opts.ownerJobId, day: value.slice(4) }));
+      const ownerKey = { op: 'autopilot-sync-daily-memory', fingerprint: createHash('sha256')
+        .update(opts.sourceId).digest('hex').slice(0, 16) };
+      if (!await appendCompleted(engine, ownerKey, ownedDays)) throw new Error('Cycle daily-memory checkpoint unavailable; anchor retained');
+    }
   };
   await capture();
   return {
     async accept() {
       await capture();
       opts.signal?.throwIfAborted();
+      // The enclosing cycle consumes its source debt through its existing handoff.
+      if (opts.ownerJobId !== undefined) return;
       const days = [...entries].filter(value => value.startsWith('day:')).map(value => value.slice(4)).sort();
       const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit, days });
       opts.signal?.throwIfAborted();

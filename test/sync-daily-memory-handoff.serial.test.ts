@@ -9,6 +9,9 @@ import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { performSync } from '../src/commands/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
+import { DAILY_MEMORY_PAGE_CAP, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
 let repo: string;
@@ -38,6 +41,77 @@ describe('standalone sync daily-memory durable handoff', () => {
     await performSync(engine, { ...opts(), full: true, dailyMemoryFollowup: false });
   });
   afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
+
+  async function filenameCycleFixture() {
+    const from='notes/zz-2026-01-06-fixture.md',to='notes/zz-2026-01-07-fixture.md';
+    const oldSlug=from.slice(0,-3),newSlug=to.slice(0,-3);
+    const body='---\ntitle: Synthetic filename fixture\n---\n\n'+Array.from({length:20},(_,i)=>`Synthetic unchanged paragraph ${i}.`).join('\n');
+    writeFileSync(join(repo,from),body); git('add','-A');git('commit','-m','seed filename date');
+    await performSync(engine,{...opts(),dailyMemoryFollowup:false});
+    const seed=git('rev-parse','HEAD');
+    expect(await dailyMemoryDaysForSlugs(engine,'default',[oldSlug])).toContain('2026-01-06');
+    for(let i=0;i<DAILY_MEMORY_PAGE_CAP;i++) await engine.putPage(`aaa-cap-${String(i).padStart(2,'0')}`,{
+      type:'note',title:'Synthetic cap fixture',compiled_truth:'Synthetic body',frontmatter:{date:'2026-01-06'},
+      effective_date:new Date('2026-01-06T00:00:00Z'),effective_date_source:'date',
+    });
+    await writeDailyMemoryFromSources(engine,{date:'2026-01-06'});
+    expect((await engine.getPage('daily-memory/2026-01-06',{sourceId:DAILY_MEMORY_SOURCE_ID}))!.compiled_truth).not.toContain(`[[default:${oldSlug}]]`);
+    renameSync(join(repo,from),join(repo,to));writeFileSync(join(repo,to),body+'\nSynthetic new paragraph.\n');
+    git('add','-A');git('commit','-m','rename filename day');
+    const target=git('rev-parse','HEAD');
+    expect(git('diff','--name-status','-M',seed,target)).toMatch(/^R\d+\s/);
+    await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'",[repo]);
+    const handlers=new Map<string,(job:any)=>Promise<any>>();
+    await registerBuiltinHandlers({register(name:string,fn:(job:any)=>Promise<any>){handlers.set(name,fn);}} as never,engine,{quiet:true});
+    const queue=new MinionQueue(engine);
+    await queue.add('autopilot-cycle',{source_id:'default',phases:['sync'],pull:false});
+    const job=(await queue.claim('synthetic-cycle-owner',60_000,'default',['autopilot-cycle']))!;
+    expect(job).not.toBeNull();
+    return {seed,target,oldSlug,newSlug,job,handler:handlers.get('autopilot-cycle')!};
+  }
+
+  test('queued filename-only rename retains the capped old day through a rejected post-cycle handoff',async () => {
+    const home=mkdtempSync(join(tmpdir(),'gbrain-cycle-days-home-'));
+    try {await withEnv({GBRAIN_HOME:home},async () => {
+      const fixture=await filenameCycleFixture();
+      const add=MinionQueue.prototype.add;
+      const failure=spyOn(MinionQueue.prototype,'add').mockImplementation(async function(this:MinionQueue,name,data,options){
+        if(name==='autopilot-daily-memory') throw new Error('Synthetic cycle handoff rejection');
+        return add.call(this,name,data,options);
+      });
+      try {await expect(fixture.handler(fixture.job)).rejects.toThrow('Synthetic cycle handoff rejection');}
+      finally {failure.mockRestore();}
+      expect(await anchor()).toBe(fixture.target);
+      expect(await engine.getPage(fixture.oldSlug)).toBeNull();
+      expect(await dailyMemoryDaysForSlugs(engine,'default',[fixture.newSlug])).not.toContain('2026-01-06');
+      const debt=await engine.executeRaw<{path:string}>("SELECT path FROM op_checkpoint_paths WHERE op='autopilot-sync-daily-memory'");
+      expect(debt.some(row=>JSON.parse(row.path).day==='2026-01-06')).toBe(true);
+      await fixture.handler(fixture.job);
+      const batches=await engine.executeRaw<{data:{daily_memory_dates:string[];daily_memory_source_job_id:number}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+      expect(batches).toHaveLength(1);
+      expect(batches[0]!.data.daily_memory_source_job_id).toBe(fixture.job.id);
+      expect(batches[0]!.data.daily_memory_dates).toEqual(expect.arrayContaining(['2026-01-06','2026-01-07']));
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op IN ('sync-daily-memory','autopilot-sync-daily-memory')")).toHaveLength(0);
+    });} finally {rmSync(home,{recursive:true,force:true});}
+  });
+
+  test('rejected cycle pre-write date bank keeps canonical rename and sync anchor untouched',async () => {
+    const home=mkdtempSync(join(tmpdir(),'gbrain-cycle-days-home-'));
+    try {await withEnv({GBRAIN_HOME:home},async () => {
+      const fixture=await filenameCycleFixture();const direct=engine.executeRawDirect;
+      const failure=spyOn(engine,'executeRawDirect').mockImplementation(async function<T>(this:PGLiteEngine,sql:string,params?:unknown[],rawOpts?:{signal?:AbortSignal}):Promise<T[]>{
+        if(sql.includes('INSERT INTO op_checkpoint_paths')&&params?.[0]==='autopilot-sync-daily-memory') throw new Error('Synthetic cycle date bank rejection');
+        return direct.call(this,sql,params,rawOpts) as Promise<T[]>;
+      });
+      try {expect((await fixture.handler(fixture.job)).partial).toBe(true);} finally {failure.mockRestore();}
+      expect(await anchor()).toBe(fixture.seed);
+      expect(await engine.getPage(fixture.oldSlug)).not.toBeNull();expect(await engine.getPage(fixture.newSlug)).toBeNull();
+      await fixture.handler(fixture.job);
+      expect(await anchor()).toBe(fixture.target);
+      const batches=await engine.executeRaw<{data:{daily_memory_dates:string[]}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+      expect(batches.some(row=>['2026-01-06','2026-01-07'].every(day=>row.data.daily_memory_dates.includes(day)))).toBe(true);
+    });} finally {rmSync(home,{recursive:true,force:true});}
+  });
 
   for (const full of [false, true]) {
     test(`${full ? 'full reconciliation' : 'incremental rename'} retries old and new days before consuming anchor`, async () => {
