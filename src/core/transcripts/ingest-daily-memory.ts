@@ -1,7 +1,7 @@
 /** Durable daily-memory refresh handoff for transcript ingest (and connectors that reuse it). */
 import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
-import { appendCompleted, type OpCheckpointKey } from '../op-checkpoint.ts';
+import { appendCompleted, appendCompletedInTransaction, type OpCheckpointKey } from '../op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../cycle/daily-memory.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../cycle/daily-memory-followup.ts';
 
@@ -116,11 +116,19 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       await bank([`before:${JSON.stringify(prior)}`]);
       for (const slug of unique) priorBySlug.set(slug, prior);
     },
-    async touched(slugs: string[]) {
+    async touched(slugs: string[], opts?: { engine?: BrainEngine }) {
       const unique = [...new Set(slugs.filter(Boolean))];
       if (unique.length) {
         const prior = [...new Set(unique.map(slug => priorBySlug.get(slug)).filter((record): record is Prior => !!record))];
-        await bank([...prior.map(record => `before:${JSON.stringify(record)}`), ...unique.map(slug => `slug:${slug}`)]);
+        const entries = [...prior.map(record => `before:${JSON.stringify(record)}`), ...unique.map(slug => `slug:${slug}`)];
+        const wrapped = entries.map(value => JSON.stringify({ origin, value }));
+        const target = opts?.engine;
+        if (target && target !== engine) {
+          // Share the caller's open transaction (e.g. deletePage + debt bank).
+          await appendCompletedInTransaction(target, key, wrapped);
+        } else if (!await appendCompleted(engine, key, wrapped)) {
+          throw new Error('Daily-memory transcript ingest checkpoint unavailable');
+        }
         for (const slug of unique) priorBySlug.delete(slug);
       }
     },

@@ -479,15 +479,24 @@ export async function runTranscriptsIngest(
                   }, LEASE_RENEW_EVERY_MS)
                   : undefined;
                 try {
-                  await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                  // Delete and re-bank prior-day debt in one transaction so a
+                  // peer that adopted the pre-delete before: cannot retire the
+                  // only durable entry before the post-delete bank lands.
+                  const deleteAndBank = async (target: typeof engine) => {
+                    await target.deletePage(row.slug, { sourceId: opts.sourceId });
+                    await dailyMemory?.touched([row.slug], { engine: target });
+                  };
+                  if (dailyMemory && typeof engine.transaction === 'function') {
+                    await engine.transaction(deleteAndBank);
+                  } else {
+                    await deleteAndBank(engine);
+                  }
                 } finally {
                   if (renewTimer) clearInterval(renewTimer);
                   await renewInFlight;
                 }
                 result.partsDeleted++;
                 result.slugsTouched.push(row.slug);
-                // Hard deletion cannot reconstruct prior dates; re-bank the pre-write snapshot.
-                await dailyMemory?.touched([row.slug]);
                 if (renewError) {
                   const error = new Error(`${RUN_ABORT_MARKER}: delete lease renewal failed on ${row.slug}`);
                   (error as { cause?: unknown }).cause = renewError;

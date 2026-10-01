@@ -557,8 +557,32 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [day, last!.id])).not.toHaveLength(0);
   });
 
+  test('stale-part delete rolls back when post-delete debt bank fails in-transaction', async () => {
+    const day = '2026-01-11';
+    const slug = 'notes/atomic-delete-bank';
+    await engine.putPage(slug, { type: 'note', title: 'Atomic bank', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [day, slug]);
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'atomic-delete-bank' }))!;
+    await live.before([slug]);
+    const before = await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(before.length).toBeGreaterThan(0);
+    await expect(engine.transaction(async (tx) => {
+      await tx.deletePage(slug, { sourceId: 'default' });
+      // Force the transactional bank path to fail so delete cannot commit alone.
+      const broken = Object.create(tx) as typeof tx;
+      Object.defineProperty(broken, 'executeRaw', {
+        value: async () => { throw new Error('synthetic transactional bank failure'); },
+      });
+      await live.touched([slug], { engine: broken });
+    })).rejects.toThrow('synthetic transactional bank failure');
+    expect(await engine.getPage(slug)).not.toBeNull();
+    const retained = await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(retained.length).toBeGreaterThan(0);
+    await live.release();
+  });
+
   for (const failRenew of [false, true]) {
-    test(`in-flight stale-part deletion preserves old-day debt with ${failRenew ? 'failed' : 'successful'} renewal`, async () => {
+    test(`stale-part deletion banks old-day debt atomically with ${failRenew ? 'failed' : 'successful'} renewal`, async () => {
       const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-delete-lease-'));
       const file = join(dir, 'session.jsonl'), nextFile = join(dir, 'next.jsonl');
       const timestamp = '2026-01-26T12:00:00.000Z', oldDay = '2026-01-14';
@@ -573,11 +597,21 @@ describe('daily memory from sources the brain already holds', () => {
       const staleSlug = `${initial.slugsTouched[0]!}-p2`;
       await engine.putPage(staleSlug, { type: 'note', title: 'Stale part fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: oldDay } });
       await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [oldDay, staleSlug]);
-      // No rendered daily index exists for oldDay: post-delete slug lookup alone cannot recover it.
       expect(await engine.getPage(dailyMemorySlug(oldDay), { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
-      let enter!: () => void, settle!: () => void;
-      const entered = new Promise<void>(resolve => { enter = resolve; });
-      const deferred = new Promise<void>(resolve => { settle = resolve; });
+      // Peer retires the pre-delete before: before the atomic delete+bank runs.
+      const preparer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'pre-delete-peer' }))!;
+      await preparer.before([staleSlug]);
+      const [marker] = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+      const wrapped = JSON.parse(marker!.path) as { origin: string; value: string };
+      const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+      await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, marker!.path]);
+      const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'peer-deletion' }))!;
+      await peer.finish();
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+      const beforeJobs = await engine.executeRaw<{ id: number }>("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 ORDER BY id", [oldDay]);
+      expect(beforeJobs.length).toBeGreaterThan(0);
+      const lastId = beforeJobs.at(-1)!.id;
+      await preparer.release();
       const active = new Map<ReturnType<typeof setInterval>, () => unknown>();
       const originalInterval = globalThis.setInterval, originalClear = globalThis.clearInterval;
       const timers = spyOn(globalThis, 'setInterval').mockImplementation(((callback: (...args: unknown[]) => unknown, delay: number, ...args: unknown[]) => {
@@ -589,11 +623,15 @@ describe('daily memory from sources the brain already holds', () => {
         active.delete(handle); originalClear(handle);
       }) as typeof clearInterval);
       let deleting = false;
-      const originalDelete = engine.deletePage.bind(engine);
-      const deletion = spyOn(engine, 'deletePage').mockImplementation(async (slug, options) => {
-        deleting = true; enter();
-        try { await deferred; await originalDelete(slug, options); }
-        finally { deleting = false; }
+      const originalDelete = PGLiteEngine.prototype.deletePage;
+      const deletion = spyOn(engine, 'deletePage').mockImplementation(async function (this: PGLiteEngine, slug, options) {
+        deleting = true;
+        try {
+          // Renew rejects without DB I/O; keep this off the open delete transaction.
+          if (failRenew && active.size) await [...active.values()][0]!();
+          // Preserve the transactional receiver so delete+bank share one connection.
+          await originalDelete.call(this, slug, options);
+        } finally { deleting = false; }
       });
       const leaseModule = await import('../src/core/transcripts/ingest-daily-memory.ts');
       const originalCreate = leaseModule.createTranscriptIngestDailyMemory;
@@ -606,37 +644,18 @@ describe('daily memory from sources the brain already holds', () => {
         return live;
       });
       const admitted: string[] = [];
-      const run = runTranscriptsIngest(engine, { paths: [file, nextFile], format: 'codex', sourceId: 'default',
-        onSession: id => { admitted.push(id); } }).then(result => ({ result, error: undefined as unknown }), error => ({ result: undefined, error }));
       try {
-        await entered;
-        expect(active.size).toBe(1);
-        const markers = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
-        expect(markers).toHaveLength(1);
-        const wrapped = JSON.parse(markers[0]!.path) as { origin: string; value: string };
-        const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
-        await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, markers[0]!.path]);
-        // Timer callback returns the complete renewal promise; no wall-clock sleep.
-        await [...active.values()][0]!();
-        const peer = (await originalCreate(engine, { sourceId: 'default', runKey: 'peer-deletion' }))!;
-        await peer.finish();
-        const before = await engine.executeRaw<{ id: number }>("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 ORDER BY id", [oldDay]);
-        if (failRenew) {
-          expect(before.length).toBeGreaterThan(0);
-          expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
-        } else expect(before).toHaveLength(0);
-        const lastId = before.at(-1)?.id ?? 0;
-        settle();
-        const outcome = await run;
+        const outcome = await runTranscriptsIngest(engine, {
+          paths: [file, nextFile], format: 'codex', sourceId: 'default',
+          onSession: id => { admitted.push(id); },
+        }).then(result => ({ result, error: undefined as unknown }), error => ({ result: undefined, error }));
         expect(await engine.getPage(staleSlug)).toBeNull();
-        expect(active.size).toBe(0);
         if (failRenew) {
           expect(outcome.error).toBeInstanceOf(Error);
           expect((outcome.error as Error).message).toContain('delete lease renewal failed');
           expect(admitted).toEqual(['delete-lease-fixture']);
           const retained = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
           expect(retained.some(row => JSON.parse(JSON.parse(row.path).value.slice(7)).days.includes(oldDay))).toBe(true);
-          // The rejected origin releases its lease but retains re-banked pre-delete dates.
           const recovery = (await originalCreate(engine, { sourceId: 'default', runKey: 'recover-deletion' }))!;
           await recovery.finish();
         } else {
@@ -648,7 +667,6 @@ describe('daily memory from sources the brain already holds', () => {
         const after = await engine.executeRaw<{ id: number }>("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [oldDay, lastId]);
         expect(after.length).toBeGreaterThan(0);
       } finally {
-        settle(); await run;
         deletion.mockRestore(); leases.mockRestore(); timers.mockRestore(); clears.mockRestore();
         rmSync(dir, { recursive: true, force: true });
       }
