@@ -33,14 +33,25 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
   let runningValue = `running:${new Date().toISOString()}`;
   await bank([runningValue]);
   const clearRunning = async () => {
-    const marker = JSON.stringify({ origin, value: runningValue });
+    // Drop every running marker for this origin (not only the latest stamp) so a
+    // failed renew cannot leave an orphaned prior lease that blocks peer adoption.
     for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
       await engine.executeRawDirect(
-        'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=$3',
-        [key.op, fingerprint, marker]);
+        `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           AND path::jsonb->>'origin'=$3
+           AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')`,
+        [key.op, fingerprint, origin]);
       await engine.executeRawDirect(
-        'UPDATE op_checkpoints SET completed_keys=completed_keys-$3::text[] WHERE op=$1 AND fingerprint=$2',
-        [key.op, fingerprint, [marker]]);
+        `UPDATE op_checkpoints SET completed_keys=(
+           SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
+           FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
+           WHERE NOT (
+             elem::jsonb->>'origin'=$3
+             AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
+           )
+         ), updated_at=now()
+         WHERE op=$1 AND fingerprint=$2`,
+        [key.op, fingerprint, origin]);
     }
   };
   const runningOriginActive = (value: string, at = Date.now()) => {
@@ -57,33 +68,32 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     /** Refresh the lease timestamp so peers keep treating this origin as live. */
     async renew() {
       opts.signal?.throwIfAborted();
-      runningValue = `running:${new Date().toISOString()}`;
-      const keep = JSON.stringify({ origin, value: runningValue });
-      await bank([runningValue]);
-      // Drop every other running marker for this origin after banking the fresh
-      // stamp — including an externally aged path that no longer matches the
-      // prior in-memory value — so peers never see an unmarked gap and orphans
-      // cannot linger past finish().
+      // Bank the replacement first; only then advance runningValue / delete peers
+      // so a failed renew leaves release() able to clear the prior fresh marker.
+      const next = `running:${new Date().toISOString()}`;
+      const keep = JSON.stringify({ origin, value: next });
+      await bank([next]);
       for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
-        const rows = await engine.executeRaw<{ path: string }>(
-          `SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-           UNION SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
-          [key.op, fingerprint]);
-        for (const row of rows) {
-          if (!row.path.startsWith('{') || row.path === keep) continue;
-          let wrapped: { origin?: unknown; value?: unknown };
-          try { wrapped = JSON.parse(row.path); } catch { continue; }
-          if (wrapped && wrapped.origin === origin && typeof wrapped.value === 'string'
-            && (wrapped.value === 'running' || wrapped.value.startsWith('running:'))) {
-            await engine.executeRawDirect(
-              'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=$3',
-              [key.op, fingerprint, row.path]);
-            await engine.executeRawDirect(
-              'UPDATE op_checkpoints SET completed_keys=completed_keys-$3::text[] WHERE op=$1 AND fingerprint=$2',
-              [key.op, fingerprint, [row.path]]);
-          }
-        }
+        await engine.executeRawDirect(
+          `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+             AND path::jsonb->>'origin'=$3
+             AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
+             AND path<>$4`,
+          [key.op, fingerprint, origin, keep]);
+        await engine.executeRawDirect(
+          `UPDATE op_checkpoints SET completed_keys=(
+             SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
+             FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
+             WHERE NOT (
+               elem::jsonb->>'origin'=$3
+               AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
+               AND elem<>$4
+             )
+           ), updated_at=now()
+           WHERE op=$1 AND fingerprint=$2`,
+          [key.op, fingerprint, origin, keep]);
       }
+      runningValue = next;
     },
     async before(slugs: string[]) {
       opts.signal?.throwIfAborted();
