@@ -622,12 +622,12 @@ describe('daily memory from sources the brain already holds', () => {
     const deferred = new Promise<void>(resolve => { settle = resolve; });
     let held = false;
     const originalDirect = engine.executeRawDirect;
-    const retirement = spyOn(engine, 'executeRawDirect').mockImplementation(async function (this: PGLiteEngine, sql, params) {
+    const retirement = spyOn(engine, 'executeRawDirect').mockImplementation(async function <T = Record<string, unknown>>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
       if (!held && sql.includes('DELETE FROM op_checkpoint_paths') && sql.includes('path=ANY')) {
         held = true; pause(); await deferred;
       }
       // Transaction engines inherit this spy; preserve their own query handle.
-      return originalDirect.call(this, sql, params);
+      return (originalDirect<T>).call(this, sql, params);
     });
     const finish = peer.finish();
     try {
