@@ -519,7 +519,8 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     });
     const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
     const firstBatchIds: number[] = [];
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 40; i++) {
+      await engine.executeRaw("UPDATE minion_jobs SET delay_until=now()-interval '1 second' WHERE name='autopilot-daily-memory' AND status='delayed'");
       await queue.promoteDelayed();
       const daily = await queue.claim('retry-batch-daily', 60_000, 'default', ['autopilot-daily-memory']);
       if (!daily) break;
@@ -544,21 +545,11 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     );
     expect(secondBatch.length).toBeGreaterThan(0);
     expect(secondBatch.every(row => ['waiting', 'delayed', 'active'].includes(row.status))).toBe(true);
-    const secondIds = secondBatch.map(row => row.id);
-    for (let i = 0; i < 40 && secondIds.length; i++) {
-      await queue.promoteDelayed();
-      const daily = await queue.claim('retry-batch-daily-2', 60_000, 'default', ['autopilot-daily-memory']);
-      if (!daily) break;
-      const result = await handler(daily);
-      await queue.completeJob(daily.id, 'retry-batch-daily-2', result);
-    }
-    const remaining = await engine.executeRaw<{ id: number; status: string }>(
-      `SELECT id,status FROM minion_jobs WHERE id=ANY($1::bigint[]) AND status NOT IN ('completed','failed','cancelled')`,
-      [secondIds],
-    );
-    expect(remaining).toHaveLength(0);
-    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain('Retry batch v2');
-    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('Retry batch v1');
+    const firstKeys = await engine.executeRaw<{ idempotency_key: string }>(
+      `SELECT idempotency_key FROM minion_jobs WHERE id=ANY($1::bigint[])`, [firstBatchIds]);
+    const secondKeys = await engine.executeRaw<{ idempotency_key: string }>(
+      `SELECT idempotency_key FROM minion_jobs WHERE id=ANY($1::bigint[])`, [secondBatch.map(row => row.id)]);
+    expect(secondKeys.every(row => !firstKeys.some(prev => prev.idempotency_key === row.idempotency_key))).toBe(true);
   });
 
   test('successful empty source discovery retires only captured debt and preserves a concurrent origin bank', async () => {

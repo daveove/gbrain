@@ -215,9 +215,10 @@ async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string
   // batch for the same parent+days cannot satisfy newly banked retry work.
   const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId, replayRound, handoffGeneration })).digest('hex').slice(0, 20);
   const day = days[Math.min(Math.max(cursor, 0), Math.max(days.length - 1, 0))] ?? days[0];
-  const data = { daily_memory_date: day, daily_memory_dates: days,
+  const data: Record<string, unknown> = { daily_memory_date: day, daily_memory_dates: days,
     daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor,
     daily_memory_day_job_ids: childIds, daily_memory_replay_round: replayRound };
+  if (handoffGeneration) data.daily_memory_handoff_generation = handoffGeneration;
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily-batch:${sourceJobId}:${hash}:${cursor}`,
     max_attempts: 2, timeout_ms: 60_000, delay,
@@ -359,6 +360,7 @@ async function settleDailyDateChildren(
   sourceJobId: number,
   childIds: number[],
   replayRound: number,
+  handoffGeneration = '',
 ) {
   const queue = new MinionQueue(engine);
   const rows = childIds.length ? await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
@@ -368,7 +370,7 @@ async function settleDailyDateChildren(
   }
   job.signal?.throwIfAborted();
   if (rows.some(row => PENDING.has(row.status))) {
-    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000, job.id, replayRound);
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, childIds, 30_000, job.id, replayRound, handoffGeneration);
     return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_days_queued: days };
   }
   const failed = rows.filter(row => row.status === 'dead' || row.status === 'failed' || row.status === 'cancelled');
@@ -385,7 +387,7 @@ async function settleDailyDateChildren(
     }));
   }
   if (replayed.length) {
-    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, replayed, 30_000, job.id, replayRound + 1);
+    const id = await queueDailyDateBatch(queue, days, sourceJobId, days.length, replayed, 30_000, job.id, replayRound + 1, handoffGeneration);
     return { daily_memory_pending: true, daily_memory_job_id: id, daily_memory_replayed: replayed.length };
   }
   return {
@@ -400,29 +402,35 @@ async function dispatchDailyDateBatch(engine: BrainEngine, job: DailyJob) {
   const cursor = job.data.daily_memory_cursor, sourceJobId = job.data.daily_memory_source_job_id;
   const rawChildren = job.data.daily_memory_day_job_ids ?? [];
   const replayRound = job.data.daily_memory_replay_round ?? 0;
+  const handoffGeneration = typeof job.data.daily_memory_handoff_generation === 'string'
+    ? job.data.daily_memory_handoff_generation : '';
   if (!Array.isArray(days) || !days.length || !days.every(isDay)
     || !Number.isSafeInteger(cursor) || (cursor as number) < 0
     || !Number.isSafeInteger(sourceJobId) || (sourceJobId as number) <= 0
     || !Number.isSafeInteger(replayRound) || (replayRound as number) < 0 || (replayRound as number) > 2
+    || (handoffGeneration !== '' && (handoffGeneration.length < 8 || handoffGeneration.length > 80))
     || !Array.isArray(rawChildren) || !rawChildren.every(id => Number.isSafeInteger(id) && id > 0)) {
     throw new Error('Invalid affected-day continuation');
   }
   const queue = new MinionQueue(engine);
   const start = cursor as number;
   let childIds = [...rawChildren as number[]];
+  const fanoutKey = handoffGeneration
+    ? `source:${sourceJobId}:${handoffGeneration}`
+    : `source:${sourceJobId}`;
   // Cursor past the end means we are only waiting on / replaying children.
   if (start >= days.length) {
     if (!childIds.length) throw new Error('Invalid affected-day continuation');
-    return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds, replayRound as number);
+    return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds, replayRound as number, handoffGeneration);
   }
   for (const day of days.slice(start, start + 8)) {
     job.signal?.throwIfAborted();
-    childIds.push(await queueFanoutDailyMemory(queue, { day, ids: [], key: `source:${sourceJobId}` }));
+    childIds.push(await queueFanoutDailyMemory(queue, { day, ids: [], key: fanoutKey }));
   }
   const nextCursor = start + 8;
   if (nextCursor < days.length) {
-    const next = await queueDailyDateBatch(queue, days, sourceJobId as number, nextCursor, childIds, 0, 0, replayRound as number);
+    const next = await queueDailyDateBatch(queue, days, sourceJobId as number, nextCursor, childIds, 0, 0, replayRound as number, handoffGeneration);
     return { daily_memory_days_queued: days.slice(start, nextCursor), daily_memory_continuation_id: next };
   }
-  return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds, replayRound as number);
+  return settleDailyDateChildren(engine, job, days, sourceJobId as number, childIds, replayRound as number, handoffGeneration);
 }
