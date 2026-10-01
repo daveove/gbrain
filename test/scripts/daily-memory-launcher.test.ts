@@ -180,6 +180,7 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
     const args = result.calls[0].args;
     expect(args.slice(1, 5)).toEqual(['transcripts', 'ingest', '--format', 'codex']);
+    // No prior watermark: --since falls back to the target day's midnight.
     expect(new Date(args[args.indexOf('--since') + 1]).getTime()).toBe(input.start);
     expect(args.slice(args.indexOf('--source-id'), args.indexOf('--source-id') + 2)).toEqual(['--source-id', 'default']);
     expect(args.slice(args.indexOf('--date-zone'), args.indexOf('--date-zone') + 2)).toEqual(['--date-zone', 'Asia/Manila']);
@@ -190,13 +191,39 @@ finally:
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
+  it('uses the saved watermark as --since so cross-midnight rescans are not filtered', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    // Prior run finished early yesterday; evening messages updated mtime after
+    // that watermark but still before today's start.
+    const priorRun = new Date(input.start - 6 * 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const evening = new Date(input.start - 2 * 3600_000);
+    utimesSync(input.before, evening, evening);
+    mkdirSync(join(home, '.local/state/gbrain'), { recursive: true });
+    writeFileSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'), `${priorRun}\n`);
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
+    const args = result.calls[0].args;
+    expect(args[args.indexOf('--since') + 1]).toBe(priorRun);
+    expect(args).toContain(input.before);
+    expect(args).toContain(input.precedingUtc);
+    expect(args).toContain(input.currentUtc);
+  });
+
   it('regenerates an explicit date without ingesting existing transcripts', () => {
     const { home, run } = fixture();
     todayInputs(home);
+    const mark = join(home, '.local/state/gbrain/daily-memory-codex-mtime');
+    mkdirSync(dirname(mark), { recursive: true });
+    writeFileSync(mark, '2026-09-28T12:00:00Z\n');
+    const before = readFileSync(mark, 'utf8');
     const result = run(['2026-09-29']);
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), '2026-09-29']);
+    // Backfill must not advance the Codex mtime watermark.
+    expect(readFileSync(mark, 'utf8')).toBe(before);
   });
 
   it('writes when the current day has no Codex files', () => {

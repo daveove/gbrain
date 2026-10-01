@@ -338,6 +338,32 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('unchanged finish preserves a concurrent before: bank for later date recovery', async () => {
+    await engine.putPage('notes/stable-transcript', { type: 'note', title: 'Stable', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-20' } });
+    await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-21' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug=ANY($1::text[])", [['notes/stable-transcript', 'notes/mutating-transcript']]);
+    const unchanged = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'unchanged' }))!;
+    const mutating = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'mutating' }))!;
+    await mutating.before(['notes/mutating-transcript']);
+    await unchanged.before(['notes/stable-transcript']);
+    // Unchanged run finishes with no revision drift while mutating still holds
+    // its before: bank and has not written yet.
+    await unchanged.finish();
+    const beforeRows = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(beforeRows).toHaveLength(1);
+    expect(beforeRows[0]!.path).toContain('mutating-transcript');
+    await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture changed', frontmatter: { date: '2026-01-22' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/mutating-transcript'");
+    await mutating.touched(['notes/mutating-transcript']);
+    await mutating.finish();
+    const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    // Prior day from before: plus the new date after the write.
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-21'))).toBe(true);
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-22'))).toBe(true);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+  });
+
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-codex-manila-day-'));
     const file = join(dir, 'session.jsonl');

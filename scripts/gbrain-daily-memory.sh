@@ -77,7 +77,11 @@ run_command() {
   sed -E 's#postgres(ql)?://[^[:space:]]+#[redacted-url]#g' "$TMP" >> "$LOG"
   return "$ec"
 }
+# Scheduled (no-arg) runs may scan Codex transcripts and may advance the
+# mtime watermark. Explicit-date backfills only rewrite the daily index.
+scheduled_run=0
 if [[ $# -eq 0 ]]; then
+  scheduled_run=1
   day="$(TZ="$zone" date +%Y-%m-%d)"
   files=()
   watermark=""
@@ -87,7 +91,14 @@ if [[ $# -eq 0 ]]; then
   python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" "$zone" "$watermark" > "$TMP"
   while IFS= read -r -d '' path; do files+=("$path"); done < "$TMP"
   if [[ ${#files[@]} -gt 0 ]]; then
-    since="$(python3 -c '
+    # Prefer the prior-run watermark as --since so cross-midnight rescans
+    # (session mtime after last run, last message still before today's
+    # midnight) are not filtered out by ingest.ts. Fall back to the target
+    # day's midnight on the first scheduled run with no watermark yet.
+    if [[ -n "$watermark" ]]; then
+      since="$watermark"
+    else
+      since="$(python3 -c '
 import sys
 from datetime import datetime, time, timezone
 from zoneinfo import ZoneInfo
@@ -95,6 +106,7 @@ day, zone_name = sys.argv[1], sys.argv[2]
 start = datetime.combine(datetime.fromisoformat(day).date(), time(), ZoneInfo(zone_name))
 print(start.astimezone(timezone.utc).isoformat())
 ' "$day" "$zone")"
+    fi
     printf 'codex ingest day=%s zone=%s files=%s\n' "$day" "$zone" "${#files[@]}" >> "$LOG"
     run_command bun "$REPO/src/cli.ts" transcripts ingest --format codex --since "$since" --source-id default --date-zone "$zone" "${files[@]}"
   fi
@@ -104,7 +116,10 @@ print(start.astimezone(timezone.utc).isoformat())
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
-# Advance the Codex mtime watermark only after a successful write so a failed
-# ingest/write retries sessions modified since the prior good run.
-python3 -c 'import datetime, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")' "$WATERMARK"
+# Advance the Codex mtime watermark only after a successful scheduled write.
+# Explicit-date backfills skip transcript selection; advancing here would hide
+# ongoing sessions that were never scanned.
+if [[ "$scheduled_run" -eq 1 ]]; then
+  python3 -c 'import datetime, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")' "$WATERMARK"
+fi
 echo 'daily-memory ok' >> "$LOG"
