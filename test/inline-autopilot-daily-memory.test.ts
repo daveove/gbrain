@@ -26,7 +26,8 @@ for (const status of ['ok', 'clean', 'partial'] as const) test(`inline ${status}
   expect(result).toBe(original);
   expect((await page())?.compiled_truth).toContain('[[default:notes/inline-late]]');
   expect(await engine.getPage('daily-memory/2026-10-01', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
-  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract' AND data->>'sourceId'=$1", [DAILY_MEMORY_SOURCE_ID])).toHaveLength(1);
+  const extract = await engine.executeRaw<{ data: { deferred_commit: string } }>("SELECT data FROM minion_jobs WHERE name='extract' AND data->>'sourceId'=$1", [DAILY_MEMORY_SOURCE_ID]);
+  expect(extract.map(job => job.data.deferred_commit).sort()).toEqual(['daily-memory:2026-09-29', 'daily-memory:2026-09-30']);
 });
 
 test('inline maintenance refreshes its pinned previous-day lookback', async () => {
