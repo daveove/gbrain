@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -124,4 +124,17 @@ test('oversized markdown skips body parse during prior-slug discovery', async ()
   await prior.before(file, 'note.md');
   await prior.finish();
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-20'))).toBe(true);
+});
+
+
+test('prior-date discovery skips dangling symlink bodies and leaves canonical identity unchanged', async () => {
+  const dir = root(), file = join(dir, 'note.md');
+  await engine.putPage('note', { type: 'note', title: 'Canonical fixture', compiled_truth: 'Synthetic existing page', frontmatter: { date: '2026-09-20' } });
+  const before = await engine.readPageSnapshot('note', { sourceId: 'default' });
+  symlinkSync(join(dir, 'missing-target.md'), file);
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await daily.before(file, 'note.md');
+  await daily.finish();
+  expect(await engine.readPageSnapshot('note', { sourceId: 'default' })).toEqual(before);
+  expect(await batches()).toHaveLength(0);
 });

@@ -239,9 +239,43 @@ describe('daily memory from sources the brain already holds', () => {
       const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
         "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
       expect(batches.some(row => row.data.daily_memory_dates?.includes('2026-01-15'))).toBe(true);
+      const accepted = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+      const unchanged = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' });
+      expect(unchanged.pages.imported).toBe(0);
+      expect(unchanged.pages.skipped).toBe(1);
+      expect(unchanged.slugsTouched).toEqual(ingested.slugsTouched);
+      expect(unchanged.cleanScan).toBe(true);
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(accepted);
+
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('transcript refresh rejection recovers through hash-skipped rerun without losing clean-scan failure', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-retry-'));
+    const file = join(dir, 'session.jsonl'), timestamp = '2026-01-16T12:00:00.000Z';
+    writeFileSync(file, [
+      { timestamp, type: 'session_meta', payload: { id: 'retry-day-fixture', timestamp, cwd: dir } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'Synthetic retry fixture.' } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    const opts = { paths: [file], format: 'codex' as const, sourceId: 'default' };
+    try {
+      const rejected = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('Synthetic transcript refresh rejection'); });
+      try {
+        const first = await runTranscriptsIngest(engine, opts);
+        expect(first.pages.imported).toBe(1);
+        expect(first.cleanScan).toBe(false);
+      } finally { rejected.mockRestore(); }
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path LIKE 'slug:%'")).toHaveLength(1);
+      const retried = await runTranscriptsIngest(engine, opts);
+      expect(retried.pages.imported).toBe(0);
+      expect(retried.pages.skipped).toBe(1);
+      expect(retried.cleanScan).toBe(true);
+      const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+      expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-16'))).toBe(true);
+      expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
