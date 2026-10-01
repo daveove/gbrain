@@ -676,8 +676,6 @@ export async function runImport(
         if (renewTimer) clearInterval(renewTimer);
         await renewInFlight;
       }
-      // Renewals must not die silently: an expired lease lets peers retire before: debt.
-      if (renewError) throw renewError;
       // An import that landed while cancellation arrived is still complete.
       // Account for it before stopping, so resume never loses a successful path.
       noteTypeWarning((result as { type_warning?: Parameters<typeof noteTypeWarning>[0] }).type_warning);
@@ -714,6 +712,8 @@ export async function runImport(
           succeededPaths.push(importRelPath); // #3839
         }
       }
+      // Report renewals after committed progress; banked before: debt remains recoverable.
+      if (renewError) throw renewError;
     } catch (e: unknown) {
       if (signal?.aborted) {
         // Do not turn an unrelated infrastructure failure into a timeout.

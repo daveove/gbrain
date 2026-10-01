@@ -363,3 +363,85 @@ test('aborted import releases daily-memory live lease', async () => {
     "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(0);
 });
 
+
+for (const proof of ['checkpoint lease', 'committed accounting', 'renewal failure accounting'] as const) {
+  test(`cancelled in-flight import preserves ${proof} through renewal and settlement`, async () => {
+    const dir = root(), home = root(), file = join(dir, 'note.md');
+    writeFileSync(file, markdown);
+    await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+    await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+    const controller = new AbortController();
+    let enter!: () => void, settle!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const deferred = new Promise<void>(resolve => { settle = resolve; });
+    const callbacks: Array<() => void> = [];
+    const originalInterval = globalThis.setInterval;
+    const timers = spyOn(globalThis, 'setInterval').mockImplementation(((callback: (...args: unknown[]) => void, delay: number, ...args: unknown[]) => {
+      if (delay === 10 * 60_000) callbacks.push(() => callback(...args));
+      return originalInterval(callback, delay, ...args);
+    }) as typeof setInterval);
+    const module = await import('../src/core/import-file.ts');
+    const importer = spyOn(module, 'importFile').mockImplementation(async () => {
+      enter(); await deferred;
+      // Model an already admitted database write settling despite caller abort.
+      await engine.executeRaw("UPDATE pages SET frontmatter=$1::jsonb,effective_date='2026-09-24T00:00:00Z'::timestamptz,effective_date_source='date',compiled_truth='After',updated_at=now() WHERE slug='note' AND source_id='default'", [JSON.stringify({ date: '2026-09-24' })]);
+      return { status: 'imported' as const, slug: 'note', chunks: 1 };
+    });
+    const renewalFailure = new Error('Synthetic renewal storage failure');
+    let renewal: Promise<void> | undefined;
+    const dailyModule = await import('../src/core/import-daily-memory.ts');
+    const originalDaily = dailyModule.createImportDailyMemory;
+    const dailySpy = spyOn(dailyModule, 'createImportDailyMemory').mockImplementation(async (eng, opts) => {
+      const daily = await originalDaily(eng, opts);
+      if (daily && opts.signal) {
+        const renew = daily.renew.bind(daily);
+        daily.renew = () => {
+          renewal = proof === 'renewal failure accounting' ? Promise.reject(renewalFailure) : renew();
+          return renewal;
+        };
+      }
+      return daily;
+    });
+    const run = withEnv({ GBRAIN_HOME: home }, () => runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], {
+      noExtract: true, signal: controller.signal,
+    })).then(value => value, error => error);
+    let retainedBefore = 0;
+    try {
+      await entered;
+      controller.abort();
+      // Advance the persisted lease beyond TTL while the unsignaled file write
+      // remains deferred, then fire its existing ten-minute renewal callback.
+      await expireLiveLeases();
+      expect(callbacks).toHaveLength(1);
+      callbacks[0]!();
+      expect(renewal).toBeDefined();
+      await renewal!.catch(() => undefined);
+      if (proof === 'renewal failure accounting') {
+        settle();
+        expect(await run).toBe(renewalFailure);
+        const { readFileSync, existsSync } = await import('node:fs');
+        const checkpointPath = join(home, '.gbrain', 'import-checkpoint.json');
+        const checkpoint = existsSync(checkpointPath) ? JSON.parse(readFileSync(checkpointPath, 'utf8')) : { completedPaths: [] };
+        expect(checkpoint.completedPaths).toEqual(['note.md']);
+        expect((await engine.executeRaw<{ date: string }>("SELECT frontmatter->>'date' AS date FROM pages WHERE source_id='default' AND slug='note'"))[0]!.date).toBe('2026-09-24');
+        return;
+      }
+
+      await (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!.finish();
+      retainedBefore = (await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).length;
+      if (proof === 'checkpoint lease') expect(retainedBefore).toBe(1);
+      settle();
+      const result = await run;
+      expect(result).toBeInstanceOf(ImportAbortError);
+      expect((result as ImportAbortError).partialResult?.imported).toBe(1);
+      expect(retainedBefore).toBe(1);
+      await (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!.finish();
+      expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+        && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(0);
+    } finally {
+      settle(); await run;
+      importer.mockRestore(); timers.mockRestore(); dailySpy.mockRestore();
+    }
+  });
+}
