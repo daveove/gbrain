@@ -920,9 +920,7 @@ export async function runImport(
   // batches, then rethrown.
   let structuralLinks = 0;
   let linkExtractionError: string | undefined;
-  // Clear only after a complete sweep or an accepted deferred job.
-  let dailyMemoryRefreshRecovered = false;
-  let linkExtractionRecovered = false;
+  let dailyMemoryRefreshRecovered = false, linkExtractionRecovered = false;
   const recordLinkFailure = (message: string): void => {
     preserveCompletedPaths();
     linkExtractionError = message;
