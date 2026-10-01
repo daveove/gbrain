@@ -82,8 +82,8 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   // Lease marks this origin live so an empty peer finish cannot retire our banks.
   await touchLive();
   return {
-    /** Refresh the live lease so peers keep treating this origin as active. */
-    async renew() { await touchLive(); },
+    /** Keep the live lease alive through in-flight writes even after admission cancel. */
+    async renew() { await touchLive(true); },
     /** Drop the live lease without settling debt (abort / early exit). */
     async release() { await clearOwnLive(); },
     async before(filePath: string, relativePath: string) {

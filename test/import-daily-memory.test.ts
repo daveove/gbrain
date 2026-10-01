@@ -344,6 +344,33 @@ test('concurrent renewals leave one live lease', async () => {
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
 });
 
+test('renew keeps live lease after cancellation stops admission', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const controller = new AbortController();
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir, signal: controller.signal }))!;
+  await daily.before(file, 'note.md');
+  const before = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  expect(before).toHaveLength(1);
+  controller.abort();
+  // Admission stopped; non-managed importFile has no signal. Renew must still refresh.
+  await daily.renew();
+  const after = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  expect(after).toHaveLength(1);
+  expect(after[0]!.path).not.toBe(before[0]!.path);
+  // Empty peer must not retire before: debt while the cancelled origin stays live.
+  await (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!.finish();
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
+  await daily.imported('note');
+  await daily.release();
+});
+
 test('aborted import releases daily-memory live lease', async () => {
   const dir = root(), home = root();
   writeFileSync(join(dir, 'note.md'), markdown);
