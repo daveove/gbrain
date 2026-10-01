@@ -516,6 +516,11 @@ async function runIngest(engine: BrainEngine, args: string[]): Promise<void> {
     reporter.finish();
   }
 
+  if (result.dailyMemoryError !== undefined) {
+    console.error(`gbrain transcripts ingest: daily-memory refresh requires retry: ${result.dailyMemoryError}`);
+    setCliExitVerdict(1);
+  }
+
   if (!parsed.embed && !parsed.dryRun && result.pages.imported > 0 && !parsed.quiet) {
     console.error(
       'note: pages imported without embeddings (default) — run the embed backfill ' +

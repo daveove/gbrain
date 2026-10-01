@@ -127,6 +127,8 @@ export interface TranscriptsIngestResult {
   slugsTouched: string[];
   /** True ⇔ no file/session errors and no limit truncation: watermark may advance. */
   cleanScan: boolean;
+  /** Accepted session writes need a retry when their daily refresh handoff fails. */
+  dailyMemoryError?: string;
   /** Newest session last-message ISO seen (imported or filtered). */
   maxSessionTs: string;
 }
@@ -478,9 +480,10 @@ export async function runTranscriptsIngest(
   else if (dailyMemory) {
     try {
       await dailyMemory.finish();
-    } catch {
+    } catch (error) {
       // Fail closed: never report a clean ingest when historical indexes were not queued.
       result.cleanScan = false;
+      result.dailyMemoryError = error instanceof Error ? error.message : String(error);
     }
   }
   return result;
