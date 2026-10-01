@@ -338,4 +338,28 @@ describe('daily memory refresh on source archive/restore', () => {
     }
   });
 
+
+  test('expiry purge queues affected daily-memory days before delete', async () => {
+    const { purgeExpiredSources } = await import('../src/core/destructive-guard.ts');
+    const sourceId = 'expiry-purge-refresh', day = '2026-09-22';
+    await engine.executeRaw(
+      "INSERT INTO sources(id,name,archived,archived_at,archive_expires_at) VALUES($1,'Expiry purge fixture',true,now(),now()-interval '1 hour')",
+      [sourceId],
+    );
+    await engine.putPage('notes/day', {
+      type: 'note', title: 'Fixture', compiled_truth: 'Synthetic', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2",
+      [day, sourceId],
+    );
+    await writeDailyMemoryFromSources(engine, { date: day });
+    const result = await purgeExpiredSources(engine);
+    expect(result.purged).toContain(sourceId);
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
+  });
+
 });
