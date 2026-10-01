@@ -292,7 +292,8 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (!written.length) throw new Error('Affected daily memory dates were not persisted');
     job.data.daily_memory_affected_dates = days;
   }
-  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID());
+  const timezone = pinnedDailyMemoryTimezone(job.data) ?? await resolveCycleTimeZone(engine);
+  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID(), timezone);
   await retireSnapshot();
 }
 
@@ -343,15 +344,16 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   // The lifecycle caller owns the transaction boundary; separate transitions need fresh refreshes.
   const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   opts.signal?.throwIfAborted();
-  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey });
-  await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
+  const timezone = await resolveCycleTimeZone(engine);
+  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey, timezone });
+  await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
   return days;
 }
 
 /** Accept a complete standalone-sync day handoff before its checkpoint advances. */
 export async function queueStandaloneSyncDailyMemory(
   engine: BrainEngine,
-  opts: { sourceId: string; commit: string; days: string[] },
+  opts: { sourceId: string; commit: string; days: string[]; timezone?: string },
 ): Promise<number | null> {
   if (!opts.sourceId || !opts.commit || !Array.isArray(opts.days) || !opts.days.every(isDay)) {
     throw new Error('Invalid standalone sync daily memory handoff');
@@ -362,8 +364,9 @@ export async function queueStandaloneSyncDailyMemory(
   // A checkpoint retry may duplicate an index write, but never reuse a finished refresh.
   const key = `sync:${opts.sourceId}:${opts.commit}:${hash}:${randomUUID()}`;
   const queue = new MinionQueue(engine);
-  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key });
-  return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
+  const timezone = opts.timezone ?? await resolveCycleTimeZone(engine);
+  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key, timezone });
+  return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
 }
 
 async function settleDailyDateChildren(

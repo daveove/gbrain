@@ -38,13 +38,14 @@ function parseReference(value: string): PendingLinkReference | null {
 const PENDING_BATCH_SIZE = 100;
 
 /** Keyset batches filter origins or changed-source target endpoints before parsing. */
+export type PendingLinkScanEnd = { incomplete: boolean; after: string };
+
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], boolean> {
-  let after = '';
+  opts: { signal?: AbortSignal; deadline?: number; after?: string } = {}): AsyncGenerator<PendingLinkRow[], PendingLinkScanEnd> {
+  let after = typeof opts.after === 'string' ? opts.after : '';
   while (true) {
     opts.signal?.throwIfAborted();
-    // true = incomplete (deadline); false = reached the end of the registry.
-    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     const rows = await engine.executeRaw<{ key: string; value: string }>(
       `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
         AND ($2::text IS NULL OR CASE WHEN key LIKE $1 AND pg_input_is_valid(value,'jsonb') THEN
@@ -56,15 +57,15 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
               WHERE p.deleted_at IS NULL AND p.source_id=$2 AND p.slug=candidate->>'targetSlug')) END)
         ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
-    if (!rows.length) return false;
-    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
+    if (!rows.length) return { incomplete: false, after };
+    after = rows.at(-1)!.key;
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     const parsed = rows.flatMap(row => {
       const reference = parseReference(row.value);
       return reference ? [{ ...row, reference }] : [];
     });
     if (parsed.length) yield parsed;
-    if (rows.length < PENDING_BATCH_SIZE) return false;
-    after = rows.at(-1)!.key;
+    if (rows.length < PENDING_BATCH_SIZE) return { incomplete: false, after };
   }
 }
 

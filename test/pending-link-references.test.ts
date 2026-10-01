@@ -377,7 +377,7 @@ test('pending registry scans only the requested source in bounded keyset batches
   expect(await engine.getConfig('internal.pending-links.malformed-text')).toBe('{broken');
   const iterator = pendingLinkReferenceBatches(engine, 'default');
   expect((await iterator.next()).value).toHaveLength(100);
-  expect(await iterator.return(false)).toEqual({ value: false, done: true });
+  expect(await iterator.return({ incomplete: false, after: '' })).toEqual({ value: { incomplete: false, after: '' }, done: true });
 });
 
 for (const qualified of [false, true]) test(`slash frontmatter aliases do not create exact body targets (qualified=${qualified})`, async () => {
@@ -409,7 +409,7 @@ test('expired and cancelled pending probes issue no readiness queries', async ()
   engine.executeRaw = async () => { throw new Error('expired probe must not query'); };
   try {
     const expired = pendingLinkReferenceBatches(engine, 'default', { deadline: Date.now() - 1 });
-    expect(await expired.next()).toEqual({ value: true, done: true });
+    expect(await expired.next()).toEqual({ value: { incomplete: true, after: '' }, done: true });
     await expect(pendingLinkReferenceBatches(engine, 'default', { signal: controller.signal }).next()).rejects.toThrow();
     expect(await probePendingLinkReferences(engine, rows, {
       globalBasename: true, deadline: Date.now() - 1,

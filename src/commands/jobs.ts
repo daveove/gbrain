@@ -2563,16 +2563,20 @@ export async function registerBuiltinHandlers(
     // overlapping submissions converge.
     if (job.data.stale === true) {
       const sourceIdFilter = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      const pendingAfter = typeof job.data.pending_after === 'string' ? job.data.pending_after : undefined;
       const r = await extractStaleFromDB(engine, {
         dryRun: !!job.data.dryRun,
         jsonMode: false,
         sourceIdFilter,
         catchUp: false,
+        pendingAfter,
       });
       // Internal 30-min budget hit with work remaining → chain a
       // continuation job so a very large deferred backlog converges without
       // waiting for the next sync. Forward-progress guard (pagesProcessed >
       // 0) prevents an infinite chain if the sweep can't advance.
+      // pendingScanIncomplete also continues, carrying pending_after so the
+      // next scan resumes past the unresolved prefix instead of replaying it.
       if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0) || r.pendingScanIncomplete)) {
         try {
           const queue = new MinionQueue(engine);
@@ -2583,7 +2587,8 @@ export async function registerBuiltinHandlers(
           // so there is no pile-up to guard against.
           await queue.add(
             'extract',
-            { ...job.data, continuation_of: job.id },
+            { ...job.data, continuation_of: job.id,
+              ...(r.pendingScanIncomplete && r.pendingScanAfter ? { pending_after: r.pendingScanAfter } : {}) },
             { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
           );
         } catch { /* best-effort: next sync/manual sweep picks up the rest */ }

@@ -2122,8 +2122,10 @@ export async function extractStaleFromDB(
     timeBudgetMs?: number;
     /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
     signal?: AbortSignal;
+    /** Resume pending-registry keyset after this config key (continuation jobs). */
+    pendingAfter?: string;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean }> {
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean; pendingScanAfter?: string }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const startMs = Date.now();
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
@@ -2139,7 +2141,9 @@ export async function extractStaleFromDB(
   let totalStale = await countStale();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = selected ? undefined : pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
+  const pendingBatches = selected ? undefined : pendingLinkReferenceBatches(engine, sourceIdFilter, {
+    signal: opts.signal, deadline: pendingDeadline, after: opts.pendingAfter,
+  });
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
@@ -2172,11 +2176,16 @@ export async function extractStaleFromDB(
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
   let pendingScanIncomplete = false;
+  let pendingScanAfter = typeof opts.pendingAfter === 'string' ? opts.pendingAfter : '';
   if (pendingBatches) {
     let readyPending = 0;
     for (;;) {
       const step = await pendingBatches.next();
-      if (step.done) { pendingScanIncomplete = step.value === true; break; }
+      if (step.done) {
+        pendingScanIncomplete = step.value?.incomplete === true;
+        if (typeof step.value?.after === 'string') pendingScanAfter = step.value.after;
+        break;
+      }
       readyPending += await probePendingLinkReferences(engine, step.value, { globalBasename, signal: opts.signal,
         deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter,
         onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
@@ -2189,7 +2198,8 @@ export async function extractStaleFromDB(
   if (dryRun) return reportDryRun();
   if (totalStale === 0) {
     if (pendingScanIncomplete) {
-      return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0, pendingScanIncomplete: true };
+      return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0,
+        pendingScanIncomplete: true, pendingScanAfter };
     }
     if (!jsonMode) log('No stale pages — extraction is up to date.');
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
@@ -2357,7 +2367,7 @@ export async function extractStaleFromDB(
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
     ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}),
-    ...(pendingScanIncomplete ? { pendingScanIncomplete: true } : {}) };
+    ...(pendingScanIncomplete ? { pendingScanIncomplete: true, pendingScanAfter } : {}) };
 }
 
 /**
