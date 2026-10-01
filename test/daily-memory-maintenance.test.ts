@@ -220,6 +220,30 @@ describe('daily memory from sources the brain already holds', () => {
       .toContain('[[default:notes/replacement-instant]]');
   });
 
+  test('transcript ingest queues affected-day refreshes for historical session dates', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-daily-handoff-'));
+    const file = join(dir, 'session.jsonl');
+    const timestamp = '2026-01-15T12:00:00.000Z';
+    writeFileSync(file, [
+      { timestamp, type: 'session_meta', payload: { id: 'historical-day-fixture', session_id: 'historical-day-fixture', timestamp, cwd: dir } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'Historical daily index fixture.' } },
+      { timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixture acknowledged.' }] } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    try {
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+      const ingested = await runTranscriptsIngest(engine, {
+        paths: [file], format: 'codex', sourceId: 'default',
+      });
+      expect(ingested.pages.imported).toBe(1);
+      expect(ingested.cleanScan).toBe(true);
+      const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
+        "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+      expect(batches.some(row => row.data.daily_memory_dates?.includes('2026-01-15'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-codex-manila-day-'));
     const file = join(dir, 'session.jsonl');

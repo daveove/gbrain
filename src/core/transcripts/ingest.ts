@@ -30,6 +30,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { importFromContent } from '../import-file.ts';
 import { canonicalJson } from '../remediation-step.ts';
+import { createTranscriptIngestDailyMemory } from './ingest-daily-memory.ts';
 import type { TranscriptAdapter, TranscriptFormat } from './types.ts';
 import { detectAdapter } from './detect.ts';
 import {
@@ -185,6 +186,13 @@ export async function runTranscriptsIngest(
   // recompiles the pattern file on every call, which a bulk import would
   // otherwise repeat thousands of times.
   const redactionPatterns = loadImportRedactionPatterns(opts.userPatternsPath);
+  // importFromContent/deletePage bypass publication effects; durable day handoff mirrors standalone import.
+  const dailyMemory = opts.dryRun
+    ? undefined
+    : await createTranscriptIngestDailyMemory(engine, {
+      sourceId: opts.sourceId,
+      runKey: [...opts.paths].sort().join('\0'),
+    });
 
   const total = opts.paths.length;
   let done = 0;
@@ -293,6 +301,7 @@ export async function runTranscriptsIngest(
             await adoptExistingBaseSlug(engine, opts.sourceId ?? 'default', rendered);
             outcome.baseSlug = rendered.baseSlug;
             let resolvedBaseSlug = rendered.baseSlug;
+            await dailyMemory?.before(rendered.parts.map((part) => part.slug));
             for (const part of rendered.parts) {
               try {
                 const r = await importFromContent(engine, part.slug, part.content, {
@@ -310,6 +319,7 @@ export async function runTranscriptsIngest(
                 const actualSlug = r.slug || part.slug;
                 if (part.part === 1 && actualSlug) resolvedBaseSlug = actualSlug;
                 result.slugsTouched.push(actualSlug);
+                await dailyMemory?.touched([actualSlug]);
               } catch (err) {
                 if (isPerSessionImportError(err)) throw err; // → per-session catch
                 const e = new Error(
@@ -404,6 +414,8 @@ export async function runTranscriptsIngest(
               const m = /^-p(\d+)$/.exec(suffix);
               const num = m ? Number(m[1]) : NaN;
               if (Number.isFinite(num) && num > rendered.parts.length) {
+                await dailyMemory?.before([row.slug]);
+                await dailyMemory?.touched([row.slug]);
                 await engine.deletePage(row.slug, { sourceId: opts.sourceId });
                 result.partsDeleted++;
               }
@@ -461,6 +473,14 @@ export async function runTranscriptsIngest(
   }
 
   if (opts.dryRun) result.cleanScan = false; // dry-runs never advance watermarks
+  else if (dailyMemory) {
+    try {
+      await dailyMemory.finish();
+    } catch {
+      // Fail closed: never report a clean ingest when historical indexes were not queued.
+      result.cleanScan = false;
+    }
+  }
   return result;
 }
 
