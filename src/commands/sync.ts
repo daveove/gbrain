@@ -332,9 +332,8 @@ export {
 } from '../core/sync-cost-gate.ts';
 
 export interface SyncOpts {
-  /** Standalone entrypoints accept affected-day maintenance before advancing. */
+  /** Bank affected days before advancing; cycle owners reuse their existing handoff. */
   dailyMemoryFollowup?: boolean;
-  /** Internal cycle owner banks affected days without a duplicate standalone job. */
   dailyMemoryOwnerJobId?: number;
   repoPath?: string;
   dryRun?: boolean;
