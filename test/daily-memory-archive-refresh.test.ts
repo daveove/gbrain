@@ -77,19 +77,29 @@ describe('daily memory refresh on source archive/restore', () => {
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='completed'")).toHaveLength(4);
   });
 
-  test('failed archive and restore handoffs surface and retry after the state change', async () => {
+  test('failed archive and restore handoffs roll back and retry with the transition', async () => {
     const sourceId = 'retry-refresh', day = '2026-09-30';
     await engine.executeRaw("INSERT INTO sources(id,name,archived) VALUES($1,'Retry fixture',false)", [sourceId]);
     await engine.putPage('notes/day', {
       type: 'note', title: 'Retry fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day },
     }, { sourceId });
     await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
-    for (const operation of [softDeleteSource, restoreSource]) {
+    {
       const rejected = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('synthetic queue outage'));
-      try { await expect(operation(engine, sourceId)).rejects.toThrow('synthetic queue outage'); }
+      try { await expect(softDeleteSource(engine, sourceId)).rejects.toThrow('synthetic queue outage'); }
       finally { rejected.mockRestore(); }
-      // The state change committed, but its no-op retry must still enqueue the refresh.
-      expect(await operation(engine, sourceId)).toBe(operation === softDeleteSource ? null : false);
+      // Transition and handoff share one transaction: queue failure leaves the source active.
+      expect(await engine.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]))
+        .toEqual([{ archived: false }]);
+      expect(await softDeleteSource(engine, sourceId)).not.toBeNull();
+    }
+    {
+      const rejected = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('synthetic queue outage'));
+      try { await expect(restoreSource(engine, sourceId)).rejects.toThrow('synthetic queue outage'); }
+      finally { rejected.mockRestore(); }
+      expect(await engine.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]))
+        .toEqual([{ archived: true }]);
+      expect(await restoreSource(engine, sourceId)).toBe(true);
     }
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status='waiting'")).toHaveLength(4);
   });

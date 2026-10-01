@@ -355,22 +355,28 @@ export async function softDeleteSource(
     return null;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources archive');
-  // Atomic: only flip rows that are currently active. Returns the metadata
-  // we need without a follow-up SELECT. RETURNING projects the columns the
-  // caller cares about; pageCount is a separate count.
+  // Atomic: only flip rows that are currently active. Transition + refresh
+  // share one transaction so a crash cannot leave archive without handoff.
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
-  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
-    `UPDATE sources
-     SET archived = true,
-         archived_at = now(),
-         archive_expires_at = ${expiresClause},
-         config = ${SOURCE_CONFIG_OBJECT_SQL} || '{"federated": false}'::jsonb
-     WHERE id = $1 AND archived = false
-     RETURNING id, name, archived_at, archive_expires_at`,
-    [sourceId],
-  );
   const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-  await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+  const transition = async (tx: BrainEngine) => {
+    const rows = await tx.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
+      `UPDATE sources
+       SET archived = true,
+           archived_at = now(),
+           archive_expires_at = ${expiresClause},
+           config = ${SOURCE_CONFIG_OBJECT_SQL} || '{"federated": false}'::jsonb
+       WHERE id = $1 AND archived = false
+       RETURNING id, name, archived_at, archive_expires_at`,
+      [sourceId],
+    );
+    // No-op retries still re-enqueue refresh when a prior handoff was lost.
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, sourceId);
+    return rows;
+  };
+  const rows = typeof engine.transaction === 'function'
+    ? await engine.transaction(transition)
+    : await transition(engine);
   if (rows.length === 0) return null;
   const row = rows[0];
 
@@ -411,18 +417,25 @@ export async function restoreSource(
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources restore');
   const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
-  const rows = await engine.executeRaw<{ id: string }>(
-    `UPDATE sources
-     SET archived = false,
-         archived_at = NULL,
-         archive_expires_at = NULL,
-         config = ${SOURCE_CONFIG_OBJECT_SQL} || $1::text::jsonb
-     WHERE id = $2 AND archived = true
-     RETURNING id`,
-    [federatedPatch, sourceId],
-  );
   const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
-  await refreshDailyMemoryAfterSourceArchiveChange(engine, sourceId);
+  const transition = async (tx: BrainEngine) => {
+    const rows = await tx.executeRaw<{ id: string }>(
+      `UPDATE sources
+       SET archived = false,
+           archived_at = NULL,
+           archive_expires_at = NULL,
+           config = ${SOURCE_CONFIG_OBJECT_SQL} || $1::text::jsonb
+       WHERE id = $2 AND archived = true
+       RETURNING id`,
+      [federatedPatch, sourceId],
+    );
+    // No-op retries still re-enqueue refresh when a prior handoff was lost.
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, sourceId);
+    return rows;
+  };
+  const rows = typeof engine.transaction === 'function'
+    ? await engine.transaction(transition)
+    : await transition(engine);
   return rows.length > 0;
 }
 
