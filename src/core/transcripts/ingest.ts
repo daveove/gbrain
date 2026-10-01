@@ -328,14 +328,33 @@ export async function runTranscriptsIngest(
             await maybeRenewDailyMemoryLease();
             for (const part of rendered.parts) {
               try {
-                const r = await importFromContent(engine, part.slug, part.content, {
-                  noEmbed: !opts.embed,
-                  sourceId: opts.sourceId,
-                  activePack: opts.activePack,
-                  source_kind: `transcript:${session.meta.harness}`,
-                  source_uri: path,
-                  ingested_via: 'cli:transcripts-ingest',
-                });
+                // Keep renewing during each in-flight part write; elapsed-time
+                // renewals cannot run until importFromContent returns.
+                let renewInFlight: Promise<void> | undefined;
+                let renewError: unknown;
+                const renewTimer = dailyMemory
+                  ? setInterval(() => {
+                    if (renewInFlight) return;
+                    renewInFlight = dailyMemory.renew()
+                      .then(() => { lastLeaseRenewAt = Date.now(); })
+                      .catch((err: unknown) => { renewError ??= err; })
+                      .finally(() => { renewInFlight = undefined; });
+                  }, LEASE_RENEW_EVERY_MS)
+                  : undefined;
+                let r: Awaited<ReturnType<typeof importFromContent>>;
+                try {
+                  r = await importFromContent(engine, part.slug, part.content, {
+                    noEmbed: !opts.embed,
+                    sourceId: opts.sourceId,
+                    activePack: opts.activePack,
+                    source_kind: `transcript:${session.meta.harness}`,
+                    source_uri: path,
+                    ingested_via: 'cli:transcripts-ingest',
+                  });
+                } finally {
+                  if (renewTimer) clearInterval(renewTimer);
+                  await renewInFlight;
+                }
                 outcome.statuses.push(r.status);
                 if (r.status === 'imported') result.pages.imported++;
                 else if (r.status === 'skipped') result.pages.skipped++;
@@ -349,6 +368,7 @@ export async function runTranscriptsIngest(
                 // A single large session can exceed the 30m lease between
                 // session-boundary renewals; refresh inside the part loop.
                 await maybeRenewDailyMemoryLease();
+                if (renewError) throw renewError;
               } catch (err) {
                 if (isPerSessionImportError(err)) throw err; // → per-session catch
                 const e = new Error(

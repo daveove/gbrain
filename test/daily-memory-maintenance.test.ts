@@ -478,6 +478,62 @@ describe('daily memory from sources the brain already holds', () => {
     await live.finish();
   });
 
+  test('in-flight part write keeps renewing the transcript lease until import settles', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-part-lease-'));
+    const file = join(dir, 'session.jsonl');
+    const timestamp = '2026-01-26T12:00:00.000Z';
+    writeFileSync(file, [
+      { timestamp, type: 'session_meta', payload: { id: 'part-lease-fixture', session_id: 'part-lease-fixture', timestamp, cwd: dir } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'Part lease fixture.' } },
+      { timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixture acknowledged.' }] } },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+    let enter!: () => void, settle!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const deferred = new Promise<void>(resolve => { settle = resolve; });
+    const callbacks: Array<() => void> = [];
+    const originalInterval = globalThis.setInterval;
+    const timers = spyOn(globalThis, 'setInterval').mockImplementation(((callback: (...args: unknown[]) => void, delay: number, ...args: unknown[]) => {
+      if (delay === 10 * 60_000) callbacks.push(() => callback(...args));
+      return originalInterval(callback, delay, ...args);
+    }) as typeof setInterval);
+    const importer = spyOn(await import('../src/core/import-file.ts'), 'importFromContent').mockImplementation(async (...args) => {
+      enter();
+      await deferred;
+      importer.mockRestore();
+      return importFromContent(...args);
+    });
+    try {
+      const run = runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' });
+      await entered;
+      expect(callbacks).toHaveLength(1);
+      const before = await engine.executeRaw<{ path: string }>(
+        "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+      expect(before).toHaveLength(1);
+      const wrapped = JSON.parse(before[0]!.path) as { origin: string; value: string };
+      const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+      await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, before[0]!.path]);
+      callbacks[0]!();
+      // Allow the in-flight renew promise to land.
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const after = await engine.executeRaw<{ path: string }>(
+        "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+      expect(after).toHaveLength(1);
+      expect(after[0]!.path).not.toBe(aged);
+      const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'peer-part-lease' }))!;
+      await peer.finish();
+      expect(await engine.executeRaw(
+        "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
+      settle();
+      const result = await run;
+      expect(result.pages.imported).toBe(1);
+      expect(result.cleanScan).toBe(true);
+    } finally {
+      timers.mockRestore();
+      if (importer.mock) importer.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   test('unchanged finish preserves a concurrent before: bank for later date recovery', async () => {
     await engine.putPage('notes/stable-transcript', { type: 'note', title: 'Stable', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-20' } });
     await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-21' } });
