@@ -40,6 +40,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
       await engine.executeRawDirect(
         `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           AND pg_input_is_valid(path, 'jsonb')
            AND path::jsonb->>'origin'=$3
            AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')`,
         [key.op, fingerprint, origin]);
@@ -48,7 +49,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
            SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
            FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
            WHERE NOT (
-             elem::jsonb->>'origin'=$3
+             pg_input_is_valid(elem, 'jsonb')
+             AND elem::jsonb->>'origin'=$3
              AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
            )
          ), updated_at=now()
@@ -78,6 +80,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
         await engine.executeRawDirect(
           `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+             AND pg_input_is_valid(path, 'jsonb')
              AND path::jsonb->>'origin'=$3
              AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
              AND path<>$4`,
@@ -87,7 +90,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
              SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
              FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
              WHERE NOT (
-               elem::jsonb->>'origin'=$3
+               pg_input_is_valid(elem, 'jsonb')
+               AND elem::jsonb->>'origin'=$3
                AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
                AND elem<>$4
              )

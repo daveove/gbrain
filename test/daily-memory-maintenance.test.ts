@@ -453,6 +453,40 @@ describe('daily memory from sources the brain already holds', () => {
       "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'")).toHaveLength(0);
   });
 
+  test('renew and release skip legacy unwrapped checkpoint rows without JSON cast errors', async () => {
+    const { createHash } = await import('node:crypto');
+    const runKey = 'legacy-unwrapped';
+    const legacyFingerprint = createHash('sha256').update(JSON.stringify(['default', runKey])).digest('hex').slice(0, 16);
+    const legacyBefore = 'before:' + JSON.stringify({
+      targets: [{ slug: 'notes/legacy-unwrapped', revision: null }],
+      days: ['2026-01-09'],
+    });
+    await engine.executeRawDirect(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ('transcript-ingest-daily-memory', $1, $2::jsonb, now())
+       ON CONFLICT (op, fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys, updated_at=now()`,
+      [legacyFingerprint, JSON.stringify([legacyBefore, 'slug:notes/legacy-unwrapped'])]);
+    await engine.executeRawDirect(
+      `INSERT INTO op_checkpoint_paths (op, fingerprint, path) VALUES
+         ('transcript-ingest-daily-memory', $1, $2),
+         ('transcript-ingest-daily-memory', $1, 'slug:notes/legacy-unwrapped')
+       ON CONFLICT DO NOTHING`,
+      [legacyFingerprint, legacyBefore]);
+    await engine.putPage('notes/legacy-unwrapped', { type: 'note', title: 'Legacy', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-09' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", ['2026-01-09', 'notes/legacy-unwrapped']);
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey }))!;
+    // Pre-fix: casting unwrapped legacy paths threw and wedged renew/release.
+    await expect(live.renew()).resolves.toBeUndefined();
+    await expect(live.release()).resolves.toBeUndefined();
+    const recovery = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey }))!;
+    await recovery.finish();
+    expect(await engine.executeRaw(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND fingerprint=$1",
+      [legacyFingerprint])).toHaveLength(0);
+    expect(await engine.executeRaw(
+      "SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'='2026-01-09'")).not.toHaveLength(0);
+  });
+
   test('renew deletes obsolete running markers by origin predicate without reading unrelated debt', async () => {
     const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'renew-predicate' }))!;
     await live.before(['notes/renew-predicate']);
