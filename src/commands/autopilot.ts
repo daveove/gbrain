@@ -1556,6 +1556,29 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           const t = report.totals;
           console.log(`[cycle-inline ${report.status}] lint=${t.lint_fixes} backlinks=${t.backlinks_added} synced=${t.pages_synced} extracted=${t.pages_extracted} embedded=${t.pages_embedded} orphans=${t.orphans_found}`);
         }
+        // Match Minions dispatch: daily indexes must refresh even when the
+        // daemon cannot enqueue autopilot-daily-memory (PGLite / --inline / minions off).
+        if (report.status !== 'failed') {
+          try {
+            const { resolveCycleDate } = await import('../core/cycle/cycle-date.ts');
+            const { writeDailyMemoryFromSources, queueDailyMemoryExtract } = await import('../core/cycle/daily-memory.ts');
+            const { previousCalendarDay } = await import('../core/cycle/daily-memory-followup.ts');
+            const day = await resolveCycleDate(engine);
+            const days = [day, previousCalendarDay(day)].filter((value): value is string => !!value);
+            for (const date of days) {
+              const daily = await writeDailyMemoryFromSources(engine, { date, signal: shutdownAbort.signal });
+              if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
+              await queueDailyMemoryExtract(engine, daily);
+              if (jsonMode) {
+                process.stderr.write(JSON.stringify({ event: 'cycle-inline-daily-memory', date, written: daily.written, reason: daily.reason }) + '\n');
+              } else {
+                console.log(`[cycle-inline-daily-memory] ${date} written=${daily.written} reason=${daily.reason ?? 'ok'}`);
+              }
+            }
+          } catch (e) {
+            logError('cycle-inline-daily-memory', e);
+          }
+        }
       } catch (e) { logError('cycle-inline', e); cycleOk = false; }
     }
 
