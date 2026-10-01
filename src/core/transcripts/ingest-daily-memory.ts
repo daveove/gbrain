@@ -20,10 +20,10 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
   // Retain pre-write dates until post-commit banking, even if an expired peer adopted them.
   const priorBySlug = new Map<string, Prior>();
   await opts.protect?.(key);
-  const bank = async (entries: string[]) => {
+  const bank = async (entries: string[], target = engine) => {
     opts.signal?.throwIfAborted();
     const wrapped = entries.map(value => JSON.stringify({ origin, value }));
-    if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
+    if (wrapped.length && !await appendCompleted(target, key, wrapped)) {
       throw new Error('Daily-memory transcript ingest checkpoint unavailable');
     }
     return wrapped;
@@ -64,7 +64,31 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     // peers suppress adoption until the future instant and GC can drop before: debt.
     return Number.isFinite(stamped) && stamped <= at && at - stamped < RUNNING_LEASE_MS;
   };
+  const bankMutation = async (tx: BrainEngine, slugs: string[], preparedSlug?: string) => {
+    const unique = [...new Set(slugs.filter(Boolean))];
+    const prior = [...new Set([...unique, ...(preparedSlug ? [preparedSlug] : [])].map(slug => priorBySlug.get(slug)).filter((record): record is Prior => !!record))];
+    // The admitted write and its original dates share a commit. Keep the cache
+    // until the caller observes commit; a failed transaction must remain retryable.
+    const current = await tx.executeRaw<{ slug: string; revision: string }>(
+      'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])',
+      [opts.sourceId, unique]);
+    const changed = unique.filter(slug => {
+      const previous = prior.flatMap(record => record.targets).find(target => target.slug === slug)?.revision ?? null;
+      return (current.find(row => row.slug === slug)?.revision ?? null) !== previous;
+    });
+    await bank([...prior.map(record => `before:${JSON.stringify(record)}`), ...changed.map(slug => `slug:${slug}`)], tx);
+  };
   return {
+    /** Bank debt inside the canonical page write transaction, without clearing prior dates. */
+    async beforeCommit(tx: BrainEngine, slug: string, preparedSlug?: string) { await bankMutation(tx, [slug], preparedSlug); },
+    /** Hard deletion and its refresh debt must commit or roll back together. */
+    async deleteStalePart(slug: string) {
+      await engine.transaction(async tx => {
+        await tx.deletePage(slug, { sourceId: opts.sourceId });
+        await bankMutation(tx, [slug]);
+      });
+      priorBySlug.delete(slug);
+    },
     /** Drop the running marker without settling debt (abort / early exit). */
     async release() { await clearRunning(); },
     /** Refresh the lease timestamp so peers keep treating this origin as live. */

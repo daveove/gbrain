@@ -351,6 +351,7 @@ export async function runTranscriptsIngest(
                     source_kind: `transcript:${session.meta.harness}`,
                     source_uri: path,
                     ingested_via: 'cli:transcripts-ingest',
+                    beforeCommit: dailyMemory ? (tx, slug) => dailyMemory.beforeCommit(tx, slug, part.slug) : undefined,
                   });
                 } finally {
                   if (renewTimer) clearInterval(renewTimer);
@@ -479,15 +480,14 @@ export async function runTranscriptsIngest(
                   }, LEASE_RENEW_EVERY_MS)
                   : undefined;
                 try {
-                  await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                  if (dailyMemory) await dailyMemory.deleteStalePart(row.slug);
+                  else await engine.deletePage(row.slug, { sourceId: opts.sourceId });
                 } finally {
                   if (renewTimer) clearInterval(renewTimer);
                   await renewInFlight;
                 }
                 result.partsDeleted++;
                 result.slugsTouched.push(row.slug);
-                // Hard deletion cannot reconstruct prior dates; re-bank the pre-write snapshot.
-                await dailyMemory?.touched([row.slug]);
                 if (renewError) {
                   const error = new Error(`${RUN_ABORT_MARKER}: delete lease renewal failed on ${row.slug}`);
                   (error as { cause?: unknown }).cause = renewError;

@@ -534,7 +534,7 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
-  test('post-delete touched re-banks adopted prior dates without a rendered daily index', async () => {
+  test('atomic stale deletion re-banks adopted prior dates without a rendered daily index', async () => {
     const slug = 'notes/adopted-delete', day = '2026-01-17';
     await engine.putPage(slug, { type: 'note', title: 'Adopted deletion fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } });
     await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [day, slug]);
@@ -549,13 +549,130 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
     const [last] = await engine.executeRaw<{ id: number }>("SELECT max(id)::integer AS id FROM minion_jobs WHERE name='autopilot-daily-memory'");
     expect(await engine.getPage(dailyMemorySlug(day), { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
-    await engine.deletePage(slug);
-    await live.touched([slug]);
+    const originalTransaction = engine.transaction.bind(engine);
+    const rejectedCommit = spyOn(engine, 'transaction').mockImplementation(fn => originalTransaction(async tx => {
+      await fn(tx);
+      throw new Error('synthetic pre-commit rejection');
+    }));
+    try {
+      await expect(live.deleteStalePart(slug)).rejects.toThrow('synthetic pre-commit rejection');
+      expect(await engine.getPage(slug)).not.toBeNull();
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+    } finally { rejectedCommit.mockRestore(); }
+    // No second before() call: failed commit must retain the cached original day.
+    await live.deleteStalePart(slug);
+    expect(await engine.getPage(slug)).toBeNull();
     await live.release();
     const recovery = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'adopt-delete-recovery' }))!;
     await recovery.finish();
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [day, last!.id])).not.toHaveLength(0);
   });
+
+  test('cancellation during atomic stale deletion rolls back the page and debt', async () => {
+    const slug = 'notes/cancel-atomic-delete';
+    await engine.putPage(slug, { type: 'note', title: 'Atomic cancellation fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-17' } });
+    const controller = new AbortController();
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'cancel-atomic-delete', signal: controller.signal }))!;
+    await live.before([slug]);
+    const originalTransaction = engine.transaction.bind(engine);
+    const cancellation = spyOn(engine, 'transaction').mockImplementation(fn => originalTransaction(async tx => {
+      const deletePage = tx.deletePage.bind(tx);
+      tx.deletePage = async (...args) => {
+        await deletePage(...args);
+        controller.abort(new Error('synthetic debt bank cancellation'));
+      };
+      return fn(tx);
+    }));
+    try {
+      await expect(live.deleteStalePart(slug)).rejects.toThrow('synthetic debt bank cancellation');
+      expect(await engine.getPage(slug)).not.toBeNull();
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value'=$1", [`slug:${slug}`])).toHaveLength(0);
+    } finally { cancellation.mockRestore(); await live.release(); }
+  });
+
+  for (const mutation of ['import', 'delete'] as const) {
+    test(`transcript ${mutation} rolls back when atomic daily-memory debt banking fails after peer adoption`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-atomic-bank-'));
+      const file = join(dir, 'session.jsonl');
+      const writeTranscript = (timestamp: string, message: string) => writeFileSync(file, [
+        { timestamp, type: 'session_meta', payload: { id: 'atomic-bank-fixture', session_id: 'atomic-bank-fixture', timestamp, cwd: dir } },
+        { timestamp, type: 'event_msg', payload: { type: 'user_message', message } },
+        { timestamp, type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Fixture acknowledged.' }] } },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n');
+      const oldDay = '2026-01-14';
+      writeTranscript(`${oldDay}T12:00:00.000Z`, 'Original atomic fixture.');
+      const first = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' });
+      const baseSlug = first.slugsTouched[0]!;
+      const target = mutation === 'delete' ? `${baseSlug}-p2` : baseSlug;
+      if (mutation === 'delete') {
+        await engine.putPage(target, { type: 'note', title: 'Atomic stale fixture', compiled_truth: 'Synthetic stale fixture', frontmatter: { date: oldDay } });
+        await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [oldDay, target]);
+      } else writeTranscript('2026-01-26T12:00:00.000Z', 'Changed atomic fixture.');
+      const original = await engine.getPage(target);
+      const leaseModule = await import('../src/core/transcripts/ingest-daily-memory.ts');
+      const checkpointModule = await import('../src/core/op-checkpoint.ts');
+      const originalCreate = leaseModule.createTranscriptIngestDailyMemory;
+      const originalAppend = checkpointModule.appendCompleted;
+      let adopted = false, lastId = 0;
+      const leases = spyOn(leaseModule, 'createTranscriptIngestDailyMemory').mockImplementation(async (...args) => {
+        const live = await originalCreate(...args);
+        if (live) {
+          const before = live.before.bind(live);
+          live.before = async slugs => {
+            await before(slugs);
+            if (adopted || !slugs.includes(target)) return;
+            adopted = true;
+            const markers = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+            for (const marker of markers) {
+              const wrapped = JSON.parse(marker.path) as { origin: string; value: string };
+              const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+              await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, marker.path]);
+            }
+            const peer = (await originalCreate(engine, { sourceId: 'default', runKey: 'atomic-peer' }))!;
+            await peer.finish();
+            expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+            const [last] = await engine.executeRaw<{ id: number }>("SELECT max(id)::integer AS id FROM minion_jobs WHERE name='autopilot-daily-memory'");
+            lastId = last!.id;
+          };
+        }
+        return live;
+      });
+      let rejected = false;
+      const append = spyOn(checkpointModule, 'appendCompleted').mockImplementation(async (targetEngine, key, values) => {
+        if (key.op === 'transcript-ingest-daily-memory' && adopted && values.some(value => JSON.parse(value).value === `slug:${target}`)) {
+          rejected = true;
+          return false;
+        }
+        return originalAppend(targetEngine, key, values);
+      });
+      try {
+        const outcome = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' })
+          .then(result => ({ result, error: undefined as unknown }), error => ({ result: undefined, error }));
+        expect(adopted).toBe(true);
+        expect(rejected).toBe(true);
+        if (mutation === 'import') {
+          expect(outcome.error).toBeInstanceOf(Error);
+          expect((outcome.error as Error).message).toContain('Daily-memory transcript ingest checkpoint unavailable');
+        } else {
+          expect(outcome.error).toBeUndefined();
+          expect(outcome.result!.cleanScan).toBe(false);
+          expect(outcome.result!.partsDeleted).toBe(0);
+          expect(outcome.result!.pages.imported).toBe(0);
+        }
+        expect(await engine.getPage(target)).toEqual(original);
+        append.mockRestore(); leases.mockRestore();
+        // A retry must recover the preserved old day and complete the mutation.
+        const retry = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' });
+        expect(retry.cleanScan).toBe(true);
+        expect(mutation === 'delete' ? retry.partsDeleted : retry.pages.imported).toBe(1);
+        expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [oldDay, lastId])).not.toHaveLength(0);
+      } finally {
+        if (append.mock) append.mockRestore();
+        if (leases.mock) leases.mockRestore();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   for (const failRenew of [false, true]) {
     test(`in-flight stale-part deletion preserves old-day debt with ${failRenew ? 'failed' : 'successful'} renewal`, async () => {
@@ -589,16 +706,18 @@ describe('daily memory from sources the brain already holds', () => {
         active.delete(handle); originalClear(handle);
       }) as typeof clearInterval);
       let deleting = false;
-      const originalDelete = engine.deletePage.bind(engine);
-      const deletion = spyOn(engine, 'deletePage').mockImplementation(async (slug, options) => {
-        deleting = true; enter();
-        try { await deferred; await originalDelete(slug, options); }
-        finally { deleting = false; }
-      });
       const leaseModule = await import('../src/core/transcripts/ingest-daily-memory.ts');
       const originalCreate = leaseModule.createTranscriptIngestDailyMemory;
       const leases = spyOn(leaseModule, 'createTranscriptIngestDailyMemory').mockImplementation(async (...args) => {
         const live = await originalCreate(...args);
+        if (live) {
+          const deleteStalePart = live.deleteStalePart.bind(live);
+          live.deleteStalePart = async slug => {
+            deleting = true; enter();
+            try { await deferred; await deleteStalePart(slug); }
+            finally { deleting = false; }
+          };
+        }
         if (live && failRenew) {
           const renew = live.renew.bind(live);
           live.renew = () => deleting ? Promise.reject(new Error('synthetic deletion lease failure')) : renew();
@@ -649,7 +768,7 @@ describe('daily memory from sources the brain already holds', () => {
         expect(after.length).toBeGreaterThan(0);
       } finally {
         settle(); await run;
-        deletion.mockRestore(); leases.mockRestore(); timers.mockRestore(); clears.mockRestore();
+        leases.mockRestore(); timers.mockRestore(); clears.mockRestore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
