@@ -209,8 +209,11 @@ export async function dailyMemoryDaysForSlugs(
 }
 
 async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string[], sourceJobId: number,
-  cursor: number, childIds: number[] = [], delay = 0, pollFromJobId = 0, replayRound = 0): Promise<number> {
-  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId, replayRound })).digest('hex').slice(0, 20);
+  cursor: number, childIds: number[] = [], delay = 0, pollFromJobId = 0, replayRound = 0,
+  handoffGeneration = ''): Promise<number> {
+  // Handoff generations (refresh path) mint a fresh batch so a completed prior
+  // batch for the same parent+days cannot satisfy newly banked retry work.
+  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId, replayRound, handoffGeneration })).digest('hex').slice(0, 20);
   const day = days[Math.min(Math.max(cursor, 0), Math.max(days.length - 1, 0))] ?? days[0];
   const data = { daily_memory_date: day, daily_memory_dates: days,
     daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor,
@@ -275,7 +278,7 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (!written.length) throw new Error('Affected daily memory dates were not persisted');
     job.data.daily_memory_affected_dates = days;
   }
-  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0);
+  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID());
   await retireSnapshot();
 }
 

@@ -501,6 +501,66 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect((await engine.getPage(`daily-memory/${days[0]}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('[[affected-source:notes/affected-0]]');
   });
 
+  test('source-sync refresh mints a fresh batch after a completed handoff for the same days', async () => {
+    const sourceId = 'retry-batch-source';
+    const day = '2026-09-22';
+    const slug = 'notes/retry-batch';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    await engine.putPage(slug, { type: 'note', title: 'Retry batch v1', compiled_truth: 'First body', frontmatter: { date: day } }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2 AND slug=$3", [day, sourceId, slug]);
+    const { ensureDailyMemorySource } = await import('../src/core/cycle/daily-memory.ts');
+    await ensureDailyMemorySource(engine);
+    const queue = new MinionQueue(engine);
+    const source = await queue.add('autopilot-cycle', { source_id: sourceId });
+    const claimed = (await queue.claim('retry-batch-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(claimed.id).toBe(source.id);
+    await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, {
+      status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+    });
+    const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
+    const firstBatchIds: number[] = [];
+    for (let i = 0; i < 20; i++) {
+      await queue.promoteDelayed();
+      const daily = await queue.claim('retry-batch-daily', 60_000, 'default', ['autopilot-daily-memory']);
+      if (!daily) break;
+      firstBatchIds.push(daily.id);
+      const result = await handler(daily);
+      await queue.completeJob(daily.id, 'retry-batch-daily', result);
+    }
+    expect(firstBatchIds.length).toBeGreaterThan(0);
+    expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
+    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain('Retry batch v1');
+    await engine.putPage(slug, { type: 'note', title: 'Retry batch v2', compiled_truth: 'Second body after retry', frontmatter: { date: day } }, { sourceId });
+    await engine.executeRaw(
+      "UPDATE pages SET title='Retry batch v2', effective_date=$1::date::timestamptz, effective_date_source='date' WHERE source_id=$2 AND slug=$3",
+      [day, sourceId, slug],
+    );
+    await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, {
+      status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+    });
+    const secondBatch = await engine.executeRaw<{ id: number; status: string }>(
+      `SELECT id,status FROM minion_jobs WHERE name='autopilot-daily-memory' AND id<>ALL($1::bigint[]) ORDER BY id`,
+      [firstBatchIds],
+    );
+    expect(secondBatch.length).toBeGreaterThan(0);
+    expect(secondBatch.every(row => ['waiting', 'delayed', 'active'].includes(row.status))).toBe(true);
+    const secondIds = secondBatch.map(row => row.id);
+    for (let i = 0; i < 40 && secondIds.length; i++) {
+      await queue.promoteDelayed();
+      const daily = await queue.claim('retry-batch-daily-2', 60_000, 'default', ['autopilot-daily-memory']);
+      if (!daily) break;
+      const result = await handler(daily);
+      await queue.completeJob(daily.id, 'retry-batch-daily-2', result);
+    }
+    const remaining = await engine.executeRaw<{ id: number; status: string }>(
+      `SELECT id,status FROM minion_jobs WHERE id=ANY($1::bigint[]) AND status NOT IN ('completed','failed','cancelled')`,
+      [secondIds],
+    );
+    expect(remaining).toHaveLength(0);
+    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).toContain('Retry batch v2');
+    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth).not.toContain('Retry batch v1');
+  });
+
   test('successful empty source discovery retires only captured debt and preserves a concurrent origin bank', async () => {
     const sourceId = 'empty-debt-source';
     await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
