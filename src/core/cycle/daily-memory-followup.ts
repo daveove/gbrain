@@ -32,16 +32,16 @@ export async function pinDailyMemoryJob(engine: BrainEngine, job: DailyJob): Pro
   if (job.data.daily_memory_date === day && job.data.daily_memory_timezone === timezone) return job;
   // Legacy active jobs pin durably before the first write or deferred handoff.
   const stored = await engine.executeRaw<{ data: Record<string, unknown>; status: string }>(
-    'SELECT data,status FROM minion_jobs WHERE id=$1', [job.id]);
+    "SELECT data,status FROM minion_jobs WHERE id=$1 AND name IN ('autopilot-daily-memory','autopilot-global-maintenance')", [job.id]);
   if (stored[0]?.status === 'active') {
     if (pinnedDailyMemoryTimezone(stored[0].data) && isDay(stored[0].data.daily_memory_date)) {
       return { ...job, data: stored[0].data };
     }
     const written = await engine.executeRaw<{ data: Record<string, unknown> }>(
       `UPDATE minion_jobs SET data=data || $2::jsonb WHERE id=$1 AND status='active'
-        AND data=$3::jsonb RETURNING data`, [job.id, pin, stored[0].data]);
+        AND name IN ('autopilot-daily-memory','autopilot-global-maintenance') AND data=$3::jsonb RETURNING data`, [job.id, pin, stored[0].data]);
     const canonical = written[0]?.data ?? (await engine.executeRaw<{ data: Record<string, unknown> }>(
-      "SELECT data FROM minion_jobs WHERE id=$1 AND status='active'", [job.id]))[0]?.data;
+      "SELECT data FROM minion_jobs WHERE id=$1 AND status='active' AND name IN ('autopilot-daily-memory','autopilot-global-maintenance')", [job.id]))[0]?.data;
     if (!canonical || !isDay(canonical.daily_memory_date) || !pinnedDailyMemoryTimezone(canonical)) {
       throw new Error('Daily memory pin was not persisted');
     }

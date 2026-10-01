@@ -433,6 +433,16 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(successors.every(row => row.data.daily_memory_timezone === 'Asia/Manila')).toBe(true);
   });
 
+  test('legacy pin helper leaves an unrelated active extract job unchanged', async () => {
+    const queue = new MinionQueue(engine);
+    const job = await queue.add('extract', { stale: true, sourceId: 'default' });
+    const claimed = await queue.claim('synthetic-unrelated-owner', 60_000, 'default', ['extract']);
+    expect(claimed!.id).toBe(job.id);
+    const before = (await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [job.id]))[0].data;
+    await pinDailyMemoryJob(engine, { id: job.id, data: { daily_memory_date: '2026-09-30' } });
+    expect((await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [job.id]))[0].data).toEqual(before);
+  });
+
   test('same-day barriers for distinct zones do not collide and explicit invalid zones fail', async () => {
     const queue = new MinionQueue(engine), opts = { day: '2026-09-30', ids: [], key: 'zone-identity' };
     const a = await queueFanoutDailyMemory(queue, { ...opts, timezone: 'Asia/Manila' });
