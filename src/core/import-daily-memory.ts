@@ -41,13 +41,19 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   const clearOwnLive = async () => {
     await engine.executeRawDirect(
       `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-         AND path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'`,
+         AND CASE WHEN pg_input_is_valid(path, 'jsonb') THEN
+           path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
+         ELSE false END`,
       [key.op, key.fingerprint, origin]);
     await engine.executeRawDirect(
       `UPDATE op_checkpoints SET completed_keys=(
          SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
          FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
-         WHERE NOT (elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%')
+         WHERE NOT (
+           CASE WHEN pg_input_is_valid(elem, 'jsonb') THEN COALESCE(
+             elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%', false)
+           ELSE false END
+         )
        ), updated_at=now()
        WHERE op=$1 AND fingerprint=$2`,
       [key.op, key.fingerprint, origin]);
@@ -64,14 +70,20 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       }
       await engine.executeRawDirect(
         `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-           AND path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
-           AND path<>$4`,
+           AND CASE WHEN pg_input_is_valid(path, 'jsonb') THEN
+             path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
+             AND path<>$4
+           ELSE false END`,
         [key.op, key.fingerprint, origin, wrapped]);
       await engine.executeRawDirect(
         `UPDATE op_checkpoints SET completed_keys=(
            SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
            FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
-           WHERE NOT (elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4)
+           WHERE NOT (
+             CASE WHEN pg_input_is_valid(elem, 'jsonb') THEN COALESCE(
+               elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4, false)
+             ELSE false END
+           )
          ), updated_at=now()
          WHERE op=$1 AND fingerprint=$2`,
         [key.op, key.fingerprint, origin, wrapped]);

@@ -649,6 +649,50 @@ test('same-revision date mutation survives stale slug retirement and later page 
     && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
 });
 
+
+test('renew and release skip legacy unwrapped import checkpoint rows without JSON cast errors', async () => {
+  const { createHash } = await import('node:crypto');
+  const dir = root();
+  const fingerprint = createHash('sha256').update(JSON.stringify(['default', dir])).digest('hex').slice(0, 16);
+  const legacyBefore = 'before:' + JSON.stringify({
+    targets: [{ slug: 'notes/legacy-import-unwrapped', revision: null }],
+    days: ['2026-01-09'],
+  });
+  await engine.executeRawDirect(
+    `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+     VALUES ('import-daily-memory', $1, $2::jsonb, now())
+     ON CONFLICT (op, fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys, updated_at=now()`,
+    [fingerprint, JSON.stringify([legacyBefore, 'slug:notes/legacy-import-unwrapped', 'day:2026-01-09'])]);
+  await engine.executeRawDirect(
+    `INSERT INTO op_checkpoint_paths (op, fingerprint, path) VALUES
+       ('import-daily-memory', $1, $2),
+       ('import-daily-memory', $1, 'slug:notes/legacy-import-unwrapped'),
+       ('import-daily-memory', $1, 'day:2026-01-09')
+     ON CONFLICT DO NOTHING`,
+    [fingerprint, legacyBefore]);
+  await engine.putPage('notes/legacy-import-unwrapped', {
+    type: 'note', title: 'Legacy', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-09' },
+  });
+  await engine.executeRaw(
+    "UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'",
+    ['2026-01-09', 'notes/legacy-import-unwrapped']);
+  // createImportDailyMemory calls touchLive(); unguarded casts used to abort here.
+  const live = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await expect(live.renew()).resolves.toBeUndefined();
+  await expect(live.release()).resolves.toBeUndefined();
+  const [retainedLegacy] = await engine.executeRaw<{ completed_keys: string[] }>(
+    "SELECT completed_keys FROM op_checkpoints WHERE op='import-daily-memory' AND fingerprint=$1", [fingerprint]);
+  expect(retainedLegacy!.completed_keys).toContain(legacyBefore);
+  expect(retainedLegacy!.completed_keys).toContain('slug:notes/legacy-import-unwrapped');
+  expect(retainedLegacy!.completed_keys).toContain('day:2026-01-09');
+  const recovery = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await recovery.finish();
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND fingerprint=$1",
+    [fingerprint])).toHaveLength(0);
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-01-09'))).toBe(true);
+});
+
 test('unchanged CODE projection repair rejects its commit hook and rolls back the seal', async () => {
   const dir = root(), relativePath = 'src/example.ts', file = join(dir,relativePath);
   const content = 'export function syntheticValue() { return 42; }\n';
