@@ -16,6 +16,7 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
+import { requireWritablePage } from '../src/core/ops/context.ts';
 import { listWriteRequests, cancelWriteRequest } from '../src/core/persistence/control.ts';
 
 const engines: BrainEngine[] = [];
@@ -183,3 +184,34 @@ test('opt-out cannot expose a stored receipt after its target becomes an owner a
     }
   }
 });
+
+
+test('remote create at reserved owner-aggregate identities is rejected; generated path still protected', async () => {
+  for (const engine of engines) {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('dream','Dream fixture') ON CONFLICT DO NOTHING");
+    for (const ownerSource of ['default', 'dream']) {
+      const remote = { ...context(engine), sourceId: ownerSource,
+        auth: { token: 'fixture', clientId: 'fixture', scopes: ['read', 'write'], allowedSources: [ownerSource] } } as OperationContext;
+      const day = `daily-memory/2026-10-02`;
+      const ref = 'source-records/gmail/create-block';
+      for (const slug of [day, ref]) {
+        await expect(submitPageMutation(remote, { operation: 'put_page', params: {
+          slug, content: 'Remote mint attempt', request_id: randomUUID(),
+        } })).rejects.toMatchObject({ code: 'page_not_found' });
+        expect(await engine.getPage(slug, { sourceId: ownerSource })).toBeNull();
+      }
+      await expect(requireWritablePage(remote, day, 'put_page', 'page', true)).rejects.toMatchObject({ code: 'page_not_found' });
+      await expect(requireWritablePage({ ...remote, remote: false }, day, 'put_page', 'page', true)).resolves.toBeUndefined();
+      await engine.putPage(day, { ...page(), frontmatter: { dream_generated: true } }, { sourceId: ownerSource });
+      await expect(submitPageMutation(remote, { operation: 'put_page', params: {
+        slug: day, content: 'Overwrite generated', force: true, request_id: randomUUID(),
+      } })).rejects.toMatchObject({ code: 'page_not_found' });
+      expect((await engine.getPage(day, { sourceId: ownerSource }))!.frontmatter.dream_generated).toBe(true);
+      const ordinarySlug = `notes/remote-ordinary-${randomUUID().slice(0, 8)}`;
+      const ordinary = await submitPageMutation(remote, { operation: 'put_page', params: {
+        slug: ordinarySlug, content: 'Ordinary remote create', request_id: randomUUID(),
+      } });
+      expect(ordinary.state).toBe('committed');
+    }
+  }
+}, 120_000);

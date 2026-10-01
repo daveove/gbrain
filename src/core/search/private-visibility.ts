@@ -48,11 +48,17 @@ export function privatePagesFilterFragment(pageAlias: string, filter: PageVisibi
     : `(COALESCE(${pageAlias}.frontmatter->>'visibility', 'world') <> 'private' AND ${owner})`;
 }
 
+/** Reserved owner-aggregate source+slug identities, independent of page metadata. */
+export function isReservedOwnerAggregateIdentity(sourceId: string, slug: string): boolean {
+  if (!['default', 'dream'].includes(sourceId)) return false;
+  return /^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(slug)
+    || slug.startsWith('source-records/');
+}
+
 export function isOwnerAggregate(page: { source_id: string; slug: string; frontmatter: Record<string, unknown> }): boolean {
-  if (!['default', 'dream'].includes(page.source_id) || page.frontmatter.dream_generated !== true) return false;
+  if (page.frontmatter.dream_generated !== true || !isReservedOwnerAggregateIdentity(page.source_id, page.slug)) return false;
   return /^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(page.slug)
-    || (page.slug.startsWith('source-records/')
-      && ['source_record_id', 'source_record_type', 'source_record_ref'].every(key => Object.hasOwn(page.frontmatter, key)));
+    || ['source_record_id', 'source_record_type', 'source_record_ref'].every(key => Object.hasOwn(page.frontmatter, key));
 }
 
 export function isPageHidden(page: { source_id: string; slug: string; frontmatter: Record<string, unknown> },

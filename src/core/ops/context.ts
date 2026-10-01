@@ -21,7 +21,7 @@ import { isSearchMode } from '../search/mode.ts';
 import { stampEvidence } from '../search/evidence.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '../eval-capture.ts';
 import type { SearchResult, HybridSearchMeta, PageReadScope, PageReadPolicy } from '../types.ts';
-import { resolveExcludePrivatePages, isPageHidden, isOwnerAggregate } from '../search/private-visibility.ts';
+import { resolveExcludePrivatePages, isPageHidden, isOwnerAggregate, isReservedOwnerAggregateIdentity } from '../search/private-visibility.ts';
 
 // --- Upload validators (Fix 1 / B5 / H5 / M4) ---
 
@@ -783,7 +783,12 @@ export async function requireWritablePage(
     }
     return;
   }
-  if (allowCreate) return;
+  if (allowCreate) {
+    if (ctx.remote !== false && isReservedOwnerAggregateIdentity(writeSource, slug)) {
+      throw new OperationError('page_not_found', 'Page not found.');
+    }
+    return;
+  }
 
   const visibleScope = federatedSearchScope(ctx);
   const spansAnotherSource =
