@@ -281,3 +281,46 @@ test('renew refreshes the live lease stamp and finish still settles', async () =
   await daily.finish();
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
 });
+
+test('nonempty finish retires expired foreign before: debt', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Synthetic fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-24' }, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const crashed = (await createImportDailyMemory(engine, opts))!;
+  await crashed.before(file, 'note.md');
+  await expireLiveLeases();
+  const live = (await createImportDailyMemory(engine, opts))!;
+  await live.before(file, 'note.md');
+  await live.imported('note');
+  await live.finish();
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('future live lease is treated as abandoned', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const peer = (await createImportDailyMemory(engine, opts))!;
+  await peer.before(file, 'note.md');
+  const lives = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  for (const row of lives) {
+    const wrapped = JSON.parse(row.path) as { origin: string; value: string };
+    wrapped.value = `live:${new Date(Date.now() + 60 * 60 * 1000).toISOString()}`;
+    await engine.executeRawDirect(
+      'UPDATE op_checkpoint_paths SET path=$1 WHERE op=$2 AND path=$3',
+      [JSON.stringify(wrapped), 'import-daily-memory', row.path]);
+  }
+  expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('imported');
+  await (await createImportDailyMemory(engine, opts))!.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+});

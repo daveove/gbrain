@@ -49,11 +49,24 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   };
   const touchLive = async () => {
     opts.signal?.throwIfAborted();
-    await clearOwnLive();
+    // Bank the replacement first so peers never see an unmarked gap.
     const wrapped = JSON.stringify({ origin, value: `live:${new Date().toISOString()}` });
     if (!await appendCompleted(engine, key, [wrapped])) {
       throw new Error('Daily-memory import checkpoint unavailable');
     }
+    await engine.executeRawDirect(
+      `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+         AND path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
+         AND path<>$4`,
+      [key.op, key.fingerprint, origin, wrapped]);
+    await engine.executeRawDirect(
+      `UPDATE op_checkpoints SET completed_keys=(
+         SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
+         FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
+         WHERE NOT (elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4)
+       ), updated_at=now()
+       WHERE op=$1 AND fingerprint=$2`,
+      [key.op, key.fingerprint, origin, wrapped]);
   };
   // Lease marks this origin live so an empty peer finish cannot retire our banks.
   await touchLive();
@@ -178,20 +191,18 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
           } catch { /* fall through */ }
           return { origin: null as string | null, value: path };
         };
-        const ownDebt = mine.some(path => {
-          const value = unwrap(path).value;
-          return value.startsWith('before:') || value.startsWith('slug:') || value.startsWith('day:');
-        });
         const now = Date.now();
         const abandonedForeign = foreign.filter(path => {
           const rowOrigin = unwrap(path).origin;
           if (!rowOrigin) return true;
           const stamped = liveByOrigin.get(rowOrigin);
           if (stamped == null) return true;
+          // Future stamps (clock skew) are not active; otherwise peers suppress adoption forever.
+          if (stamped > now) return true;
           return now - stamped > LIVE_TTL_MS;
         });
-        // Own debt: retire only this origin. Empty finish: adopt foreign only when its live lease expired.
-        const retire = [...new Set([...(ownDebt ? mine : [...mine, ...abandonedForeign]), ...recovery])];
+        // Always retire own + expired/missing-lease foreign; only live foreign origins stay.
+        const retire = [...new Set([...mine, ...abandonedForeign, ...recovery])];
         for (let start = 0; start < retire.length; start += 100) {
           const chunk = retire.slice(start, start + 100);
           await engine.executeRawDirect(
