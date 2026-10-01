@@ -630,6 +630,9 @@ export async function runImport(
     sourceId: sourceId ?? 'default', dir, commit: opts.commit, signal,
     protect: company ? key => company.protect([{ ...key, kind: 'content' }]) : undefined,
   });
+  // Abort/worker-failure paths skip finish(); always drop the live lease so a
+  // clean retry can adopt before: debt instead of waiting out the 30m TTL.
+  try {
 
   async function processFile(eng: BrainEngine, filePath: string) {
     if (signal?.aborted) return;
@@ -1258,6 +1261,9 @@ export async function runImport(
       ? { type_warnings: [...typeWarningCounts.values()] }
       : {}),
   };
+  } finally {
+    try { await dailyMemory?.release(); } catch { /* prefer prior error */ }
+  }
 }
 
 /**

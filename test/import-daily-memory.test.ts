@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { runImport } from '../src/commands/import.ts';
+import { runImport, ImportAbortError } from '../src/commands/import.ts';
 import { importFile } from '../src/core/import-file.ts';
 import { createImportDailyMemory } from '../src/core/import-daily-memory.ts';
 import { loadSyncFailures } from '../src/core/sync-failure-ledger.ts';
@@ -342,5 +342,24 @@ test('concurrent renewals leave one live lease', async () => {
     "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(1);
   await daily.finish();
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('aborted import releases daily-memory live lease', async () => {
+  const dir = root(), home = root();
+  writeFileSync(join(dir, 'note.md'), markdown);
+  const controller = new AbortController();
+  const spy = spyOn(await import('../src/core/import-file.ts'), 'importFile').mockImplementation(async () => {
+    controller.abort();
+    return { status: 'imported' as const, slug: 'note', chunks: 1 };
+  });
+  try {
+    await withEnv({ GBRAIN_HOME: home }, async () => {
+      await expect(runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], {
+        noExtract: true, signal: controller.signal,
+      })).rejects.toBeInstanceOf(ImportAbortError);
+    });
+  } finally { spy.mockRestore(); }
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(0);
 });
 
