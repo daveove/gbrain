@@ -1,4 +1,6 @@
 import datetime
+import os
+import stat
 import json
 import pathlib
 import sys
@@ -32,37 +34,85 @@ if len(sys.argv) > 4 and sys.argv[4].strip():
 # up to `last` so a resumed session older than 14 days is still found by mtime.
 last = (end - datetime.timedelta(microseconds=1)).date()
 selected: list[pathlib.Path] = []
+def fail_scan(action: str, target: pathlib.Path, exc: BaseException) -> None:
+    print(f'daily-memory-codex-files: cannot {action} {target}: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+
+
+def scandir_sorted(directory: pathlib.Path):
+    """List directory entries; surface OSError instead of Path.glob suppression."""
+    try:
+        return sorted(os.scandir(directory), key=lambda entry: entry.name)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        fail_scan('list', directory, exc)
+
+
+def day_directories(sessions_root: pathlib.Path, *, watermark: bool) -> list[pathlib.Path]:
+    if not watermark:
+        lookback_start = (start - datetime.timedelta(days=14)).date()
+        found: list[pathlib.Path] = []
+        utc_day = lookback_start
+        while utc_day <= last:
+            directory = sessions_root / utc_day.strftime('%Y/%m/%d')
+            try:
+                st = directory.stat()
+            except FileNotFoundError:
+                utc_day += datetime.timedelta(days=1)
+                continue
+            except OSError as exc:
+                fail_scan('stat', directory, exc)
+            if stat.S_ISDIR(st.st_mode):
+                found.append(directory)
+            utc_day += datetime.timedelta(days=1)
+        return found
+    # Watermark path: walk every existing YYYY/MM/DD (no 14-day creation cutoff).
+    found = []
+    for year_ent in scandir_sorted(sessions_root):
+        if not (year_ent.is_dir(follow_symlinks=False) and len(year_ent.name) == 4 and year_ent.name.isdigit()):
+            continue
+        year_path = pathlib.Path(year_ent.path)
+        for month_ent in scandir_sorted(year_path):
+            if not (month_ent.is_dir(follow_symlinks=False) and len(month_ent.name) == 2 and month_ent.name.isdigit()):
+                continue
+            month_path = pathlib.Path(month_ent.path)
+            for day_ent in scandir_sorted(month_path):
+                if not (day_ent.is_dir(follow_symlinks=False) and len(day_ent.name) == 2 and day_ent.name.isdigit()):
+                    continue
+                try:
+                    utc_day = datetime.date.fromisoformat(f'{year_ent.name}-{month_ent.name}-{day_ent.name}')
+                except ValueError:
+                    continue
+                if utc_day <= last:
+                    found.append(pathlib.Path(day_ent.path))
+    return found
+
+
 # argv[4] present ⇒ walk all existing day dirs (no 14-day creation cutoff).
 has_watermark = len(sys.argv) > 4 and bool(sys.argv[4].strip())
-if has_watermark:
-    directories = []
-    for directory in sorted(root.glob('[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]')):
-        if not directory.is_dir():
-            continue
-        try:
-            utc_day = datetime.date.fromisoformat(directory.as_posix()[-10:].replace('/', '-'))
-        except ValueError:
-            continue
-        if utc_day <= last:
-            directories.append(directory)
-else:
-    lookback_start = (start - datetime.timedelta(days=14)).date()
-    directories = []
-    utc_day = lookback_start
-    while utc_day <= last:
-        directory = root / utc_day.strftime('%Y/%m/%d')
-        if directory.is_dir():
-            directories.append(directory)
-        utc_day += datetime.timedelta(days=1)
+directories = day_directories(root, watermark=has_watermark)
 for directory in directories:
-    for path in sorted(directory.glob('*.jsonl')):
+    try:
+        # Include symlinks named *.jsonl so a broken/unreadable target fails
+        # closed at stat/open instead of being silently omitted by is_file().
+        jsonl_paths = sorted(
+            (pathlib.Path(entry.path) for entry in os.scandir(directory)
+             if entry.name.endswith('.jsonl')
+             and (entry.is_file(follow_symlinks=False) or entry.is_symlink())),
+            key=lambda p: p.name,
+        )
+    except FileNotFoundError:
+        continue
+    except OSError as exc:
+        fail_scan('list', directory, exc)
+    for path in jsonl_paths:
         try:
             mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc)
         except OSError as exc:
             # Fail closed: a skipped unreadable session plus a clean watermark
             # advance would hide it forever once mtime falls behind the stamp.
-            print(f'daily-memory-codex-files: cannot stat {path}: {exc}', file=sys.stderr)
-            raise SystemExit(1)
+            fail_scan('stat', path, exc)
         meta_in_window = False
         try:
             with path.open() as transcript:
@@ -81,8 +131,7 @@ for directory in directories:
                     except (ValueError, KeyError, TypeError):
                         continue
         except OSError as exc:
-            print(f'daily-memory-codex-files: cannot read {path}: {exc}', file=sys.stderr)
-            raise SystemExit(1)
+            fail_scan('read', path, exc)
         # Start-time match for the calendar day, or modified since the prior
         # run / today's start so late evening messages converge on the next run.
         if meta_in_window or (mtime_floor <= mtime < end):

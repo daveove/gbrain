@@ -380,6 +380,19 @@ finally:
     try { chmodSync(broken, 0o644); } catch { /* ignore */ }
   });
 
+  it('exits nonzero when a session day directory cannot be listed', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const utcDate = new Date(input.start + 3600_000).toISOString().slice(0, 10).replaceAll('-', '/');
+    const dayDir = join(home, '.codex/sessions', utcDate);
+    mkdirSync(dayDir, { recursive: true });
+    chmodSync(dayDir, 0o000);
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    try { chmodSync(dayDir, 0o755); } catch { /* ignore */ }
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cannot (list|stat)/);
+  });
+
   it('places the flock under GBRAIN_DAILY_MEMORY_STATE on a fresh home', () => {
     const { home, run } = fixture();
     const state = join(home, 'custom-state');
