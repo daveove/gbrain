@@ -65,6 +65,7 @@ for (const kind of backends) {
         await engine.executeRaw('TRUNCATE facts, pages, fact_withdrawals, page_projection_jobs CASCADE');
         await engine.executeRaw("DELETE FROM config WHERE key LIKE 'embedding_migration.%'");
       }
+      await engine.executeRaw("INSERT INTO sources(id,name) VALUES('synthetic-retention-archive','Synthetic retention archive') ON CONFLICT(id) DO UPDATE SET archived=false,archived_at=NULL,archive_expires_at=NULL");
       await engine.setConfig('embedding_model', model);
       await engine.setConfig('embedding_dimensions', String(dimensions));
       resetGateway();
@@ -751,18 +752,18 @@ for (const kind of backends) {
       });
     }
     test('retention mutation parity: target-stamped archived legacy alias is not invalidated', async () => {
-      await engine.putPage('legacy-archived', { type: 'note', title: 'Synthetic legacy alias', compiled_truth: 'Synthetic legacy alias' });
-      await installFixtureChunks(engine, 'legacy-archived', [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Synthetic legacy alias', embedding: new Float32Array(dimensions).fill(0.1) }]);
+      await engine.putPage('legacy-archived', { type: 'note', title: 'Synthetic legacy alias', compiled_truth: 'Synthetic legacy alias' }, { sourceId: 'synthetic-retention-archive' });
+      await installFixtureChunks(engine, 'legacy-archived', [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Synthetic legacy alias', embedding: new Float32Array(dimensions).fill(0.1) }], { sourceId: 'synthetic-retention-archive' });
       await engine.executeRaw('UPDATE pages SET embedding_signature=$1', [`${model}:${dimensions}`]);
       await engine.executeRaw('UPDATE content_chunks SET model=$1,embedded_text_hash=md5(chunk_text)', [model.split(':')[1]]);
-      await softDeleteSource(engine, 'default');
+      await softDeleteSource(engine, 'synthetic-retention-archive');
       const snapshot = () => engine.executeRaw('SELECT to_jsonb(cc) AS row FROM content_chunks cc');
       const before = await snapshot();
       try {
         const result = await applyEmbeddingMigration(engine, await planEmbeddingMigration(engine, { to: model, dim: dimensions }));
         expect(await snapshot()).toEqual(before);
         expect(result.status).toBe('applied');
-      } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='default'"); }
+      } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='synthetic-retention-archive'"); }
     });
     test('legacy unsealed and already-zero pages recover through canonical projection before embedding', async () => {
       await engine.putPage('synthetic-recovery', { type: 'note', title: 'Synthetic recovery', compiled_truth: 'Canonical synthetic recovery content.' });
@@ -996,10 +997,10 @@ for (const kind of backends) {
     for (const phase of ['after-plan', 'before-ddl', 'before-companions']) {
       test(`retained vector refusal after normal archive ${phase}`, async () => {
         const factOnly = phase === 'before-companions';
-        if (factOnly) await engine.insertFact({ fact: 'Synthetic late archive fact', source: 'synthetic', embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'default' });
+        if (factOnly) await engine.insertFact({ fact: 'Synthetic late archive fact', source: 'synthetic', embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'synthetic-retention-archive' });
         else {
-          await engine.putPage('late-archive', { type: 'note', title: 'Synthetic late archive', compiled_truth: 'Synthetic late archive' });
-          await installFixtureChunks(engine, 'late-archive', [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Synthetic late archive', embedding: new Float32Array(dimensions).fill(0.1) }]);
+          await engine.putPage('late-archive', { type: 'note', title: 'Synthetic late archive', compiled_truth: 'Synthetic late archive' }, { sourceId: 'synthetic-retention-archive' });
+          await installFixtureChunks(engine, 'late-archive', [{ chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Synthetic late archive', embedding: new Float32Array(dimensions).fill(0.1) }], { sourceId: 'synthetic-retention-archive' });
         }
         const plan = await planEmbeddingMigration(engine, { to: 'openai:text-embedding-3-large', dim: factOnly ? dimensions : dimensions * 2 });
         const vectors = async () => Promise.all([
@@ -1008,9 +1009,9 @@ for (const kind of backends) {
           engine.executeRaw("SELECT key,value FROM config WHERE key IN ('embedding_model','embedding_dimensions') ORDER BY key"),
         ]);
         const before = await vectors();
-        const identity = await engine.executeRaw("SELECT incarnation::text FROM sources WHERE id='default'");
+        const identity = await engine.executeRaw("SELECT incarnation::text FROM sources WHERE id='synthetic-retention-archive'");
         let archived = false, fileWrites = 0;
-        const archive = async () => { expect(await softDeleteSource(engine, 'default')).not.toBeNull(); archived = true; };
+        const archive = async () => { expect(await softDeleteSource(engine, 'synthetic-retention-archive')).not.toBeNull(); archived = true; };
         const raced = new Proxy(engine, { get(target, key) {
           if (key === 'executeRaw' && phase === 'before-ddl') return async (sql: string, params?: unknown[]) => {
             if (!archived && sql.includes('format_type') && await target.getConfig('embedding_migration.state')) await archive();
@@ -1038,24 +1039,24 @@ for (const kind of backends) {
           const result = await applyEmbeddingMigration(raced, plan, { persistConfig: () => { fileWrites++; } });
           expect(archived).toBe(true);
           expect(await vectors()).toEqual(before);
-          expect(await engine.executeRaw("SELECT incarnation::text FROM sources WHERE id='default'")).toEqual(identity);
+          expect(await engine.executeRaw("SELECT incarnation::text FROM sources WHERE id='synthetic-retention-archive'")).toEqual(identity);
           expect(result).toMatchObject({ status: 'failed' });
           if (result.status === 'failed') expect(result.reason).toContain('retained_vectors_blocked');
           expect(fileWrites).toBe(0);
           expect((await readContentChunksEmbeddingDim(engine)).dims).toBe(dimensions);
-        } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='default'"); }
+        } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='synthetic-retention-archive'"); }
       });
     }
     for (const phase of ['before-provider', 'during-provider']) {
       test(`retained vector flow refusal ${phase} preserves vectors and configuration`, async () => {
-        await engine.insertFact({ fact: 'Synthetic guarded flow fact', source: 'synthetic', embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'default' });
+        await engine.insertFact({ fact: 'Synthetic guarded flow fact', source: 'synthetic', embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'synthetic-retention-archive' });
         const before = await engine.executeRaw('SELECT to_jsonb(f) AS row FROM facts f');
         const beforeConfig = await engine.executeRaw('SELECT key,value FROM config ORDER BY key');
-        if (phase === 'before-provider') await softDeleteSource(engine, 'default');
+        if (phase === 'before-provider') await softDeleteSource(engine, 'synthetic-retention-archive');
         let calls = 0;
         __setEmbedTransportForTests(async ({ values }) => {
           calls++;
-          if (phase === 'during-provider') await softDeleteSource(engine, 'default');
+          if (phase === 'during-provider') await softDeleteSource(engine, 'synthetic-retention-archive');
           return { values, warnings: [], embeddings: values.map(() => Array(dimensions).fill(0.1)), usage: { tokens: 8 } };
         });
         try {
@@ -1067,16 +1068,16 @@ for (const kind of backends) {
           expect(await engine.getConfig('embedding_dimensions')).toBe(String(dimensions));
           if (phase === 'before-provider') expect(await engine.executeRaw('SELECT key,value FROM config ORDER BY key')).toEqual(beforeConfig);
           else expect((await readMigrationState(engine)).state?.budget?.requests).toBe(1);
-        } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='default'"); }
+        } finally { await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='synthetic-retention-archive'"); }
       });
     }
     test('retained vector guard preserves archived takes and refuses destructive companion changes', async () => {
-      await engine.putPage('retained-take', { type: 'note', title: 'Synthetic retained take', compiled_truth: '' });
+      await engine.putPage('retained-take', { type: 'note', title: 'Synthetic retained take', compiled_truth: '' }, { sourceId: 'synthetic-retention-archive' });
       await engine.executeRaw(`INSERT INTO takes(page_id,row_num,claim,kind,holder,embedding)
         SELECT id,0,'Synthetic retained take','take','self',
           ('[' || array_to_string(array_fill(0.1::real, ARRAY[(SELECT atttypmod FROM pg_attribute WHERE attrelid='takes'::regclass AND attname='embedding')]), ',') || ']')::vector
-        FROM pages WHERE slug='retained-take' AND source_id='default'`);
-      await softDeleteSource(engine, 'default');
+        FROM pages WHERE slug='retained-take' AND source_id='synthetic-retention-archive'`);
+      await softDeleteSource(engine, 'synthetic-retention-archive');
       const before = await engine.executeRaw('SELECT embedding::text FROM takes');
       try {
         const result = await applyEmbeddingMigration(engine, await planEmbeddingMigration(engine, { to: 'openai:text-embedding-3-large', dim: dimensions * 2 }));
@@ -1088,23 +1089,23 @@ for (const kind of backends) {
         expect(await engine.executeRaw('SELECT embedding::text FROM takes')).toEqual(before);
         expect((await readContentChunksEmbeddingDim(engine)).dims).toBe(dimensions * 2);
       } finally {
-        await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='default'");
+        await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='synthetic-retention-archive'");
         await runSchemaTransition(engine, dimensions);
       }
     });
     test('retained vector guard distinguishes intentionally retired fact vectors', async () => {
       for (const [fact, source, valid_until] of [['Synthetic expired', 'synthetic', new Date(0)], ['Synthetic audit', AUDIT_ROW_SOURCES[0], undefined], ['Synthetic withdrawn', 'synthetic', undefined]] as const) {
-        await engine.insertFact({ fact, source, valid_until, embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'default' });
+        await engine.insertFact({ fact, source, valid_until, embedding: new Float32Array(dimensions).fill(0.2) }, { source_id: 'synthetic-retention-archive' });
       }
       await engine.executeRaw("INSERT INTO fact_withdrawals(source_id,visibility,fact_hash) SELECT source_id,visibility,gbrain_fact_fingerprint(fact) FROM facts WHERE fact='Synthetic withdrawn'");
-      await softDeleteSource(engine, 'default');
+      await softDeleteSource(engine, 'synthetic-retention-archive');
       try {
         const result = await applyEmbeddingMigration(engine, await planEmbeddingMigration(engine, { to: 'openai:text-embedding-3-large', dim: dimensions * 2 }));
         expect(result.status).toBe('applied');
         expect((await engine.executeRaw('SELECT id FROM facts WHERE embedding IS NOT NULL')).length).toBe(0);
         expect((await countStaleFactEmbeddings(engine, 'openai:text-embedding-3-large', dimensions * 2)).count).toBe(0);
       } finally {
-        await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='default'");
+        await engine.executeRaw("UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL WHERE id='synthetic-retention-archive'");
         await engine.executeRaw('TRUNCATE facts, fact_withdrawals, pages CASCADE');
         await runSchemaTransition(engine, dimensions);
       }

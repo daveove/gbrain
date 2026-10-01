@@ -29,8 +29,8 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   // imports do not collapse under appendCompleted's ON CONFLICT DO NOTHING.
   const origin = randomUUID();
   await opts.protect?.(key);
-  const bank = async (entries: string[]) => {
-    opts.signal?.throwIfAborted();
+  const bank = async (entries: string[], committed = false) => {
+    if (!committed) opts.signal?.throwIfAborted();
     const wrapped = entries.map(value => JSON.stringify({ origin, value }));
     if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
       throw new Error('Daily-memory import checkpoint unavailable');
@@ -53,9 +53,9 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   };
   // Workers share this origin; serialize renewals so two deletes cannot wipe both markers.
   let liveChain: Promise<void> = Promise.resolve();
-  const touchLive = () => {
+  const touchLive = (committed = false) => {
     const run = async () => {
-      opts.signal?.throwIfAborted();
+      if (!committed) opts.signal?.throwIfAborted();
       // Bank the replacement first so peers never see an unmarked gap.
       const wrapped = JSON.stringify({ origin, value: `live:${new Date().toISOString()}` });
       if (!await appendCompleted(engine, key, [wrapped])) {
@@ -109,8 +109,10 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       await bank([`before:${JSON.stringify(prior)}`]);
     },
     async imported(slug: string) {
-      await touchLive();
-      await bank([`slug:${slug}`]);
+      // The page has committed. Bank its debt before observing cancellation,
+      // so the caller can retain its successful path while draining workers.
+      await touchLive(true);
+      await bank([`slug:${slug}`], true);
     },
     async finish() {
       opts.signal?.throwIfAborted();
