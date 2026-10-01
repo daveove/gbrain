@@ -397,6 +397,24 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
   });
 
+  test('source-sync refresh clears debt when hard-deleted slugs resolve to no dates', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('gone-source','Gone fixture')");
+    const slug = 'notes/gone-hard';
+    await engine.putPage(slug, { type: 'note', title: 'Gone', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-08-01' } }, { sourceId: 'gone-source' });
+    const [page] = await engine.executeRaw<{ id: number }>('SELECT id FROM pages WHERE source_id=$1 AND slug=$2', ['gone-source', slug]);
+    await engine.executeRaw('DELETE FROM page_versions WHERE page_id=$1', [page.id]);
+    await engine.executeRaw('DELETE FROM pages WHERE id=$1', [page.id]);
+    const queue = new MinionQueue(engine);
+    const first = await queue.add('autopilot-cycle', { source_id: 'gone-source' });
+    const claimed = (await queue.claim('gone-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(claimed.id).toBe(first.id);
+    await refreshDailyMemoryAfterSourceSync(engine, claimed, 'gone-source', {
+      status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+    });
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='autopilot-sync-daily-memory'")).toHaveLength(0);
+  });
+
   test('source-sync refresh cross-job checkpoint survives a terminal cycle row', async () => {
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES('checkpoint-source','Checkpoint fixture')");
     const day = '2026-09-18', slug = 'notes/checkpoint';

@@ -67,6 +67,19 @@ describe('runChronicleExtract', () => {
     });
   });
 
+  test('queues historical event days for daily-memory refresh', async () => {
+    await engine.executeRaw("DELETE FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    const historical: ChronicleJudge = async () => ({
+      events: [{ when: '2025-11-03T10:00:00Z', who: ['people/sarah-chen'], what: 'Historical backfill event', kind: 'meeting' }],
+    });
+    const r = await runChronicleExtract(engine, { slug: 'meetings/2026-06-18-sync', judge: historical, tz: 'UTC' });
+    expect(r.status).toBe('extracted');
+    expect(r.events_written).toBe(1);
+    const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(batches.some(row => row.data.daily_memory_dates?.includes('2025-11-03'))).toBe(true);
+  });
+
   test('writes an event page + timeline projection', async () => {
     const r = await runChronicleExtract(engine, { slug: 'meetings/2026-06-18-sync', judge: oneEvent });
     expect(r.status).toBe('extracted');
