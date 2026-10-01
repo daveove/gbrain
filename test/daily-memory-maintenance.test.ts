@@ -568,6 +568,50 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [day, last!.id])).not.toHaveLength(0);
   });
 
+  test('committed transcript debt survives a peer retiring its older snapshot', async () => {
+    const slug = 'notes/retiring-peer-delete', day = '2026-01-17';
+    await engine.putPage(slug, { type: 'note', title: 'Peer retirement fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [day, slug]);
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'retiring-peer-delete' }))!;
+    await live.before([slug]);
+    const [marker] = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
+    const wrapped = JSON.parse(marker!.path) as { origin: string; value: string };
+    const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+    await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, marker!.path]);
+    const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'retiring-peer' }))!;
+    let pause!: () => void, settle!: () => void;
+    const paused = new Promise<void>(resolve => { pause = resolve; });
+    const deferred = new Promise<void>(resolve => { settle = resolve; });
+    let held = false;
+    const originalDirect = engine.executeRawDirect;
+    const retirement = spyOn(engine, 'executeRawDirect').mockImplementation(async function (this: PGLiteEngine, sql, params) {
+      if (!held && sql.includes('DELETE FROM op_checkpoint_paths') && sql.includes('path=ANY')) {
+        held = true; pause(); await deferred;
+      }
+      // Transaction engines inherit this spy; preserve their own query handle.
+      return originalDirect.call(this, sql, params);
+    });
+    const finish = peer.finish();
+    try {
+      await Promise.race([paused, finish.then(() => { throw new Error('peer finished before retirement pause'); })]);
+      // Queue accepted, snapshot retirement not yet executed; no DB transaction is held.
+      const [last] = await engine.executeRaw<{ id: number }>("SELECT max(id)::integer AS id FROM minion_jobs WHERE name='autopilot-daily-memory'");
+      expect(last!.id).toBeGreaterThan(0);
+      await live.deleteStalePart(slug);
+      settle(); await finish;
+      await live.release(); // Simulate a crash before this origin's finish.
+      expect(await engine.getPage(slug)).toBeNull();
+      const retained = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+      expect(retained.some(row => JSON.parse(JSON.parse(row.path).value.slice(7)).days.includes(day))).toBe(true);
+      const recovery = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'retiring-peer-recovery' }))!;
+      await recovery.finish();
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [day, last!.id])).not.toHaveLength(0);
+    } finally {
+      settle(); await finish.catch(() => undefined);
+      retirement.mockRestore(); await live.release();
+    }
+  });
+
   test('cancellation during atomic stale deletion rolls back the page and debt', async () => {
     const slug = 'notes/cancel-atomic-delete';
     await engine.putPage(slug, { type: 'note', title: 'Atomic cancellation fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-17' } });

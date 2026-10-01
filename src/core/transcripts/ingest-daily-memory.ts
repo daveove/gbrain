@@ -76,7 +76,9 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       const previous = prior.flatMap(record => record.targets).find(target => target.slug === slug)?.revision ?? null;
       return (current.find(row => row.slug === slug)?.revision ?? null) !== previous;
     });
-    await bank([...prior.map(record => `before:${JSON.stringify(record)}`), ...changed.map(slug => `slug:${slug}`)], tx);
+    // A peer may already have snapshotted the original before: path for retirement.
+    // Give this committed mutation a fresh path so that older DELETE cannot erase it.
+    await bank([...prior.map(record => `before:${JSON.stringify({ ...record, bankId: randomUUID() })}`), ...changed.map(slug => `slug:${slug}`)], tx);
   };
   return {
     /** Bank debt inside the canonical page write transaction, without clearing prior dates. */
