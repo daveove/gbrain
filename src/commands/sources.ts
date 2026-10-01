@@ -926,10 +926,16 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
-  if (id === 'default' || id === 'dream') {
+  // Keep default hard-reserved. Ordinary id=dream without ownership markers may
+  // be archived; owned system-index dream rows stay blocked by softDeleteSource /
+  // assertSourceNotSystemIndex below.
+  if (id === 'default') {
     console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   // Show impact preview
   const impact = await assessDestructiveImpact(engine, id);
