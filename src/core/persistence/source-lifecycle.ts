@@ -165,10 +165,17 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         else await tx.executeRaw('INSERT INTO sources(id,name,local_path,config,incarnation) VALUES($1,$2,$3,$4::text::jsonb,$5::uuid)',
           [input.sourceId,input.name??input.sourceId,root?.source??null,JSON.stringify(input.config??{}),incarnation]);
         if(root){const id=await installTopologyBinding(tx,input.sourceId,incarnation,root,bindings);if(!worktrees.includes(id))worktrees.push(id);}
-      }else if(input.operation==='archive') await tx.executeRaw(`UPDATE sources SET archived=true,archived_at=COALESCE(archived_at,now()),
-        archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:false})]);
-      else if(input.operation==='restore') await tx.executeRaw(`UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL,
-        config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:input.refederate!==false})]);
+      }else if(input.operation==='archive'){
+        await tx.executeRaw(`UPDATE sources SET archived=true,archived_at=COALESCE(archived_at,now()),
+          archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:false})]);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
+      }else if(input.operation==='restore'){
+        await tx.executeRaw(`UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL,
+          config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:input.refederate!==false})]);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
+      }
       else if(input.operation==='rebind'){
         await tx.executeRaw('UPDATE sources SET local_path=$2 WHERE id=$1',[input.sourceId,root!.source]);
         const id=await installTopologyBinding(tx,input.sourceId,incarnation,root!,bindings);if(!worktrees.includes(id))worktrees.push(id);

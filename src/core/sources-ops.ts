@@ -934,6 +934,16 @@ export async function removeSource(
     );
   }
 
+  const { assertSourceNotSystemIndex } = await import('./destructive-guard.ts');
+  try {
+    await assertSourceNotSystemIndex(engine, opts.id);
+  } catch (error) {
+    throw new SourceOpError(
+      (error as { code?: string })?.code === 'system_index_source' ? 'protected_id' : 'protected_id',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:opts.id,confirmDestructive:opts.confirmDestructive||opts.yes,
@@ -1011,7 +1021,11 @@ export async function removeSource(
     }
   }
 
-  await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [opts.id]);
+  await engine.transaction(async (tx) => {
+    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, opts.id);
+    await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [opts.id]);
+  });
 
   return {
     id: opts.id,
