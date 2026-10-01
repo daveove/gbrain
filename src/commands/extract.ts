@@ -2186,8 +2186,10 @@ export async function extractStaleFromDB(
         if (typeof step.value?.after === 'string') pendingScanAfter = step.value.after;
         break;
       }
+      // Finish each yielded batch fully. Budget is enforced between batches so
+      // a mid-probe deadline cannot leave the resume cursor past unprocessed rows.
       readyPending += await probePendingLinkReferences(engine, step.value, { globalBasename, signal: opts.signal,
-        deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter,
+        dryRun, versionTs, sourceId: sourceIdFilter,
         onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);

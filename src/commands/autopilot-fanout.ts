@@ -681,7 +681,8 @@ export async function dispatchGlobalMaintenance(
   const job = await queue.add(
     'autopilot-global-maintenance',
     { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES,
-      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate } : {}) },
+      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate } : {}),
+      ...(opts.dailyMemoryTimezone ? { daily_memory_timezone: opts.dailyMemoryTimezone } : {}) },
     {
       queue: 'default',
       // Structural single-flight: one global job per slot; maxPending:1

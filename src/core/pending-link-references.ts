@@ -58,13 +58,15 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
         ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
     if (!rows.length) return { incomplete: false, after };
-    after = rows.at(-1)!.key;
-    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
+    // Yield before advancing after so a deadline mid-probe does not skip the
+    // unprocessed suffix of this batch on continuation.
     const parsed = rows.flatMap(row => {
       const reference = parseReference(row.value);
       return reference ? [{ ...row, reference }] : [];
     });
     if (parsed.length) yield parsed;
+    after = rows.at(-1)!.key;
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     if (rows.length < PENDING_BATCH_SIZE) return { incomplete: false, after };
   }
 }
