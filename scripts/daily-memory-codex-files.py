@@ -25,7 +25,11 @@ if len(sys.argv) > 4 and sys.argv[4].strip():
         watermark = datetime.datetime.fromisoformat(stamp)
         if watermark.tzinfo is None:
             watermark = watermark.replace(tzinfo=datetime.timezone.utc)
-        mtime_floor = min(watermark.astimezone(datetime.timezone.utc), start)
+        watermark = watermark.astimezone(datetime.timezone.utc)
+        # Future/invalid stamps are ignored (same as absent): a host clock
+        # correction must not raise the floor above "now".
+        if watermark <= datetime.datetime.now(datetime.timezone.utc):
+            mtime_floor = min(watermark, start)
     except ValueError:
         pass
 # Sessions live under the UTC date of creation. Walk every existing day folder

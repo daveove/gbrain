@@ -95,6 +95,28 @@ if [[ $# -eq 0 ]]; then
   if [[ -f "$WATERMARK" ]]; then
     watermark="$(tr -d '[:space:]' < "$WATERMARK" || true)"
   fi
+  # Reject malformed or future watermarks once; selector and ingest --since
+  # must share that normalized value or a future cutoff can filter every
+  # selected session while still reporting cleanScan=true.
+  if [[ -n "$watermark" ]]; then
+    watermark="$(python3 -c '
+import sys
+from datetime import datetime, timezone
+raw = sys.argv[1].strip()
+if not raw:
+    raise SystemExit(0)
+try:
+    stamp = raw.replace("Z", "+00:00")
+    dt = datetime.fromisoformat(stamp)
+except ValueError:
+    raise SystemExit(0)
+if dt.tzinfo is None:
+    dt = dt.replace(tzinfo=timezone.utc)
+if dt.astimezone(timezone.utc) > datetime.now(timezone.utc):
+    raise SystemExit(0)
+print(raw)
+' "$watermark" || true)"
+  fi
   python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" "$zone" "$watermark" > "$TMP"
   while IFS= read -r -d '' path; do files+=("$path"); done < "$TMP"
   if [[ ${#files[@]} -gt 0 ]]; then

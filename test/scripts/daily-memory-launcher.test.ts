@@ -274,6 +274,33 @@ finally:
     expect(args).toContain(input.currentUtc);
   });
 
+  it('rejects a future watermark and falls back to day midnight for --since', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    const future = new Date(Date.now() + 3600_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    mkdirSync(join(home, '.local/state/gbrain'), { recursive: true });
+    writeFileSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'), `${future}\n`);
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
+    const args = result.calls[0].args;
+    expect(new Date(args[args.indexOf('--since') + 1]).getTime()).toBe(input.start);
+    expect(args).toContain(input.precedingUtc);
+    expect(args).toContain(input.currentUtc);
+  });
+
+  it('rejects a malformed watermark and falls back to day midnight for --since', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    mkdirSync(join(home, '.local/state/gbrain'), { recursive: true });
+    writeFileSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'), 'not-a-timestamp\n');
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
+    const args = result.calls[0].args;
+    expect(new Date(args[args.indexOf('--since') + 1]).getTime()).toBe(input.start);
+  });
+
   it('regenerates an explicit date without ingesting existing transcripts', () => {
     const { home, run } = fixture();
     todayInputs(home);

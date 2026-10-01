@@ -44,8 +44,20 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       processed++;
     } catch (error) {
       stopped = true; clearInterval(timer); await renewal;
+      const message = error instanceof Error ? error.message : String(error);
+      const abortReason = abort.signal.aborted
+        ? (abort.signal.reason instanceof Error ? abort.signal.reason.message : String(abort.signal.reason || 'aborted'))
+        : null;
+      // Worker-parity: forwarded shutdown and lease-loss are infrastructure /
+      // recovery events. failJob would burn attempts and can dead-letter a
+      // two-attempt continuation after routine interruptions, losing dates
+      // already retired from the originating checkpoint.
+      const shutdown = Boolean(opts.signal?.aborted);
+      const leaseLost = message === 'Inline daily memory lease lost'
+        || abortReason === 'Inline daily memory lease lost';
+      if (shutdown || leaseLost) throw error;
       const terminal = job.attempts_made + 1 >= job.max_attempts;
-      const failed = await queue.failJob(job.id, token, error instanceof Error ? error.message : String(error),
+      const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));
       if (!failed) throw new Error('Inline daily memory failure fence lost', { cause: error });
       throw error;

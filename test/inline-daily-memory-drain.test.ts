@@ -97,3 +97,40 @@ test('scoped stalled recovery resumes an expired daily claim without changing un
   expect(await queue.getJob(unrelated.id)).toEqual(before);
   expect(await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).not.toBeNull();
 });
+
+test('forwarded shutdown aborts without burning an attempt or failing the job', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-26'; await seed(day);
+  await writeDailyMemoryFromSources(engine, { date: day });
+  const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
+  const shutdown = new AbortController();
+  await expect(drainInlineDailyMemory(engine, {
+    signal: shutdown.signal,
+    afterWrite: async (_daily, signal) => {
+      const wait = new Promise<void>((_resolve, reject) => {
+        if (signal!.aborted) { reject(signal!.reason instanceof Error ? signal!.reason : new Error(String(signal!.reason || 'aborted'))); return; }
+        signal!.addEventListener('abort', () => {
+          reject(signal!.reason instanceof Error ? signal!.reason : new Error(String(signal!.reason || 'aborted')));
+        }, { once: true });
+      });
+      shutdown.abort(new Error('shutdown'));
+      await wait;
+    },
+  })).rejects.toThrow('shutdown');
+  const row = await queue.getJob(job.id);
+  expect(row?.status).toBe('active');
+  expect(row?.attempts_made).toBe(0);
+  expect(row?.data.daily_memory_date).toBe(day);
+});
+
+test('lease-loss abort preserves the job without burning an attempt', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-27'; await seed(day);
+  await writeDailyMemoryFromSources(engine, { date: day });
+  const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
+  await expect(drainInlineDailyMemory(engine, {
+    afterWrite: async () => { throw new Error('Inline daily memory lease lost'); },
+  })).rejects.toThrow('Inline daily memory lease lost');
+  const row = await queue.getJob(job.id);
+  expect(row?.status).toBe('active');
+  expect(row?.attempts_made).toBe(0);
+  expect(row?.data.daily_memory_date).toBe(day);
+});
