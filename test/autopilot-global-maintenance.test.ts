@@ -357,6 +357,41 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
   });
 
+  test('delayed daily barrier keeps pinned timezone after cycle.timezone changes', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const queue = new MinionQueue(engine);
+    const sibling = await queue.add('autopilot-cycle', {});
+    const day = '2026-09-30';
+    const id = await queueFanoutDailyMemory(queue, {
+      day, ids: [sibling.id], key: 'tz-pin-slot', timezone: 'Asia/Manila',
+    });
+    const barrier = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      'SELECT data FROM minion_jobs WHERE id=$1', [id]))[0];
+    expect(barrier.data.daily_memory_timezone).toBe('Asia/Manila');
+    const pending = await finishFanoutDailyMemory(engine, { id, data: barrier.data });
+    expect(pending.daily_memory_pending).toBe(true);
+    const successor = (await engine.executeRaw<{ id: number; data: Record<string, unknown> }>(
+      "SELECT id,data FROM minion_jobs WHERE name='autopilot-daily-memory' AND id<>$1", [id]))[0];
+    expect(successor.data.daily_memory_timezone).toBe('Asia/Manila');
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    // Instant is 2026-09-30 in Manila and 2026-09-29 in Los Angeles.
+    await engine.putPage('notes/tz-pin', {
+      type: 'note', title: 'Timezone pin fixture', compiled_truth: 'Synthetic fixture', frontmatter: {},
+    });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=NULL, effective_date_source=NULL, updated_at='2026-09-30T02:00:00Z' WHERE slug='notes/tz-pin'");
+    const claimed = await queue.claim('tz-pin-lock', 60_000, 'default', ['autopilot-cycle']);
+    expect(claimed!.id).toBe(sibling.id);
+    await queue.completeJob(sibling.id, 'tz-pin-lock', {});
+    const pinned = await pinDailyMemoryJob(engine, { id: successor.id, data: successor.data });
+    expect(pinned.data.daily_memory_timezone).toBe('Asia/Manila');
+    const done = await finishFanoutDailyMemory(engine, pinned);
+    expect(done.daily_memory_pending).toBe(false);
+    expect(done.day).toBe(day);
+    expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+      .toContain('[[default:notes/tz-pin]]');
+  });
+
   test('completed identical daily barriers are idempotent but changed dependency sets get a new job', async () => {
     const queue = new MinionQueue(engine), day = '2026-09-30';
     const id = await queueFanoutDailyMemory(queue, { day, ids: [], key: 'same-slot' });
