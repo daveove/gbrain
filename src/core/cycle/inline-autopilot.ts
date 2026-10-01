@@ -2,11 +2,14 @@
 import type { BrainEngine } from '../engine.ts';
 import type { CycleOpts, CycleReport } from '../cycle.ts';
 import { resolveCycleDate } from './cycle-date.ts';
-import { finishFanoutDailyMemory, previousCalendarDay } from './daily-memory-followup.ts';
+import type { extractStaleFromDB } from '../../commands/extract.ts';
+import { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } from './daily-memory.ts';
+import { previousCalendarDay } from './daily-memory-followup.ts';
 
 export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOpts, deps: {
   cycle?: (engine: BrainEngine, opts: CycleOpts) => Promise<CycleReport>;
   now?: () => Date;
+  extract?: typeof extractStaleFromDB;
   onMaintenanceError?: (error: unknown) => void;
 } = {}): Promise<CycleReport> {
   const day = await resolveCycleDate(engine, { explicitDate: opts.synthDate, now: deps.now });
@@ -15,7 +18,14 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   if (['ok', 'clean', 'partial'].includes(report.status) && report.reason !== 'aborted' && !opts.signal?.aborted) {
     try {
       for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
-        await finishFanoutDailyMemory(engine, { id: 0, data: { daily_memory_date: date }, signal: opts.signal });
+        const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
+        if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
+        if (daily.written || daily.needs_extract) {
+          const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
+          const extracted = await extract(engine, { dryRun: false, jsonMode: true, quiet: true,
+            sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal: opts.signal });
+          if (extracted.staleRemaining > 0) throw new Error(`Inline daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
+        }
       }
     } catch (error) {
       if (!deps.onMaintenanceError) throw error;
