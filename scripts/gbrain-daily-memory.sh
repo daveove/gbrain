@@ -177,6 +177,8 @@ run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
 # must not move the watermark or failed sessions can be skipped forever.
 if [[ "$scheduled_run" -eq 1 && -n "$scan_started" && "$ingest_clean_scan" -eq 1 ]]; then
   # Commit the pre-scan stamp (not "now") so mid-run appends remain eligible.
-  python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2] + "\n")' "$WATERMARK" "$scan_started"
+  # Atomic rename: a crash mid-write must not leave an empty/malformed watermark
+  # that resets the next run to day-midnight and permanently skips late sessions.
+  python3 -c 'import os, pathlib, sys; p=pathlib.Path(sys.argv[1]); t=p.with_name(p.name+".tmp"); t.write_text(sys.argv[2]+"\n"); os.replace(t, p)' "$WATERMARK" "$scan_started"
 fi
 echo 'daily-memory ok' >> "$LOG"

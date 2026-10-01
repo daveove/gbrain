@@ -5,7 +5,7 @@ import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
 import { MAX_FILE_SIZE } from './import-file.ts';
 import { isMarkdownFilePath, isCodeFilePath, slugifyPath, slugifyCodePath } from './sync.ts';
-import { appendCompleted, clearOpCheckpoint, type OpCheckpointKey } from './op-checkpoint.ts';
+import { appendCompleted, type OpCheckpointKey } from './op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from './cycle/daily-memory.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
@@ -20,7 +20,9 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   await opts.protect?.(key);
   const bank = async (entries: string[]) => {
     opts.signal?.throwIfAborted();
-    if (entries.length && !await appendCompleted(engine, key, entries)) throw new Error('Daily-memory import checkpoint unavailable');
+    if (!entries.length) return [] as string[];
+    if (!await appendCompleted(engine, key, entries)) throw new Error('Daily-memory import checkpoint unavailable');
+    return entries;
   };
   return {
     async before(filePath: string, relativePath: string) {
@@ -52,6 +54,9 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         `SELECT path AS value FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
          UNION ALL SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
         [key.op, key.fingerprint]);
+      // Snapshot before recovery banks. Concurrent imports share this fingerprint;
+      // retiring only snapshot∪recovery leaves banks that arrive after this query.
+      const captured = rows.map(row => row.value);
       const slugs = new Set<string>(), days = new Set<string>();
       const prior: Prior[] = [];
       for (const row of rows) {
@@ -77,14 +82,31 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         }
       }
       // Bank concrete slugs before discovery, so a discovery outage survives hash-skipped retries.
-      await bank([...slugs].map(slug => `slug:${slug}`));
+      const recovery = await bank([...slugs].map(slug => `slug:${slug}`));
       for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal })) days.add(day);
-      await bank([...days].map(day => `day:${day}`));
+      recovery.push(...await bank([...days].map(day => `day:${day}`)));
       if (days.size) {
         const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit ?? 'import', days: [...days] });
         if (accepted === null) throw new Error('Daily-memory import handoff rejected');
       }
-      await clearOpCheckpoint(engine, key);
+      const retire = [...new Set([...captured, ...recovery])];
+      for (let start = 0; start < retire.length; start += 100) {
+        const chunk = retire.slice(start, start + 100);
+        await engine.executeRawDirect(
+          'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=ANY($3::text[])',
+          [key.op, key.fingerprint, chunk]);
+        await engine.executeRawDirect(
+          'UPDATE op_checkpoints SET completed_keys=completed_keys-$3::text[] WHERE op=$1 AND fingerprint=$2',
+          [key.op, key.fingerprint, chunk]);
+      }
+      const left = await engine.executeRaw<{ n: number }>(
+        `SELECT COUNT(*)::int AS n FROM (
+           SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           UNION ALL SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2
+         ) debt`, [key.op, key.fingerprint]);
+      if ((left[0]?.n ?? 0) === 0) {
+        await engine.executeRawDirect('DELETE FROM op_checkpoints WHERE op=$1 AND fingerprint=$2', [key.op, key.fingerprint]);
+      }
     },
   };
 }

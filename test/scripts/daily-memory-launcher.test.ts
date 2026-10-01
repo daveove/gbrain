@@ -209,6 +209,12 @@ finally:
     expect(end - stamp).toBeGreaterThan(800);
   });
 
+  it('writes the Codex mtime watermark via atomic rename', () => {
+    const src = readFileSync(launcher, 'utf8');
+    expect(src).toContain('os.replace');
+    expect(src).toContain('.tmp');
+  });
+
   it('holds the watermark when ingest reports cleanScan false', () => {
     const { home, run } = fixture();
     todayInputs(home);
