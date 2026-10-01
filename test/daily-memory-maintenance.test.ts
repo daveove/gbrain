@@ -317,6 +317,7 @@ describe('daily memory from sources the brain already holds', () => {
   test('transcript acceptance preserves a concurrent invocation bank for its own later handoff', async () => {
     await engine.putPage('notes/first-transcript-debt', { type: 'note', title: 'First fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-18' } });
     await engine.putPage('notes/concurrent-transcript-debt', { type: 'note', title: 'Concurrent fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-19' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug=ANY($1::text[])", [['notes/first-transcript-debt', 'notes/concurrent-transcript-debt']]);
     const first = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'first' }))!;
     const concurrent = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'concurrent' }))!;
     await first.touched(['notes/first-transcript-debt']);
