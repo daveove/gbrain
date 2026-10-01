@@ -225,19 +225,37 @@ async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string
 export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job: DailyJob,
   sourceId: string | undefined, report: { status: string; phases: Array<{ phase: string; pagesAffected?: string[] }> }): Promise<void> {
   if (!sourceId) return;
-  const saved = job.data.daily_memory_affected_dates ?? [];
-  if (!Array.isArray(saved) || !saved.every(isDay)) throw new Error('Invalid saved daily memory dates');
+  const savedOnJob = job.data.daily_memory_affected_dates ?? [];
+  if (!Array.isArray(savedOnJob) || !savedOnJob.every(isDay)) throw new Error('Invalid saved daily memory dates');
+  const { createHash } = await import('node:crypto');
+  const { appendCompleted, clearOpCheckpoint, loadOpCheckpoint } = await import('../op-checkpoint.ts');
+  // Survive terminal autopilot-cycle rows: a later slot must still refresh these days.
+  const key = {
+    op: 'autopilot-sync-daily-memory',
+    fingerprint: createHash('sha256').update(sourceId).digest('hex').slice(0, 16),
+  };
+  const checkpointed = (await loadOpCheckpoint(engine, key))
+    .filter(v => v.startsWith('day:')).map(v => v.slice(4));
+  if (!checkpointed.every(isDay)) throw new Error('Invalid checkpointed daily memory dates');
+  const saved = [...new Set([...savedOnJob, ...checkpointed])];
   const slugs = report.status === 'failed' ? [] : report.phases.find(phase => phase.phase === 'sync')?.pagesAffected ?? [];
   const days = [...new Set([...saved, ...await dailyMemoryDaysForSlugs(engine, sourceId, slugs, { signal: job.signal })])].sort();
   job.signal?.throwIfAborted();
-  if (!days.length) return;
-  if (JSON.stringify(days) !== JSON.stringify(saved)) {
+  if (!days.length) {
+    await clearOpCheckpoint(engine, key);
+    return;
+  }
+  if (JSON.stringify(days) !== JSON.stringify(savedOnJob)) {
     const written = await engine.executeRaw(`UPDATE minion_jobs SET data=jsonb_set(data,'{daily_memory_affected_dates}',($2::jsonb)->'days')
       WHERE id=$1 AND name='autopilot-cycle' AND status='active' RETURNING id`, [job.id, { days }]);
     if (!written.length) throw new Error('Affected daily memory dates were not persisted');
     job.data.daily_memory_affected_dates = days;
   }
+  if (!await appendCompleted(engine, key, days.map(day => `day:${day}`))) {
+    throw new Error('Affected daily memory dates checkpoint unavailable');
+  }
   await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0);
+  await clearOpCheckpoint(engine, key);
 }
 
 

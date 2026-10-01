@@ -395,6 +395,35 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
   });
 
+  test('source-sync refresh cross-job checkpoint survives a terminal cycle row', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('checkpoint-source','Checkpoint fixture')");
+    const day = '2026-09-18', slug = 'notes/checkpoint';
+    await engine.putPage(slug, { type: 'note', title: 'Checkpoint', compiled_truth: 'Body', frontmatter: { date: day } }, { sourceId: 'checkpoint-source' });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id='checkpoint-source'", [day]);
+    const queue = new MinionQueue(engine);
+    const first = await queue.add('autopilot-cycle', { source_id: 'checkpoint-source' });
+    const claimed = (await queue.claim('cp-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(claimed.id).toBe(first.id);
+    const reject = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('Synthetic checkpoint rejection'); });
+    try {
+      await expect(refreshDailyMemoryAfterSourceSync(engine, claimed, 'checkpoint-source', {
+        status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+      })).rejects.toThrow('Synthetic checkpoint rejection');
+    } finally { reject.mockRestore(); }
+    await queue.failJob(first.id, 'cp-lock', 'terminal', 'failed', 0);
+    // Brand-new cycle job with no saved dates and no pagesAffected must still refresh.
+    const second = await queue.add('autopilot-cycle', { source_id: 'checkpoint-source' });
+    const next = (await queue.claim('cp-next-lock', 60_000, 'default', ['autopilot-cycle']))!;
+    expect(next.id).toBe(second.id);
+    await refreshDailyMemoryAfterSourceSync(engine, next, 'checkpoint-source', {
+      status: 'ok', phases: [{ phase: 'sync', pagesAffected: [] }],
+    });
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_date === day)).toBe(true);
+  });
+
   test('source-sync refresh persists all affected days before rejection, retries no-op sync and clears tombstones', async () => {
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES('affected-source','Affected fixture')");
     const slugs: string[] = [], days: string[] = [];
