@@ -1,5 +1,5 @@
 /** Standalone imports bank prior dates before writes and accept refresh work before bookmarks. */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, lstatSync } from 'node:fs';
 import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
@@ -17,12 +17,17 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   if (opts.sourceId === DAILY_MEMORY_SOURCE_ID) return undefined;
   const key = { op: 'import-daily-memory', fingerprint: createHash('sha256')
     .update(JSON.stringify([opts.sourceId, opts.dir])).digest('hex').slice(0, 16) };
+  // Per-invocation origin so identical before:/slug: values from concurrent
+  // imports do not collapse under appendCompleted's ON CONFLICT DO NOTHING.
+  const origin = randomUUID();
   await opts.protect?.(key);
   const bank = async (entries: string[]) => {
     opts.signal?.throwIfAborted();
-    if (!entries.length) return [] as string[];
-    if (!await appendCompleted(engine, key, entries)) throw new Error('Daily-memory import checkpoint unavailable');
-    return entries;
+    const wrapped = entries.map(value => JSON.stringify({ origin, value }));
+    if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
+      throw new Error('Daily-memory import checkpoint unavailable');
+    }
+    return wrapped;
   };
   return {
     async before(filePath: string, relativePath: string) {
@@ -54,16 +59,31 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         `SELECT path AS value FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
          UNION ALL SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
         [key.op, key.fingerprint]);
-      // Snapshot before recovery banks. Concurrent imports share this fingerprint;
-      // retiring only snapshot∪recovery leaves banks that arrive after this query.
-      const captured = rows.map(row => row.value);
+      // Snapshot before recovery banks. Retire only snapshot∪recovery so a
+      // concurrent import's later origin-tagged banks survive.
       const slugs = new Set<string>(), days = new Set<string>();
       const prior: Prior[] = [];
+      const mine: string[] = [];
+      const foreign: string[] = [];
       for (const row of rows) {
-        if (row.value.startsWith('slug:')) slugs.add(row.value.slice(5));
-        else if (row.value.startsWith('day:')) days.add(row.value.slice(4));
-        else if (row.value.startsWith('before:')) {
-          const parsed = JSON.parse(row.value.slice(7)) as Prior;
+        let value = row.value;
+        let rowOrigin: string | null = null;
+        if (value.startsWith('{')) {
+          let wrapped: { origin?: unknown; value?: unknown };
+          try { wrapped = JSON.parse(value); } catch { throw new Error('Invalid daily-memory import checkpoint'); }
+          if (!wrapped || typeof wrapped.origin !== 'string' || !wrapped.origin || typeof wrapped.value !== 'string') {
+            throw new Error('Invalid daily-memory import origin');
+          }
+          rowOrigin = wrapped.origin;
+          value = wrapped.value;
+        }
+        // Track own vs foreign; day discovery uses every origin.
+        if (rowOrigin === null || rowOrigin === origin) mine.push(row.value);
+        else foreign.push(row.value);
+        if (value.startsWith('slug:')) slugs.add(value.slice(5));
+        else if (value.startsWith('day:')) days.add(value.slice(4));
+        else if (value.startsWith('before:')) {
+          const parsed = JSON.parse(value.slice(7)) as Prior;
           if (!parsed || !Array.isArray(parsed.targets) || !Array.isArray(parsed.days)
             || !parsed.targets.every(target => target && typeof target.slug === 'string' && target.slug.length > 0 && (target.revision === null || typeof target.revision === 'string'))
             || !parsed.days.every(day => typeof day === 'string')) throw new Error('Invalid daily-memory import checkpoint');
@@ -89,7 +109,16 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit ?? 'import', days: [...days] });
         if (accepted === null) throw new Error('Daily-memory import handoff rejected');
       }
-      const retire = [...new Set([...captured, ...recovery])];
+      const ownDebt = mine.some(path => {
+        let value = path;
+        if (value.startsWith('{')) {
+          try { value = (JSON.parse(value) as { value: string }).value; } catch { return false; }
+        }
+        return value.startsWith('before:') || value.startsWith('slug:') || value.startsWith('day:');
+      });
+      // Concurrent peers keep origin-tagged banks when we still have our own.
+      // A bare finish after another origin crashed adopts and retires foreign debt.
+      const retire = [...new Set([...(ownDebt ? mine : [...mine, ...foreign]), ...recovery])];
       for (let start = 0; start < retire.length; start += 100) {
         const chunk = retire.slice(start, start + 100);
         await engine.executeRawDirect(

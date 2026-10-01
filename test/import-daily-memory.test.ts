@@ -42,7 +42,7 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
     });
   } finally { failure.mockRestore(); }
   expect(await engine.getConfig('sync.last_commit')).toBe('before');
-  expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path='slug:note'")).toHaveLength(1);
+  expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value'='slug:note'")).toHaveLength(1);
   await withEnv({ GBRAIN_HOME: home }, async () => {
     const retried = await runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], { noExtract: true });
     expect(retried.imported).toBe(0); expect(retried.errors).toBe(0);
@@ -122,8 +122,8 @@ test('oversized markdown skips body parse during prior-slug discovery', async ()
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz,effective_date_source='date' WHERE slug='note'");
   const prior = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
   await prior.before(file, 'note.md');
-  const saved = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path LIKE 'before:%'");
-  expect(JSON.parse(saved[0]!.path.slice(7)).days).toContain('2026-09-20');
+  const saved = await engine.executeRaw<{ path: string }>("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+  expect(JSON.parse(JSON.parse(saved[0]!.path).value.slice(7)).days).toContain('2026-09-20');
   await prior.finish();
   expect(await batches()).toHaveLength(0);
 });
@@ -159,13 +159,13 @@ test('finish retires only its snapshot and preserves a concurrent before: bank',
   const peer = (await createImportDailyMemory(engine, opts))!;
   const direct = engine.executeRawDirect;
   let peerBanked = false;
-  const spy = spyOn(engine, 'executeRawDirect').mockImplementation(async function (this: PGLiteEngine, sql: string, params?: unknown[]) {
+  const spy = spyOn(engine, 'executeRawDirect').mockImplementation((async function (this: PGLiteEngine, sql: string, params?: unknown[]) {
     if (!peerBanked && sql.startsWith('DELETE FROM op_checkpoint_paths')) {
       peerBanked = true;
       await peer.before(secondFile, 'second.md');
     }
     return direct.call(this, sql, params);
-  });
+  }) as typeof engine.executeRawDirect);
   try {
     await first.finish();
   } finally {
@@ -173,10 +173,34 @@ test('finish retires only its snapshot and preserves a concurrent before: bank',
   }
   expect(peerBanked).toBe(true);
   expect(await engine.executeRaw(
-    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path LIKE 'before:%'")).toHaveLength(1);
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
   await peer.imported('second');
   await peer.finish();
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-25'))).toBe(true);
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('identical concurrent before: banks stay distinct by invocation origin', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Synthetic fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-24' }, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const first = (await createImportDailyMemory(engine, opts))!;
+  const peer = (await createImportDailyMemory(engine, opts))!;
+  await first.before(file, 'note.md');
+  await peer.before(file, 'note.md');
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(2);
+  await first.imported('note');
+  await first.finish();
+  // Peer origin-tagged before: remains; identical values no longer share one row.
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+  await peer.imported('note');
+  await peer.finish();
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
 });
