@@ -123,3 +123,15 @@ test('failed cycle still drains queued historical daily-memory jobs', async () =
     .toContain('[[default:notes/queued-historical]]');
   expect((await queue.getJob(job.id))?.status).toBe('completed');
 });
+
+
+test('inline cycle preserves the timezone captured with its day when config changes during the cycle', async () => {
+  await engine.putPage('notes/inline-zone', { type: 'note', title: 'Synthetic zone', compiled_truth: 'Synthetic fixture' });
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-30T02:00:00Z' WHERE slug='notes/inline-zone'");
+  await runInlineAutopilotCycle(engine, options, {
+    now: () => new Date('2026-09-30T02:00:00Z'), extract: noExtract,
+    cycle: async () => { await engine.setConfig('cycle.timezone', 'America/Los_Angeles'); return report('clean'); },
+  });
+  expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+    .toContain('[[default:notes/inline-zone]]');
+});

@@ -33,7 +33,7 @@
  */
 
 import { existsSync } from 'fs';
-import { resolveCycleDate, resolveCycleTimeZone } from '../core/cycle/cycle-date.ts';
+import { calendarDateInTimeZone, resolveCycleTimeZone } from '../core/cycle/cycle-date.ts';
 import { queueFanoutDailyMemory, queueFanoutDailyMemoryWithRecordLookback } from '../core/cycle/daily-memory-followup.ts';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
@@ -415,8 +415,8 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
-  const dailyMemoryDate = await resolveCycleDate(engine, { now: opts.now });
   const dailyMemoryTimezone = await resolveCycleTimeZone(engine, { now: opts.now });
+  const dailyMemoryDate = calendarDateInTimeZone(opts.now?.() ?? new Date(), dailyMemoryTimezone);
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
@@ -537,6 +537,7 @@ export async function dispatchPerSource(
         {
           repoPath: opts.repoPath,
           source_id: src.id,
+          daily_memory_timezone: dailyMemoryTimezone,
           pull: shouldPull,
           // Freshness is stamped by bounded deterministic work only. LLM-backed
           // source enrichment (atoms, takes, thin-page development, etc.) is
@@ -681,7 +682,8 @@ export async function dispatchGlobalMaintenance(
   const job = await queue.add(
     'autopilot-global-maintenance',
     { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES,
-      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate } : {}) },
+      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate } : {}),
+      ...(opts.dailyMemoryTimezone !== undefined ? { daily_memory_timezone: opts.dailyMemoryTimezone } : {}) },
     {
       queue: 'default',
       // Structural single-flight: one global job per slot; maxPending:1

@@ -1,7 +1,7 @@
 /** Inline autopilot holds one tracked promise through its pinned-day maintenance. */
 import type { BrainEngine } from '../engine.ts';
 import type { CycleOpts, CycleReport } from '../cycle.ts';
-import { resolveCycleDate } from './cycle-date.ts';
+import { calendarDateInTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
 import { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } from './daily-memory.ts';
 import { drainInlineDailyMemory } from './inline-daily-memory-drain.ts';
@@ -13,7 +13,8 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   extract?: typeof extractStaleFromDB;
   onMaintenanceError?: (error: unknown) => void;
 } = {}): Promise<CycleReport> {
-  const day = await resolveCycleDate(engine, { explicitDate: opts.synthDate, now: deps.now });
+  const timezone = await resolveCycleTimeZone(engine);
+  const day = opts.synthDate ?? calendarDateInTimeZone(deps.now?.() ?? new Date(), timezone);
   const cycle = deps.cycle ?? (await import('../cycle.ts')).runCycle;
   const report = await cycle(engine, opts);
   const notAborted = report.reason !== 'aborted' && !opts.signal?.aborted;
@@ -30,7 +31,7 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
       };
       if (canWrite) {
         for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
-          const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
+          const daily = await writeDailyMemoryFromSources(engine, { date, timezone, signal: opts.signal });
           if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
           await afterWrite(daily);
         }

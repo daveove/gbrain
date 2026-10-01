@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { appendCompleted } from '../src/core/op-checkpoint.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
+import { pinDailyMemoryJob, queueFanoutDailyMemory, finishFanoutDailyMemory, refreshDailyMemoryAfterSourceSync, dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory, runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../src/core/cycle/daily-memory.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -390,6 +390,60 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(done.day).toBe(day);
     expect((await engine.getPage(`daily-memory/${day}`, { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
       .toContain('[[default:notes/tz-pin]]');
+  });
+
+  test('standalone date batch retains dispatch timezone through child fanout', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const batchId = await queueStandaloneSyncDailyMemory(engine, {
+      sourceId: 'default', commit: 'synthetic-zone-batch', days: ['2026-09-29', '2026-09-30'],
+    });
+    const batch = (await engine.executeRaw<{ id: number; data: Record<string, unknown> }>(
+      'SELECT id,data FROM minion_jobs WHERE id=$1', [batchId]))[0];
+    expect(batch.data.daily_memory_timezone).toBe('Asia/Manila');
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await runDailyMemoryJob(engine, batch);
+    const child = (await engine.executeRaw<{ id: number; data: Record<string, unknown> }>(
+      "SELECT id,data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'='2026-09-30' AND NOT(data ? 'daily_memory_dates')"))[0];
+    expect(child.data.daily_memory_timezone).toBe('Asia/Manila');
+    await engine.putPage('notes/batch-zone', { type: 'note', title: 'Synthetic zone', compiled_truth: 'Synthetic fixture' });
+    await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-30T02:00:00Z' WHERE slug='notes/batch-zone'");
+    await runDailyMemoryJob(engine, child);
+    expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+      .toContain('[[default:notes/batch-zone]]');
+  });
+
+  test('legacy active daily handler persists its first timezone across an old-payload retry', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const queue = new MinionQueue(engine);
+    const sibling = await queue.add('autopilot-cycle', {});
+    const barrier = await queue.add('autopilot-daily-memory', {
+      daily_memory_only: true, daily_memory_date: '2026-09-30', source_cycle_job_ids: [sibling.id],
+    });
+    const claimed = await queue.claim('synthetic-zone-owner', 60_000, 'default', ['autopilot-daily-memory']);
+    expect(claimed!.id).toBe(barrier.id);
+    const handler = (await captureHandlers()).get('autopilot-daily-memory')!;
+    await handler(claimed);
+    const saved = (await engine.executeRaw<{ data: Record<string, unknown> }>('SELECT data FROM minion_jobs WHERE id=$1', [barrier.id]))[0];
+    expect(saved.data.daily_memory_timezone).toBe('Asia/Manila');
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await handler(claimed);
+    const successors = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND id<>$1", [barrier.id]);
+    expect(successors.length).toBeGreaterThan(0);
+    expect(successors.every(row => row.data.daily_memory_timezone === 'Asia/Manila')).toBe(true);
+  });
+
+  test('same-day barriers for distinct zones do not collide and explicit invalid zones fail', async () => {
+    const queue = new MinionQueue(engine), opts = { day: '2026-09-30', ids: [], key: 'zone-identity' };
+    const a = await queueFanoutDailyMemory(queue, { ...opts, timezone: 'Asia/Manila' });
+    const b = await queueFanoutDailyMemory(queue, { ...opts, timezone: 'America/Los_Angeles' });
+    expect(a).not.toBe(b);
+    for (const zone of ['', 'Invalid/Zone', 3, null]) {
+      await expect(runDailyMemoryJob(engine, { id: 987654, data: {
+        daily_memory_date: opts.day, daily_memory_timezone: zone,
+      } })).rejects.toThrow('Invalid daily memory timezone');
+    }
+    expect(await engine.getPage(`daily-memory/${opts.day}`, { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
   });
 
   test('completed identical daily barriers are idempotent but changed dependency sets get a new job', async () => {

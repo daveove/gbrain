@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { appendCompleted } from '../op-checkpoint.ts';
 import { MinionQueue } from '../minions/queue.ts';
-import { calendarDateInTimeZone, resolveCycleDate, resolveCycleTimeZone, utcDate } from './cycle-date.ts';
+import { calendarDateInTimeZone, resolveCycleTimeZone, isValidTimeZone, utcDate } from './cycle-date.ts';
 import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffectiveDate, DAILY_MEMORY_SOURCE_ID, type SourcePageRow } from './daily-memory.ts';
 
 export type DailyJob = { id: number; data: Record<string, unknown>; signal?: AbortSignal };
@@ -16,17 +16,38 @@ function isDay(day: unknown): day is string {
 }
 
 function pinnedDailyMemoryTimezone(data: Record<string, unknown>): string | undefined {
-  return typeof data.daily_memory_timezone === 'string' && data.daily_memory_timezone.trim()
-    ? data.daily_memory_timezone.trim() : undefined;
+  if (!('daily_memory_timezone' in data)) return undefined;
+  const zone = data.daily_memory_timezone;
+  if (typeof zone !== 'string' || !zone.trim() || !isValidTimeZone(zone.trim())) {
+    throw new Error('Invalid daily memory timezone');
+  }
+  return zone.trim();
 }
 
 export async function pinDailyMemoryJob(engine: BrainEngine, job: DailyJob): Promise<DailyJob> {
-  const day = typeof job.data.daily_memory_date === 'string' ? job.data.daily_memory_date : await resolveCycleDate(engine);
-  if (!isDay(day)) {
-    throw new Error('Invalid daily memory fanout date');
-  }
   const timezone = pinnedDailyMemoryTimezone(job.data) ?? await resolveCycleTimeZone(engine);
-  return { ...job, data: { ...job.data, daily_memory_date: day, daily_memory_timezone: timezone } };
+  const day = job.data.daily_memory_date ?? calendarDateInTimeZone(new Date(), timezone);
+  if (!isDay(day)) throw new Error('Invalid daily memory fanout date');
+  const pin = { daily_memory_date: day, daily_memory_timezone: timezone };
+  if (job.data.daily_memory_date === day && job.data.daily_memory_timezone === timezone) return job;
+  // Legacy active jobs pin durably before the first write or deferred handoff.
+  const stored = await engine.executeRaw<{ data: Record<string, unknown>; status: string }>(
+    'SELECT data,status FROM minion_jobs WHERE id=$1', [job.id]);
+  if (stored[0]?.status === 'active') {
+    if (pinnedDailyMemoryTimezone(stored[0].data) && isDay(stored[0].data.daily_memory_date)) {
+      return { ...job, data: stored[0].data };
+    }
+    const written = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      `UPDATE minion_jobs SET data=data || $2::jsonb WHERE id=$1 AND status='active'
+        AND data=$3::jsonb RETURNING data`, [job.id, pin, stored[0].data]);
+    const canonical = written[0]?.data ?? (await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE id=$1 AND status='active'", [job.id]))[0]?.data;
+    if (!canonical || !isDay(canonical.daily_memory_date) || !pinnedDailyMemoryTimezone(canonical)) {
+      throw new Error('Daily memory pin was not persisted');
+    }
+    return { ...job, data: canonical };
+  }
+  return { ...job, data: { ...job.data, ...pin } };
 }
 
 export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
@@ -35,8 +56,8 @@ export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
     daily_memory_only: true, daily_memory_date: opts.day,
     source_cycle_job_ids: [...new Set(opts.ids)].sort((a,b) => a-b),
   };
-  if (opts.timezone) data.daily_memory_timezone = opts.timezone;
-  const dependencies = createHash('sha256').update(JSON.stringify(data.source_cycle_job_ids)).digest('hex').slice(0, 20);
+  if (opts.timezone !== undefined) data.daily_memory_timezone = pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone });
+  const dependencies = createHash('sha256').update(JSON.stringify([data.source_cycle_job_ids, data.daily_memory_timezone ?? null])).digest('hex').slice(0, 20);
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily:${opts.day}:${opts.key}:${dependencies}`, delay: opts.delay ?? 0,
     max_attempts: 2, timeout_ms: 60_000,
@@ -106,8 +127,9 @@ export async function finishFanoutDailyMemory(engine: BrainEngine, job: DailyJob
 }
 
 export async function runDailyMemoryJob(engine: BrainEngine, job: DailyJob, afterWrite?: DailyMemoryAfterWrite) {
-  if ('daily_memory_dates' in job.data) return dispatchDailyDateBatch(engine, job);
-  return finishFanoutDailyMemory(engine, await pinDailyMemoryJob(engine, job), afterWrite);
+  const pinned = await pinDailyMemoryJob(engine, job);
+  if ('daily_memory_dates' in pinned.data) return dispatchDailyDateBatch(engine, pinned);
+  return finishFanoutDailyMemory(engine, pinned, afterWrite);
 }
 
 /** Calendar days an imported slug set should refresh in the daily index. */
@@ -115,10 +137,11 @@ export async function dailyMemoryDaysForSlugs(
   engine: BrainEngine,
   sourceId: string,
   slugs: string[],
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; timezone?: string } = {},
 ): Promise<string[]> {
   if (slugs.length === 0) return [];
-  const zone = await resolveCycleTimeZone(engine);
+  const zone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
+    : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
   const days = new Set<string>();
   for (let offset = 0; offset < slugs.length; offset += 100) {
     opts.signal?.throwIfAborted();
@@ -225,13 +248,13 @@ async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string
   handoffGeneration = '', timezone?: string): Promise<number> {
   // Handoff generations (refresh path) mint a fresh batch so a completed prior
   // batch for the same parent+days cannot satisfy newly banked retry work.
-  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId, replayRound, handoffGeneration })).digest('hex').slice(0, 20);
+  const hash = createHash('sha256').update(JSON.stringify({ days, childIds, cursor, pollFromJobId, replayRound, handoffGeneration, timezone })).digest('hex').slice(0, 20);
   const day = days[Math.min(Math.max(cursor, 0), Math.max(days.length - 1, 0))] ?? days[0];
   const data: Record<string, unknown> = { daily_memory_date: day, daily_memory_dates: days,
     daily_memory_source_job_id: sourceJobId, daily_memory_cursor: cursor,
     daily_memory_day_job_ids: childIds, daily_memory_replay_round: replayRound };
   if (handoffGeneration) data.daily_memory_handoff_generation = handoffGeneration;
-  if (timezone) data.daily_memory_timezone = timezone;
+  if (timezone !== undefined) data.daily_memory_timezone = pinnedDailyMemoryTimezone({ daily_memory_timezone: timezone });
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily-batch:${sourceJobId}:${hash}:${cursor}`,
     max_attempts: 2, timeout_ms: 60_000, delay,
@@ -246,6 +269,7 @@ async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string
 export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job: DailyJob,
   sourceId: string | undefined, report: { status: string; phases: Array<{ phase: string; pagesAffected?: string[] }> }): Promise<void> {
   if (!sourceId) return;
+  const timezone = pinnedDailyMemoryTimezone(job.data) ?? await resolveCycleTimeZone(engine);
   const saved = job.data.daily_memory_affected_dates ?? [];
   if (!Array.isArray(saved) || !saved.every(isDay)) throw new Error('Invalid saved daily memory dates');
   const slugs = report.status === 'failed' ? [] : report.phases.find(phase => phase.phase === 'sync')?.pagesAffected ?? [];
@@ -273,7 +297,7 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (isDay(entry.day)) savedDays.add(entry.day);
     else savedSlugs.add(entry.slug);
   }
-  const days = [...new Set([...savedDays, ...await dailyMemoryDaysForSlugs(engine, sourceId, [...savedSlugs], { signal: job.signal })])].sort();
+  const days = [...new Set([...savedDays, ...await dailyMemoryDaysForSlugs(engine, sourceId, [...savedSlugs], { signal: job.signal, timezone })])].sort();
   const dateEntries = days.map(day => JSON.stringify({ jobId: job.id, day }));
   if (dateEntries.length && !await appendCompleted(engine, key, dateEntries)) throw new Error('Source daily memory dates were not persisted');
   debt.push(...dateEntries.map(path => ({ path })));
@@ -292,7 +316,7 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (!written.length) throw new Error('Affected daily memory dates were not persisted');
     job.data.daily_memory_affected_dates = days;
   }
-  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID());
+  await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID(), timezone);
   await retireSnapshot();
 }
 
@@ -323,6 +347,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
   if (!sourceId || sourceId === DAILY_MEMORY_SOURCE_ID) return [];
+  const timezone = await resolveCycleTimeZone(engine);
   const affectedDays = new Set<string>();
   let cursor = '';
   for (;;) {
@@ -331,7 +356,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
       `SELECT slug FROM pages WHERE source_id=$1 AND slug>$2 ORDER BY slug LIMIT 500`,
       [sourceId, cursor],
     );
-    for (const day of await dailyMemoryDaysForSlugs(engine, sourceId, rows.map(row => row.slug), opts)) {
+    for (const day of await dailyMemoryDaysForSlugs(engine, sourceId, rows.map(row => row.slug), { ...opts, timezone })) {
       affectedDays.add(day);
     }
     if (rows.length < 500) break;
@@ -343,8 +368,8 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   // The lifecycle caller owns the transaction boundary; separate transitions need fresh refreshes.
   const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   opts.signal?.throwIfAborted();
-  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey });
-  await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
+  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey, timezone });
+  await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
   return days;
 }
 
@@ -356,14 +381,15 @@ export async function queueStandaloneSyncDailyMemory(
   if (!opts.sourceId || !opts.commit || !Array.isArray(opts.days) || !opts.days.every(isDay)) {
     throw new Error('Invalid standalone sync daily memory handoff');
   }
+  const timezone = await resolveCycleTimeZone(engine);
   const days = [...new Set(opts.days)].sort();
   if (!days.length) return null;
   const hash = createHash('sha256').update(JSON.stringify(days)).digest('hex').slice(0, 20);
   // A checkpoint retry may duplicate an index write, but never reuse a finished refresh.
   const key = `sync:${opts.sourceId}:${opts.commit}:${hash}:${randomUUID()}`;
   const queue = new MinionQueue(engine);
-  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key });
-  return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild]);
+  const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key, timezone });
+  return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
 }
 
 async function settleDailyDateChildren(
