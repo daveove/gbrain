@@ -657,7 +657,7 @@ describe('daily memory from sources the brain already holds', () => {
       const checkpointModule = await import('../src/core/op-checkpoint.ts');
       const originalCreate = leaseModule.createTranscriptIngestDailyMemory;
       const originalAppend = checkpointModule.appendCompleted;
-      let adopted = false, lastId = 0;
+      let adopted = false, bankFailureReady = false, lastId = 0;
       const leases = spyOn(leaseModule, 'createTranscriptIngestDailyMemory').mockImplementation(async (...args) => {
         const live = await originalCreate(...args);
         if (live) {
@@ -677,13 +677,14 @@ describe('daily memory from sources the brain already holds', () => {
             expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
             const [last] = await engine.executeRaw<{ id: number }>("SELECT max(id)::integer AS id FROM minion_jobs WHERE name='autopilot-daily-memory'");
             lastId = last!.id;
+            bankFailureReady = true;
           };
         }
         return live;
       });
       let rejected = false;
       const append = spyOn(checkpointModule, 'appendCompleted').mockImplementation(async (targetEngine, key, values) => {
-        if (key.op === 'transcript-ingest-daily-memory' && adopted && values.some(value => JSON.parse(value).value === `slug:${target}`)) {
+        if (key.op === 'transcript-ingest-daily-memory' && bankFailureReady && values.some(value => JSON.parse(value).value === `slug:${target}`)) {
           rejected = true;
           return false;
         }
