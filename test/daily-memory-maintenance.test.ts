@@ -20,6 +20,7 @@ import { dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { extractEntityRefs } from '../src/core/link-extraction.ts';
+import { createTranscriptIngestDailyMemory } from '../src/core/transcripts/ingest-daily-memory.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { dailyMemoryArgs } from '../scripts/write-daily-memory.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
@@ -252,7 +253,7 @@ describe('daily memory from sources the brain already holds', () => {
     }
   });
 
-  test('transcript refresh rejection recovers through hash-skipped rerun without losing clean-scan failure', async () => {
+  for (const changedPaths of [false, true]) test(`transcript refresh rejection recovers with changed paths=${changedPaths} without losing clean-scan failure`, async () => {
     const dir = mkdtempSync(join(tmpdir(), 'gbrain-transcript-retry-'));
     const file = join(dir, 'session.jsonl'), timestamp = '2026-01-16T12:00:00.000Z';
     writeFileSync(file, [
@@ -267,15 +268,49 @@ describe('daily memory from sources the brain already holds', () => {
         expect(first.pages.imported).toBe(1);
         expect(first.cleanScan).toBe(false);
       } finally { rejected.mockRestore(); }
-      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path LIKE 'slug:%'")).toHaveLength(1);
-      const retried = await runTranscriptsIngest(engine, opts);
-      expect(retried.pages.imported).toBe(0);
-      expect(retried.pages.skipped).toBe(1);
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'slug:%'")).toHaveLength(1);
+      let retryOpts = opts;
+      if (changedPaths) {
+        const next = join(dir, 'next.jsonl'), nextTimestamp = '2026-01-17T12:00:00.000Z';
+        writeFileSync(next, [
+          { timestamp: nextTimestamp, type: 'session_meta', payload: { id: 'next-day-fixture', timestamp: nextTimestamp, cwd: dir } },
+          { timestamp: nextTimestamp, type: 'event_msg', payload: { type: 'user_message', message: 'Synthetic next fixture.' } },
+        ].map(row => JSON.stringify(row)).join('\n') + '\n');
+        rmSync(file);
+        retryOpts = { ...opts, paths: [next] };
+      }
+      const retried = await runTranscriptsIngest(engine, retryOpts);
+      expect(retried.pages.imported).toBe(changedPaths ? 1 : 0);
+      expect(retried.pages.skipped).toBe(changedPaths ? 0 : 1);
       expect(retried.cleanScan).toBe(true);
       const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
       expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-16'))).toBe(true);
-      expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+      if (changedPaths) expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-17'))).toBe(true);
+      expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test('transcript acceptance preserves a concurrent invocation bank for its own later handoff', async () => {
+    await engine.putPage('notes/first-transcript-debt', { type: 'note', title: 'First fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-18' } });
+    await engine.putPage('notes/concurrent-transcript-debt', { type: 'note', title: 'Concurrent fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-19' } });
+    const first = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'first' }))!;
+    const concurrent = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'concurrent' }))!;
+    await first.touched(['notes/first-transcript-debt']);
+    const add = MinionQueue.prototype.add;
+    let appended = false;
+    const during = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, name, data, opts) {
+      if (name === 'autopilot-daily-memory' && !appended) {
+        appended = true;
+        await concurrent.touched(['notes/concurrent-transcript-debt']);
+      }
+      return add.call(this, name, data, opts);
+    });
+    try { await first.finish(); } finally { during.mockRestore(); }
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value'='slug:notes/concurrent-transcript-debt'")).toHaveLength(1);
+    await concurrent.finish();
+    const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-19'))).toBe(true);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
   test('the daily ingest date zone links early-Manila Codex sessions while keeping their UTC slug', async () => {
