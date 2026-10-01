@@ -26,10 +26,13 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     }
     return wrapped;
   };
-  // Mark this origin active so a concurrent finish preserves our before:/slug banks.
-  await bank(['running']);
+  // Lease-backed running marker. Crashed hosts cannot clear finally; peers adopt
+  // debt once the lease expires (default 30m). Format: running:<iso>.
+  const RUNNING_LEASE_MS = 30 * 60_000;
+  const runningValue = `running:${new Date().toISOString()}`;
+  await bank([runningValue]);
   const clearRunning = async () => {
-    const marker = JSON.stringify({ origin, value: 'running' });
+    const marker = JSON.stringify({ origin, value: runningValue });
     for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
       await engine.executeRawDirect(
         'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=$3',
@@ -38,6 +41,12 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
         'UPDATE op_checkpoints SET completed_keys=completed_keys-$3::text[] WHERE op=$1 AND fingerprint=$2',
         [key.op, fingerprint, [marker]]);
     }
+  };
+  const runningOriginActive = (value: string, at = Date.now()) => {
+    // Legacy unleased "running" has no lease — do not suppress adoption.
+    if (!value.startsWith('running:')) return false;
+    const stamped = Date.parse(value.slice('running:'.length));
+    return Number.isFinite(stamped) && at - stamped < RUNNING_LEASE_MS;
   };
   return {
     /** Drop the running marker without settling debt (abort / early exit). */
@@ -83,19 +92,21 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           }
         }
         const activeForeign = new Set<string>();
+        const now = Date.now();
         for (const row of rows) {
           if (!row.value.startsWith('{')) continue;
           let wrapped: { origin?: unknown; value?: unknown };
           try { wrapped = JSON.parse(row.value); } catch { continue; }
           if (wrapped && typeof wrapped.origin === 'string' && wrapped.origin && wrapped.origin !== origin
-            && wrapped.value === 'running') {
+            && typeof wrapped.value === 'string' && runningOriginActive(wrapped.value, now)) {
             activeForeign.add(wrapped.origin);
           }
         }
         const slugs = new Set<string>(), days = new Set<string>();
-        const prior: Prior[] = [];
-        // Preserve still-running foreign origins. Adopt abandoned origins (no
-        // running marker) so a retry after a rejected handoff can recover debt.
+        type PriorDebt = Prior & { foreignAbandoned: boolean };
+        const prior: PriorDebt[] = [];
+        // Preserve still-running foreign origins (fresh lease). Adopt abandoned
+        // origins (expired/missing lease) so crashed or rejected runs recover.
         const mine: Array<{ fingerprint: string; value: string }> = [];
         for (const row of rows) {
           let value = row.value;
@@ -108,7 +119,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           }
           if (rowOrigin !== null && activeForeign.has(rowOrigin)) continue;
           mine.push(row);
-          if (value === 'running') continue;
+          if (value === 'running' || value.startsWith('running:')) continue;
+          const foreignAbandoned = rowOrigin !== null && rowOrigin !== origin;
           if (value.startsWith('slug:')) slugs.add(value.slice(5));
           else if (value.startsWith('day:')) days.add(value.slice(4));
           else if (value.startsWith('before:')) {
@@ -119,7 +131,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
               || !parsed.days.every(day => typeof day === 'string')) {
               throw new Error('Invalid daily-memory transcript ingest checkpoint');
             }
-            prior.push(parsed);
+            prior.push({ ...parsed, foreignAbandoned });
           } else throw new Error('Invalid daily-memory transcript checkpoint entry');
         }
         for (const record of prior) {
@@ -127,8 +139,11 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           const current = await engine.executeRaw<{ slug: string; revision: string }>(
             'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])',
             [opts.sourceId, record.targets.map(target => target.slug)]);
-          if (record.targets.some(target => slugs.has(target.slug)
-            || (current.find(row => row.slug === target.slug)?.revision ?? null) !== target.revision)) {
+          // Abandoned foreign before: banks must hand off even with no revision
+          // drift — that origin will never finish itself after a crash.
+          if (record.foreignAbandoned
+            || record.targets.some(target => slugs.has(target.slug)
+              || (current.find(row => row.slug === target.slug)?.revision ?? null) !== target.revision)) {
             for (const target of record.targets) slugs.add(target.slug);
             for (const day of record.days) days.add(day);
           }

@@ -27,18 +27,34 @@ if len(sys.argv) > 4 and sys.argv[4].strip():
         mtime_floor = min(watermark.astimezone(datetime.timezone.utc), start)
     except ValueError:
         pass
-# Sessions live under the UTC date of creation. A long-lived session that is
-# still receiving messages may sit in an older folder; look back so mtime
-# overlap can select it. The transcript importer hash-skips unchanged files.
-lookback_start = (start - datetime.timedelta(days=14)).date()
+# Sessions live under the UTC date of creation. Without a watermark, look back
+# 14 days for mtime overlap. With a watermark, walk every existing day folder
+# up to `last` so a resumed session older than 14 days is still found by mtime.
 last = (end - datetime.timedelta(microseconds=1)).date()
 selected: list[pathlib.Path] = []
-utc_day = lookback_start
-while utc_day <= last:
-    directory = root / utc_day.strftime('%Y/%m/%d')
-    utc_day += datetime.timedelta(days=1)
-    if not directory.is_dir():
-        continue
+# argv[4] present ⇒ walk all existing day dirs (no 14-day creation cutoff).
+has_watermark = len(sys.argv) > 4 and bool(sys.argv[4].strip())
+if has_watermark:
+    directories = []
+    for directory in sorted(root.glob('[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]')):
+        if not directory.is_dir():
+            continue
+        try:
+            utc_day = datetime.date.fromisoformat(directory.as_posix()[-10:].replace('/', '-'))
+        except ValueError:
+            continue
+        if utc_day <= last:
+            directories.append(directory)
+else:
+    lookback_start = (start - datetime.timedelta(days=14)).date()
+    directories = []
+    utc_day = lookback_start
+    while utc_day <= last:
+        directory = root / utc_day.strftime('%Y/%m/%d')
+        if directory.is_dir():
+            directories.append(directory)
+        utc_day += datetime.timedelta(days=1)
+for directory in directories:
     for path in sorted(directory.glob('*.jsonl')):
         try:
             mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime, datetime.timezone.utc)

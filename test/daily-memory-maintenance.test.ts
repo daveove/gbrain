@@ -338,6 +338,36 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('expired running lease lets a peer adopt abandoned before: debt', async () => {
+    await engine.putPage('notes/abandoned-transcript', { type: 'note', title: 'Abandoned', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-23' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/abandoned-transcript'");
+    const crashed = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'crashed' }))!;
+    await crashed.before(['notes/abandoned-transcript']);
+    // Simulate write-then-crash: page revises and the calendar day moves while
+    // the origin's lease expires without finish()/release().
+    await engine.putPage('notes/abandoned-transcript', { type: 'note', title: 'Abandoned', compiled_truth: 'Synthetic fixture changed', frontmatter: { date: '2026-01-24' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/abandoned-transcript'");
+    const markers = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'");
+    expect(markers.length).toBeGreaterThan(0);
+    for (const row of markers) {
+      const wrapped = JSON.parse(row.path) as { origin: string; value: string };
+      const expired = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+      await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [expired, row.path]);
+      // completed_keys stores the same wrapped strings; swap so UNION cannot see a live lease.
+      await engine.executeRawDirect(
+        "UPDATE op_checkpoints SET completed_keys=(completed_keys-$1::text[])||$2::jsonb WHERE op='transcript-ingest-daily-memory'",
+        [[row.path], JSON.stringify([expired])]);
+    }
+    // Peer finish adopts the expired origin and queues prior + new dates.
+    const peer = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'peer' }))!;
+    await peer.finish();
+    const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-23'))).toBe(true);
+    expect(jobs.some(row => row.data.daily_memory_dates?.includes('2026-01-24'))).toBe(true);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+  });
+
   test('unchanged finish preserves a concurrent before: bank for later date recovery', async () => {
     await engine.putPage('notes/stable-transcript', { type: 'note', title: 'Stable', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-20' } });
     await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-21' } });

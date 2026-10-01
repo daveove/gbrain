@@ -80,8 +80,12 @@ run_command() {
 # Scheduled (no-arg) runs may scan Codex transcripts and may advance the
 # mtime watermark. Explicit-date backfills only rewrite the daily index.
 scheduled_run=0
+# Prospective watermark captured before selection/ingest so appends during the
+# run stay at/after this floor on the next scheduled pass.
+scan_started=""
 if [[ $# -eq 0 ]]; then
   scheduled_run=1
+  scan_started="$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
   day="$(TZ="$zone" date +%Y-%m-%d)"
   files=()
   watermark=""
@@ -119,7 +123,8 @@ run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
 # Advance the Codex mtime watermark only after a successful scheduled write.
 # Explicit-date backfills skip transcript selection; advancing here would hide
 # ongoing sessions that were never scanned.
-if [[ "$scheduled_run" -eq 1 ]]; then
-  python3 -c 'import datetime, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")' "$WATERMARK"
+if [[ "$scheduled_run" -eq 1 && -n "$scan_started" ]]; then
+  # Commit the pre-scan stamp (not "now") so mid-run appends remain eligible.
+  python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2] + "\n")' "$WATERMARK" "$scan_started"
 fi
 echo 'daily-memory ok' >> "$LOG"

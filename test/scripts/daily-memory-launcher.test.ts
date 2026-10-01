@@ -191,6 +191,36 @@ finally:
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
+  it('commits the pre-scan watermark so mid-run appends stay eligible', () => {
+    const { home, run } = fixture();
+    todayInputs(home);
+    const ready = join(home, 'ready');
+    const mark = join(home, '.local/state/gbrain/daily-memory-codex-mtime');
+    const result = run([], { TEST_HOLD: '1', TEST_READY: ready });
+    expect(result.code).toBe(0);
+    const end = Date.now();
+    const stamp = Date.parse(readFileSync(mark, 'utf8').trim());
+    expect(Number.isFinite(stamp)).toBe(true);
+    // Write fixture holds 1s after ingest; pre-scan stamp must predate that hold.
+    expect(end - stamp).toBeGreaterThan(800);
+  });
+
+  it('selects a resumed session older than 14 days when watermark mtime matches', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const oldStart = new Date(input.start - 20 * 86400_000);
+    const oldDay = oldStart.toISOString().slice(0, 10).replaceAll('-', '/');
+    const file = join(home, '.codex/sessions', oldDay, 'ancient.jsonl');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { timestamp: oldStart.toISOString() } }) + '\n');
+    const recent = new Date(input.start - 3600_000);
+    utimesSync(file, recent, recent);
+    const priorRun = new Date(input.start - 6 * 3600_000).toISOString();
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila', priorRun], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.split('\0').filter(Boolean)).toContain(file);
+  });
+
   it('uses the saved watermark as --since so cross-midnight rescans are not filtered', () => {
     const { home, run } = fixture();
     const input = todayInputs(home);
