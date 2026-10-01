@@ -140,3 +140,35 @@ test('pre-apply dates survive updated-at fallback replacement and hard purge wit
     await disposePersistenceConsumer(engine);
   }
 }, 120_000);
+
+test('revert_version queues prior and restored calendar days for daily indexes', async () => {
+  for (const engine of engines) {
+    const sourceId = `revert-${randomUUID()}`, slug = 'notes/revert-day';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    const ctx = context(engine, sourceId);
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, content: content('2026-09-20'), request_id: randomUUID() }, waitMs: 30_000 });
+    await drainDaily(engine);
+    const link = `[[${sourceId}:${slug}]]`;
+    expect(await dailyBody(engine, '2026-09-20')).toContain(link);
+    const first = (await engine.readPageSnapshot(slug, { sourceId }))!;
+    await submitPageMutation(ctx, { operation: 'put_page', params: { slug, expected_revision: first.revision, content: content('2026-09-21'), request_id: randomUUID() }, waitMs: 30_000 });
+    await drainDaily(engine);
+    expect(await dailyBody(engine, '2026-09-20')).not.toContain(link);
+    expect(await dailyBody(engine, '2026-09-21')).toContain(link);
+    const prior = (await engine.getVersions(slug, { sourceId })).find(version =>
+      (version.frontmatter as { date?: string } | undefined)?.date === '2026-09-20');
+    expect(prior).toBeTruthy();
+    const current = (await engine.readPageSnapshot(slug, { sourceId }))!;
+    await submitPageMutation(ctx, { operation: 'revert_version', params: { slug, version_id: prior!.id, expected_revision: current.revision, request_id: randomUUID() }, waitMs: 30_000 });
+    const handoffs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+    expect(handoffs.some(row => Array.isArray(row.data.daily_memory_dates)
+      && row.data.daily_memory_dates.includes('2026-09-20')
+      && row.data.daily_memory_dates.includes('2026-09-21'))).toBe(true);
+    await drainDaily(engine);
+    expect(await dailyBody(engine, '2026-09-21')).not.toContain(link);
+    expect(await dailyBody(engine, '2026-09-20')).toContain(link);
+    await disposePersistenceConsumer(engine);
+  }
+}, 120_000);
+

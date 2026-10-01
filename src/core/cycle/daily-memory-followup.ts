@@ -261,7 +261,15 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
   if (dateEntries.length && !await appendCompleted(engine, key, dateEntries)) throw new Error('Source daily memory dates were not persisted');
   debt.push(...dateEntries.map(path => ({ path })));
   job.signal?.throwIfAborted();
-  if (!days.length) return;
+  // Empty discovery is success: hard-deleted slug-only debt must not stick forever.
+  // Delete only the scanned snapshot paths so concurrent banks added after the scan stay.
+  if (!days.length) {
+    for (let start = 0; start < debt.length; start += 100) {
+      await engine.executeRawDirect('DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=ANY($3::text[])',
+        [key.op, key.fingerprint, debt.slice(start, start + 100).map(row => row.path)]);
+    }
+    return;
+  }
   if (JSON.stringify(days) !== JSON.stringify(saved)) {
     const written = await engine.executeRaw(`UPDATE minion_jobs SET data=jsonb_set(data,'{daily_memory_affected_dates}',($2::jsonb)->'days')
       WHERE id=$1 AND name='autopilot-cycle' AND status='active' RETURNING id`, [job.id, { days }]);
@@ -283,7 +291,7 @@ export async function refreshDailyMemoryAfterPageMutation(
   opts: { sourceId: string; slug: string; operation: string; requestId: string; priorDays?: string[] },
 ): Promise<string[]> {
   if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
-  if (!['put_page', 'delete_page', 'restore_page', 'capture'].includes(opts.operation)) return [];
+  if (!['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(opts.operation)) return [];
   if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
     throw new Error('Invalid prior daily memory dates');
   }

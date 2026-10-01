@@ -150,6 +150,8 @@ export async function runChronicleExtract(
   }
 
   let written = 0;
+  const eventSlugs: string[] = [];
+  const eventDays = new Set<string>();
   for (const ev of proposals) {
     if (opts.signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
     const who = ev.who.length ? ev.who : attendees;
@@ -174,7 +176,25 @@ export async function runChronicleExtract(
     await engine.upsertEventProjection({
       depthSlug: opts.slug, eventSlug, date: day, summary: ev.what, sourceId,
     });
+    eventSlugs.push(eventSlug);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day)) eventDays.add(day);
     written++;
+  }
+  // Direct putPage bypasses publication daily-memory handoff; queue historical days here.
+  if (eventSlugs.length) {
+    const { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } = await import('../cycle/daily-memory-followup.ts');
+    const days = [...new Set([
+      ...eventDays,
+      ...await dailyMemoryDaysForSlugs(engine, sourceId, eventSlugs, { signal: opts.signal }),
+    ])].sort();
+    if (days.length) {
+      const accepted = await queueStandaloneSyncDailyMemory(engine, {
+        sourceId,
+        commit: `chronicle_extract:${opts.slug}`,
+        days,
+      });
+      if (accepted === null) throw new Error('Chronicle daily memory handoff rejected');
+    }
   }
   return { slug: opts.slug, status: 'extracted', events_written: written };
 }

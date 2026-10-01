@@ -206,7 +206,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       }
       await prepared.validate?.(tx);
       if (!skill && !prepared.noop && row.source_id !== 'dream'
-        && ['put_page', 'delete_page', 'restore_page', 'capture'].includes(row.operation)) {
+        && ['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(row.operation)) {
         const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
         prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, [row.slug]);
       }
