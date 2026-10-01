@@ -98,3 +98,28 @@ test('bounded inline extraction reports remaining work and a later cycle retries
   expect(observed).toBeUndefined();
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
+
+test('failed cycle still drains queued historical daily-memory jobs', async () => {
+  const { MinionQueue } = await import('../src/core/minions/queue.ts');
+  await engine.putPage('notes/queued-historical', {
+    type: 'note', title: 'Queued fixture', compiled_truth: 'Synthetic fixture',
+    frontmatter: { date: '2026-09-28' },
+  });
+  await engine.executeRaw(
+    "UPDATE pages SET effective_date='2026-09-28T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/queued-historical'",
+  );
+  const queue = new MinionQueue(engine);
+  const job = await queue.add('autopilot-daily-memory', {
+    daily_memory_only: true, daily_memory_date: '2026-09-28', source_cycle_job_ids: [],
+  });
+  await seed();
+  await runInlineAutopilotCycle(engine, options, {
+    extract: noExtract,
+    now: () => new Date('2026-09-30T12:00:00Z'),
+    cycle: async () => report('failed'),
+  });
+  expect(await page()).toBeNull();
+  expect((await engine.getPage('daily-memory/2026-09-28', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/queued-historical]]');
+  expect((await queue.getJob(job.id))?.status).toBe('completed');
+});

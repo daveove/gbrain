@@ -23,9 +23,16 @@ function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asi
   writeFileSync(bun, `#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 args = sys.argv[1:]
-kind = 'resolve' if args[0] == '-e' else ('ingest' if 'transcripts' in args else 'write')
+kind = 'resolve' if args[0] == '-e' else (
+  'tz' if any('daily-memory-timezone' in a for a in args) else
+  ('ingest' if 'transcripts' in args else 'write'))
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+if kind == 'tz':
+    value = (os.environ.get('TEST_BRAIN_TZ') or '').strip()
+    if value:
+        print(value, end='')
+    sys.exit(0)
 with log.open('a') as out:
     out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ')}) + '\\n')
 if kind == 'resolve':
@@ -152,6 +159,19 @@ finally:
     expect(result.stdout.split('\0').filter(Boolean)).toEqual([input.before, input.precedingUtc, input.currentUtc]);
   });
 
+  it('rescans sessions modified after the prior run watermark across midnight', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Prior run finished early yesterday; evening messages updated mtime after
+    // that watermark but still before today's start — tomorrow must reselect.
+    const priorRun = new Date(input.start - 6 * 3600_000).toISOString();
+    const evening = new Date(input.start - 2 * 3600_000);
+    utimesSync(input.before, evening, evening);
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila', priorRun], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    expect(result.stdout.split('\0').filter(Boolean)).toEqual([input.before, input.precedingUtc, input.currentUtc]);
+  });
+
   it('ingests selected Codex files before writing with the default source and day boundary', () => {
     const { home, run } = fixture();
     const input = todayInputs(home);
@@ -167,6 +187,7 @@ finally:
     expect(args).not.toContain(input.before);
     expect(args).not.toContain(input.after);
     expect(result.calls[1].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), input.day]);
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
   it('regenerates an explicit date without ingesting existing transcripts', () => {
@@ -193,6 +214,7 @@ finally:
     const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'error' });
     expect(result.code).toBe(7);
     expect(result.calls.map(call => call.kind)).toEqual(['ingest']);
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
   });
 
   for (const kind of ['ingest', 'write']) {
@@ -241,6 +263,16 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].tz).toBe('Asia/Manila');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date())]);
+  });
+
+  it('uses brain DB cycle.timezone when the file plane omits it', () => {
+    const { home, run } = fixture({});
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export TZ=UTC\n');
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date());
+    const result = run([], { TEST_BRAIN_TZ: 'Asia/Manila' });
+    expect(result.code).toBe(0);
+    expect(result.calls[0].tz).toBe('Asia/Manila');
+    expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
   });
 
   it('honors GBRAIN_DAILY_MEMORY_TZ over config and env.sh', () => {

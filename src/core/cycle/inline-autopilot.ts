@@ -16,7 +16,9 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   const day = await resolveCycleDate(engine, { explicitDate: opts.synthDate, now: deps.now });
   const cycle = deps.cycle ?? (await import('../cycle.ts')).runCycle;
   const report = await cycle(engine, opts);
-  if (['ok', 'clean', 'partial'].includes(report.status) && report.reason !== 'aborted' && !opts.signal?.aborted) {
+  const notAborted = report.reason !== 'aborted' && !opts.signal?.aborted;
+  const canWrite = ['ok', 'clean', 'partial'].includes(report.status) && notAborted;
+  if (notAborted) {
     try {
       const afterWrite = async (daily: import('./daily-memory.ts').DailyMemoryWrite, signal = opts.signal) => {
         if (daily.written || daily.needs_extract) {
@@ -26,11 +28,14 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
           if (extracted.staleRemaining > 0) throw new Error(`Inline daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
         }
       };
-      for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
-        const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
-        if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
-        await afterWrite(daily);
+      if (canWrite) {
+        for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {
+          const daily = await writeDailyMemoryFromSources(engine, { date, signal: opts.signal });
+          if (daily.reason === 'error') throw new Error(`Inline daily memory write failed for ${date}`);
+          await afterWrite(daily);
+        }
       }
+      // Queued historical jobs are independent of this cycle's success.
       await drainInlineDailyMemory(engine, { signal: opts.signal, afterWrite });
     } catch (error) {
       if (!deps.onMaintenanceError) throw error;

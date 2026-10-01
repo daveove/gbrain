@@ -4,19 +4,36 @@ export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/u
 export GBRAIN_POOL_SIZE=1 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
-mkdir -p "$(dirname "$LOG")" "$HOME/.local/state/gbrain"
+STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"
+WATERMARK="$STATE/daily-memory-codex-mtime"
+mkdir -p "$(dirname "$LOG")" "$STATE"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
-# Launcher calendar zone: explicit setting > file-plane cycle.timezone >
-# TZ from env.sh/host > UTC. Do not force Asia/Manila over brain config.
-zone="$(python3 -c '
-import json, os
+# Launcher calendar zone: explicit setting > brain DB (config set) >
+# file-plane cycle.timezone > TZ from env.sh/host > UTC.
+zone="$(REPO="$REPO" python3 -c '
+import json, os, subprocess
 from pathlib import Path
 explicit = (os.environ.get("GBRAIN_DAILY_MEMORY_TZ") or "").strip()
 if explicit:
     print(explicit, end="")
     raise SystemExit
+repo = Path(os.environ["REPO"])
+helper = repo / "scripts" / "daily-memory-timezone.ts"
+bun = os.environ.get("PATH", "")
+try:
+    proc = subprocess.run(
+        ["bun", str(helper)],
+        capture_output=True, text=True, timeout=60,
+        env=os.environ,
+    )
+    value = (proc.stdout or "").strip()
+    if proc.returncode == 0 and value:
+        print(value, end="")
+        raise SystemExit
+except (OSError, subprocess.SubprocessError):
+    pass
 cfg = Path.home() / ".gbrain" / "config.json"
 if cfg.is_file():
     try:
@@ -63,7 +80,11 @@ run_command() {
 if [[ $# -eq 0 ]]; then
   day="$(TZ="$zone" date +%Y-%m-%d)"
   files=()
-  python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" "$zone" > "$TMP"
+  watermark=""
+  if [[ -f "$WATERMARK" ]]; then
+    watermark="$(tr -d '[:space:]' < "$WATERMARK" || true)"
+  fi
+  python3 "$REPO/scripts/daily-memory-codex-files.py" "$HOME/.codex/sessions" "$day" "$zone" "$watermark" > "$TMP"
   while IFS= read -r -d '' path; do files+=("$path"); done < "$TMP"
   if [[ ${#files[@]} -gt 0 ]]; then
     since="$(python3 -c '
@@ -83,4 +104,7 @@ print(start.astimezone(timezone.utc).isoformat())
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
+# Advance the Codex mtime watermark only after a successful write so a failed
+# ingest/write retries sessions modified since the prior good run.
+python3 -c 'import datetime, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n")' "$WATERMARK"
 echo 'daily-memory ok' >> "$LOG"
