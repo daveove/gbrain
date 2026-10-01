@@ -44,10 +44,16 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
     execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
   }
   await engine.setConfig('sync.repo_path', dir); await engine.setConfig('sync.last_commit', 'before');
-  let discoveries = 0;
+  let committed = false;
+  const module = await import('../src/core/import-file.ts'), actualImport = module.importFile;
+  const importer = spyOn(module, 'importFile').mockImplementation(async (...args) => {
+    const result = await actualImport(...args);
+    committed = result.status === 'imported';
+    return result;
+  });
   const execute = engine.executeRaw;
   const failure = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
-    if (sql.includes('SELECT source_id, slug, title, effective_date') && ++discoveries === 2) throw new Error('Synthetic day discovery outage');
+    if (committed && sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic day discovery outage');
     return execute.call(this, sql, params) as Promise<T[]>;
   });
   try {
@@ -57,7 +63,7 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
       expect(result.failures.some(f => f.path === '<daily-memory-refresh>')).toBe(true);
       expect(loadSyncFailures().some(f => f.path === '<daily-memory-refresh>' && f.state === 'open')).toBe(true);
     });
-  } finally { failure.mockRestore(); }
+  } finally { failure.mockRestore(); importer.mockRestore(); }
   expect(await engine.getConfig('sync.last_commit')).toBe('before');
   expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value'='slug:note'")).toHaveLength(1);
   await withEnv({ GBRAIN_HOME: home }, async () => {
