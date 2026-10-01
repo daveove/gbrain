@@ -5,6 +5,7 @@ import { DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core
 import type { extractStaleFromDB } from '../src/commands/extract.ts';
 import { extractOneShotDailyMemory, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine, version: string | null;
 beforeAll(async () => {
@@ -125,17 +126,12 @@ test('one-shot writer uses GBRAIN_DAILY_MEMORY_ZONE for instant page filters', a
   await engine.executeRaw(
     "UPDATE pages SET effective_date='2026-09-30T06:00:00Z'::timestamptz,effective_date_source='created' WHERE source_id='default' AND slug='notes/boundary'",
   );
-  const previous = process.env.GBRAIN_DAILY_MEMORY_ZONE;
-  process.env.GBRAIN_DAILY_MEMORY_ZONE = 'America/Los_Angeles';
-  try {
+  await withEnv({ GBRAIN_DAILY_MEMORY_ZONE: 'America/Los_Angeles' }, async () => {
     const result = await runOneShotDailyMemoryWrite(engine, '2026-09-29', { extract: noExtract });
     expect(result.written).toBe(true);
     expect((await engine.getPage(result.slug!, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
       .toContain('[[default:notes/boundary]]');
-  } finally {
-    if (previous === undefined) delete process.env.GBRAIN_DAILY_MEMORY_ZONE;
-    else process.env.GBRAIN_DAILY_MEMORY_ZONE = previous;
-  }
+  });
 });
 
 test('implicit day uses timezone override not cycle.timezone', async () => {
