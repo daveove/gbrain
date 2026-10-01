@@ -423,6 +423,60 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('failed renew keeps prior lease until success; release clears every running marker', async () => {
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'renew-fail' }))!;
+    const before = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'");
+    expect(before).toHaveLength(1);
+    const prior = before[0]!.path;
+    let deletes = 0;
+    const direct = engine.executeRawDirect.bind(engine);
+    const spy = spyOn(engine, 'executeRawDirect').mockImplementation(async (sql: string, params?: unknown[]) => {
+      if (typeof sql === 'string' && sql.includes("path::jsonb->>'value' LIKE 'running:%'") && sql.includes('DELETE')) {
+        deletes += 1;
+        if (deletes === 1) throw new Error('Synthetic renew delete failure');
+      }
+      return direct(sql, params);
+    });
+    try {
+      await expect(live.renew()).rejects.toThrow('Synthetic renew delete failure');
+    } finally {
+      spy.mockRestore();
+    }
+    // Prior marker must still be present (runningValue was not advanced past a failed renew).
+    const afterFail = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'");
+    expect(afterFail.some(row => row.path === prior)).toBe(true);
+    await live.release();
+    expect(await engine.executeRaw(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'")).toHaveLength(0);
+  });
+
+  test('renew deletes obsolete running markers by origin predicate without reading unrelated debt', async () => {
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'renew-predicate' }))!;
+    await live.before(['notes/renew-predicate']);
+    await engine.putPage('notes/renew-predicate', { type: 'note', title: 'Renew predicate', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-28' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/renew-predicate'");
+    const selects: string[] = [];
+    const execute = engine.executeRaw.bind(engine);
+    const spy = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: typeof engine, sql: string, params?: unknown[]): Promise<T[]> {
+      if (typeof sql === 'string' && sql.includes('SELECT path FROM op_checkpoint_paths') && sql.includes('UNION')) {
+        selects.push(sql);
+      }
+      return execute(sql, params) as Promise<T[]>;
+    });
+    try {
+      await live.renew();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(selects).toHaveLength(0);
+    const markers = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'");
+    expect(markers).toHaveLength(1);
+    await live.finish();
+  });
+
   test('unchanged finish preserves a concurrent before: bank for later date recovery', async () => {
     await engine.putPage('notes/stable-transcript', { type: 'note', title: 'Stable', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-20' } });
     await engine.putPage('notes/mutating-transcript', { type: 'note', title: 'Mutating', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-21' } });
