@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { LINK_EXTRACTOR_VERSION_TS } from '../link-extraction.ts';
 import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
+import { PageRevisionConflictError } from '../page-state/types.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { calendarDateInTimeZone, isValidTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
@@ -258,9 +259,11 @@ async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
  * cycle day. A human-owned page at that slug is left in place, including one
  * that is soft-deleted: `getPage` hides those rows, and `putPage` clears
  * `deleted_at` on conflict, which would resurrect the page. A soft-deleted
- * dream note (`dream_generated: true`) may still refresh. Errors are logged
- * and swallowed so a note failure does not cancel the rest of the maintenance
- * job; an abort still propagates.
+ * dream note (`dream_generated: true`) may still refresh. Concurrent writers
+ * for the same day capture the note revision before scanning and CAS the
+ * put; a conflict rescans so a stale snapshot cannot overwrite a newer index.
+ * Errors are logged and swallowed so a note failure does not cancel the rest
+ * of the maintenance job; an abort still propagates.
  */
 export async function writeDailyMemoryFromSources(
   engine: BrainEngine,
@@ -291,117 +294,134 @@ export async function writeDailyMemoryFromSources(
     }
     await ensureDailyMemorySource(engine);
 
-    const rows: SourcePageRow[] = [];
-    let pageTotal = 0;
-    let afterSource = '';
-    let afterSlug = '';
-    for (;;) {
+    const maxAttempts = 8;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       throwIfAborted(opts.signal, '[dream] daily memory');
-      const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
-        `SELECT source_id, slug, title, effective_date, effective_date_source,
-           jsonb_build_object(
-             COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
-             'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
-             'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
-             '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
-               COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
-               'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
-               'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
-               'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
-               'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
-           to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
-           to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
-         FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
-         WHERE deleted_at IS NULL
-           AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
-           AND NOT (source_id = $4 AND slug = $3)
-           AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
-             OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
-           AND (source_id, slug) > ($5, $6)
-         ORDER BY source_id, slug LIMIT $7`,
-        [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
-      );
-      // Count every matching calendar/instant day without retaining a whole-day snapshot.
-      for (const row of candidates) {
-        if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
-        pageTotal++;
-        if (rows.length < DAILY_MEMORY_PAGE_CAP && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
+      // Bound the write to the revision observed before the source scan so a
+      // concurrent same-day writer that commits first forces a rescan.
+      const snapshot = await engine.readPageSnapshot(slug, {
+        sourceId: DAILY_MEMORY_SOURCE_ID,
+        includeDeleted: true,
+      });
+      const existing = snapshot?.page ?? null;
+      if (existing && existing.frontmatter?.dream_generated !== true) {
+        return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: 0, reason: 'human_page',
+          needs_extract: await dreamIndexesNeedExtract(engine) };
       }
-      if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
-      const last = candidates[candidates.length - 1];
-      afterSource = last.source_id;
-      afterSlug = last.slug;
-    }
-    const records = await loadSourceRecordGroups(engine, zone, day);
-    const existing = await engine.getPage(slug, {
-      sourceId: DAILY_MEMORY_SOURCE_ID,
-      includeDeleted: true,
-    });
-    if (existing && existing.frontmatter?.dream_generated !== true) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: rows.length, reason: 'human_page',
-        needs_extract: await dreamIndexesNeedExtract(engine) };
-    }
 
-    if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID,
-        needs_extract: await dreamIndexesNeedExtract(engine), pages: 0, reason: 'no_source_activity' };
-    }
-
-    let recordsWrote = false;
-    for (const group of records) {
-      const available: SourceRecordLink[] = [];
-      for (const link of group.links) {
+      const rows: SourcePageRow[] = [];
+      let pageTotal = 0;
+      let afterSource = '';
+      let afterSlug = '';
+      for (;;) {
         throwIfAborted(opts.signal, '[dream] daily memory');
-        const put = await putSourceRecordIndex(engine, group.source_type, link);
-        if (put.available) available.push(link);
-        if (put.wrote) recordsWrote = true;
+        const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
+          `SELECT source_id, slug, title, effective_date, effective_date_source,
+             jsonb_build_object(
+               COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
+               'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
+               'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
+               '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
+                 COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
+                 'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+                 'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+                 'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+                 'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
+             to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+             to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
+           FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
+           WHERE deleted_at IS NULL
+             AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
+             AND NOT (source_id = $4 AND slug = $3)
+             AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
+               OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
+             AND (source_id, slug) > ($5, $6)
+           ORDER BY source_id, slug LIMIT $7`,
+          [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
+        );
+        // Count every matching calendar/instant day without retaining a whole-day snapshot.
+        for (const row of candidates) {
+          if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
+          pageTotal++;
+          if (rows.length < DAILY_MEMORY_PAGE_CAP && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
+        }
+        if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
+        const last = candidates[candidates.length - 1];
+        afterSource = last.source_id;
+        afterSlug = last.slug;
       }
-      group.links = available;
-    }
+      const records = await loadSourceRecordGroups(engine, zone, day);
 
-    const title = `Daily memory ${day}`;
-    const compiled_truth = renderNote(day, { rows, pageTotal, records });
-    const dailyUnchanged = Boolean(
-      existing
-      && !existing.deleted_at
-      && existing.frontmatter?.dream_generated === true
-      && existing.title === title
-      && existing.compiled_truth === compiled_truth
-      && existing.frontmatter?.dream_cycle_date === day
-      && existing.frontmatter?.visibility === 'private',
-    );
-    if (!dailyUnchanged) {
-      await engine.putPage(slug, {
-        type: 'note',
-        title,
-        compiled_truth,
-        timeline: '',
-        frontmatter: {
-          dream_generated: true,
-          visibility: 'private',
-          dream_cycle_date: day,
-          dream_created_cycle_date: day,
-          raw_trace_exempt: true,
-          raw_trace_exempt_reason: 'daily memory index; source pages keep their own traces',
-        },
-      }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    }
+      if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
+        return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID,
+          needs_extract: await dreamIndexesNeedExtract(engine), pages: 0, reason: 'no_source_activity' };
+      }
 
-    const targets = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
-    const [readiness] = await engine.executeRaw<{ needed: boolean; extract_slugs: string[] }>(
-      `SELECT COALESCE(bool_or(links_extracted_at IS NULL OR links_extracted_at < $3::timestamptz
-          OR updated_at > links_extracted_at), false) AS needed,
-          COALESCE(array_agg(slug ORDER BY slug), '{}'::text[]) AS extract_slugs
-        FROM pages WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
-          AND frontmatter @> '{"dream_generated":true}'::jsonb`,
-      [DAILY_MEMORY_SOURCE_ID, targets, LINK_EXTRACTOR_VERSION_TS],
-    );
-    const needs_extract = readiness.needed;
+      let recordsWrote = false;
+      for (const group of records) {
+        const available: SourceRecordLink[] = [];
+        for (const link of group.links) {
+          throwIfAborted(opts.signal, '[dream] daily memory');
+          const put = await putSourceRecordIndex(engine, group.source_type, link);
+          if (put.available) available.push(link);
+          if (put.wrote) recordsWrote = true;
+        }
+        group.links = available;
+      }
 
-    if (dailyUnchanged && !recordsWrote) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length, reason: 'unchanged' };
+      const title = `Daily memory ${day}`;
+      const compiled_truth = renderNote(day, { rows, pageTotal, records });
+      const dailyUnchanged = Boolean(
+        existing
+        && !existing.deleted_at
+        && existing.frontmatter?.dream_generated === true
+        && existing.title === title
+        && existing.compiled_truth === compiled_truth
+        && existing.frontmatter?.dream_cycle_date === day
+        && existing.frontmatter?.visibility === 'private',
+      );
+      if (!dailyUnchanged) {
+        const writeOpts = snapshot
+          ? { sourceId: DAILY_MEMORY_SOURCE_ID, expectedRevision: snapshot.revision }
+          : { sourceId: DAILY_MEMORY_SOURCE_ID, force: false as const };
+        try {
+          await engine.putPage(slug, {
+            type: 'note',
+            title,
+            compiled_truth,
+            timeline: '',
+            frontmatter: {
+              dream_generated: true,
+              visibility: 'private',
+              dream_cycle_date: day,
+              dream_created_cycle_date: day,
+              raw_trace_exempt: true,
+              raw_trace_exempt_reason: 'daily memory index; source pages keep their own traces',
+            },
+          }, writeOpts);
+        } catch (err) {
+          if (err instanceof PageRevisionConflictError && attempt + 1 < maxAttempts) continue;
+          throw err;
+        }
+      }
+
+      const targets = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
+      const [readiness] = await engine.executeRaw<{ needed: boolean; extract_slugs: string[] }>(
+        `SELECT COALESCE(bool_or(links_extracted_at IS NULL OR links_extracted_at < $3::timestamptz
+            OR updated_at > links_extracted_at), false) AS needed,
+            COALESCE(array_agg(slug ORDER BY slug), '{}'::text[]) AS extract_slugs
+          FROM pages WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
+            AND frontmatter @> '{"dream_generated":true}'::jsonb`,
+        [DAILY_MEMORY_SOURCE_ID, targets, LINK_EXTRACTOR_VERSION_TS],
+      );
+      const needs_extract = readiness.needed;
+
+      if (dailyUnchanged && !recordsWrote) {
+        return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length, reason: 'unchanged' };
+      }
+      return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length };
     }
-    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length };
+    throw new Error('Daily memory write exhausted revision retries');
   } catch (err) {
     throwIfAborted(opts.signal, '[dream] daily memory');
     const message = err instanceof Error ? err.message : String(err);
@@ -409,6 +429,7 @@ export async function writeDailyMemoryFromSources(
     return { written: false, day, slug, pages: 0, reason: 'error' };
   }
 }
+
 
 async function loadSourceRecordGroups(
   engine: BrainEngine,

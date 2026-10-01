@@ -16,6 +16,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { resolveCycleDate } from '../src/core/cycle/cycle-date.ts';
 import { dailyMemorySlug, DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, queueDailyMemoryExtract, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
+import { PageRevisionConflictError } from '../src/core/page-state/types.ts';
 import { dailyMemoryDaysForSlugs } from '../src/core/cycle/daily-memory-followup.ts';
 import { computeEffectiveDate, DATE_INSTANT_PROVENANCE } from '../src/core/effective-date.ts';
 import { importFromContent } from '../src/core/import-file.ts';
@@ -1440,5 +1441,75 @@ describe('daily memory from sources the brain already holds', () => {
     expect(days).toContain('2026-09-21'); // 16:30Z instant in Asia/Manila
     expect(days).toContain('2026-09-25'); // live calendar date
   });
+
+  test('same-day revision conflict rescans and keeps the full index', async () => {
+    await engine.setConfig('cycle.timezone', 'UTC');
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ($1, $1)`, ['notes']);
+    await engine.putPage('notes/early', {
+      type: 'note', title: 'Early', compiled_truth: 'early body',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'notes' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='notes' AND slug='notes/early'",
+    );
+    expect((await writeDailyMemoryFromSources(engine, { date: '2026-09-30' })).written).toBe(true);
+
+    await engine.putPage('notes/late', {
+      type: 'note', title: 'Late', compiled_truth: 'late body',
+      frontmatter: { date: '2026-09-30' },
+    }, { sourceId: 'notes' });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='notes' AND slug='notes/late'",
+    );
+
+    let conflicts = 0;
+    const realPut = engine.putPage.bind(engine);
+    const putSpy = spyOn(engine, 'putPage').mockImplementation(async (slug, page, opts) => {
+      if (opts?.sourceId === DAILY_MEMORY_SOURCE_ID && conflicts === 0) {
+        conflicts += 1;
+        throw new PageRevisionConflictError(
+          '11111111-1111-1111-1111-111111111111',
+          '22222222-2222-2222-2222-222222222222',
+        );
+      }
+      return realPut(slug, page, opts);
+    });
+
+    const result = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+    putSpy.mockRestore();
+    expect(conflicts).toBe(1);
+    expect(result.reason).not.toBe('error');
+    expect(result.written).toBe(true);
+    const page = await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[notes:notes/early]]');
+    expect(page!.compiled_truth).toContain('[[notes:notes/late]]');
+  });
+
+  test('concurrent same-day writers converge on the full day index', async () => {
+    await engine.setConfig('cycle.timezone', 'UTC');
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ($1, $1)`, ['notes']);
+    for (const slug of ['notes/a', 'notes/b', 'notes/c']) {
+      await engine.putPage(slug, {
+        type: 'note', title: slug, compiled_truth: 'body',
+        frontmatter: { date: '2026-09-30' },
+      }, { sourceId: 'notes' });
+      await engine.executeRaw(
+        "UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='notes' AND slug=$1",
+        [slug],
+      );
+    }
+    const results = await Promise.all([
+      writeDailyMemoryFromSources(engine, { date: '2026-09-30' }),
+      writeDailyMemoryFromSources(engine, { date: '2026-09-30' }),
+      writeDailyMemoryFromSources(engine, { date: '2026-09-30' }),
+    ]);
+    expect(results.every(r => r.reason !== 'error')).toBe(true);
+    expect(results.some(r => r.written || r.reason === 'unchanged')).toBe(true);
+    const page = await engine.getPage(dailyMemorySlug('2026-09-30'), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page!.compiled_truth).toContain('[[notes:notes/a]]');
+    expect(page!.compiled_truth).toContain('[[notes:notes/b]]');
+    expect(page!.compiled_truth).toContain('[[notes:notes/c]]');
+  });
+
 
 });
