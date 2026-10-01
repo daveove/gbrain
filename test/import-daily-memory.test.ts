@@ -21,6 +21,23 @@ afterAll(async () => { await engine.disconnect(); for (const dir of roots) rmSyn
 beforeEach(async () => { await resetPgliteState(engine); if (version) await engine.setConfig('version', version); });
 const batches = () => engine.executeRaw<{ data: { daily_memory_dates: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
 
+
+const expireLiveLeases = async () => {
+  const lives = await engine.executeRaw<{ path: string }>(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
+  let i = 0;
+  for (const row of lives) {
+    const wrapped = JSON.parse(row.path) as { origin: string; value: string };
+    // Unique stale stamps so PK (op, fingerprint, path) cannot collide across origins.
+    wrapped.value = `live:${new Date(Date.now() - (31 * 60 * 1000) - i).toISOString()}`;
+    i += 1;
+    await engine.executeRawDirect(
+      'UPDATE op_checkpoint_paths SET path=$1 WHERE op=$2 AND path=$3',
+      [JSON.stringify(wrapped), 'import-daily-memory', row.path]);
+  }
+};
+
+
 test('post-import discovery failure banks slugs and withholds bookmark through a checkpoint-skipped retry', async () => {
   const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
   for (const args of [['init'], ['add', '.'], ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'Fixture']]) {
@@ -63,6 +80,8 @@ test('pre-write bank recovers old undated day after interruption before post-wri
   expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('imported');
   // Simulate process loss after the canonical write, before imported() and file checkpoint.
   expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('skipped');
+  // Process-loss recovery: adopting finish only retires foreign debt after live lease expiry.
+  await expireLiveLeases();
   await (await createImportDailyMemory(engine, opts))!.finish();
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
     && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
@@ -203,4 +222,40 @@ test('identical concurrent before: banks stay distinct by invocation origin', as
   await peer.imported('note');
   await peer.finish();
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('empty finish preserves live foreign before: debt', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Synthetic fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-24' }, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const peer = (await createImportDailyMemory(engine, opts))!;
+  await peer.before(file, 'note.md');
+  await (await createImportDailyMemory(engine, opts))!.finish();
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(1);
+  await peer.imported('note');
+  await peer.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+  expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
+});
+
+test('empty finish adopts foreign debt after live lease expires', async () => {
+  const dir = root();
+  const file = join(dir, 'note.md');
+  writeFileSync(file, markdown);
+  await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const opts = { sourceId: 'default', dir };
+  const peer = (await createImportDailyMemory(engine, opts))!;
+  await peer.before(file, 'note.md');
+  expect((await importFile(engine, file, 'note.md', { noEmbed: true })).status).toBe('imported');
+  await expireLiveLeases();
+  await (await createImportDailyMemory(engine, opts))!.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
 });
