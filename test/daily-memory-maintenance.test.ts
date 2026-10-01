@@ -453,6 +453,40 @@ describe('daily memory from sources the brain already holds', () => {
       "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'")).toHaveLength(0);
   });
 
+  test('renew and release skip legacy unwrapped checkpoint rows without JSON cast errors', async () => {
+    const { createHash } = await import('node:crypto');
+    const runKey = 'legacy-unwrapped';
+    const legacyFingerprint = createHash('sha256').update(JSON.stringify(['default', runKey])).digest('hex').slice(0, 16);
+    const legacyBefore = 'before:' + JSON.stringify({
+      targets: [{ slug: 'notes/legacy-unwrapped', revision: null }],
+      days: ['2026-01-09'],
+    });
+    await engine.executeRawDirect(
+      `INSERT INTO op_checkpoints (op, fingerprint, completed_keys, updated_at)
+       VALUES ('transcript-ingest-daily-memory', $1, $2::jsonb, now())
+       ON CONFLICT (op, fingerprint) DO UPDATE SET completed_keys=EXCLUDED.completed_keys, updated_at=now()`,
+      [legacyFingerprint, JSON.stringify([legacyBefore, 'slug:notes/legacy-unwrapped'])]);
+    await engine.executeRawDirect(
+      `INSERT INTO op_checkpoint_paths (op, fingerprint, path) VALUES
+         ('transcript-ingest-daily-memory', $1, $2),
+         ('transcript-ingest-daily-memory', $1, 'slug:notes/legacy-unwrapped')
+       ON CONFLICT DO NOTHING`,
+      [legacyFingerprint, legacyBefore]);
+    await engine.putPage('notes/legacy-unwrapped', { type: 'note', title: 'Legacy', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-09' } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", ['2026-01-09', 'notes/legacy-unwrapped']);
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey }))!;
+    // Pre-fix: casting unwrapped legacy paths threw and wedged renew/release.
+    await expect(live.renew()).resolves.toBeUndefined();
+    await expect(live.release()).resolves.toBeUndefined();
+    const recovery = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey }))!;
+    await recovery.finish();
+    expect(await engine.executeRaw(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND fingerprint=$1",
+      [legacyFingerprint])).toHaveLength(0);
+    expect(await engine.executeRaw(
+      "SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'='2026-01-09'")).not.toHaveLength(0);
+  });
+
   test('renew deletes obsolete running markers by origin predicate without reading unrelated debt', async () => {
     const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'renew-predicate' }))!;
     await live.before(['notes/renew-predicate']);
@@ -657,6 +691,7 @@ describe('daily memory from sources the brain already holds', () => {
       const checkpointModule = await import('../src/core/op-checkpoint.ts');
       const originalCreate = leaseModule.createTranscriptIngestDailyMemory;
       const originalAppend = checkpointModule.appendCompleted;
+      const originalAppendTx = checkpointModule.appendCompletedInTransaction;
       let adopted = false, bankFailureReady = false, lastId = 0;
       const leases = spyOn(leaseModule, 'createTranscriptIngestDailyMemory').mockImplementation(async (...args) => {
         const live = await originalCreate(...args);
@@ -690,6 +725,14 @@ describe('daily memory from sources the brain already holds', () => {
         }
         return originalAppend(targetEngine, key, values);
       });
+      const appendTx = typeof checkpointModule.appendCompletedInTransaction === 'function'
+        ? spyOn(checkpointModule, 'appendCompletedInTransaction').mockImplementation(async (targetEngine, key, values) => {
+        if (key.op === 'transcript-ingest-daily-memory' && bankFailureReady && values.some(value => JSON.parse(value).value === `slug:${target}`)) {
+          rejected = true;
+          throw new Error('Daily-memory transcript ingest checkpoint unavailable');
+        }
+        return originalAppendTx(targetEngine, key, values);
+      }) : undefined;
       try {
         const outcome = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' })
           .then(result => ({ result, error: undefined as unknown }), error => ({ result: undefined, error }));
@@ -705,7 +748,7 @@ describe('daily memory from sources the brain already holds', () => {
           expect(outcome.result!.pages.imported).toBe(0);
         }
         expect(await engine.getPage(target)).toEqual(original);
-        append.mockRestore(); leases.mockRestore();
+        append.mockRestore(); appendTx?.mockRestore(); leases.mockRestore();
         // A retry must recover the preserved old day and complete the mutation.
         const retry = await runTranscriptsIngest(engine, { paths: [file], format: 'codex', sourceId: 'default' });
         expect(retry.cleanScan).toBe(true);
@@ -713,11 +756,36 @@ describe('daily memory from sources the brain already holds', () => {
         expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND data->>'daily_memory_date'=$1 AND id>$2", [oldDay, lastId])).not.toHaveLength(0);
       } finally {
         if (append.mock) append.mockRestore();
+        if (appendTx?.mock) appendTx.mockRestore();
         if (leases.mock) leases.mockRestore();
         rmSync(dir, { recursive: true, force: true });
       }
     });
   }
+
+  test('stale-part delete rolls back when post-delete debt bank fails in-transaction', async () => {
+    const day = '2026-01-11';
+    const slug = 'notes/atomic-delete-bank';
+    await engine.putPage(slug, { type: 'note', title: 'Atomic bank', compiled_truth: 'Synthetic fixture', frontmatter: { date: day } });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE slug=$2 AND source_id='default'", [day, slug]);
+    const live = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'atomic-delete-bank' }))!;
+    await live.before([slug]);
+    const before = await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(before.length).toBeGreaterThan(0);
+    await expect(engine.transaction(async (tx) => {
+      await tx.deletePage(slug, { sourceId: 'default' });
+      // Force the transactional bank path to fail so delete cannot commit alone.
+      const broken = Object.create(tx) as typeof tx;
+      Object.defineProperty(broken, 'executeRaw', {
+        value: async () => { throw new Error('synthetic transactional bank failure'); },
+      });
+      await live.beforeCommit(broken, slug);
+    })).rejects.toThrow('synthetic transactional bank failure');
+    expect(await engine.getPage(slug)).not.toBeNull();
+    const retained = await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(retained.length).toBeGreaterThan(0);
+    await live.release();
+  });
 
   for (const failRenew of [false, true]) {
     test(`in-flight stale-part deletion preserves old-day debt with ${failRenew ? 'failed' : 'successful'} renewal`, async () => {

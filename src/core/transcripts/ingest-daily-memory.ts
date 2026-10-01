@@ -1,7 +1,7 @@
 /** Durable daily-memory refresh handoff for transcript ingest (and connectors that reuse it). */
 import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
-import { appendCompleted, type OpCheckpointKey } from '../op-checkpoint.ts';
+import { appendCompleted, appendCompletedInTransaction, type OpCheckpointKey } from '../op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../cycle/daily-memory.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../cycle/daily-memory-followup.ts';
 
@@ -20,10 +20,10 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
   // Retain pre-write dates until post-commit banking, even if an expired peer adopted them.
   const priorBySlug = new Map<string, Prior>();
   await opts.protect?.(key);
-  const bank = async (entries: string[], target = engine) => {
+  const bank = async (entries: string[]) => {
     opts.signal?.throwIfAborted();
     const wrapped = entries.map(value => JSON.stringify({ origin, value }));
-    if (wrapped.length && !await appendCompleted(target, key, wrapped)) {
+    if (wrapped.length && !await appendCompleted(engine, key, wrapped)) {
       throw new Error('Daily-memory transcript ingest checkpoint unavailable');
     }
     return wrapped;
@@ -40,6 +40,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
       await engine.executeRawDirect(
         `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           AND pg_input_is_valid(path, 'jsonb')
            AND path::jsonb->>'origin'=$3
            AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')`,
         [key.op, fingerprint, origin]);
@@ -48,7 +49,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
            SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
            FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
            WHERE NOT (
-             elem::jsonb->>'origin'=$3
+             pg_input_is_valid(elem, 'jsonb')
+             AND elem::jsonb->>'origin'=$3
              AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
            )
          ), updated_at=now()
@@ -78,7 +80,9 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     });
     // A peer may already have snapshotted the original before: path for retirement.
     // Give this committed mutation a fresh path so that older DELETE cannot erase it.
-    await bank([...prior.map(record => `before:${JSON.stringify({ ...record, bankId: randomUUID() })}`), ...changed.map(slug => `slug:${slug}`)], tx);
+    opts.signal?.throwIfAborted();
+    const entries = [...prior.map(record => `before:${JSON.stringify({ ...record, bankId: randomUUID() })}`), ...changed.map(slug => `slug:${slug}`)];
+    await appendCompletedInTransaction(tx, key, entries.map(value => JSON.stringify({ origin, value })));
   };
   return {
     /** Bank debt inside the canonical page write transaction, without clearing prior dates. */
@@ -104,6 +108,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
         await engine.executeRawDirect(
           `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+             AND pg_input_is_valid(path, 'jsonb')
              AND path::jsonb->>'origin'=$3
              AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
              AND path<>$4`,
@@ -113,7 +118,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
              SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
              FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
              WHERE NOT (
-               elem::jsonb->>'origin'=$3
+               pg_input_is_valid(elem, 'jsonb')
+               AND elem::jsonb->>'origin'=$3
                AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
                AND elem<>$4
              )
