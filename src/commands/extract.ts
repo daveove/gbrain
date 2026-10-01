@@ -39,7 +39,7 @@
  */
 
 import { probePendingOriginsForArrivedTargets } from '../core/pending-link-target-arrivals.ts';
-import { pendingLinkReferenceBatches, probePendingLinkReferences, storePendingLinkReferences, pendingCandidates, queuePendingOriginExtraction } from '../core/pending-link-references.ts';
+import { scanPendingLinkReferences, storePendingLinkReferences, pendingCandidates, queuePendingOriginExtraction } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
@@ -2120,10 +2120,12 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
+    pendingAfterKey?: string;
+    pendingScanComplete?: boolean;
     /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
     signal?: AbortSignal;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean }> {
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean; pendingAfterKey?: string }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const startMs = Date.now();
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
@@ -2139,7 +2141,6 @@ export async function extractStaleFromDB(
   let totalStale = await countStale();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = selected ? undefined : pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
@@ -2171,26 +2172,21 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  let pendingScanIncomplete = false;
-  if (pendingBatches) {
-    let readyPending = 0;
-    for (;;) {
-      const step = await pendingBatches.next();
-      if (step.done) { pendingScanIncomplete = step.value === true; break; }
-      readyPending += await probePendingLinkReferences(engine, step.value, { globalBasename, signal: opts.signal,
-        deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter,
-        onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
-        resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-          outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
-    }
+  let pending = { ready: 0, pendingScanIncomplete: false, pendingAfterKey: opts.pendingAfterKey ?? '' };
+  if (!selected && !opts.pendingScanComplete) {
+    pending = await scanPendingLinkReferences(engine, { globalBasename, signal: opts.signal,
+      deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter, afterKey: opts.pendingAfterKey,
+      onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
+      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
+        outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
     opts.signal?.throwIfAborted();
-    totalStale = dryRun ? totalStale + readyPending : await countStale();
+    totalStale = dryRun ? totalStale + pending.ready : await countStale();
   }
+  const pendingResult = { pendingScanIncomplete: pending.pendingScanIncomplete,
+    pendingAfterKey: pending.pendingAfterKey };
   if (dryRun) return reportDryRun();
   if (totalStale === 0) {
-    if (pendingScanIncomplete) {
-      return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0, pendingScanIncomplete: true };
-    }
+    if (pending.pendingScanIncomplete) return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0, ...pendingResult };
     if (!jsonMode) log('No stale pages — extraction is up to date.');
     return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 };
   }
@@ -2357,7 +2353,7 @@ export async function extractStaleFromDB(
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,
     ...(skippedAttendanceIncomplete ? { skippedAttendanceIncomplete } : {}),
-    ...(pendingScanIncomplete ? { pendingScanIncomplete: true } : {}) };
+    ...pendingResult };
 }
 
 /**

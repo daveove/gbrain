@@ -2568,22 +2568,20 @@ export async function registerBuiltinHandlers(
         jsonMode: false,
         sourceIdFilter,
         catchUp: false,
+        pendingAfterKey: typeof job.data.pendingAfterKey === 'string' ? job.data.pendingAfterKey : undefined,
+        pendingScanComplete: job.data.pendingScanComplete === true,
+        signal: job.signal,
       });
-      // Internal 30-min budget hit with work remaining → chain a
-      // continuation job so a very large deferred backlog converges without
-      // waiting for the next sync. Forward-progress guard (pagesProcessed >
-      // 0) prevents an infinite chain if the sweep can't advance.
-      if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0) || r.pendingScanIncomplete)) {
+      // Continue only after page/readiness progress; resume the pending keyset.
+      if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0)
+        || (r.pendingScanIncomplete && r.pendingAfterKey !== (job.data.pendingAfterKey ?? '')))) {
         try {
           const queue = new MinionQueue(engine);
-          // NO maxWaiting: with an unscoped (NULL-sourceId) payload the
-          // coalesce filter matches ANY waiting 'extract' job and would
-          // swallow the continuation. Each completed sweep chains at most
-          // one continuation and the sweep is an idempotent watermark scan,
-          // so there is no pile-up to guard against.
+          // Unscoped coalescing would swallow this continuation.
           await queue.add(
             'extract',
-            { ...job.data, continuation_of: job.id },
+            { ...job.data, continuation_of: job.id, pendingAfterKey: r.pendingScanIncomplete ? r.pendingAfterKey : undefined,
+              pendingScanComplete: !r.pendingScanIncomplete },
             { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
           );
         } catch { /* best-effort: next sync/manual sweep picks up the rest */ }

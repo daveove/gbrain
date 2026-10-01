@@ -5,7 +5,8 @@ import { buildBasenameIndex, queryBasenameIndex, normalizeBasename, LINK_EXTRACT
 const PREFIX = 'internal.pending-links.';
 type PendingProbeOptions = { dryRun?: boolean; versionTs?: string; sourceId?: string;
   onReadyForeign?: (sourceId: string) => Promise<void>;
-  onReadyOrigin?: (sourceId: string) => Promise<void> };
+  onReadyOrigin?: (sourceId: string) => Promise<void>;
+  onProcessed?: (key: string) => void };
 type Store = Pick<BrainEngine, 'executeRaw' | 'getConfig'>;
 export interface PendingLinkOrigin {
   slug: string;
@@ -39,8 +40,9 @@ const PENDING_BATCH_SIZE = 100;
 
 /** Keyset batches filter origins or changed-source target endpoints before parsing. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number } = {}): AsyncGenerator<PendingLinkRow[], boolean> {
-  let after = '';
+  opts: { signal?: AbortSignal; deadline?: number; afterKey?: string; onBatchComplete?: (key: string) => void } = {}): AsyncGenerator<PendingLinkRow[], boolean> {
+  let after = opts.afterKey ?? '';
+  if (after && (typeof after !== 'string' || !after.startsWith(PREFIX))) throw new Error('Invalid pending link scan cursor');
   while (true) {
     opts.signal?.throwIfAborted();
     // true = incomplete (deadline); false = reached the end of the registry.
@@ -63,8 +65,9 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
       return reference ? [{ ...row, reference }] : [];
     });
     if (parsed.length) yield parsed;
-    if (rows.length < PENDING_BATCH_SIZE) return false;
     after = rows.at(-1)!.key;
+    opts.onBatchComplete?.(after);
+    if (rows.length < PENDING_BATCH_SIZE) return false;
   }
 }
 
@@ -141,6 +144,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
         // Foreign origins are not, so count every ready foreign handoff.
         const foreign = Boolean(opts.sourceId && ref.sourceId !== opts.sourceId);
         if (current && (foreign || !current.already_stale)) requeued++;
+        opts.onProcessed?.(row.key);
         continue;
       }
       const foreign = Boolean(opts.sourceId && ref.sourceId !== opts.sourceId);
@@ -161,6 +165,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
             [row.key, row.value, ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation]);
           requeued += changed.length;
         }
+        opts.onProcessed?.(row.key);
         continue;
       }
       // The config CAS and origin revision/incarnation check belong to the same statement.
@@ -173,6 +178,7 @@ export async function requeueReadyPendingLinks(engine: Store, rows: PendingLinkR
         RETURNING key`, [ref.slug, ref.sourceId, ref.revision, ref.sourceIncarnation, row.key, row.value]);
       requeued += changed.length;
     }
+    opts.onProcessed?.(row.key);
   }
   return requeued;
 }
@@ -225,6 +231,29 @@ async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRo
     return queryBasenameIndex(indexes.get(origin.sourceId)!, candidate.targetSlug).some(targetSlug =>
       resolves({ ...candidate, targetSlug }, origin, allSlugs, sources));
   }, opts.signal, opts.deadline, opts);
+}
+
+/** Continue after successfully probed rows, including a partially consumed final batch. */
+export async function scanPendingLinkReferences(engine: Store,
+  opts: Parameters<typeof probePendingLinkReferences>[2] & { afterKey?: string },
+  resolves: Parameters<typeof probePendingLinkReferences>[3]) {
+  let afterKey = opts.afterKey ?? '', ready = 0;
+  const batches = pendingLinkReferenceBatches(engine, opts.sourceId, {
+    signal: opts.signal, deadline: opts.deadline, afterKey,
+    onBatchComplete: key => { afterKey = key; },
+  });
+  for (;;) {
+    const step = await batches.next();
+    if (step.done) return { ready, pendingScanIncomplete: step.value, pendingAfterKey: afterKey };
+    let processed = 0;
+    ready += await probePendingLinkReferences(engine, step.value, { ...opts,
+      onProcessed: key => { afterKey = key; processed++; opts.onProcessed?.(key); },
+    }, resolves);
+    if (processed < step.value.length) {
+      await batches.return(true);
+      return { ready, pendingScanIncomplete: true, pendingAfterKey: afterKey };
+    }
+  }
 }
 
 /** A resolved basename edge satisfies its parser-generated bare direct candidate. */

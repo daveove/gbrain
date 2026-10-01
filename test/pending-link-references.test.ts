@@ -2,10 +2,11 @@ import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { extractLinksForSlugs, extractStaleFromDB, runExtract, runExtractCore, stampExtracted } from '../src/commands/extract.ts';
+import { extractLinksForSlugs, extractStaleFromDB, STALE_TIME_BUDGET_MS, runExtract, runExtractCore, stampExtracted } from '../src/commands/extract.ts';
 import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
@@ -736,4 +737,130 @@ for (const qualified of [true, false]) test(`foreign origin is stale before an e
   expect(await engine.countStalePagesForExtraction({ sourceId: a })).toBe(0);
   expect((await engine.getLinks('people/race-origin', { sourceId: a })).some(link =>
     link.to_source_id === b && link.to_slug === 'people/race-later')).toBe(true);
+});
+
+// Advance only at the real per-origin deadline gate, not during fixture setup or SQL.
+function pendingProbeClock(step: number) {
+  let clock = 0;
+  const spy = spyOn(Date, 'now').mockImplementation(() => {
+    if (new Error().stack?.includes('requeueReadyPendingLinks')) clock += step;
+    return clock;
+  });
+  return spy;
+}
+
+async function pendingFixture(count: number) {
+  for (let i = 0; i < count; i++) await engine.putPage(`people/budget-${i}`, page(`[[people/future-${i}]]`));
+  await drain();
+  return loadPendingLinkReferences(engine);
+}
+
+async function pendingExtractHandler() {
+  const handlers = new Map<string, (job: any) => Promise<any>>();
+  await registerBuiltinHandlers({ register: (name: string, handler: (job: any) => Promise<any>) => handlers.set(name, handler) } as never,
+    engine, { quiet: true });
+  return handlers.get('extract')!;
+}
+
+test('partial short pending batch resumes after handled origins instead of claiming completion', async () => {
+  const rows = await pendingFixture(8);
+  const clock = pendingProbeClock(1);
+  try {
+    const first = await extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, catchUp: false, includeFrontmatter: false, timeBudgetMs: 5,
+    });
+    expect(first.pendingScanIncomplete).toBe(true);
+    expect(first.pendingAfterKey).toBe(rows[2].key);
+    const rest = await extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, catchUp: true, includeFrontmatter: false,
+      pendingAfterKey: first.pendingAfterKey,
+    });
+    expect(rest.pendingScanIncomplete).not.toBe(true);
+    expect(await loadPendingLinkReferences(engine)).toHaveLength(8);
+  } finally { clock.mockRestore(); }
+});
+
+test('queued pending budget continuations reach a ready tail beyond a dormant full batch', async () => {
+  const rows = await pendingFixture(105);
+  const tail = rows.at(-1)!;
+  await engine.putPage(tail.reference.candidates[0].targetSlug, page());
+  await engine.executeRaw('UPDATE pages SET links_extracted_at=updated_at WHERE slug=$1', [tail.reference.candidates[0].targetSlug]);
+  const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
+  let job = await queue.add('extract', { stale: true, sourceId: 'default' });
+  const clock = pendingProbeClock(STALE_TIME_BUDGET_MS / 8);
+  let rounds = 0;
+  try {
+    for (; rounds < 25; rounds++) {
+      await handler(job);
+      if ((await engine.getLinks(tail.reference.slug)).some(link => link.to_slug === tail.reference.candidates[0].targetSlug)) break;
+      const next = (await engine.executeRaw<{ id: number; data: Record<string, unknown> }>(
+        "SELECT id,data FROM minion_jobs WHERE name='extract' AND data->>'continuation_of'=$1 ORDER BY id DESC LIMIT 1", [String(job.id)]))[0];
+      expect(next).toBeDefined();
+      expect(typeof next.data.pendingAfterKey).toBe('string');
+      expect(String(next.data.pendingAfterKey) > String(job.data.pendingAfterKey ?? '')).toBe(true);
+      job = next as typeof job;
+    }
+    expect(rounds).toBeLessThan(25);
+    expect((await engine.getLinks(tail.reference.slug)).some(link => link.to_slug === tail.reference.candidates[0].targetSlug)).toBe(true);
+  } finally { clock.mockRestore(); }
+}, 120_000);
+
+test('queued pending scan with no processed origin cannot create an endless continuation', async () => {
+  await pendingFixture(2);
+  const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
+  const job = await queue.add('extract', { stale: true, sourceId: 'default' });
+  const clock = pendingProbeClock(STALE_TIME_BUDGET_MS);
+  try {
+    const result = await handler(job);
+    expect(result.pendingScanIncomplete).toBe(true);
+    expect(result.pagesProcessed).toBe(0);
+    expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
+  } finally { clock.mockRestore(); }
+});
+
+
+test('legacy malformed registry keys resume past a consumed invalid prefix', async () => {
+  const [tail] = await pendingFixture(1);
+  for (let i = 0; i < 100; i++) await engine.setConfig(`internal.pending-links.000-legacy-${String(i).padStart(3, '0')}`,
+    JSON.stringify({ sourceId: 'default', candidates: [] }));
+  await engine.putPage(tail.reference.candidates[0].targetSlug, page());
+  await engine.executeRaw('UPDATE pages SET links_extracted_at=updated_at WHERE slug=$1', [tail.reference.candidates[0].targetSlug]);
+  let clock = 0;
+  const now = spyOn(Date, 'now').mockImplementation(() => clock);
+  const raw = engine.executeRaw;
+  engine.executeRaw = async function<T>(sql: string, params?: any[]) {
+    const result = await raw.call(this, sql, params);
+    if (sql.includes('SELECT key,value FROM config') && params?.[2]) clock = 100;
+    return result as T[];
+  };
+  let first: Awaited<ReturnType<typeof extractStaleFromDB>>;
+  try {
+    first = await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true,
+      catchUp: false, includeFrontmatter: false, timeBudgetMs: 100 });
+    expect(first.pendingScanIncomplete).toBe(true);
+    expect(first.pendingAfterKey).toBe('internal.pending-links.000-legacy-099');
+  } finally { engine.executeRaw = raw; now.mockRestore(); }
+  await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true,
+    catchUp: true, includeFrontmatter: false, pendingAfterKey: first!.pendingAfterKey });
+  expect((await engine.getLinks(tail.reference.slug)).some(link => link.to_slug === tail.reference.candidates[0].targetSlug)).toBe(true);
+});
+
+test('cancelled pending job never publishes a cursor after a durable origin handoff', async () => {
+  const [tail] = await pendingFixture(1);
+  await engine.putPage(tail.reference.candidates[0].targetSlug, page());
+  await engine.executeRaw('UPDATE pages SET links_extracted_at=updated_at WHERE slug=$1', [tail.reference.candidates[0].targetSlug]);
+  const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
+  const job = await queue.add('extract', { stale: true, sourceId: 'default' });
+  const controller = new AbortController(), raw = engine.executeRaw;
+  engine.executeRaw = async function<T>(sql: string, params?: any[]) {
+    const result = await raw.call(this, sql, params);
+    if (sql.includes('WITH ready AS') && result.length) controller.abort(new Error('Synthetic post-handoff cancel'));
+    return result as T[];
+  };
+  try { await expect(handler({ ...job, signal: controller.signal })).rejects.toThrow('Synthetic post-handoff cancel'); }
+  finally { engine.executeRaw = raw; }
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
+  expect(await engine.countStalePagesForExtraction()).toBe(1);
+  await drain();
+  expect((await engine.getLinks(tail.reference.slug)).some(link => link.to_slug === tail.reference.candidates[0].targetSlug)).toBe(true);
 });
