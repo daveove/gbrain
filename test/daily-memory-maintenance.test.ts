@@ -478,6 +478,10 @@ describe('daily memory from sources the brain already holds', () => {
     // Pre-fix: casting unwrapped legacy paths threw and wedged renew/release.
     await expect(live.renew()).resolves.toBeUndefined();
     await expect(live.release()).resolves.toBeUndefined();
+    const [retainedLegacy] = await engine.executeRaw<{ completed_keys: string[] }>(
+      "SELECT completed_keys FROM op_checkpoints WHERE op='transcript-ingest-daily-memory' AND fingerprint=$1", [legacyFingerprint]);
+    expect(retainedLegacy!.completed_keys).toContain(legacyBefore);
+    expect(retainedLegacy!.completed_keys).toContain('slug:notes/legacy-unwrapped');
     const recovery = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey }))!;
     await recovery.finish();
     expect(await engine.executeRaw(

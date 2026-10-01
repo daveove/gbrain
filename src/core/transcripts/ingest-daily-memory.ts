@@ -40,18 +40,20 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
       await engine.executeRawDirect(
         `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-           AND pg_input_is_valid(path, 'jsonb')
-           AND path::jsonb->>'origin'=$3
-           AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')`,
+           AND CASE WHEN pg_input_is_valid(path, 'jsonb') THEN
+             path::jsonb->>'origin'=$3
+             AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
+           ELSE false END`,
         [key.op, fingerprint, origin]);
       await engine.executeRawDirect(
         `UPDATE op_checkpoints SET completed_keys=(
            SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
            FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
            WHERE NOT (
-             pg_input_is_valid(elem, 'jsonb')
-             AND elem::jsonb->>'origin'=$3
-             AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
+             CASE WHEN pg_input_is_valid(elem, 'jsonb') THEN COALESCE(
+               elem::jsonb->>'origin'=$3
+               AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%'), false)
+             ELSE false END
            )
          ), updated_at=now()
          WHERE op=$1 AND fingerprint=$2`,
@@ -108,20 +110,22 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
         await engine.executeRawDirect(
           `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-             AND pg_input_is_valid(path, 'jsonb')
-             AND path::jsonb->>'origin'=$3
-             AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
-             AND path<>$4`,
+             AND CASE WHEN pg_input_is_valid(path, 'jsonb') THEN
+               path::jsonb->>'origin'=$3
+               AND (path::jsonb->>'value' = 'running' OR path::jsonb->>'value' LIKE 'running:%')
+               AND path<>$4
+             ELSE false END`,
           [key.op, fingerprint, origin, keep]);
         await engine.executeRawDirect(
           `UPDATE op_checkpoints SET completed_keys=(
              SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
              FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
              WHERE NOT (
-               pg_input_is_valid(elem, 'jsonb')
-               AND elem::jsonb->>'origin'=$3
-               AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
-               AND elem<>$4
+               CASE WHEN pg_input_is_valid(elem, 'jsonb') THEN COALESCE(
+                 elem::jsonb->>'origin'=$3
+                 AND (elem::jsonb->>'value' = 'running' OR elem::jsonb->>'value' LIKE 'running:%')
+                 AND elem<>$4, false)
+               ELSE false END
              )
            ), updated_at=now()
            WHERE op=$1 AND fingerprint=$2`,
