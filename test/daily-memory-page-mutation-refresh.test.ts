@@ -204,4 +204,3 @@ test('revert_version queues prior and restored calendar days for daily indexes',
     await disposePersistenceConsumer(engine);
   }
 }, 120_000);
-
