@@ -7,6 +7,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runImport } from '../src/commands/import.ts';
 import { importFile } from '../src/core/import-file.ts';
 import { createImportDailyMemory } from '../src/core/import-daily-memory.ts';
+import { loadSyncFailures } from '../src/core/sync-failure-ledger.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -28,15 +29,16 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
   await engine.setConfig('sync.repo_path', dir); await engine.setConfig('sync.last_commit', 'before');
   let discoveries = 0;
   const execute = engine.executeRaw;
-  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function(this: PGLiteEngine, sql, params) {
+  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
     if (sql.includes('SELECT source_id, slug, title, effective_date') && ++discoveries === 2) throw new Error('Synthetic day discovery outage');
-    return execute.call(this, sql, params);
+    return execute.call(this, sql, params) as Promise<T[]>;
   });
   try {
     await withEnv({ GBRAIN_HOME: home }, async () => {
       const result = await runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], { noExtract: true });
       expect(result.imported).toBe(1); expect(result.errors).toBe(1);
       expect(result.failures.some(f => f.path === '<daily-memory-refresh>')).toBe(true);
+      expect(loadSyncFailures().some(f => f.path === '<daily-memory-refresh>' && f.state === 'open')).toBe(true);
     });
   } finally { failure.mockRestore(); }
   expect(await engine.getConfig('sync.last_commit')).toBe('before');
@@ -44,6 +46,7 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
   await withEnv({ GBRAIN_HOME: home }, async () => {
     const retried = await runImport(engine, [dir, '--no-embed', '--json', '--workers', '1'], { noExtract: true });
     expect(retried.imported).toBe(0); expect(retried.errors).toBe(0);
+    expect(loadSyncFailures().filter(f => f.path === '<daily-memory-refresh>')).toEqual([]);
   });
   expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
   expect(await engine.getConfig('sync.last_commit')).toBe(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim());
@@ -88,9 +91,9 @@ test('pre-write date discovery failure leaves the canonical page and bookmark un
   const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
   await engine.setConfig('sync.last_commit', 'before');
   const execute = engine.executeRaw;
-  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function(this: PGLiteEngine, sql, params) {
+  const failure = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
     if (sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic prior-date discovery outage');
-    return execute.call(this, sql, params);
+    return execute.call(this, sql, params) as Promise<T[]>;
   });
   try { await withEnv({ GBRAIN_HOME: home }, async () => {
     const result = await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true });

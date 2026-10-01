@@ -783,7 +783,12 @@ describe('formatters (display helpers)', () => {
 
 describe('purgeExpiredSources — clone cleanup containment', () => {
   function purgeStubFor(id: string, localPath: string) {
-    const stub = {
+    type PurgeStub = {
+      getConfig(): Promise<null>;
+      executeRaw(sql: string): Promise<Record<string, unknown>[]>;
+      transaction<T>(fn: (tx: PurgeStub) => Promise<T>): Promise<T>;
+    };
+    const stub: PurgeStub = {
       getConfig: async () => null,
       executeRaw: async (sql: string) => {
         const q = sql.trimStart();
@@ -794,7 +799,7 @@ describe('purgeExpiredSources — clone cleanup containment', () => {
         }
         return [{ id }];
       },
-      transaction: async <T>(fn: (tx: typeof stub) => Promise<T>) => fn(stub),
+      transaction: async <T>(fn: (tx: PurgeStub) => Promise<T>) => fn(stub),
     };
     return stub as never;
   }

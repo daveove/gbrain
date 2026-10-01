@@ -271,19 +271,21 @@ describe('import structural edges', () => {
       } finally { enqueue.mockRestore(); }
       await extractStaleFromDB(engine, { sourceIdFilter: sourceId, dryRun: false, jsonMode: true, quiet: true, catchUp: true });
       expect(await engine.countStalePagesForExtraction({ sourceId })).toBe(0);
-      const offline = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('queue unavailable'); });
+      let offline = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('queue unavailable'); });
       try {
         const noop = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
         expect(noop.imported).toBe(0);
         expect(noop.skipped).toBe(count);
         expect(noop.errors).toBe(0);
         expect(offline).not.toHaveBeenCalled();
+        offline.mockRestore();
         writeFileSync(join(dir, 'unchanged-0.md'), '# Unique 0\n\nChanged body.');
         const changed = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
         expect(changed.imported).toBe(1);
         expect(changed.errors).toBe(0);
-        expect(offline).not.toHaveBeenCalled();
+        expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).not.toHaveLength(0);
         expect(await engine.countStalePagesForExtraction({ sourceId })).toBe(0);
+        offline = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => { throw new Error('queue unavailable'); });
         const full = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId, fullSync: true });
         expect(full.imported).toBe(0);
         expect(full.linkExtractionError).toContain('queue unavailable');

@@ -2876,8 +2876,6 @@ export async function registerBuiltinHandlers(
       ? (job.data.phases as string[]).filter((p) => maintenanceSet.has(p))
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
-
-    // Fanout snapshots use a queued completion barrier; this worker never waits on siblings.
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls
@@ -2892,14 +2890,9 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
-    // Daily barrier owns its own retries; do not fail/retry global maintenance on it.
-    try {
-      await finishFanoutDailyMemory(engine, dailyJob);
-    } catch (e) {
-      console.warn(
-        `[autopilot-global-maintenance] daily-memory finish failed (not retrying global cycle): ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
+    // The durable daily barrier retries independently of global maintenance.
+    try { await finishFanoutDailyMemory(engine, dailyJob); }
+    catch (e) { console.warn(`[autopilot-global-maintenance] daily-memory finish failed (not retrying global cycle): ${e instanceof Error ? e.message : String(e)}`); }
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {
