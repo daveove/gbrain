@@ -40,6 +40,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     }
   };
   return {
+    /** Drop the running marker without settling debt (abort / early exit). */
+    async release() { await clearRunning(); },
     async before(slugs: string[]) {
       opts.signal?.throwIfAborted();
       const names = new Set(slugs.filter(Boolean));

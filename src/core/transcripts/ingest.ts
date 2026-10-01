@@ -202,6 +202,7 @@ export async function runTranscriptsIngest(
       runKey: opts.dailyMemoryRunKey ?? [...opts.paths].sort().join('\0'),
     });
 
+  try {
   const total = opts.paths.length;
   let done = 0;
   let newWorkSessions = 0;
@@ -493,6 +494,10 @@ export async function runTranscriptsIngest(
     }
   }
   return result;
+  } finally {
+    // Abort paths never reach finish(); drop the running marker so peers can adopt.
+    await dailyMemory?.release();
+  }
 }
 
 /**
