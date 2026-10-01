@@ -1,8 +1,9 @@
 /** Standalone imports bank prior dates before writes and accept refresh work before bookmarks. */
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { BrainEngine } from './engine.ts';
 import { parseMarkdown } from './markdown.ts';
+import { MAX_FILE_SIZE } from './import-file.ts';
 import { isMarkdownFilePath, isCodeFilePath, slugifyPath, slugifyCodePath } from './sync.ts';
 import { appendCompleted, clearOpCheckpoint, type OpCheckpointKey } from './op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from './cycle/daily-memory.ts';
@@ -27,8 +28,12 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       const expected = isCodeFilePath(relativePath) ? slugifyCodePath(relativePath) : slugifyPath(relativePath);
       const names = new Set(expected ? [expected] : []);
       if (isMarkdownFilePath(relativePath)) {
-        const parsed = parseMarkdown(readFileSync(filePath, 'utf8'), relativePath);
-        if (parsed.slug && (!expected || slugifyPath(parsed.slug) === expected)) names.add(parsed.slug);
+        // Match importFromFile: skip oversized bodies so prior-slug discovery cannot stall workers.
+        const size = statSync(filePath).size;
+        if (size <= MAX_FILE_SIZE) {
+          const parsed = parseMarkdown(readFileSync(filePath, 'utf8'), relativePath);
+          if (parsed.slug && (!expected || slugifyPath(parsed.slug) === expected)) names.add(parsed.slug);
+        }
       }
       const existing = await engine.executeRaw<{ slug: string; revision: string }>(
         'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND (slug=ANY($2::text[]) OR source_path=$3)',

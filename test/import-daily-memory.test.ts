@@ -113,3 +113,15 @@ test('managed bookmark imports leave daily handoff to the outer sync transaction
   expect(await batches()).toHaveLength(0);
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
 });
+
+test('oversized markdown skips body parse during prior-slug discovery', async () => {
+  const dir = root(), file = join(dir, 'note.md');
+  // Larger than MAX_FILE_SIZE (5MB) so before() must not read/parse the body.
+  writeFileSync(file, `${'x'.repeat(5_000_001)}`);
+  await engine.putPage('note', { type: 'note', title: 'Prior fixture', compiled_truth: 'Before', frontmatter: {}, source_path: 'note.md' });
+  await engine.executeRaw("UPDATE pages SET effective_date='2026-09-20T00:00:00Z'::timestamptz,effective_date_source='date' WHERE slug='note'");
+  const prior = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  await prior.before(file, 'note.md');
+  await prior.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-20'))).toBe(true);
+});
