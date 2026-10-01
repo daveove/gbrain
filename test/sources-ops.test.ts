@@ -480,6 +480,40 @@ describe('removeSource — clone-cleanup', () => {
     });
   });
 
+  test('post-commit in-root symlink swap reports partial success without throwing', async () => {
+    await withEnv2(async () => {
+      const row = await addSource(engine, {
+        id: 'post-commit-symlink',
+        remoteUrl: 'https://github.com/example/post-commit.git',
+      });
+      const clonePath = row.local_path!;
+      const target = join(CLONE_ROOT, 'post-commit-real');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'sentinel'), 'do-not-touch');
+      const original = engine.transaction.bind(engine);
+      const tx = spyOn(engine, 'transaction').mockImplementation(async (fn) => {
+        const result = await original(fn);
+        rmSync(clonePath, { recursive: true, force: true });
+        symlinkSync(target, clonePath);
+        return result;
+      });
+      try {
+        const result = await removeSource(engine, {
+          id: 'post-commit-symlink',
+          confirmDestructive: true,
+        });
+        expect(result.clone_removed).toBe(false);
+        expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [row.id])).toHaveLength(0);
+        expect(existsSync(join(target, 'sentinel'))).toBe(true);
+        expect(existsSync(clonePath)).toBe(true);
+      } finally {
+        tx.mockRestore();
+        rmSync(clonePath, { force: true });
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+  });
+
   test('refuses to remove "default" source', async () => {
     await withEnv2(async () => {
       try {

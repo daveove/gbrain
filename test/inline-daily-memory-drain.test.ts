@@ -68,20 +68,32 @@ test('consumer bound preserves the remaining accepted jobs and forwards its dead
 });
 
 
-test('consumer deadline aborts the actual callback and releases accepted work for retry', async () => {
+test('consumer deadline aborts without burning an attempt', async () => {
   const queue = new MinionQueue(engine), day = '2026-01-24'; await seed(day);
   await writeDailyMemoryFromSources(engine, { date: day });
   const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
   let supplied: AbortSignal | undefined;
-  await expect(drainInlineDailyMemory(engine, { timeBudgetMs: 300, afterWrite: async (_daily, signal) => {
+  // Budget above the claim floor so the job is claimed, then aborts mid-callback.
+  await expect(drainInlineDailyMemory(engine, { timeBudgetMs: 1_200, afterWrite: async (_daily, signal) => {
     supplied = signal;
     signal!.throwIfAborted();
     await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
   } })).rejects.toThrow('Inline daily memory deadline exceeded');
   expect(supplied?.aborted).toBe(true);
-  const retriable = await queue.getJob(job.id);
-  expect(retriable?.status).toBe('delayed'); expect(retriable?.lock_token).toBeNull();
-  expect(retriable?.data.daily_memory_date).toBe(day);
+  const row = await queue.getJob(job.id);
+  expect(row?.status).toBe('active');
+  expect(row?.attempts_made).toBe(0);
+  expect(row?.data.daily_memory_date).toBe(day);
+});
+
+test('insufficient shared budget stops claiming without touching waiting work', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-29'; await seed(day);
+  const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
+  expect(await drainInlineDailyMemory(engine, { timeBudgetMs: 200, afterWrite: async () => {} })).toBe(0);
+  const row = await queue.getJob(job.id);
+  expect(row?.status).toBe('waiting');
+  expect(row?.attempts_made).toBe(0);
+  expect(row?.lock_token).toBeNull();
 });
 
 test('scoped stalled recovery resumes an expired daily claim without changing unrelated expired claims', async () => {

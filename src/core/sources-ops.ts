@@ -1029,11 +1029,17 @@ export async function removeSource(
     && isPathContained(src.local_path, cloneRoot)) {
     try {
       // Repeat confinement after commit: never follow a replaced clone symlink.
-      if (lstatSync(src.local_path).isSymbolicLink()) throw new SourceOpError('symlink_escape', `Refusing clone cleanup at ${src.local_path}: path is a symlink.`);
-      rmSync(src.local_path, { recursive: true, force: true });
-      cloneRemoved = true;
+      // Post-commit refusal is cleanup-only — the source row is already gone, so
+      // throwing would report failure with no retryable cleanup state.
+      if (lstatSync(src.local_path).isSymbolicLink()) {
+        console.error(
+          `[gbrain] WARN: clone cleanup at ${src.local_path} refused: path is a symlink.`,
+        );
+      } else {
+        rmSync(src.local_path, { recursive: true, force: true });
+        cloneRemoved = true;
+      }
     } catch (error) {
-      if (error instanceof SourceOpError) throw error;
       console.error(`[gbrain] WARN: clone cleanup at ${src.local_path} failed: ${(error as Error).message}`);
     }
   }

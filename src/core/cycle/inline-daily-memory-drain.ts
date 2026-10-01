@@ -11,8 +11,13 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
   const deadline = Date.now() + Math.min(opts.timeBudgetMs ?? 60_000, 60_000);
   let processed = 0;
+  // Claim only when the shared window still has enough budget for meaningful
+  // work. Jobs lock for 60s; claiming with a few ms left forces a deadline
+  // abort that must not burn attempts (see catch path below).
+  const minClaimBudgetMs = 1_000;
   while (processed < Math.min(opts.maxJobs ?? 20, 20) && Date.now() < deadline) {
     opts.signal?.throwIfAborted();
+    if (deadline - Date.now() < minClaimBudgetMs) break;
     await queue.handleStalled(undefined, { registeredNames: names, queue: 'default' });
     await queue.promoteDelayed({ registeredNames: names, queue: 'default' });
     const token = randomUUID(), job = await queue.claim(token, 60_000, 'default', names);
@@ -60,7 +65,13 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
         || abortReason === 'Inline daily memory lease lost';
       const renewalFailed = message === 'Inline daily memory lock-renewal-failed'
         || abortReason === 'Inline daily memory lock-renewal-failed';
-      if (shutdown || leaseLost || renewalFailed) throw error;
+      // Shared drain-window abort is infrastructure, not job failure: a late
+      // claim can see only a few ms of remaining budget despite a 60s timeout.
+      // failJob would burn attempts and can dead-letter a two-attempt
+      // continuation that never received its configured runtime.
+      const deadlineExceeded = message === 'Inline daily memory deadline exceeded'
+        || abortReason === 'Inline daily memory deadline exceeded';
+      if (shutdown || leaseLost || renewalFailed || deadlineExceeded) throw error;
       const terminal = job.attempts_made + 1 >= job.max_attempts;
       const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));
