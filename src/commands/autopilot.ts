@@ -1542,33 +1542,60 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           });
           // Match Minions dispatch: daily indexes must refresh even when the
           // daemon cannot enqueue autopilot-daily-memory (PGLite / --inline / minions off).
+          // Failures stay inside this tracked promise so they do not trip the cycle breaker.
           if (report.status !== 'failed') {
-            const { resolveCycleDate } = await import('../core/cycle/cycle-date.ts');
-            const { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
-            const { previousCalendarDay } = await import('../core/cycle/daily-memory-followup.ts');
-            const { extractStaleFromDB } = await import('./extract.ts');
-            const day = await resolveCycleDate(engine);
-            const days = [day, previousCalendarDay(day)].filter((value): value is string => !!value);
-            for (const date of days) {
-              const daily = await writeDailyMemoryFromSources(engine, { date, signal: shutdownAbort.signal });
-              if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
-              // No Minions worker on this path — extract dream indexes in-process.
-              if (daily.written || daily.needs_extract) {
-                await extractStaleFromDB(engine, {
-                  dryRun: false,
-                  jsonMode: false,
-                  quiet: true,
-                  sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
-                  catchUp: false,
-                  timeBudgetMs: 60_000,
-                  signal: shutdownAbort.signal,
-                });
+            try {
+              const { resolveCycleDate } = await import('../core/cycle/cycle-date.ts');
+              const { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } = await import('../core/cycle/daily-memory.ts');
+              const { previousCalendarDay, runDailyMemoryJob } = await import('../core/cycle/daily-memory-followup.ts');
+              const { extractStaleFromDB } = await import('./extract.ts');
+              const { MinionQueue } = await import('../core/minions/queue.ts');
+              const day = await resolveCycleDate(engine);
+              const days = [day, previousCalendarDay(day)].filter((value): value is string => !!value);
+              for (const date of days) {
+                const daily = await writeDailyMemoryFromSources(engine, { date, signal: shutdownAbort.signal });
+                if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
+                // No Minions worker on this path — extract dream indexes in-process.
+                if (daily.written || daily.needs_extract) {
+                  await extractStaleFromDB(engine, {
+                    dryRun: false,
+                    jsonMode: false,
+                    quiet: true,
+                    sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+                    catchUp: false,
+                    timeBudgetMs: 60_000,
+                    signal: shutdownAbort.signal,
+                  });
+                }
+                if (jsonMode) {
+                  process.stderr.write(JSON.stringify({ event: 'cycle-inline-daily-memory', date, written: daily.written, reason: daily.reason }) + '\n');
+                } else {
+                  console.log(`[cycle-inline-daily-memory] ${date} written=${daily.written} reason=${daily.reason ?? 'ok'}`);
+                }
               }
-              if (jsonMode) {
-                process.stderr.write(JSON.stringify({ event: 'cycle-inline-daily-memory', date, written: daily.written, reason: daily.reason }) + '\n');
-              } else {
-                console.log(`[cycle-inline-daily-memory] ${date} written=${daily.written} reason=${daily.reason ?? 'ok'}`);
+              // Drain historical affected-day handoffs accepted while no worker runs.
+              const queue = new MinionQueue(engine);
+              await queue.promoteDelayed();
+              const drainToken = `inline-daily-drain-${Date.now()}`;
+              for (let i = 0; i < 20; i++) {
+                shutdownAbort.signal.throwIfAborted();
+                const job = await queue.claim(drainToken, 60_000, 'default', ['autopilot-daily-memory']);
+                if (!job) break;
+                try {
+                  const result = await runDailyMemoryJob(engine, { id: job.id, data: job.data, signal: shutdownAbort.signal });
+                  await queue.completeJob(job.id, drainToken, result as Record<string, unknown>);
+                  if (jsonMode) {
+                    process.stderr.write(JSON.stringify({ event: 'cycle-inline-daily-drain', job_id: job.id, result }) + '\n');
+                  } else {
+                    console.log(`[cycle-inline-daily-drain] job #${job.id}`);
+                  }
+                } catch (e) {
+                  await queue.failJob(job.id, drainToken, e instanceof Error ? e.message : String(e), 'failed');
+                  throw e;
+                }
               }
+            } catch (e) {
+              logError('cycle-inline-daily-memory', e);
             }
           }
           return report;
