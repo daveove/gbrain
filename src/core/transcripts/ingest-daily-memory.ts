@@ -54,9 +54,34 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     async release() { await clearRunning(); },
     /** Refresh the lease timestamp so peers keep treating this origin as live. */
     async renew() {
-      await clearRunning();
+      opts.signal?.throwIfAborted();
       runningValue = `running:${new Date().toISOString()}`;
+      const keep = JSON.stringify({ origin, value: runningValue });
       await bank([runningValue]);
+      // Drop every other running marker for this origin after banking the fresh
+      // stamp — including an externally aged path that no longer matches the
+      // prior in-memory value — so peers never see an unmarked gap and orphans
+      // cannot linger past finish().
+      for (const fingerprint of new Set([key.fingerprint, legacyFingerprint])) {
+        const rows = await engine.executeRaw<{ path: string }>(
+          `SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
+           UNION SELECT jsonb_array_elements_text(completed_keys) FROM op_checkpoints WHERE op=$1 AND fingerprint=$2`,
+          [key.op, fingerprint]);
+        for (const row of rows) {
+          if (!row.path.startsWith('{') || row.path === keep) continue;
+          let wrapped: { origin?: unknown; value?: unknown };
+          try { wrapped = JSON.parse(row.path); } catch { continue; }
+          if (wrapped && wrapped.origin === origin && typeof wrapped.value === 'string'
+            && (wrapped.value === 'running' || wrapped.value.startsWith('running:'))) {
+            await engine.executeRawDirect(
+              'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=$3',
+              [key.op, fingerprint, row.path]);
+            await engine.executeRawDirect(
+              'UPDATE op_checkpoints SET completed_keys=completed_keys-$3::text[] WHERE op=$1 AND fingerprint=$2',
+              [key.op, fingerprint, [row.path]]);
+          }
+        }
+      }
     },
     async before(slugs: string[]) {
       opts.signal?.throwIfAborted();

@@ -373,11 +373,16 @@ describe('daily memory from sources the brain already holds', () => {
     const before = await engine.executeRaw<{ path: string }>(
       "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
     expect(before).toHaveLength(1);
+    // Age the DB stamp past expiry while in-memory runningValue still holds the
+    // pre-age value. renew must scrub that orphan and keep exactly one fresh lease.
+    const wrapped = JSON.parse(before[0]!.path) as { origin: string; value: string };
+    const aged = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+    await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [aged, before[0]!.path]);
     await live.renew();
     const refreshed = await engine.executeRaw<{ path: string }>(
       "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running:%'");
     expect(refreshed).toHaveLength(1);
-    expect(refreshed[0]!.path).not.toBe(before[0]!.path);
+    expect(refreshed[0]!.path).not.toBe(aged);
     const stamp = Date.parse(JSON.parse(refreshed[0]!.path).value.slice('running:'.length));
     expect(Date.now() - stamp).toBeLessThan(5_000);
     await engine.putPage('notes/live-transcript', { type: 'note', title: 'Live', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-25' } });

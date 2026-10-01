@@ -201,6 +201,17 @@ export async function runTranscriptsIngest(
       sourceId: opts.sourceId,
       runKey: opts.dailyMemoryRunKey ?? [...opts.paths].sort().join('\0'),
     });
+  // Renew about every 10m (1/3 of the 30m peer-adoption window) so a single
+  // long file cannot outlive the lease between per-file renewals.
+  const LEASE_RENEW_EVERY_MS = 10 * 60_000;
+  let lastLeaseRenewAt = Date.now();
+  const maybeRenewDailyMemoryLease = async () => {
+    if (!dailyMemory) return;
+    const now = Date.now();
+    if (now - lastLeaseRenewAt < LEASE_RENEW_EVERY_MS) return;
+    await dailyMemory.renew();
+    lastLeaseRenewAt = now;
+  };
 
   try {
   const total = opts.paths.length;
@@ -210,6 +221,7 @@ export async function runTranscriptsIngest(
   for (const path of opts.paths) {
     if (limitTruncated) break;
     await dailyMemory?.renew?.();
+    lastLeaseRenewAt = Date.now();
     const fileOutcome: IngestFileOutcome = {
       path,
       sessions: [],
@@ -252,6 +264,7 @@ export async function runTranscriptsIngest(
         const session = step.value;
         result.sessionsSeen++;
         opts.onSession?.(session.meta.sessionId);
+        await maybeRenewDailyMemoryLease();
         const lastTs = lastMessageTs(session.messages);
         if (lastTs && lastTs > result.maxSessionTs) result.maxSessionTs = lastTs;
 
