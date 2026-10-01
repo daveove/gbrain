@@ -132,6 +132,7 @@ test('managed remove keeps source, binding, and accepted jobs atomic on queue fa
 test('direct managed archive/restore accepts historical dates atomically with topology',()=>fixture(async(_home,source)=>{
   await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
     {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+  await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug='notes/day'",[source]);
   for(const operation of ['archive','restore'] as const){
     const before=await getWorktreeBinding(engine,source);
     const prior=await engine.executeRaw<{id:number}>('SELECT id FROM minion_jobs ORDER BY id');
