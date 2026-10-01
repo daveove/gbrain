@@ -461,8 +461,12 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a NON-FK error re-raises instead of reading as blocked (review gap G8)', async () => {
     const stub = {
-      async executeRaw(sql: string): Promise<Array<{ id: string }>> {
-        if (sql.trimStart().startsWith('SELECT')) return [{ id: 'boom' }];
+      getConfig: async () => null,
+      async executeRaw(sql: string): Promise<Array<{ id: string } | { protected: boolean }>> {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) return [{ id: 'boom' }];
         const err = new Error('canceling statement due to statement timeout') as Error & { code: string };
         err.code = '57014'; // query_canceled — NOT the FK class
         throw err;
@@ -473,8 +477,12 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a source restored between SELECT and DELETE is neither purged nor blocked (review gap G8)', async () => {
     const stub = {
-      async executeRaw(sql: string): Promise<Array<{ id: string }>> {
-        if (sql.trimStart().startsWith('SELECT')) return [{ id: 'restored-mid-sweep' }];
+      getConfig: async () => null,
+      async executeRaw(sql: string): Promise<Array<{ id: string } | { protected: boolean }>> {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) return [{ id: 'restored-mid-sweep' }];
         return []; // per-id DELETE re-checks the expiry predicate → 0 rows
       },
     } as never;
