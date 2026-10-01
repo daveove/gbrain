@@ -2901,7 +2901,7 @@ export class PostgresEngine implements BrainEngine {
   // ── v0.42.7 (#1696): link/timeline extraction freshness watermark ──
 
   /** Shared stale-for-extraction predicate. Returns `{ where, params }`. */
-  private buildStalePagesWhere(opts?: { sourceId?: string; versionTs?: string }): { where: string; params: unknown[] } {
+  private buildStalePagesWhere(opts?: { sourceId?: string; versionTs?: string; slugs?: readonly string[] }): { where: string; params: unknown[] } {
     const conds: string[] = ['deleted_at IS NULL'];
     const params: unknown[] = [];
     if (opts?.versionTs) {
@@ -2914,10 +2914,14 @@ export class PostgresEngine implements BrainEngine {
       params.push(opts.sourceId);
       conds.push(`source_id = $${params.length}`);
     }
+    if (opts?.slugs !== undefined) {
+      params.push([...new Set(opts.slugs)]);
+      conds.push(`slug = ANY($${params.length}::text[])`);
+    }
     return { where: conds.join(' AND '), params };
   }
 
-  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string }): Promise<number> {
+  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; slugs?: readonly string[] }): Promise<number> {
     const { where, params } = this.buildStalePagesWhere(opts);
     // RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING).
     return await this.withScopedReadTransaction(undefined, opts?.sourceId, async (tx) => {
@@ -2934,6 +2938,7 @@ export class PostgresEngine implements BrainEngine {
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    slugs?: readonly string[];
   }): Promise<StalePageRow[]> {
     const { where, params } = this.buildStalePagesWhere(opts);
     let afterClause = '';

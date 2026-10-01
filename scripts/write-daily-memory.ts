@@ -31,19 +31,20 @@ export async function extractOneShotDailyMemory(
     timeBudgetMs?: number;
   } = {},
 ): Promise<void> {
-  if (!result.written && !result.needs_extract) return;
+  if ((!result.written && !result.needs_extract) || !result.extract_slugs?.length) return;
   const extract = deps.extract ?? (await import('../src/commands/extract.ts')).extractStaleFromDB;
   const extracted = await extract(engine, {
     dryRun: false,
     jsonMode: true,
     quiet: true,
     sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+    slugs: result.extract_slugs,
     catchUp: false,
     timeBudgetMs: deps.timeBudgetMs ?? 60_000,
     signal: deps.signal,
   });
   if (extracted.staleRemaining > 0) {
-    throw new Error(`Daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
+    throw new Error(`Daily memory extraction needs retry: ${extracted.staleRemaining} selected daily-index pages remain`);
   }
 }
 

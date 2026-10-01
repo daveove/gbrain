@@ -93,6 +93,8 @@ export interface DailyMemoryWrite {
   slug: string;
   source_id?: string;
   needs_extract?: boolean;
+  /** Exact generated day/reference targets owned by this write. */
+  extract_slugs?: string[];
   pages: number;
   reason?: 'no_source_activity' | 'human_page' | 'unchanged' | 'error';
 }
@@ -386,20 +388,20 @@ export async function writeDailyMemoryFromSources(
     }
 
     const targets = [slug, ...records.flatMap(group => group.links.map(link => link.slug))];
-    const [readiness] = await engine.executeRaw<{ needed: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM pages
-        WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
-          AND frontmatter @> '{"dream_generated":true}'::jsonb
-          AND (links_extracted_at IS NULL OR links_extracted_at < $3::timestamptz
-            OR updated_at > links_extracted_at)) AS needed`,
+    const [readiness] = await engine.executeRaw<{ needed: boolean; extract_slugs: string[] }>(
+      `SELECT COALESCE(bool_or(links_extracted_at IS NULL OR links_extracted_at < $3::timestamptz
+          OR updated_at > links_extracted_at), false) AS needed,
+          COALESCE(array_agg(slug ORDER BY slug), '{}'::text[]) AS extract_slugs
+        FROM pages WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL
+          AND frontmatter @> '{"dream_generated":true}'::jsonb`,
       [DAILY_MEMORY_SOURCE_ID, targets, LINK_EXTRACTOR_VERSION_TS],
     );
     const needs_extract = readiness.needed;
 
     if (dailyUnchanged && !recordsWrote) {
-      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, pages: rows.length, reason: 'unchanged' };
+      return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length, reason: 'unchanged' };
     }
-    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, pages: rows.length };
+    return { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, needs_extract, extract_slugs: readiness.extract_slugs, pages: rows.length };
   } catch (err) {
     throwIfAborted(opts.signal, '[dream] daily memory');
     const message = err instanceof Error ? err.message : String(err);

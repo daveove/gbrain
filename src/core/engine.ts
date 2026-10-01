@@ -1307,7 +1307,7 @@ export interface BrainEngine {
    * `LINK_EXTRACTOR_VERSION_TS` string (bound `::timestamptz`); when omitted,
    * only the NULL + edited-since arms apply. Soft-deleted pages excluded.
    */
-  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string }): Promise<number>;
+  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; slugs?: readonly string[] }): Promise<number>;
   /**
    * List a keyset page (ordered by `id`, `id > afterPageId`) of stale pages
    * WITH their content so the caller extracts without an N+1 `getPage`. Same
@@ -1320,6 +1320,7 @@ export interface BrainEngine {
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    slugs?: readonly string[];
   }): Promise<StalePageRow[]>;
   /**
    * Stamp `links_extracted_at` for a batch of pages keyed on the unique

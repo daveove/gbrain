@@ -2109,6 +2109,8 @@ export async function extractStaleFromDB(
     /** Unset → the configured knob (resolveIncludeFrontmatter); explicit wins. */
     includeFrontmatter?: boolean;
     sourceIdFilter?: string;
+    /** Internal exact-target DB sweep; an empty list processes nothing. */
+    slugs?: readonly string[];
     catchUp: boolean;
     /**
      * Wall-clock cap for the sweep (checked between keyset batches).
@@ -2131,11 +2133,14 @@ export async function extractStaleFromDB(
   opts.signal?.throwIfAborted();
 
   // Count stale watermarks first; ready dormant references add work without a stale watermark.
-  let totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  const selected = opts.slugs !== undefined;
+  if (selected && !sourceIdFilter) throw new Error('Selected extraction requires an explicit source');
+  const countStale = () => engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs, slugs: opts.slugs });
+  let totalStale = await countStale();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
-  const pendingBatches = pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
-  let pendingLinks = (await pendingBatches.next()).value ?? [];
+  const pendingBatches = selected ? undefined : pendingLinkReferenceBatches(engine, sourceIdFilter, { signal: opts.signal, deadline: pendingDeadline });
+  let pendingLinks = (await pendingBatches?.next())?.value ?? [];
   opts.signal?.throwIfAborted();
   const reportDryRun = () => {
     if (jsonMode && !opts.quiet) {
@@ -2180,11 +2185,11 @@ export async function extractStaleFromDB(
         onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
         resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
           outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
-      pendingLinks = (await pendingBatches.next()).value ?? [];
+      pendingLinks = (await pendingBatches?.next())?.value ?? [];
     } while (pendingLinks.length);
     opts.signal?.throwIfAborted();
     totalStale = dryRun ? totalStale + readyPending
-      : await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+      : await countStale();
   }
   if (dryRun) return reportDryRun();
   if (totalStale === 0)
@@ -2222,7 +2227,7 @@ export async function extractStaleFromDB(
   for (;;) {
     opts.signal?.throwIfAborted();
     const rows = await engine.listStalePagesForExtraction({
-      batchSize: STALE_BATCH_SIZE, afterPageId, sourceId: sourceIdFilter, versionTs,
+      batchSize: STALE_BATCH_SIZE, afterPageId, sourceId: sourceIdFilter, versionTs, slugs: opts.slugs,
     });
     opts.signal?.throwIfAborted();
     if (rows.length === 0) break;
@@ -2328,7 +2333,7 @@ export async function extractStaleFromDB(
   }
   if (packUnavailable) throw new Error('Cannot extract links: active schema pack is unavailable.');
   opts.signal?.throwIfAborted();
-  const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  const staleRemaining = await countStale();
 
   if (!jsonMode) {
     log(`Extract --stale: ${linksCreated} link(s) + ${timelineCreated} timeline entr(ies) from ${pagesProcessed} page(s).`);
