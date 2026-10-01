@@ -319,7 +319,8 @@ export async function runTranscriptsIngest(
                 const actualSlug = r.slug || part.slug;
                 if (part.part === 1 && actualSlug) resolvedBaseSlug = actualSlug;
                 result.slugsTouched.push(actualSlug);
-                await dailyMemory?.touched([actualSlug]);
+                // Hash-skipped re-runs keep before/revision recovery; do not force a fresh day writer.
+                if (r.status === 'imported' || actualSlug !== part.slug) await dailyMemory?.touched([actualSlug]);
               } catch (err) {
                 if (isPerSessionImportError(err)) throw err; // → per-session catch
                 const e = new Error(

@@ -239,6 +239,15 @@ describe('daily memory from sources the brain already holds', () => {
       const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
         "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
       expect(batches.some(row => row.data.daily_memory_dates?.includes('2026-01-15'))).toBe(true);
+      const beforeRerun = batches.length;
+      const again = await runTranscriptsIngest(engine, {
+        paths: [file], format: 'codex', sourceId: 'default',
+      });
+      expect(again.pages.skipped).toBe(1);
+      expect(again.pages.imported).toBe(0);
+      expect(again.cleanScan).toBe(true);
+      const afterRerun = await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'");
+      expect(afterRerun).toHaveLength(beforeRerun);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
