@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, mkdirSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runImport, ImportAbortError } from '../src/commands/import.ts';
-import { importFile } from '../src/core/import-file.ts';
+import { importFile, importImageFile, importCodeFile } from '../src/core/import-file.ts';
 import { createImportDailyMemory } from '../src/core/import-daily-memory.ts';
 import { loadSyncFailures } from '../src/core/sync-failure-ledger.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
@@ -472,3 +472,201 @@ for (const proof of ['checkpoint lease', 'committed accounting', 'renewal failur
     }
   });
 }
+
+
+const syntheticPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+
+test('runImport cancellation after a real commit recovers adopted old-day debt and partial progress', async () => {
+  const dir = root(), home = root(), file = join(dir,'note.md'); writeFileSync(file,markdown);
+  await engine.putPage('note',{type:'note',title:'Prior synthetic fixture',compiled_truth:'Before',frontmatter:{},source_path:'note.md'});
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const controller = new AbortController();
+  const module = await import('../src/core/import-file.ts'), actualImport = module.importFile;
+  const importer = spyOn(module,'importFile').mockImplementation(async (...args) => {
+    // The command has admitted this file and banked its pre-write snapshot.
+    await expireLiveLeases();
+    await (await createImportDailyMemory(engine,{sourceId:'default',dir}))!.finish();
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+    const result = await actualImport(...args);
+    expect(result.status).toBe('imported');
+    controller.abort();
+    return result;
+  });
+  try {
+    const error = await withEnv({GBRAIN_HOME:home},() => runImport(engine,[dir,'--no-embed','--json','--workers','1'],{
+      noExtract:true,signal:controller.signal,
+    })).then(() => null,error => error);
+    expect(error).toBeInstanceOf(ImportAbortError);
+    expect((error as ImportAbortError).partialResult?.imported).toBe(1);
+  } finally {importer.mockRestore();}
+  expect((await engine.getPage('note'))!.frontmatter.date).toBe('2026-09-24');
+  expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(0);
+  await (await createImportDailyMemory(engine,{sourceId:'default',dir}))!.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+});
+
+for (const kind of ['markdown', 'code', 'image'] as const) {
+  test(`${kind} commit restores adopted prior-day debt before post-commit accounting`, async () => {
+    const dir = root();
+    const relativePath = kind === 'markdown' ? 'note.md' : kind === 'code' ? 'src/example.ts' : 'images/example.png';
+    const slug = kind === 'markdown' ? 'note' : relativePath;
+    const file = join(dir, relativePath); mkdirSync(join(file, '..'), {recursive:true});
+    writeFileSync(file, kind === 'markdown' ? markdown : kind === 'code' ? 'export const syntheticValue = 42;\n' : syntheticPng);
+    await engine.putPage(slug, {type:kind === 'markdown' ? 'note' : kind, title:'Prior synthetic fixture', compiled_truth:'Before', frontmatter:{}, source_path:relativePath});
+    await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug=$1",[slug]);
+    const opts = {sourceId:'default',dir};
+    const owner = (await createImportDailyMemory(engine,opts))!;
+    const beforeCommit = await owner.before(file,relativePath);
+    await expireLiveLeases();
+    await (await createImportDailyMemory(engine,opts))!.finish();
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'")).toHaveLength(0);
+    const result = kind === 'image'
+      ? await importImageFile(engine,file,relativePath,{noEmbed:true,beforeCommit})
+      : await importFile(engine,file,relativePath,{noEmbed:true,beforeCommit});
+    expect(result.status).toBe('imported');
+    // Simulate loss immediately after canonical commit: no imported() call.
+    await owner.release();
+    await (await createImportDailyMemory(engine,opts))!.finish();
+    const newDays = await (await import('../src/core/cycle/daily-memory-followup.ts')).dailyMemoryDaysForSlugs(engine,'default',[slug]);
+    expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+      && newDays.every(day => row.data.daily_memory_dates.includes(day)))).toBe(true);
+  });
+
+  test(`${kind} rejected commit hook rolls back page, projections and debt together`, async () => {
+    const dir=root(),relativePath=kind==='markdown'?'note.md':kind==='code'?'src/example.ts':'images/example.png';
+    const slug=kind==='markdown'?'note':relativePath,file=join(dir,relativePath);
+    mkdirSync(join(file,'..'),{recursive:true});
+    writeFileSync(file,kind==='markdown'?markdown:kind==='code'?'export const syntheticValue = 42;\n':syntheticPng);
+    const owner=(await createImportDailyMemory(engine,{sourceId:'default',dir}))!;
+    const bank=await owner.before(file,relativePath);
+    const beforeCommit=async (tx: import('../src/core/engine.ts').BrainEngine,actualSlug:string) => {
+      await bank?.(tx,actualSlug);
+      throw new Error('Synthetic post-bank commit rejection');
+    };
+    const write=kind==='image'?importImageFile(engine,file,relativePath,{noEmbed:true,beforeCommit})
+      :importFile(engine,file,relativePath,{noEmbed:true,beforeCommit});
+    await expect(write).rejects.toThrow('Synthetic post-bank commit rejection');
+    expect(await engine.getPage(slug,{sourceId:'default'})).toBeNull();
+    expect(await engine.executeRaw('SELECT id FROM content_chunks')).toHaveLength(0);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'slug:%'")).toHaveLength(0);
+    await owner.release();
+  });
+}
+
+test('identity rename restores original slug day atomically after expired-peer adoption',async () => {
+  const dir=root(),oldFile=join(dir,'old.md'),file=join(dir,'new.md');
+  const content='---\ntype: note\ntitle: Synthetic moved fixture\nid: synthetic-stable-id\n---\n\nUnchanged synthetic body';
+  writeFileSync(oldFile,content);
+  await importFile(engine,oldFile,'old.md',{noEmbed:true,inferFrontmatter:false});
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='old'");
+  renameSync(oldFile,file);
+  const opts={sourceId:'default',dir}; const owner=(await createImportDailyMemory(engine,opts))!;
+  const beforeCommit=await owner.before(file,'new.md');
+  await expireLiveLeases(); await (await createImportDailyMemory(engine,opts))!.finish();
+  await importFile(engine,file,'new.md',{noEmbed:true,inferFrontmatter:false,beforeCommit});
+  expect(await engine.getPage('old',{sourceId:'default'})).toBeNull();
+  expect(await engine.getPage('new',{sourceId:'default'})).not.toBeNull();
+  await owner.release(); await (await createImportDailyMemory(engine,opts))!.finish();
+  expect((await batches()).some(row=>row.data.daily_memory_dates.includes('2026-09-23'))).toBe(true);
+});
+
+test('peer retirement paused across a page commit cannot erase the new mutation bank',async () => {
+  const dir=root(),file=join(dir,'note.md');writeFileSync(file,markdown);
+  await engine.putPage('note',{type:'note',title:'Prior synthetic fixture',compiled_truth:'Before',frontmatter:{},source_path:'note.md'});
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const opts={sourceId:'default',dir},owner=(await createImportDailyMemory(engine,opts))!;
+  const beforeCommit=await owner.before(file,'note.md'); await expireLiveLeases();
+  const peer=(await createImportDailyMemory(engine,opts))!;
+  let announce=()=>{},resume=()=>{};
+  const paused=new Promise<void>(resolve=>{announce=resolve;});
+  const released=new Promise<void>(resolve=>{resume=resolve;});
+  const direct=engine.executeRawDirect;let intercepted=false;
+  const retire=spyOn(engine,'executeRawDirect').mockImplementation(async function<T>(this:PGLiteEngine,sql:string,params?:unknown[],rawOpts?:{signal?:AbortSignal}):Promise<T[]> {
+    if (!intercepted && sql.startsWith('DELETE FROM op_checkpoint_paths') && sql.includes('path=ANY')) {
+      intercepted=true;announce();await released;
+    }
+    return direct.call(this,sql,params,rawOpts) as Promise<T[]>;
+  });
+  const finishing=peer.finish();
+  try {
+    await Promise.race([paused,finishing.then(()=>{throw new Error('Peer never reached retirement pause');})]);
+    expect((await importFile(engine,file,'note.md',{noEmbed:true,beforeCommit})).status).toBe('imported');
+  } finally {resume();try {await finishing;} finally {retire.mockRestore();}}
+  const remaining=await engine.executeRaw<{path:string}>("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+  expect(remaining).toHaveLength(1);
+  expect(JSON.parse(JSON.parse(remaining[0]!.path).value.slice('before:'.length)).bankId).toEqual(expect.any(String));
+  await owner.release();await (await createImportDailyMemory(engine,opts))!.finish();
+  expect((await batches()).some(row=>row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+});
+
+test('same-revision date mutation survives stale slug retirement and later page deletion', async () => {
+  const dir = root(), file = join(dir, 'note.md'); writeFileSync(file, 'Synthetic undated fixture');
+  await engine.putPage('note', {type:'note', title:'Synthetic undated fixture', compiled_truth:'Before', frontmatter:{}, source_path:'note.md'});
+  await engine.executeRaw("UPDATE pages SET effective_date=NULL,effective_date_source=NULL,updated_at='2026-09-23T12:00:00Z'::timestamptz WHERE slug='note'");
+  const revision = (await engine.getPage('note'))!.knowledge_revision;
+  const opts = {sourceId:'default',dir}, owner = (await createImportDailyMemory(engine,opts))!;
+  const beforeCommit = await owner.before(file,'note.md');
+  // A previous accepted write has already banked this exact origin/slug marker.
+  await owner.imported('note'); await expireLiveLeases();
+  const peer = (await createImportDailyMemory(engine,opts))!;
+  let announce = () => {}, resume = () => {};
+  const paused = new Promise<void>(resolve => { announce=resolve; });
+  const released = new Promise<void>(resolve => { resume=resolve; });
+  const direct = engine.executeRawDirect; let intercepted = false;
+  const retire = spyOn(engine,'executeRawDirect').mockImplementation(async function<T>(this:PGLiteEngine,sql:string,params?:unknown[],rawOpts?:{signal?:AbortSignal}):Promise<T[]> {
+    if (!intercepted && sql.startsWith('DELETE FROM op_checkpoint_paths') && sql.includes('path=ANY')) {
+      intercepted=true; announce(); await released;
+    }
+    return direct.call(this,sql,params,rawOpts) as Promise<T[]>;
+  });
+  const finishing = peer.finish();
+  try {
+    await Promise.race([paused,finishing.then(() => {throw new Error('Peer never reached retirement pause');})]);
+    await engine.transaction(async tx => {
+      await tx.executeRaw("UPDATE pages SET updated_at='2026-09-24T12:00:00Z'::timestamptz WHERE source_id='default' AND slug='note'");
+      await beforeCommit?.(tx,'note');
+    });
+    expect((await engine.getPage('note'))!.knowledge_revision).toBe(revision);
+  } finally {resume(); try {await finishing;} finally {retire.mockRestore();}}
+  expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value'='slug:note'")).toHaveLength(0);
+  const remaining = await engine.executeRaw<{path:string}>("SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+  expect(remaining).toHaveLength(1);
+  const mutation = JSON.parse(JSON.parse(remaining[0]!.path).value.slice('before:'.length));
+  expect(mutation.bankId).toEqual(expect.any(String));
+  expect(mutation.days).toEqual(expect.arrayContaining(['2026-09-23','2026-09-24']));
+  // Recovery cannot rediscover either date from the canonical row now.
+  await engine.executeRaw("DELETE FROM pages WHERE source_id='default' AND slug='note'");
+  await owner.release(); await (await createImportDailyMemory(engine,opts))!.finish();
+  expect((await batches()).some(row => row.data.daily_memory_dates.includes('2026-09-23')
+    && row.data.daily_memory_dates.includes('2026-09-24'))).toBe(true);
+});
+
+test('unchanged CODE projection repair rejects its commit hook and rolls back the seal', async () => {
+  const dir = root(), relativePath = 'src/example.ts', file = join(dir,relativePath);
+  const content = 'export function syntheticValue() { return 42; }\n';
+  mkdirSync(join(file,'..'),{recursive:true}); writeFileSync(file,content);
+  const {slug} = await importCodeFile(engine,relativePath,content,{noEmbed:true});
+  await engine.executeRaw('UPDATE pages SET text_projection_revision=NULL WHERE source_id=$1 AND slug=$2',['default',slug]);
+  const before = (await engine.getPage(slug))!;
+  const chunks = await engine.executeRaw('SELECT * FROM content_chunks ORDER BY id');
+  const owner = (await createImportDailyMemory(engine,{sourceId:'default',dir}))!;
+  const bank = await owner.before(file,relativePath);
+  const debt = await engine.executeRaw('SELECT path FROM op_checkpoint_paths ORDER BY path');
+  let called = false;
+  await expect(importFile(engine,file,relativePath,{noEmbed:true,beforeCommit:async (tx,actualSlug) => {
+    called=true;
+    expect((await tx.getPage(actualSlug))!.text_projection_revision).toBe(before.knowledge_revision);
+    await bank?.(tx,actualSlug);
+    throw new Error('Synthetic projection hook rejection');
+  }})).rejects.toThrow('Synthetic projection hook rejection');
+  expect(called).toBe(true);
+  const after = (await engine.getPage(slug))!;
+  expect(after.text_projection_revision).toBeNull();
+  expect(after.knowledge_revision).toBe(before.knowledge_revision);
+  expect(after.content_hash).toBe(before.content_hash);
+  expect(await engine.executeRaw('SELECT * FROM content_chunks ORDER BY id')).toEqual(chunks);
+  expect(await engine.executeRaw('SELECT path FROM op_checkpoint_paths ORDER BY path')).toEqual(debt);
+  await owner.release();
+});
