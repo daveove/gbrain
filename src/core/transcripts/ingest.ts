@@ -77,6 +77,12 @@ export interface TranscriptsIngestOpts {
    * starts before 08:00 there is indexed on that Manila day.
    */
   dateZone?: string;
+  /**
+   * Stable daily-memory checkpoint identity. Connectors must pass a
+   * source-scoped key so retry after spool deletion still loads banked debt.
+   * Defaults to the sorted input paths (CLI archive ingest).
+   */
+  dailyMemoryRunKey?: string;
   /** Called once per processed file (progress ticks). */
   onFileDone?: (done: number, total: number, path: string) => void;
   /**
@@ -193,7 +199,7 @@ export async function runTranscriptsIngest(
     ? undefined
     : await createTranscriptIngestDailyMemory(engine, {
       sourceId: opts.sourceId,
-      runKey: [...opts.paths].sort().join('\0'),
+      runKey: opts.dailyMemoryRunKey ?? [...opts.paths].sort().join('\0'),
     });
 
   const total = opts.paths.length;
