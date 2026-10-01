@@ -78,9 +78,9 @@ export interface TranscriptsIngestOpts {
    */
   dateZone?: string;
   /**
-   * Stable daily-memory checkpoint identity. Connectors must pass a
-   * source-scoped key so retry after spool deletion still loads banked debt.
-   * Defaults to the sorted input paths (CLI archive ingest).
+   * Legacy checkpoint identity for recovering prior handoff receipts.
+   * Current refresh debt is source-scoped across selected file lists.
+   * Defaults to the sorted input paths for legacy CLI archive receipts.
    */
   dailyMemoryRunKey?: string;
   /** Called once per processed file (progress ticks). */
