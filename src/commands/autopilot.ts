@@ -1575,24 +1575,54 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
               }
               // Drain historical affected-day handoffs accepted while no worker runs.
               const queue = new MinionQueue(engine);
-              await queue.promoteDelayed();
-              const drainToken = `inline-daily-drain-${Date.now()}`;
+              const { calculateBackoff } = await import('../core/minions/backoff.ts');
+              const { UnrecoverableError } = await import('../core/minions/errors.ts');
+              let drainedJobs = 0;
               for (let i = 0; i < 20; i++) {
                 shutdownAbort.signal.throwIfAborted();
+                // Worker parity: promote delayed + requeue expired active rows before claim.
+                await queue.promoteDelayed();
+                await queue.handleStalled();
+                const drainToken = `inline-daily-drain-${Date.now()}-${i}`;
                 const job = await queue.claim(drainToken, 60_000, 'default', ['autopilot-daily-memory']);
                 if (!job) break;
                 try {
                   const result = await runDailyMemoryJob(engine, { id: job.id, data: job.data, signal: shutdownAbort.signal });
                   await queue.completeJob(job.id, drainToken, result as Record<string, unknown>);
+                  drainedJobs += 1;
                   if (jsonMode) {
                     process.stderr.write(JSON.stringify({ event: 'cycle-inline-daily-drain', job_id: job.id, result }) + '\n');
                   } else {
                     console.log(`[cycle-inline-daily-drain] job #${job.id}`);
                   }
                 } catch (e) {
-                  await queue.failJob(job.id, drainToken, e instanceof Error ? e.message : String(e), 'failed');
+                  const errorText = e instanceof Error ? e.message : String(e);
+                  const isUnrecoverable = e instanceof UnrecoverableError;
+                  const attemptsExhausted = job.attempts_made + 1 >= job.max_attempts;
+                  const newStatus: 'delayed' | 'dead' = isUnrecoverable || attemptsExhausted ? 'dead' : 'delayed';
+                  const backoffMs = newStatus === 'delayed'
+                    ? calculateBackoff({
+                        backoff_type: job.backoff_type,
+                        backoff_delay: job.backoff_delay,
+                        backoff_jitter: job.backoff_jitter,
+                        attempts_made: job.attempts_made + 1,
+                      })
+                    : 0;
+                  await queue.failJob(job.id, drainToken, errorText, newStatus, backoffMs);
                   throw e;
                 }
+              }
+              // No Minions worker on this path — extract pages written/queued by the historical drain.
+              if (drainedJobs > 0) {
+                await extractStaleFromDB(engine, {
+                  dryRun: false,
+                  jsonMode: false,
+                  quiet: true,
+                  sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+                  catchUp: false,
+                  timeBudgetMs: 60_000,
+                  signal: shutdownAbort.signal,
+                });
               }
             } catch (e) {
               logError('cycle-inline-daily-memory', e);
