@@ -156,7 +156,8 @@ describe('graph usefulness refuses thin-client execution before engine connectio
     seedThinClientConfig(tmp);
     const result = await run(['graph', 'measure', '--help']);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain('graph measure');
+    expect(result.stdout).toContain('Usage: gbrain graph');
+    expect(result.stdout).toContain('measure [--json] --source <id> --cursor <id> --checkpoint <path>');
     expect(result.stderr).not.toContain('Run it on the host');
     expect(existsSync(join(tmp, 'brain.pglite'))).toBe(false);
   });
