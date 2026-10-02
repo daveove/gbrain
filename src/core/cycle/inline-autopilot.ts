@@ -3,8 +3,9 @@ import type { BrainEngine } from '../engine.ts';
 import type { CycleOpts, CycleReport } from '../cycle.ts';
 import { calendarDateInTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
-import { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } from './daily-memory.ts';
+import { writeDailyMemoryFromSources } from './daily-memory.ts';
 import { drainInlineDailyMemory } from './inline-daily-memory-drain.ts';
+import { extractDailyMemoryIndexes } from './daily-memory-extraction.ts';
 import { previousCalendarDay } from './daily-memory-followup.ts';
 
 export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOpts, deps: {
@@ -24,12 +25,7 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   if (notAborted) {
     try {
       const afterWrite = async (daily: import('./daily-memory.ts').DailyMemoryWrite, signal = opts.signal) => {
-        if (daily.written || daily.needs_extract) {
-          const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
-          const extracted = await extract(engine, { dryRun: false, jsonMode: true, quiet: true,
-            sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal });
-          if (extracted.staleRemaining > 0) throw new Error(`Inline daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
-        }
+        await extractDailyMemoryIndexes(engine, daily, { extract: deps.extract, signal });
       };
       if (canWrite) {
         for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {

@@ -2563,6 +2563,11 @@ export async function registerBuiltinHandlers(
     // overlapping submissions converge.
     if (job.data.stale === true) {
       const sourceIdFilter = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      if (!job.data.dryRun && job.data.reason === 'daily_memory_write' && sourceIdFilter === 'dream') {
+        const { extractDailyMemoryIndexes } = await import('../core/cycle/daily-memory-extraction.ts');
+        await extractDailyMemoryIndexes(engine, { written: false, needs_extract: true }, { signal: job.signal, timeBudgetMs: STALE_TIME_BUDGET_MS });
+        return { stale: true, source_id: sourceIdFilter, daily_memory_extracted: true };
+      }
       const r = await extractStaleFromDB(engine, {
         dryRun: !!job.data.dryRun,
         jsonMode: false,
