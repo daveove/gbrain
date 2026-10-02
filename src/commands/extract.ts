@@ -1645,7 +1645,7 @@ export async function extractLinksForSlugs(
   engine: BrainEngine,
   repoPath: string,
   slugs: string[],
-  opts?: { sourceId?: string; includeFrontmatter?: boolean },
+  opts?: { sourceId?: string; includeFrontmatter?: boolean; signal?: AbortSignal; deadline?: number },
 ): Promise<ExtractForSlugsResult> {
   const allFiles = walkMarkdownFiles(repoPath);
   // Resolve each requested slug to its real path. Reconstructing slug.md can
@@ -1697,7 +1697,7 @@ export async function extractLinksForSlugs(
     } catch { /* skip: unreadable — not processed, stays stale */ }
   }
   if (processed.length > 0) {
-    await probePendingOriginsForArrivedTargets(engine, sourceId, { globalBasename });
+    await probePendingOriginsForArrivedTargets(engine, sourceId, { globalBasename, signal: opts?.signal, deadline: opts?.deadline });
   }
   return { created, processed };
 }

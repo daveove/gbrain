@@ -92,3 +92,24 @@ test('a retained tip from another source cannot accept this source handoff', asy
     expect(add).toHaveBeenCalledTimes(1);
   } finally { add.mockRestore(); metadata.mockRestore(); }
 });
+
+test('pending scan continuation refuses a returned sweep with another cursor', async () => {
+  const add = spyOn(MinionQueue.prototype, 'add').mockResolvedValue({
+    id: 1, status: 'waiting', data: { stale: true, sourceId: 'default', deferred_commit: pin.commit, pending_after: 'internal.pending-links.other' },
+  } as never);
+  try { expect(await queueDeferredStaleSweep(engine, { ...pin, pendingAfter: 'internal.pending-links.requested' })).toBeNull(); }
+  finally { add.mockRestore(); }
+});
+
+
+test('active pending cursor handoff accepts one durable successor for new arrivals', async () => {
+  const queue = new MinionQueue(engine), opts = { ...pin, pendingAfter: 'internal.pending-links.cursor' };
+  const first = await queueDeferredStaleSweep(engine,opts);
+  const active = (await queue.claim('pending-cursor-lock',60_000,'default',['extract']))!;
+  expect(active.id).toBe(first);
+  const successor = await queueDeferredStaleSweep(engine,opts);
+  expect(successor).not.toBe(first);
+  expect(await queueDeferredStaleSweep(engine,opts)).toBe(successor);
+  const [stored] = await engine.executeRaw<{ status: string; data: Record<string,unknown> }>('SELECT status,data FROM minion_jobs WHERE id=$1',[successor]);
+  expect(stored?.status).toBe('waiting'); expect(stored?.data.pending_after).toBe(opts.pendingAfter);
+});

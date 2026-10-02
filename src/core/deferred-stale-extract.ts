@@ -18,7 +18,7 @@ export const INLINE_EXTRACT_CHANGE_LIMIT = 100;
  */
 export async function queueDeferredStaleSweep(
   engine: BrainEngine,
-  opts: { sourceId?: string; commit: string; reason: string },
+  opts: { sourceId?: string; commit: string; reason: string; pendingAfter?: string },
 ): Promise<number | string | null> {
   const { MinionQueue } = await import('./minions/queue.ts');
   const { STALE_TIME_BUDGET_MS } = await import('../commands/extract.ts');
@@ -28,6 +28,7 @@ export async function queueDeferredStaleSweep(
     ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
     reason: opts.reason,
     deferred_commit: opts.commit,
+    ...(opts.pendingAfter !== undefined ? { pending_after: opts.pendingAfter } : {}),
   };
   // The sweep's own wall-clock budget, plus headroom so the job is not
   // killed by the null-default timeout mid-sweep.
@@ -37,7 +38,7 @@ export async function queueDeferredStaleSweep(
   const key = `extract-stale:${opts.sourceId ?? 'default'}:${opts.commit}`;
   const matchesSweep = (job: { data: Record<string, unknown> }): boolean =>
     job.data?.stale === true && job.data.sourceId === payload.sourceId
-    && job.data.deferred_commit === opts.commit;
+    && job.data.deferred_commit === opts.commit && job.data.pending_after === opts.pendingAfter;
   let nextKey = key;
   // Locate the retained tip once instead of replaying a lifetime-limited chain.
   // Same-pin callers still converge on after:<tipId> under queue idempotency.

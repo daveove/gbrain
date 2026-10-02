@@ -2,7 +2,10 @@ import type { BrainEngine } from './engine.ts';
 import { resolveCandidateSources, resolveLinkFallbackDefault } from './link-reconciliation.ts';
 import { isCrossSourceLinksEnabled, LINK_EXTRACTOR_VERSION_TS } from './link-extraction.ts';
 import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from './sources-load.ts';
-import { pendingLinkReferenceBatches, probePendingLinkReferences, queuePendingOriginExtraction } from './pending-link-references.ts';
+import { scanPendingLinkReferences, queuePendingOriginExtraction } from './pending-link-references.ts';
+import { queueDeferredStaleSweep } from './deferred-stale-extract.ts';
+
+export const INLINE_PENDING_PROBE_BUDGET_MS = 2000;
 
 /** Inline extraction stamps only affected pages; arriving targets must also wake dormant origins. */
 export async function probePendingOriginsForArrivedTargets(
@@ -10,19 +13,25 @@ export async function probePendingOriginsForArrivedTargets(
   sourceId: string,
   opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number } = { globalBasename: false },
 ): Promise<void> {
+  const deadline = Math.min(opts.deadline ?? Infinity, Date.now() + INLINE_PENDING_PROBE_BUDGET_MS);
+  opts.signal?.throwIfAborted();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const crossSource = await isCrossSourceLinksEnabled(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  for await (const pendingLinks of pendingLinkReferenceBatches(engine, sourceId, {
-    signal: opts.signal, deadline: opts.deadline,
-  })) {
-    await probePendingLinkReferences(engine, pendingLinks, {
-      globalBasename: opts.globalBasename, signal: opts.signal, deadline: opts.deadline,
-      versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
-      onReadyOrigin: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
-    }, (candidate, origin, pendingSlugs, pendingSources) =>
-      resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
-        outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+  const result = await scanPendingLinkReferences(engine, {
+    globalBasename: opts.globalBasename, signal: opts.signal, deadline,
+    versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
+    onReadyOrigin: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
+  }, (candidate, origin, pendingSlugs, pendingSources) =>
+    resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
+      outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
+  if (result.pendingScanIncomplete) {
+    opts.signal?.throwIfAborted();
+    const accepted = await queueDeferredStaleSweep(engine, {
+      sourceId, commit: `pending-target-scan:${result.pendingScanAfter}`,
+      reason: 'pending_target_scan_continuation', pendingAfter: result.pendingScanAfter,
+    });
+    if (accepted === null) throw new Error('Pending target scan continuation was not accepted');
   }
 }
