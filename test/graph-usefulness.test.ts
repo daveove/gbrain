@@ -29,6 +29,7 @@ import { federatedSearchScope } from '../src/core/ops/context.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { localFederatedSourceIds, resolveSourceWithTier } from '../src/core/source-resolver.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { sealPageTextProjection } from '../src/core/page-state/projections.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { measureGraphUsefulness } from '../src/core/graph-usefulness/measure.ts';
 import {
@@ -101,6 +102,7 @@ beforeAll(async () => {
   await engine.upsertChunks('topics/parent-note', [
     { chunk_index: 0, chunk_text: 'Parent body about immigration policy.', chunk_source: 'compiled_truth' },
   ], { sourceId: 'default' });
+  await sealPageTextProjection(engine, 'topics/parent-note', 'default');
 });
 
 afterAll(async () => {
@@ -2908,6 +2910,7 @@ describe('retrieval proof', () => {
     await engine.upsertChunks(slug, [
       { chunk_index: 0, chunk_text: query, chunk_source: 'compiled_truth' },
     ], { sourceId: 'default' });
+    await sealPageTextProjection(engine, slug, 'default');
     await engine.executeRaw(
       `UPDATE content_chunks
           SET embedding = array_fill(0.25, ARRAY[${dim}])::vector,
