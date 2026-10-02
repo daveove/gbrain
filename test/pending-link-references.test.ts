@@ -931,6 +931,21 @@ test('queued pending scan with no processed origin cannot create an endless cont
   } finally { clock.mockRestore(); }
 });
 
+test('queued pending continuation enqueue failure fails the extract job', async () => {
+  await pendingFixture(105);
+  const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
+  const job = await queue.add('extract', { stale: true, sourceId: 'default' });
+  const clock = pendingProbeClock(STALE_TIME_BUDGET_MS / 8);
+  const add = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('Synthetic continuation enqueue failure'));
+  try {
+    await expect(handler(job)).rejects.toThrow('Synthetic continuation enqueue failure');
+  } finally {
+    add.mockRestore();
+    clock.mockRestore();
+  }
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
+});
+
 
 test('legacy malformed registry keys resume past a consumed invalid prefix', async () => {
   const [tail] = await pendingFixture(1);
