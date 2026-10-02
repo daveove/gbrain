@@ -109,4 +109,13 @@ describe('autopilot-cycle handler source_id validation + archive recheck', () =>
     const result = await runHandlerOnce({ repoPath: brainDir, source_id: 'echo', pull: false, phases: ['lint'] });
     expect(['ok', 'clean']).toContain(result.status);
   });
+
+  test('legacy cycle surfaces resolved source_id for daily-memory handoff', async () => {
+    await seedSource('checkout-src');
+    const result = await runHandlerOnce({ repoPath: brainDir, phases: ['lint'] });
+    expect(['ok', 'clean', 'partial', 'failed', 'skipped']).toContain(result.status);
+    // No source_id on the job; runCycle still resolved the checkout source.
+    expect(result.report?.source_id).toBe('checkout-src');
+  });
+
 });

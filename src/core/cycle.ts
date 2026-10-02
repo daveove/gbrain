@@ -400,6 +400,12 @@ export interface CycleReport {
    * run (count + lock ids). Omitted when nothing was reaped or no engine.
    */
   reaped_dead_holder_locks?: { reaped: number; reapedIds: string[] };
+  /**
+   * Effective source for this run: explicit opts.sourceId, else the source
+   * resolved from the checkout dir (legacy autopilot-cycle with no source_id).
+   * Daily-memory follow-up reads this when the job payload omitted source_id.
+   */
+  source_id?: string;
   brain_dir: string | null;
   phases: PhaseResult[];
   totals: {
@@ -3069,6 +3075,7 @@ export async function runCycle(
     ...(lockStolenAbort ? { reason: 'lock_stolen' } : aborted ? { reason: 'aborted' } : stampWriteFailed ? { reason: 'stamp_write_failed' } : {}),
     ...(stampWriteFailed ? { stamp_write_failed: stampWriteFailed } : {}),
     ...(reapedLocks ? { reaped_dead_holder_locks: reapedLocks } : {}),
+    ...(cycleSourceId ? { source_id: cycleSourceId } : {}),
     brain_dir: opts.brainDir,
     phases: phaseResults,
     totals,
