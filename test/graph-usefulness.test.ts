@@ -2943,13 +2943,23 @@ describe('retrieval proof', () => {
       await awaitPendingSearchCacheWrites();
       expect(await cacheRows()).toEqual([]);
 
+      let cacheMeta: HybridSearchMeta | undefined;
       await hybridSearchCached(engine, query, {
         limit: 10,
         sourceId: 'default',
         expansion: true,
         expandFn: expandQuery,
+        onMeta: value => { cacheMeta = value; },
       });
       await awaitPendingSearchCacheWrites();
+      expect(cacheMeta?.cache?.status).toBe('disabled');
+      expect(await cacheRows()).toEqual([]);
+      // New response caching is disabled; seed legacy data to prove cache isolation.
+      await engine.executeRaw(
+        `INSERT INTO query_cache(id,query_text,source_id,embedding,knobs_hash)
+         VALUES ('synthetic-legacy-proof-cache',$1,'default',array_fill(0.25,ARRAY[${dim}])::vector,'synthetic-legacy')`,
+        [query],
+      );
       await engine.executeRaw(
         `UPDATE query_cache
             SET results = $1::text::jsonb
