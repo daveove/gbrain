@@ -1992,4 +1992,26 @@ describe('daily memory from sources the brain already holds', () => {
 
 
 
+
+  test('pins one timezone across transcript ingest finish discovery and enqueue after cycle.timezone flips', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const slug = 'sessions/ingest-tz-pin';
+    await engine.putPage(slug, {
+      type: 'note', title: 'Synthetic ingest tz pin', compiled_truth: 'Synthetic fixture',
+      frontmatter: { date: '2026-09-30T16:30:00Z' },
+      effective_date: new Date('2026-09-30T16:30:00Z'), effective_date_source: 'date',
+    });
+    const owner = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'ingest-tz-pin' }))!;
+    await owner.before([slug]);
+    await owner.touched([slug]);
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await owner.finish();
+    const queued = await engine.executeRaw<{ data: { daily_memory_dates?: string[]; daily_memory_timezone?: string } }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(queued.some(row => row.data.daily_memory_timezone === 'Asia/Manila'
+      && (row.data.daily_memory_dates ?? []).includes('2026-10-01'))).toBe(true);
+    expect(queued.every(row => row.data.daily_memory_timezone !== 'America/Los_Angeles')).toBe(true);
+  });
+
+
 });

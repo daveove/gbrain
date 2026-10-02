@@ -8,6 +8,7 @@ import { MAX_FILE_SIZE } from './import-file.ts';
 import { isMarkdownFilePath, isCodeFilePath, slugifyPath, slugifyCodePath } from './sync.ts';
 import { appendCompleted, appendCompletedInTransaction, type OpCheckpointKey } from './op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from './cycle/daily-memory.ts';
+import { resolveCycleTimeZone } from './cycle/cycle-date.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
 type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[]; bankId?: string };
@@ -23,6 +24,8 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   const authority = currentSubmissionAuthority();
   if (authority && authority.kind !== 'application') return undefined;
   if (opts.sourceId === DAILY_MEMORY_SOURCE_ID) return undefined;
+  // Pin once for before()/finish() discovery and the queued writer.
+  const timezone = await resolveCycleTimeZone(engine);
   const key = { op: 'import-daily-memory', fingerprint: createHash('sha256')
     .update(JSON.stringify([opts.sourceId, opts.dir])).digest('hex').slice(0, 16) };
   // Per-invocation origin so identical before:/slug: values from concurrent
@@ -119,7 +122,7 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       for (const row of existing) names.add(row.slug);
       const prior: Prior = { targets: [...names].map(slug => ({ slug,
         revision: existing.find(row => row.slug === slug)?.revision ?? null })),
-        days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...names], { signal: opts.signal }) };
+        days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...names], { signal: opts.signal, timezone }) };
       await touchLive();
       const priorValue = `before:${JSON.stringify(prior)}`;
       await bank([priorValue]);
@@ -133,7 +136,7 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         const changed = [...targets].some(slug =>
           (current.find(row => row.slug === slug)?.revision ?? null)
             !== (prior.targets.find(target => target.slug === slug)?.revision ?? null));
-        const currentDays = await dailyMemoryDaysForSlugs(tx, opts.sourceId, [...targets]);
+        const currentDays = await dailyMemoryDaysForSlugs(tx, opts.sourceId, [...targets], { timezone });
         const dayChanged = JSON.stringify([...currentDays].sort()) !== JSON.stringify([...prior.days].sort());
         if (changed || dayChanged) {
           // A peer can retain an old snapshot past our canonical commit. Mint
@@ -227,10 +230,12 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
         }
         // Bank concrete slugs before discovery, so a discovery outage survives hash-skipped retries.
         const recovery = await bank([...slugs].map(slug => `slug:${slug}`));
-        for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal })) days.add(day);
+        for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal, timezone })) days.add(day);
         recovery.push(...await bank([...days].map(day => `day:${day}`)));
         if (days.size) {
-          const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit ?? 'import', days: [...days] });
+          const accepted = await queueStandaloneSyncDailyMemory(engine, {
+            sourceId: opts.sourceId, commit: opts.commit ?? 'import', days: [...days], timezone,
+          });
           if (accepted === null) throw new Error('Daily-memory import handoff rejected');
         }
         const unwrap = (path: string) => {

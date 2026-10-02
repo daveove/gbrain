@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { appendCompleted, appendCompletedInTransaction, type OpCheckpointKey } from '../op-checkpoint.ts';
 import { DAILY_MEMORY_SOURCE_ID } from '../cycle/daily-memory.ts';
+import { resolveCycleTimeZone } from '../cycle/cycle-date.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../cycle/daily-memory-followup.ts';
 
 type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[] };
@@ -13,6 +14,8 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
   protect?: (key: OpCheckpointKey) => Promise<void>;
 }) {
   if (opts.sourceId === DAILY_MEMORY_SOURCE_ID) return undefined;
+  // Pin once for before()/finish() discovery and the queued writer.
+  const timezone = await resolveCycleTimeZone(engine);
   const key = { op: 'transcript-ingest-daily-memory', fingerprint: createHash('sha256')
     .update(JSON.stringify([opts.sourceId])).digest('hex').slice(0, 16) };
   const legacyFingerprint = createHash('sha256').update(JSON.stringify([opts.sourceId, opts.runKey])).digest('hex').slice(0, 16);
@@ -147,7 +150,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           slug,
           revision: existing.find(row => row.slug === slug)?.revision ?? null,
         })),
-        days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, unique, { signal: opts.signal }),
+        days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, unique, { signal: opts.signal, timezone }),
       };
       await bank([`before:${JSON.stringify(prior)}`]);
       for (const slug of unique) priorBySlug.set(slug, prior);
@@ -236,7 +239,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           }
         }
         const recovery = await bank([...slugs].map(slug => `slug:${slug}`));
-        for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal })) {
+        for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal, timezone })) {
           days.add(day);
         }
         recovery.push(...await bank([...days].map(day => `day:${day}`)));
@@ -246,6 +249,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
             sourceId: opts.sourceId,
             commit: 'transcripts-ingest',
             days: [...days],
+            timezone,
           });
           if (accepted === null) throw new Error('Daily-memory transcript ingest handoff rejected');
         }
