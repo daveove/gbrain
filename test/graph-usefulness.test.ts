@@ -354,6 +354,8 @@ describe('graph CLI routing', () => {
     expect(graphUsefulnessWantsHelp(['help'])).toBe(true);
     expect(graphUsefulnessWantsHelp(['stats', '-h'])).toBe(true);
     expect(graphUsefulnessWantsHelp(['measure', '--', '--help'])).toBe(false);
+    expect(graphUsefulnessWantsHelp(['--help'])).toBe(true);
+    expect(graphUsefulnessWantsHelp(['-h'])).toBe(true);
     expect(findGraphUsefulnessFlagProblem([
       'relations', 'apply', 'm.json', '--', '--apply', '--yes', '--dry-run',
     ])).toBeNull();
@@ -3932,7 +3934,7 @@ describe('usefulness help before connect', () => {
     console.log = (...a: unknown[]) => { out += a.map(String).join(' ') + '\n'; };
     process.exit = (() => { throw new Error('process.exit'); }) as typeof process.exit;
     try {
-      for (const args of [['measure', '--help'], ['help'], ['--source', 'wiki', 'stats', '-h']]) {
+      for (const args of [['measure', '--help'], ['help'], ['--help'], ['-h'], ['--source', 'wiki', 'stats', '-h']]) {
         out = '';
         const handled = await dispatchGraphUsefulness(args, async () => {
           connects += 1;

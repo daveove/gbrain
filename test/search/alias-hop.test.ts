@@ -38,6 +38,19 @@ describe('applyAliasHop', () => {
     expect((await engine.resolveAliases(['revoked alias'], { sourceId: 'default' })).get('revoked alias')?.[0].slug).toBe(page.slug);
   });
 
+  test('owner-only alias inject keeps ordinary private pages', async () => {
+    await engine.putPage('notes/private-alias', {
+      type: 'note', title: 'Private Alias', compiled_truth: 'PRIVATE_ALIAS_BODY',
+      frontmatter: { visibility: 'private' },
+    });
+    await engine.setPageAliases('notes/private-alias', 'default', ['private alias name']);
+    const hidden = await applyAliasHop(engine, [], 'private alias name', { sourceId: 'default', excludePrivate: true });
+    expect(hidden).toEqual([]);
+    const optedIn = await applyAliasHop(engine, [], 'private alias name', { sourceId: 'default', excludePrivate: 'owner-only' });
+    expect(optedIn.map(h => h.slug)).toEqual(['notes/private-alias']);
+    expect(optedIn[0].chunk_text).toContain('PRIVATE_ALIAS_BODY');
+  });
+
   test('alias-injected excerpts strip every protected take fence', async () => {
     await engine.putPage('notes/body-example', { type: 'note', title: 'Public', compiled_truth: '<!--- gbrain:takes:begin -->\nSECRET_ALIAS_TAKE\n<!--- gbrain:takes:end -->\nPUBLIC_ALIAS_EXCERPT' });
     await engine.setPageAliases('notes/body-example', 'default', ['public alias']);

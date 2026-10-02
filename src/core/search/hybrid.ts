@@ -10,6 +10,7 @@
  */
 
 import { sanitizeRemoteBody } from '../remote-body.ts';
+import { isPageHidden } from './private-visibility.ts';
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 // Type-only (erased at compile time — mode.ts stays a runtime dynamic import
@@ -975,10 +976,14 @@ export async function applyAliasHop(
     // #4352 — the alias inject path bypasses the engines' SQL visibility
     // clause (getPage, not search); re-apply the private predicate here so
     // an untrusted caller can't hop into a `visibility: private` page.
-    if (
-      opts.excludePrivate &&
-      ((page.frontmatter as Record<string, unknown> | null | undefined)?.visibility === 'private')
-    ) continue;
+    // Distinguish full private exclusion from owner-only opt-out: truthy
+    // 'owner-only' must keep ordinary private pages while still hiding
+    // mandatory owner aggregates (shared isPageHidden predicate).
+    if (opts.excludePrivate && isPageHidden({
+      source_id: page.source_id ?? ref.source_id,
+      slug: page.slug,
+      frontmatter: (page.frontmatter as Record<string, unknown> | null | undefined) ?? {},
+    }, opts.excludePrivate)) continue;
     injectScore += 1e-6;
     out.unshift({
       // #2339-sibling: include page_id. The `as SearchResult` cast hid its
