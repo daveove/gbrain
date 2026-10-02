@@ -361,13 +361,15 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
       [DAILY_MEMORY_SOURCE_ID, slug]);
     try {
       const run = extractOneShotDailyMemory(engine, { written: true, extract_slugs: [slug] });
+      let runError: unknown;
       if (timing === 'after snapshot') await expect(run).rejects.toThrow('changed');
-      else await run;
+      else { try { await run; } catch (error) { runError = error; } }
       expect(injected).toBe(true);
       expect(await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual(beforeLinks);
       expect(await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
         [DAILY_MEMORY_SOURCE_ID, slug])).toEqual(beforeMark);
       expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.frontmatter.dream_generated).toBeUndefined();
+      if (runError) throw runError;
     } finally { listSpy.mockRestore(); replaceSpy.mockRestore(); }
   });
 }
