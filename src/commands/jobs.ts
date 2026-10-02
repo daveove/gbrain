@@ -2853,7 +2853,11 @@ export async function registerBuiltinHandlers(
       ?? report.source_id
       ?? (effectiveBrainDir
         ? await (await import('../core/cycle.ts')).resolveSourceForDir(engine, effectiveBrainDir)
-        : undefined);
+        : undefined)
+      // An unregistered filesystem sync writes to default; DB-only and skipped
+      // sync phases must not adopt that source's retained debt.
+      ?? (effectiveBrainDir && report.phases.some(phase => phase.phase === 'sync' && phase.status !== 'skipped')
+        ? 'default' : undefined);
     await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(engine, job, handoffSourceId, report);
     return {
       partial: report.status === 'partial' || report.status === 'failed',

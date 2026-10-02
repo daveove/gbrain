@@ -1,6 +1,7 @@
 /** Standalone sync preserves affected dates across a rejected queue handoff. */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -43,6 +44,44 @@ describe('standalone sync daily-memory durable handoff', () => {
     await performSync(engine, { ...opts(), full: true, dailyMemoryFollowup: false });
   });
   afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
+
+  for (const mode of ['filesystem-sync', 'database-only', 'no-sync-phase'] as const) {
+    test(`legacy unregistered checkout drains default debt only after filesystem sync: ${mode}`, async () => {
+      const home = mkdtempSync(join(tmpdir(), 'gbrain-legacy-debt-home-'));
+      try { await withEnv({ GBRAIN_HOME: home }, async () => {
+        await engine.executeRaw('UPDATE sources SET local_path=NULL');
+        const queue = new MinionQueue(engine);
+        const queued = await queue.add('autopilot-cycle', {
+          repoPath: mode === 'database-only' ? null : repo,
+          phases: mode === 'no-sync-phase' ? ['lint'] : ['sync'], pull: false,
+        });
+        const job = (await queue.claim('legacy-default-debt-owner', 60_000, 'default', ['autopilot-cycle']))!;
+        expect(job.id).toBe(queued.id);
+        const key = { op: 'autopilot-sync-daily-memory', fingerprint: createHash('sha256').update('default').digest('hex').slice(0, 16) };
+        const day = '2025-12-20';
+        const debt = JSON.stringify({ jobId: job.id, day });
+        expect(await checkpoints.appendCompleted(engine, key, [debt])).toBe(true);
+        const handlers = new Map<string, (job: any) => Promise<any>>();
+        await registerBuiltinHandlers({ register(name: string, handler: (job: any) => Promise<any>) { handlers.set(name, handler); } } as never, engine, { quiet: true });
+        const previousAnchor = await anchor();
+        const result = await handlers.get('autopilot-cycle')!(job);
+        const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[]; daily_memory_source_job_id?: number } }>(
+          "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+        const retained = await engine.executeRaw<{ path: string }>('SELECT path FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2', [key.op, key.fingerprint]);
+        if (mode === 'filesystem-sync') {
+          expect(result.report.phases.some((phase: { phase: string; status: string }) => phase.phase === 'sync' && phase.status !== 'skipped')).toBe(true);
+          expect(batches).toHaveLength(1);
+          expect(batches[0]!.data.daily_memory_dates).toEqual([day]);
+          expect(batches[0]!.data.daily_memory_source_job_id).toBe(job.id);
+          expect(retained).toHaveLength(0);
+        } else {
+          expect(batches).toHaveLength(0);
+          expect(retained).toEqual([{ path: debt }]);
+        }
+        expect(await anchor()).toBe(previousAnchor);
+      }); } finally { rmSync(home, { recursive: true, force: true }); }
+    });
+  }
 
   test('standalone sync pins initial final capture and queued writer to one timezone', async () => {
     await engine.setConfig('cycle.timezone', 'Asia/Manila');
