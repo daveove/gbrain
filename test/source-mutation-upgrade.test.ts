@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -31,68 +31,83 @@ async function initializeReal169(engine: PGLiteEngine): Promise<void> {
   expect(await engine.getConfig('migration.source_mutation_generation.modern.170')).toBeNull();
 }
 
-test('a modern169 brain with legacy graph triggers receives additive170 repair', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'graph-upgrade-'));
-  const checkpointPath = join(dir, 'checkpoint.json');
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  try {
-    await initializeReal169(engine);
-    await engine.runMigration(169, readFileSync(new URL('./fixtures/source-mutation-v146.sql', import.meta.url), 'utf8'));
-    for (const source of ['upgrade-a', 'upgrade-b']) {
-      await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [source]);
-      await engine.putPage('notes/endpoint', { type: 'note', title: 'Synthetic endpoint', compiled_truth: 'Synthetic content' }, { sourceId: source });
-    }
-    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('upgrade-empty','upgrade-empty')");
-    const emptyCheckpointPath = join(dir, 'empty-checkpoint.json');
-    await runPagedMeasure(engine, { sourceId: 'upgrade-empty', cursor: 0, limit: 1, checkpointPath: emptyCheckpointPath });
-    await engine.executeRaw(`INSERT INTO links(from_page_id,to_page_id,link_type,link_source)
-      SELECT a.id,b.id,'related_to','manual' FROM pages a,pages b WHERE a.source_id='upgrade-a' AND b.source_id='upgrade-b'`);
-    const generation = async (source: string) => BigInt((await engine.executeRaw<{ generation: string }>('SELECT generation FROM source_mutation_generation WHERE source_id=$1', [source]))[0].generation);
-    let before = await generation('upgrade-a');
-    await engine.executeRaw("UPDATE pages SET last_retrieved_at=now() WHERE source_id='upgrade-a'");
-    expect(await generation('upgrade-a')).toBeGreaterThan(before);
-    before = await generation('upgrade-a');
-    await runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath });
-    await engine.executeRaw("UPDATE pages SET slug='notes/before-upgrade' WHERE source_id='upgrade-b'");
-    expect(await generation('upgrade-a')).toBe(before);
-    await runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath });
-
-    expect(await runMigrations(engine)).toEqual({ applied: 1, current: 170 });
-    expect(await engine.getConfig('version')).toBe('170');
-    await expect(runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath })).rejects.toThrow(/Corpus mutated/);
-    expect(await generation('upgrade-empty')).toBe(1n);
-    await expect(runPagedMeasure(engine, { sourceId: 'upgrade-empty', cursor: 0, limit: 1, checkpointPath: emptyCheckpointPath })).rejects.toThrow(/Corpus mutated/);
-    before = await generation('upgrade-a');
-    await engine.executeRaw("UPDATE pages SET last_retrieved_at=now() WHERE source_id='upgrade-a'");
-    expect(await generation('upgrade-a')).toBe(before);
-    await engine.executeRaw("UPDATE pages SET slug='notes/after-upgrade' WHERE source_id='upgrade-b'");
-    expect(await generation('upgrade-a')).toBe(before + 1n);
-    before = await generation('upgrade-a');
-    await engine.executeRaw("UPDATE sources SET archived=true WHERE id='upgrade-b'");
-    expect(await generation('upgrade-a')).toBe(before + 1n);
-    before = await generation('upgrade-a');
-    await engine.transaction(async tx => {
-      await tx.executeRaw("UPDATE pages SET compiled_truth='Synthetic revised content' WHERE source_id='upgrade-a'");
-      await tx.executeRaw("UPDATE pages SET compiled_truth='Synthetic revised again' WHERE source_id='upgrade-a'");
-    });
-    expect(await generation('upgrade-a')).toBe(before + 1n);
-    expect(await engine.executeRaw('SELECT id FROM source_mutation_pending')).toHaveLength(0);
-    expect(await runMigrations(engine)).toEqual({ applied: 0, current: 170 });
-    before = await generation('upgrade-a');
-    await engine.runMigration(170, MIGRATIONS.find(m => m.version === 170)!.sql);
-    expect(await generation('upgrade-a')).toBe(before);
-  } finally {
+describe('legacy graph trigger upgrade', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+  });
+  afterAll(async () => {
     await engine.disconnect();
-    rmSync(dir, { recursive: true, force: true });
-  }
-}, 30000);
+  });
+
+  test('a modern169 brain with legacy graph triggers receives additive170 repair', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'graph-upgrade-'));
+    const checkpointPath = join(dir, 'checkpoint.json');
+    try {
+      await initializeReal169(engine);
+      await engine.runMigration(169, readFileSync(new URL('./fixtures/source-mutation-v146.sql', import.meta.url), 'utf8'));
+      for (const source of ['upgrade-a', 'upgrade-b']) {
+        await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [source]);
+        await engine.putPage('notes/endpoint', { type: 'note', title: 'Synthetic endpoint', compiled_truth: 'Synthetic content' }, { sourceId: source });
+      }
+      await engine.executeRaw("INSERT INTO sources(id,name) VALUES('upgrade-empty','upgrade-empty')");
+      const emptyCheckpointPath = join(dir, 'empty-checkpoint.json');
+      await runPagedMeasure(engine, { sourceId: 'upgrade-empty', cursor: 0, limit: 1, checkpointPath: emptyCheckpointPath });
+      await engine.executeRaw(`INSERT INTO links(from_page_id,to_page_id,link_type,link_source)
+        SELECT a.id,b.id,'related_to','manual' FROM pages a,pages b WHERE a.source_id='upgrade-a' AND b.source_id='upgrade-b'`);
+      const generation = async (source: string) => BigInt((await engine.executeRaw<{ generation: string }>('SELECT generation FROM source_mutation_generation WHERE source_id=$1', [source]))[0].generation);
+      let before = await generation('upgrade-a');
+      await engine.executeRaw("UPDATE pages SET last_retrieved_at=now() WHERE source_id='upgrade-a'");
+      expect(await generation('upgrade-a')).toBeGreaterThan(before);
+      before = await generation('upgrade-a');
+      await runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath });
+      await engine.executeRaw("UPDATE pages SET slug='notes/before-upgrade' WHERE source_id='upgrade-b'");
+      expect(await generation('upgrade-a')).toBe(before);
+      await runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath });
+
+      expect(await runMigrations(engine)).toEqual({ applied: 1, current: 170 });
+      expect(await engine.getConfig('version')).toBe('170');
+      await expect(runPagedMeasure(engine, { sourceId: 'upgrade-a', cursor: 0, limit: 1, checkpointPath })).rejects.toThrow(/Corpus mutated/);
+      expect(await generation('upgrade-empty')).toBe(1n);
+      await expect(runPagedMeasure(engine, { sourceId: 'upgrade-empty', cursor: 0, limit: 1, checkpointPath: emptyCheckpointPath })).rejects.toThrow(/Corpus mutated/);
+      before = await generation('upgrade-a');
+      await engine.executeRaw("UPDATE pages SET last_retrieved_at=now() WHERE source_id='upgrade-a'");
+      expect(await generation('upgrade-a')).toBe(before);
+      await engine.executeRaw("UPDATE pages SET slug='notes/after-upgrade' WHERE source_id='upgrade-b'");
+      expect(await generation('upgrade-a')).toBe(before + 1n);
+      before = await generation('upgrade-a');
+      await engine.executeRaw("UPDATE sources SET archived=true WHERE id='upgrade-b'");
+      expect(await generation('upgrade-a')).toBe(before + 1n);
+      before = await generation('upgrade-a');
+      await engine.transaction(async tx => {
+        await tx.executeRaw("UPDATE pages SET compiled_truth='Synthetic revised content' WHERE source_id='upgrade-a'");
+        await tx.executeRaw("UPDATE pages SET compiled_truth='Synthetic revised again' WHERE source_id='upgrade-a'");
+      });
+      expect(await generation('upgrade-a')).toBe(before + 1n);
+      expect(await engine.executeRaw('SELECT id FROM source_mutation_pending')).toHaveLength(0);
+      expect(await runMigrations(engine)).toEqual({ applied: 0, current: 170 });
+      before = await generation('upgrade-a');
+      await engine.runMigration(170, MIGRATIONS.find(m => m.version === 170)!.sql);
+      expect(await generation('upgrade-a')).toBe(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30000);
+});
 
 
-test('fresh corrected schema does not fabricate a legacy expiry on migration replay', async () => {
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  try {
+describe('fresh corrected schema replay', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+  });
+  afterAll(async () => {
+    await engine.disconnect();
+  });
+
+  test('fresh corrected schema does not fabricate a legacy expiry on migration replay', async () => {
     await engine.initSchema();
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES('fresh-empty','fresh-empty')");
     const rowsBefore = await engine.executeRaw('SELECT source_id,generation FROM source_mutation_generation ORDER BY source_id');
@@ -101,16 +116,21 @@ test('fresh corrected schema does not fabricate a legacy expiry on migration rep
     expect(await engine.executeRaw('SELECT source_id,generation FROM source_mutation_generation ORDER BY source_id')).toEqual(rowsBefore);
     expect(await engine.getConfig('migration.source_mutation_generation.modern.170')).toBe('installed');
     expect(await runMigrations(engine)).toEqual({ applied: 0, current: 170 });
-  } finally {
+  }, 30000);
+});
+
+
+describe('modern169 state preservation', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+  });
+  afterAll(async () => {
     await engine.disconnect();
-  }
-}, 30000);
+  });
 
-
-test('real modern169 schema without graph tables upgrades without changing transcript OAuth or persistence state', async () => {
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  try {
+  test('real modern169 schema without graph tables upgrades without changing transcript OAuth or persistence state', async () => {
     await initializeReal169(engine);
     await engine.executeRaw(`INSERT INTO extract_atoms_transcript_state(source_id,file_path,content_hash,fail_count,tombstoned)
       VALUES('default','synthetic/transcript.jsonl','synthetic-hash',3,true)`);
@@ -130,7 +150,5 @@ test('real modern169 schema without graph tables upgrades without changing trans
     expect(await engine.getConfig('migration.source_mutation_generation.modern.170')).toBe('installed');
     expect(await runMigrations(engine)).toEqual({ applied: 0, current: 170 });
     expect(await snapshot()).toEqual(before);
-  } finally {
-    await engine.disconnect();
-  }
-}, 30000);
+  }, 30000);
+});
