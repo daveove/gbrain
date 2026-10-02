@@ -89,6 +89,7 @@ import {
 // shared sliding-pool helper + PGLite-clamp wrapper.
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
+import { isOwnedGeneratedDailyIndex } from '../core/cycle/daily-memory.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
 import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from '../core/sources-load.ts';
 
@@ -2124,6 +2125,12 @@ export async function extractStaleFromDB(
     pendingScanComplete?: boolean;
     /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
     signal?: AbortSignal;
+    /**
+     * Exact-target dream-index sweeps only. After each snapshot read, skip pages
+     * that no longer match owned generated daily/source-record shape so a raced
+     * human edit cannot lose derived links or advance its extraction watermark.
+     */
+    requireOwnedGeneratedDailyIndex?: boolean;
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean; pendingScanAfter?: string }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
@@ -2241,6 +2248,13 @@ export async function extractStaleFromDB(
       }
       const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
       if (!snapshot) throw new Error('Link extraction origin changed during the stale scan');
+      // Recheck ownership against the revision about to drive replaceDerivedLinks.
+      if (
+        opts.requireOwnedGeneratedDailyIndex
+        && !isOwnedGeneratedDailyIndex(page.slug, snapshot.page.frontmatter)
+      ) {
+        continue;
+      }
       const fullContent = snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
       const linkRows: LinkBatchInput[] = [];
       if (!resolvers.has(page.source_id)) resolvers.set(page.source_id, makeResolver(engine, { mode: 'batch', sourceId: page.source_id }));

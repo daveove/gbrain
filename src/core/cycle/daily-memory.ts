@@ -117,6 +117,21 @@ export function dailyMemorySlug(day: string): string {
   return `${DAILY_MEMORY_SLUG_PREFIX}/${day}`;
 }
 
+/** True when slug+frontmatter still match an owned generated daily/source-record index. */
+export function isOwnedGeneratedDailyIndex(
+  slug: string,
+  frontmatter: Record<string, unknown> | null | undefined,
+): boolean {
+  if (frontmatter?.dream_generated !== true) return false;
+  if (/^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(slug)) return true;
+  if (!slug.startsWith('source-records/')) return false;
+  return (
+    Object.hasOwn(frontmatter, 'source_record_id')
+    && Object.hasOwn(frontmatter, 'source_record_type')
+    && Object.hasOwn(frontmatter, 'source_record_ref')
+  );
+}
+
 export interface SourcePageRow {
   source_id: string;
   slug: string;
@@ -270,6 +285,19 @@ export async function countDailyMemoryExtractTargets(engine: BrainEngine): Promi
   const [row] = await engine.executeRaw<{ remaining: number | string }>(
     `SELECT COUNT(*) AS remaining ${GENERATED_STALE_INDEXES}`,
     [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+  return Number(row.remaining);
+}
+
+/** Stale owned generated indexes among exact slugs (same predicate as historical targets). */
+export async function countSelectedDailyMemoryExtractTargets(
+  engine: BrainEngine,
+  slugs: readonly string[],
+): Promise<number> {
+  if (!slugs.length) return 0;
+  const [row] = await engine.executeRaw<{ remaining: number | string }>(
+    `SELECT COUNT(*) AS remaining ${GENERATED_STALE_INDEXES} AND slug = ANY($3::text[])`,
+    [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS, [...slugs]],
+  );
   return Number(row.remaining);
 }
 

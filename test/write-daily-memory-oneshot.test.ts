@@ -51,7 +51,7 @@ test('one-shot writer runs exact-target extract in-process and queues no Minions
   expect(calls[0]).toEqual({
     dryRun: false, jsonMode: true, quiet: true,
     sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], catchUp: false, timeBudgetMs: 60_000,
-    signal: controller.signal,
+    signal: controller.signal, requireOwnedGeneratedDailyIndex: true,
   });
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
@@ -72,7 +72,7 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
   await seed();
   await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 2 }),
-  })).rejects.toThrow('Daily memory extraction needs retry: 2 selected daily-index pages remain');
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 selected daily-index pages remain');
   expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
     .toContain('[[default:notes/oneshot-day]]');
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
@@ -323,4 +323,31 @@ test('historical one-shot exhausted budget reports retained generated debt witho
   expect(await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
     [DAILY_MEMORY_SOURCE_ID])).toEqual(before);
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+});
+
+test('exact-target extract skips a raced human page without advancing its watermark', async () => {
+  await seed();
+  const written = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+  expect(written.extract_slugs).toEqual([written.slug]);
+  // Replace the selected generated index with a human page after targets return.
+  await engine.putPage(written.slug, {
+    type: 'note', title: 'Human-owned day', compiled_truth: '[[default:notes/human-raced]]', frontmatter: {},
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  await engine.putPage('notes/human-raced', {
+    type: 'note', title: 'Human target', compiled_truth: 'Synthetic human target',
+  });
+  const before = await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  );
+  await extractOneShotDailyMemory(engine, {
+    written: true,
+    needs_extract: true,
+    extract_slugs: written.extract_slugs,
+  });
+  expect(await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  )).toEqual(before);
+  expect(await engine.getLinks(written.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual([]);
 });

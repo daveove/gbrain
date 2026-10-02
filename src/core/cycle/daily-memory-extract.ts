@@ -5,6 +5,7 @@ import {
   DAILY_MEMORY_SOURCE_ID,
   dailyMemoryExtractTargets,
   countDailyMemoryExtractTargets,
+  countSelectedDailyMemoryExtractTargets,
   type DailyMemoryWrite,
 } from './daily-memory.ts';
 
@@ -28,9 +29,14 @@ export async function extractOneShotDailyMemory(
     const extracted = await extract(engine, {
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
       slugs, catchUp: false, timeBudgetMs, signal: deps.signal,
+      requireOwnedGeneratedDailyIndex: true,
     });
-    if (extracted.staleRemaining > 0) {
-      throw new Error(`Daily memory extraction needs retry: ${extracted.staleRemaining} selected daily-index pages remain`);
+    if (extracted.staleRemaining <= 0) return;
+    // A raced human page can remain watermark-stale after the ownership skip;
+    // only owned generated debt forces retry.
+    const remaining = await countSelectedDailyMemoryExtractTargets(engine, slugs);
+    if (remaining > 0) {
+      throw new Error(`Daily memory extraction needs retry: ${remaining} selected daily-index pages remain`);
     }
   };
   if (result.extract_slugs?.length) return runTargets(result.extract_slugs, budget);

@@ -15,6 +15,8 @@ function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asi
   homes.push(home);
   mkdirSync(join(home, '.local/bin'), { recursive: true });
   mkdirSync(join(home, '.gbrain'), { recursive: true });
+  // Empty sessions root is a successful empty scan; only a missing root fails closed.
+  mkdirSync(join(home, '.codex/sessions'), { recursive: true });
   const config = join(home, '.gbrain/config.json');
   const original = `${JSON.stringify({ database_url: 'postgres://example:example@127.0.0.1:5432/example', ...configExtra })}\n`;
   writeFileSync(config, original);
@@ -451,6 +453,27 @@ finally:
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/cannot (stat|read)/);
     try { chmodSync(broken, 0o644); } catch { /* ignore */ }
+  });
+
+  it('exits nonzero when the Codex sessions root is absent', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const sessions = join(home, '.codex/sessions');
+    rmSync(sessions, { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, sessions, input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cannot list/);
+  });
+
+  it('treats a child day directory that disappears mid-walk as empty, not a root failure', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Remove only the currentUtc day folder; an existing sessions root must still succeed.
+    rmSync(dirname(input.currentUtc), { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    const selected = result.stdout.split('\0').filter(Boolean);
+    expect(selected).not.toContain(input.currentUtc);
   });
 
   it('exits nonzero when a session day directory cannot be listed', () => {
