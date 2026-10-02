@@ -7,6 +7,8 @@ import {
   type DailyMemoryWrite,
 } from '../src/core/cycle/daily-memory.ts';
 import { extractOneShotDailyMemory } from '../src/core/cycle/daily-memory-extract.ts';
+import { previousCalendarDay } from '../src/core/cycle/daily-memory-followup.ts';
+import { calendarDateInTimeZone, resolveCycleTimeZone } from '../src/core/cycle/cycle-date.ts';
 import { drainInlineDailyMemory } from '../src/core/cycle/inline-daily-memory-drain.ts';
 
 export { extractOneShotDailyMemory };
@@ -28,18 +30,41 @@ export async function runOneShotDailyMemoryWrite(
   // Launcher exports the resolved calendar zone so timestamp filters match day selection.
   const selected = (process.env.GBRAIN_DAILY_MEMORY_ZONE || '').trim();
   const { now, ...extractDeps } = deps;
-  const result = await writeDailyMemoryFromSources(engine, {
-    ...dailyMemoryArgs(day),
+  const zoneOpts = {
     ...(selected ? { timezone: selected } : {}),
     ...(now ? { now } : {}),
-  });
-  await extractOneShotDailyMemory(engine, result, extractDeps);
+  };
+
+  const afterWrite = async (daily: DailyMemoryWrite, signal = deps.signal) => {
+    await extractOneShotDailyMemory(engine, daily, { ...extractDeps, signal });
+  };
+
+  let result: DailyMemoryWrite;
+  // Explicit-date backfills stay single-day. Scheduled runs also refresh the
+  // previous calendar day so late source_records still land (match inline/fanout).
+  if (day !== undefined) {
+    result = await writeDailyMemoryFromSources(engine, {
+      ...dailyMemoryArgs(day),
+      ...zoneOpts,
+    });
+    await afterWrite(result);
+  } else {
+    const timezone = selected || await resolveCycleTimeZone(engine);
+    const selectedDay = calendarDateInTimeZone(now?.() ?? new Date(), timezone);
+    let primary: DailyMemoryWrite | undefined;
+    for (const date of [selectedDay, previousCalendarDay(selectedDay)].filter((value): value is string => !!value)) {
+      const daily = await writeDailyMemoryFromSources(engine, { date, timezone, ...(now ? { now } : {}) });
+      if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
+      await afterWrite(daily);
+      primary ??= daily;
+    }
+    result = primary!;
+  }
+
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
   await drainInlineDailyMemory(engine, {
     signal: deps.signal,
-    afterWrite: async (daily, signal) => {
-      await extractOneShotDailyMemory(engine, daily, { ...extractDeps, signal });
-    },
+    afterWrite,
   });
   return result;
 }
