@@ -36,6 +36,26 @@ for (const status of ['ok', 'clean', 'partial'] as const) test(`inline ${status}
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
+test('inline maintenance keeps pinned timezone after cycle.timezone flips mid-cycle', async () => {
+  // 02:00Z is 2026-09-30 in Asia/Manila and 2026-09-29 in America/Los_Angeles.
+  await engine.putPage('notes/inline-tz-pin', {
+    type: 'note', title: 'Timezone pin fixture', compiled_truth: 'Synthetic fixture', frontmatter: {},
+  });
+  await engine.executeRaw(
+    "UPDATE pages SET effective_date=NULL, effective_date_source=NULL, updated_at='2026-09-30T02:00:00Z' WHERE slug='notes/inline-tz-pin'");
+  await runInlineAutopilotCycle(engine, options, {
+    extract: noExtract,
+    now: () => new Date('2026-09-30T12:00:00Z'),
+    cycle: async () => {
+      await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+      return report('ok');
+    },
+  });
+  expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/inline-tz-pin]]');
+  expect(await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+});
+
 test('inline maintenance refreshes its pinned previous-day lookback', async () => {
   await engine.putPage('notes/previous-inline-day', { type: 'note', title: 'Previous fixture', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-09-29' } });
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-29T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/previous-inline-day'");
