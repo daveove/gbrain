@@ -87,6 +87,14 @@ describe('incident-source graph watermarks', () => {
     expect(await engine.executeRaw('SELECT id FROM source_mutation_pending')).toHaveLength(0);
   });
 
+  test('type-only page updates advance the source mutation watermark', async () => {
+    const p = await pair('type-only');
+    const before = await readPagedSourceMutationWatermark(engine, p.a);
+    await engine.executeRaw("UPDATE pages SET type='concept' WHERE source_id=$1", [p.a]);
+    expect(generation(await readPagedSourceMutationWatermark(engine, p.a))).toBeGreaterThan(generation(before));
+    await expect(runPagedMeasure(engine, { sourceId: p.a, cursor: 0, limit: 1, checkpointPath: p.checkpointPath })).rejects.toThrow(/Corpus mutated/);
+  });
+
   test('semantic revision changes invalidate a completed checkpoint without changing page cardinality', async () => {
     const p = await pair('semantic-revision');
     const [before] = await engine.executeRaw<{ knowledge_revision: string }>('SELECT knowledge_revision FROM pages WHERE source_id=$1', [p.a]);

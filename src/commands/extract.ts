@@ -38,7 +38,7 @@
  * whole corpus through getPage.
  */
 
-import { probePendingOriginsForArrivedTargets } from '../core/pending-link-target-arrivals.ts';
+import { INLINE_PENDING_PROBE_BUDGET_MS, probePendingOriginsForArrivedTargets } from '../core/pending-link-target-arrivals.ts';
 import { scanPendingLinkReferences, storePendingLinkReferences, pendingCandidates, queuePendingOriginExtraction } from '../core/pending-link-references.ts';
 import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
@@ -1645,7 +1645,13 @@ export async function extractLinksForSlugs(
   engine: BrainEngine,
   repoPath: string,
   slugs: string[],
-  opts?: { sourceId?: string; includeFrontmatter?: boolean },
+  opts?: {
+    sourceId?: string;
+    includeFrontmatter?: boolean;
+    signal?: AbortSignal;
+    deadline?: number;
+    pendingAfter?: string;
+  },
 ): Promise<ExtractForSlugsResult> {
   const allFiles = walkMarkdownFiles(repoPath);
   // Resolve each requested slug to its real path. Reconstructing slug.md can
@@ -1697,7 +1703,21 @@ export async function extractLinksForSlugs(
     } catch { /* skip: unreadable — not processed, stays stale */ }
   }
   if (processed.length > 0) {
-    await probePendingOriginsForArrivedTargets(engine, sourceId, { globalBasename });
+    const pending = await probePendingOriginsForArrivedTargets(engine, sourceId, {
+      globalBasename,
+      signal: opts?.signal,
+      deadline: opts?.deadline ?? Date.now() + INLINE_PENDING_PROBE_BUDGET_MS,
+      after: opts?.pendingAfter,
+    });
+    if (pending.pendingScanIncomplete) {
+      const { queueDeferredStaleSweep } = await import('../core/deferred-stale-extract.ts');
+      const accepted = await queueDeferredStaleSweep(engine, {
+        sourceId,
+        commit: `pending-arrival:${sourceId}`,
+        reason: 'inline_pending_arrival_incomplete',
+      });
+      if (accepted === null) throw new Error('Pending arrival probe continuation was not accepted');
+    }
   }
   return { created, processed };
 }

@@ -7,6 +7,7 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { extractLinksForSlugs, extractStaleFromDB, STALE_TIME_BUDGET_MS, runExtract, runExtractCore, stampExtracted } from '../src/commands/extract.ts';
+import { probePendingOriginsForArrivedTargets } from '../src/core/pending-link-target-arrivals.ts';
 import { loadPendingLinkReferences, pendingLinkReferenceBatches, probePendingLinkReferences, requeueReadyPendingLinks, storePendingLinkReferences } from '../src/core/pending-link-references.ts';
 
 const home = mkdtempSync(join(tmpdir(), 'gbrain-pending-links-'));
@@ -560,6 +561,28 @@ test('small sync target arrival wakes a pending origin without a stale sweep', a
     expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBe(1);
     expect((await drain()).pagesProcessed).toBe(1);
     expect((await engine.getLinks('people/origin')).some(link => link.to_slug === 'people/later')).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('inline arrival probe deadline hands off a durable stale-sweep continuation', async () => {
+  for (let i = 0; i < 3; i++) await engine.putPage(`people/arrive-${i}`, page('[[people/future]]'));
+  await drain();
+  expect((await loadPendingLinkReferences(engine)).length).toBeGreaterThanOrEqual(3);
+  const incomplete = await probePendingOriginsForArrivedTargets(engine, 'default', {
+    globalBasename: false, deadline: Date.now() - 1, after: '',
+  });
+  expect(incomplete.pendingScanIncomplete).toBe(true);
+  expect(incomplete.pendingScanAfter).toBe('');
+
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-probe-deadline-'));
+  try {
+    mkdirSync(join(dir, 'people'));
+    writeFileSync(join(dir, 'people/future.md'), '---\ntype: person\n---\nSynthetic future');
+    await engine.putPage('people/future', page());
+    await extractLinksForSlugs(engine, dir, ['people/future'], { deadline: Date.now() - 1 });
+    const jobs = await engine.executeRaw<{ data: { reason?: string; sourceId?: string }; status: string }>(
+      "SELECT data,status FROM minion_jobs WHERE name='extract' AND data->>'reason'='inline_pending_arrival_incomplete'");
+    expect(jobs.some(job => job.data.sourceId === 'default' && job.status === 'waiting')).toBe(true);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
