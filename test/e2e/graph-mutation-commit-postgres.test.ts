@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import postgres from '#postgres';
+import { mkdtempSync, mkdirSync, rmSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { applyRelationManifest, parseRelationManifest, _setBeforeReceiptCommitForTests } from '../../src/core/graph-usefulness/relation-manifest.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 import { runMigrations } from '../../src/core/migrate.ts';
@@ -117,4 +121,69 @@ native('graph epochs follow native PostgreSQL commit order', () => {
       await brain.close();
     }
   }, 30_000);
+
+  for (const independentUpdate of [false, true]) {
+    test(independentUpdate
+      ? 'receipt compensation preserves independently committed same-value link update'
+      : 'receipt compensation removes an untouched applied link', async () => {
+      const brain = await isolatedPersistencePostgres(databaseUrl!);
+      const writer = postgres(brain.databaseUrl, { max: 1, prepare: false });
+      const dir = mkdtempSync(join(tmpdir(), 'gbrain-native-receipt-'));
+      const receiptPath = join(dir, 'receipt.json');
+      type LinkIdentity = { id: number; xmin: string; context: string };
+      let applied: LinkIdentity | undefined;
+      let committed: LinkIdentity | undefined;
+      try {
+        await runMigrations(brain.engine);
+        await writer.unsafe("SET statement_timeout='5s'");
+        await writer.unsafe("SET idle_in_transaction_session_timeout='10s'");
+        await brain.engine.executeRaw("INSERT INTO sources(id,name) VALUES('receipt-native','Synthetic receipt source')");
+        for (const slug of ['notes/from', 'notes/to']) {
+          await brain.engine.putPage(slug, { type: 'note', title: 'Synthetic receipt page', compiled_truth: 'Synthetic content' }, { sourceId: 'receipt-native' });
+        }
+        const raw = JSON.stringify({ manifest_version: 1, rows: [{
+          id: 'native-receipt-row', from_slug: 'notes/from', to_slug: 'notes/to',
+          from_source_id: 'receipt-native', to_source_id: 'receipt-native',
+          link_type: 'related_to', link_source: 'tana-relation-r2', context: 'same context',
+          guards: { exact_endpoint_match: true, source_relation_current: true, no_incident_edge: true, readwise_clear: true },
+        }] });
+        const rows = () => brain.engine.executeRaw<LinkIdentity>(
+          "SELECT l.id,l.xmin::text AS xmin,l.context FROM links l JOIN pages p ON p.id=l.from_page_id WHERE p.source_id='receipt-native'");
+        _setBeforeReceiptCommitForTests(async () => {
+          const inserted = await rows();
+          expect(inserted).toHaveLength(1); applied = inserted[0];
+          if (independentUpdate) {
+            // A separate connection commits a new physical row version with identical values.
+            const updated = await writer.unsafe<LinkIdentity[]>(
+              'UPDATE links SET context=context WHERE id=$1 RETURNING id,xmin::text AS xmin,context', [applied!.id]);
+            expect(updated).toHaveLength(1); committed = updated[0];
+            expect(committed!.id).toBe(applied!.id);
+            expect(committed!.xmin).not.toBe(applied!.xmin);
+            expect(committed!.context).toBe(applied!.context);
+          }
+          unlinkSync(receiptPath); mkdirSync(receiptPath);
+        });
+        await expect(applyRelationManifest(brain.engine, parseRelationManifest(raw), raw, {
+          apply: true, receiptPath, defaultSourceId: 'receipt-native',
+        })).rejects.toThrow(independentUpdate ? /left 1 concurrently updated link/ : /rolled back 1 applied link/);
+        expect(applied).toBeDefined();
+        const remaining = await rows();
+        if (independentUpdate) {
+          expect(committed).toBeDefined();
+          expect(remaining).toHaveLength(1);
+          expect(remaining[0]).toEqual(committed);
+          expect(remaining[0].id).toBe(applied!.id);
+          expect(remaining[0].xmin).not.toBe(applied!.xmin);
+        } else expect(remaining).toEqual([]);
+      } finally {
+        _setBeforeReceiptCommitForTests(null);
+        try { await writer.end({ timeout: 1 }); }
+        finally {
+          try { rmSync(dir, { recursive: true, force: true }); }
+          finally { await brain.close(); }
+        }
+      }
+    }, 30_000);
+  }
+
 });
