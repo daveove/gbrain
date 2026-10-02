@@ -101,7 +101,8 @@ describe('paged measure cursor and archived endpoints', () => {
       zero_degree_pages: 1,
       degree_counts: { '0': 1 },
       junk: {},
-      seen_link_ids: [],
+      union_source_ids: ['paged-resume'],
+      owned_link_rows: 0,
       identity_hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
       fingerprint_format: PAGED_FINGERPRINT_FORMAT,
       mutation_watermark: resumeWatermark,
@@ -134,7 +135,8 @@ describe('paged measure cursor and archived endpoints', () => {
       zero_degree_pages: 1,
       degree_counts: { '0': 1 },
       junk: {},
-      seen_link_ids: [],
+      union_source_ids: ['paged-resume'],
+      owned_link_rows: 0,
       identity_hash: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
       fingerprint_format: PAGED_FINGERPRINT_FORMAT,
       mutation_watermark: gapWatermark,
@@ -175,7 +177,8 @@ describe('paged measure cursor and archived endpoints', () => {
       zero_degree_pages: 1,
       degree_counts: { '0': 1 },
       junk: {},
-      seen_link_ids: [],
+      union_source_ids: ['wm-src'],
+      owned_link_rows: 0,
       identity_hash: 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
       fingerprint_format: PAGED_FINGERPRINT_FORMAT,
       mutation_watermark: watermark,
@@ -683,7 +686,8 @@ function writeStalePrefixCheckpoint(
     zero_degree_pages: 0,
     degree_counts: { '1': 1 },
     junk: {},
-    seen_link_ids: [],
+    union_source_ids: [sourceId],
+    owned_link_rows: 0,
     identity_hash: 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
     fingerprint_format: PAGED_FINGERPRINT_FORMAT,
     mutation_watermark: watermark,
@@ -1076,7 +1080,7 @@ describe('paged source watermark deletions', () => {
       checkpointPath: join(dir, 'scoped-quiet.json'),
     });
     expect(report.active_pages).toBe(2);
-    expect(report.seen_link_ids).toEqual([]);
+    expect(report.owned_link_rows).toBe(0);
     const saved = JSON.parse(readFileSync(join(dir, 'scoped-quiet.json'), 'utf8')) as {
       mutation_watermark: string;
       cursor: number;

@@ -19,14 +19,16 @@ export interface PagedScanOpts {
   /** Page ids per statement. */
   limit: number;
   checkpointPath: string;
+  /** Sources whose incident-edge union is counted without retaining link IDs. */
+  unionSourceIds?: string[];
 }
 
-/** Paged measure result plus the link ids counted in this walk. */
+/** Incident report plus this source's deterministic share of a source union. */
 export interface PagedMeasureResult extends GraphMeasureResult {
-  seen_link_ids: number[];
+  owned_link_rows: number;
 }
 
-export const PAGED_FINGERPRINT_FORMAT = 4;
+export const PAGED_FINGERPRINT_FORMAT = 6;
 
 interface Checkpoint {
   fingerprint_format: typeof PAGED_FINGERPRINT_FORMAT;
@@ -40,19 +42,16 @@ interface Checkpoint {
   zero_degree_pages: number;
   degree_counts: Record<string, number>;
   junk: Record<string, { count: number; examples: string[] }>;
-  seen_link_ids: number[];
+  union_source_ids: string[];
+  owned_link_rows: number;
   /**
    * Rolling sha256 hex of page and link identity lines seen so far.
    * Updated once per row. The checkpoint does not store the identity list.
    */
   identity_hash: string;
-  /**
-   * Source incarnation and commit-ordered generation from one SQL snapshot.
-   * A later change refuses resume so prefix and suffix never mix DB states.
-   */
+  /** Source incarnation and committed generation reject mixed-state resumes. */
   mutation_watermark: string;
 }
-
 interface PageRow {
   id: number | string;
   slug: string;
@@ -62,7 +61,6 @@ interface PageRow {
   content_hash: string | null;
   truth_md5: string | null;
 }
-
 interface LinkRow {
   id: number | string;
   from_page_id: number | string;
@@ -76,7 +74,6 @@ interface LinkRow {
   context: string | null;
   link_source: string | null;
 }
-
 interface ChunkRevRow {
   page_id: number | string;
   chunk_rev: string | null;
@@ -90,7 +87,7 @@ function intId(value: number | string): number {
 
 /** Prefix for one source. Later rows fold in with `rollHash`. */
 export function initialIdentityHash(sourceId: string): string {
-  return createHash('sha256').update('paged-measure-v4\n').update(sourceId).digest('hex');
+  return createHash('sha256').update('paged-measure-v6\n').update(sourceId).digest('hex');
 }
 
 /** Fold one identity line into the running digest. The hex is what we persist. */
@@ -98,7 +95,7 @@ export function rollHash(prev: string, line: string): string {
   return createHash('sha256').update(prev).update('\n').update(line).digest('hex');
 }
 
-function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
+function emptyCheckpoint(sourceId: string, cursor: number, unionSources = [sourceId]): Checkpoint {
   return {
     fingerprint_format: PAGED_FINGERPRINT_FORMAT,
     source_id: sourceId,
@@ -111,7 +108,8 @@ function emptyCheckpoint(sourceId: string, cursor: number): Checkpoint {
     zero_degree_pages: 0,
     degree_counts: {},
     junk: {},
-    seen_link_ids: [],
+    union_source_ids: unionSources,
+    owned_link_rows: 0,
     identity_hash: initialIdentityHash(sourceId),
     mutation_watermark: '',
   };
@@ -179,7 +177,7 @@ export async function revalidatePagedCheckpoint(
   await assertCheckpointWatermark(engine, checkpoint);
 }
 
-function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
+function readCheckpoint(path: string, sourceId: string, unionSources?: string[]): Checkpoint | null {
   if (!existsSync(path)) return null;
   const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<Checkpoint>;
   if (parsed.source_id !== sourceId) {
@@ -190,6 +188,13 @@ function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
       `Checkpoint ${path} has unsupported fingerprint_format ${parsed.fingerprint_format}; ` +
       `delete it and rerun with --cursor 0`,
     );
+  }
+  if (!Array.isArray(parsed.union_source_ids) ||
+      !parsed.union_source_ids.every(id => typeof id === 'string') ||
+      !parsed.union_source_ids.includes(sourceId) ||
+      !Number.isSafeInteger(parsed.owned_link_rows) || (parsed.owned_link_rows ?? -1) < 0 ||
+      (unionSources && JSON.stringify(parsed.union_source_ids) !== JSON.stringify(unionSources))) {
+    throw new Error(`Checkpoint ${path} has incompatible union source scope; delete it and rerun with --cursor 0`);
   }
   // A count-only checkpoint would keep a same-cardinality rewrite invisible.
   // Refuse it instead of hashing empty identity lists.
@@ -210,7 +215,7 @@ function readCheckpoint(path: string, sourceId: string): Checkpoint | null {
     source_id: sourceId,
     identity_hash: parsed.identity_hash,
     mutation_watermark: parsed.mutation_watermark,
-    seen_link_ids: Array.isArray(parsed.seen_link_ids) ? parsed.seen_link_ids : [],
+    union_source_ids: parsed.union_source_ids,
     degree_counts: parsed.degree_counts ?? {},
     junk: parsed.junk ?? {},
   };
@@ -267,7 +272,7 @@ function resultFromCheckpoint(checkpoint: Checkpoint): PagedMeasureResult {
     zero_degree_pages: checkpoint.zero_degree_pages,
   };
   const sha256 = createHash('sha256')
-    .update('paged-measure-v4\n')
+    .update('paged-measure-v6\n')
     .update(JSON.stringify({
       source_id: checkpoint.source_id,
       mutation_watermark: checkpoint.mutation_watermark,
@@ -286,7 +291,7 @@ function resultFromCheckpoint(checkpoint: Checkpoint): PagedMeasureResult {
     median_degree: median,
     junk_slug_samples,
     fingerprint,
-    seen_link_ids: [...checkpoint.seen_link_ids],
+    owned_link_rows: checkpoint.owned_link_rows,
   };
 }
 
@@ -335,7 +340,7 @@ function linkLine(link: LinkRow): string {
  * matches. Live edges require both endpoint pages undeleted and both
  * endpoint sources not archived.
  *
- * The fingerprint rolls a sha256 once per live page and once per newly seen
+ * The fingerprint rolls a sha256 once per live page and once per deterministically owned
  * live link. Page and chunk revisions are read for the current id batch
  * only, so a source is never loaded in one statement.
  */
@@ -349,7 +354,9 @@ export async function runPagedMeasure(
   if (!Number.isSafeInteger(opts.limit) || opts.limit < 1) {
     throw new Error('--limit requires a positive integer');
   }
-  const existing = readCheckpoint(opts.checkpointPath, opts.sourceId);
+  const unionSources = [...new Set(opts.unionSourceIds ?? [opts.sourceId])].sort();
+  if (!unionSources.includes(opts.sourceId)) throw new Error('Union source scope must include the scanned source');
+  const existing = readCheckpoint(opts.checkpointPath, opts.sourceId, unionSources);
   // Gap check before the done fast path: a completed checkpoint only covers
   // rows through its cursor, so a higher --cursor must not return it.
   if (existing && existing.cursor < opts.cursor) {
@@ -367,15 +374,14 @@ export async function runPagedMeasure(
       `use --cursor 0 to start, or pass --checkpoint naming a prior partial run`,
     );
   }
-  const checkpoint = existing ?? emptyCheckpoint(opts.sourceId, opts.cursor);
+  const checkpoint = existing ?? emptyCheckpoint(opts.sourceId, opts.cursor, unionSources);
   if (!existing) {
     checkpoint.mutation_watermark = await readPagedSourceMutationWatermark(
       engine,
       opts.sourceId,
     );
   }
-  const seen = new Set(checkpoint.seen_link_ids);
-
+  const unionScope = new Set(unionSources);
   for (;;) {
     const pages = await engine.executeRaw<PageRow>(
       `SELECT id, slug, (deleted_at IS NULL) AS live,
@@ -393,12 +399,10 @@ export async function runPagedMeasure(
       writeCheckpoint(opts.checkpointPath, checkpoint);
       return resultFromCheckpoint(checkpoint);
     }
-
     const live = pages.filter(page => page.live);
     const liveIds = live.map(page => intId(page.id));
     checkpoint.active_pages += live.length;
     mergeJunk(checkpoint, live.map(page => page.slug));
-
     const chunkByPage = new Map<number, string>();
     const links: LinkRow[] = [];
     if (liveIds.length > 0) {
@@ -424,6 +428,7 @@ export async function runPagedMeasure(
       for (const row of chunkRows) {
         chunkByPage.set(intId(row.page_id), row.chunk_rev ?? '');
       }
+      // Page keysets do not bound the incident edges of one high-degree page.
       const linkRows = await engine.executeRaw<LinkRow>(
         `SELECT l.id, l.from_page_id, l.to_page_id,
                 fp.source_id AS from_source_id, fp.slug AS from_slug,
@@ -441,12 +446,10 @@ export async function runPagedMeasure(
       );
       links.push(...linkRows);
     }
-
     const degree = new Map<number, number>();
     for (const id of liveIds) degree.set(id, 0);
-    const firstSeen = new Map<number, LinkRow[]>();
-    for (const id of liveIds) firstSeen.set(id, []);
-
+    const ownedLinks = new Map<number, LinkRow[]>();
+    for (const id of liveIds) ownedLinks.set(id, []);
     for (const link of links) {
       if (!link.live_edge) continue;
       const fromId = intId(link.from_page_id);
@@ -458,41 +461,39 @@ export async function runPagedMeasure(
         if (degree.has(fromId)) degree.set(fromId, (degree.get(fromId) ?? 0) + 1);
         if (degree.has(toId)) degree.set(toId, (degree.get(toId) ?? 0) + 1);
       }
-      const linkId = intId(link.id);
-      if (seen.has(linkId)) continue;
-      const owners = liveIds.filter(id => id === fromId || id === toId);
-      if (owners.length === 0) continue;
-      const owner = Math.min(...owners);
-      firstSeen.get(owner)?.push(link);
+      // The earliest in-source endpoint owns the row across every batch/resume.
+      const owner = Math.min(
+        link.from_source_id === opts.sourceId ? fromId : Infinity,
+        link.to_source_id === opts.sourceId ? toId : Infinity,
+      );
+      ownedLinks.get(owner)?.push(link);
     }
-
     for (const page of live) {
       const pageId = intId(page.id);
       checkpoint.identity_hash = rollHash(
         checkpoint.identity_hash,
         pageLine(opts.sourceId, page, chunkByPage.get(pageId) ?? ''),
       );
-      const fresh = (firstSeen.get(pageId) ?? [])
+      const fresh = (ownedLinks.get(pageId) ?? [])
         .sort((a, b) => intId(a.id) - intId(b.id));
       for (const link of fresh) {
-        const linkId = intId(link.id);
-        if (seen.has(linkId)) continue;
-        seen.add(linkId);
+        const unionOwner = Math.min(
+          unionScope.has(link.from_source_id) ? intId(link.from_page_id) : Infinity,
+          unionScope.has(link.to_source_id) ? intId(link.to_page_id) : Infinity,
+        );
+        if (unionOwner === pageId) checkpoint.owned_link_rows += 1;
         checkpoint.link_rows += 1;
         checkpoint.valid_links += 1;
         checkpoint.identity_hash = rollHash(checkpoint.identity_hash, linkLine(link));
       }
     }
-
     for (const deg of degree.values()) {
       checkpoint.degree_sum += deg;
       if (deg === 0) checkpoint.zero_degree_pages += 1;
       const key = String(deg);
       checkpoint.degree_counts[key] = (checkpoint.degree_counts[key] ?? 0) + 1;
     }
-
     checkpoint.cursor = intId(pages[pages.length - 1].id);
-    checkpoint.seen_link_ids = [...seen];
     await assertCheckpointWatermark(engine, checkpoint);
     writeCheckpoint(opts.checkpointPath, checkpoint);
   }

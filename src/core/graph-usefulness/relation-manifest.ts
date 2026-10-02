@@ -554,19 +554,15 @@ function combinePagedFingerprints(
   parts: Array<{
     sourceId: string;
     fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
-    seen_link_ids: number[];
+    owned_link_rows: number;
   }>,
 ): Awaited<ReturnType<typeof computeGraphFingerprint>> {
   const ordered = [...parts].sort((a, b) => a.sourceId.localeCompare(b.sourceId));
   if (ordered.length === 1) return ordered[0]!.fingerprint;
-  // Cross-source edges are incident to both walks. Deduplicate link ids before
-  // summing link_rows / valid_links so an A-to-B apply bumps counts by 1.
-  const linkIds = new Set<number>();
-  for (const part of ordered) {
-    for (const id of part.seen_link_ids) linkIds.add(id);
-  }
+  // Endpoint ownership assigns each selected-source incident edge to one walk.
+  const linkRows = ordered.reduce((total, part) => total + part.owned_link_rows, 0);
   const sha256 = createHash('sha256')
-    .update('paged-measure-sources-v2\n')
+    .update('paged-measure-sources-v3\n')
     .update(JSON.stringify(ordered.map(part => ({
       source_id: part.sourceId,
       sha256: part.fingerprint.sha256,
@@ -576,8 +572,8 @@ function combinePagedFingerprints(
     ordered.reduce((total, part) => total + part.fingerprint[key], 0);
   return {
     active_pages: sum('active_pages'),
-    link_rows: linkIds.size,
-    valid_links: linkIds.size,
+    link_rows: linkRows,
+    valid_links: linkRows,
     zero_degree_pages: sum('zero_degree_pages'),
     sha256,
   };
@@ -615,7 +611,7 @@ async function fingerprintForApply(
     sourceId: string;
     checkpointPath: string;
     fingerprint: Awaited<ReturnType<typeof computeGraphFingerprint>>;
-    seen_link_ids: number[];
+    owned_link_rows: number;
   }> = [];
   for (const sourceId of ids) {
     const checkpointPath = applyPhaseCheckpointPath(
@@ -630,12 +626,13 @@ async function fingerprintForApply(
       cursor: opts.pageScan.cursor,
       limit: opts.pageScan.limit,
       checkpointPath,
+      unionSourceIds: ids,
     });
     parts.push({
       sourceId,
       checkpointPath,
       fingerprint: report.fingerprint,
-      seen_link_ids: report.seen_link_ids,
+      owned_link_rows: report.owned_link_rows,
     });
   }
   // Each source is checked only through the end of its own walk. Recheck
