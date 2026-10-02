@@ -720,3 +720,26 @@ test('unchanged CODE projection repair rejects its commit hook and rolls back th
   expect(await engine.executeRaw('SELECT path FROM op_checkpoint_paths ORDER BY path')).toEqual(debt);
   await owner.release();
 });
+
+test('pins one timezone across import finish discovery and enqueue after cycle.timezone flips', async () => {
+  await engine.setConfig('cycle.timezone', 'Asia/Manila');
+  const dir = root();
+  mkdirSync(join(dir, 'notes'), { recursive: true });
+  const relativePath = 'notes/import-tz-pin.md';
+  const file = join(dir, relativePath);
+  writeFileSync(file, `---\ntype: note\ntitle: Synthetic tz pin\ndate: "2026-09-30T16:30:00Z"\n---\n\nSynthetic fixture`);
+  const owner = (await createImportDailyMemory(engine, { sourceId: 'default', dir, commit: 'import-tz-pin' }))!;
+  const bank = await owner.before(file, relativePath);
+  await importFile(engine, file, relativePath, {
+    noEmbed: true,
+    beforeCommit: async (tx, actualSlug) => { await bank?.(tx, actualSlug); },
+  });
+  await owner.imported('notes/import-tz-pin');
+  await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+  await owner.finish();
+  const queued = await engine.executeRaw<{ data: { daily_memory_dates?: string[]; daily_memory_timezone?: string } }>(
+    "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+  expect(queued.some(row => row.data.daily_memory_timezone === 'Asia/Manila'
+    && (row.data.daily_memory_dates ?? []).includes('2026-10-01'))).toBe(true);
+  expect(queued.every(row => row.data.daily_memory_timezone !== 'America/Los_Angeles')).toBe(true);
+});
