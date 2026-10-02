@@ -152,3 +152,44 @@ describe('modern169 state preservation', () => {
     expect(await snapshot()).toEqual(before);
   }, 30000);
 });
+
+
+describe('fresh bootstrap before alias migrations', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+  });
+  afterAll(async () => {
+    await engine.disconnect();
+  });
+
+  test('bootstrap tolerates absent alias tables and additive170 installs their mutation guards', async () => {
+    let bootstrap = getPGLiteSchema();
+    for (const table of ['page_aliases', 'slug_aliases']) {
+      const tableSql = new RegExp(String.raw`CREATE TABLE IF NOT EXISTS ${table} \([\s\S]*?\n\);`, 'g');
+      expect(bootstrap.match(tableSql)).toHaveLength(1);
+      bootstrap = bootstrap.replace(tableSql, '');
+      const indexSql = new RegExp(String.raw`CREATE INDEX IF NOT EXISTS ${table}_[a-z_]+\n  ON ${table}[^;]+;`, 'g');
+      expect(bootstrap.match(indexSql)?.length).toBe(table === 'page_aliases' ? 2 : 1);
+      bootstrap = bootstrap.replace(indexSql, '');
+    }
+    await engine.runMigration(1, bootstrap);
+    expect(await engine.executeRaw("SELECT to_regclass('public.page_aliases')::text AS page_aliases, to_regclass('public.slug_aliases')::text AS slug_aliases"))
+      .toEqual([{ page_aliases: null, slug_aliases: null }]);
+    const report = await runMigrations(engine);
+    expect(report.current).toBe(170);
+    expect(report.applied).toBeGreaterThan(0);
+    const triggers = await engine.executeRaw<{ name: string }>("SELECT tgname AS name FROM pg_trigger WHERE tgname LIKE 'source_mutation_%aliases_%' ORDER BY tgname");
+    expect(triggers.map(row => row.name)).toEqual(['page_aliases', 'slug_aliases'].flatMap(table => ['delete', 'insert', 'update'].map(kind => `source_mutation_${table}_${kind}`)));
+    await engine.putPage('notes/target', { type: 'note', title: 'Synthetic target', compiled_truth: 'Synthetic content' });
+    const generation = async () => BigInt((await engine.executeRaw<{ generation: string }>("SELECT COALESCE((SELECT generation FROM source_mutation_generation WHERE source_id='default'),0)::text AS generation"))[0]!.generation);
+    let before = await generation();
+    await engine.executeRaw("INSERT INTO page_aliases(source_id,alias_norm,slug) VALUES('default','synthetic alias','notes/target')");
+    expect(await generation()).toBe(before + 1n);
+    before = await generation();
+    await engine.executeRaw("INSERT INTO slug_aliases(source_id,alias_slug,canonical_slug) VALUES('default','notes/old','notes/target')");
+    expect(await generation()).toBe(before + 1n);
+    expect(await runMigrations(engine)).toEqual({ applied: 0, current: 170 });
+  }, 30000);
+});

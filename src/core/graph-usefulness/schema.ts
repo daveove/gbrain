@@ -263,6 +263,9 @@ END $modern_graph$;
         RETURN NULL;
       END;
       $srcmut$ LANGUAGE plpgsql;
+      DO $graph_page_aliases$
+      BEGIN
+        IF to_regclass('public.page_aliases') IS NOT NULL THEN
       DROP TRIGGER IF EXISTS source_mutation_page_aliases_insert ON page_aliases;
       CREATE TRIGGER source_mutation_page_aliases_insert AFTER INSERT ON page_aliases
         REFERENCING NEW TABLE AS new_rows
@@ -275,6 +278,8 @@ END $modern_graph$;
       CREATE TRIGGER source_mutation_page_aliases_update AFTER UPDATE ON page_aliases
         REFERENCING NEW TABLE AS new_rows OLD TABLE AS old_rows
         FOR EACH STATEMENT EXECUTE FUNCTION note_source_mutation_page_aliases_fn();
+        END IF;
+      END $graph_page_aliases$;
 
       CREATE OR REPLACE FUNCTION note_source_mutation_slug_aliases_fn() RETURNS trigger
       SET search_path = pg_catalog, public AS $srcmut$
@@ -289,6 +294,9 @@ END $modern_graph$;
         RETURN NULL;
       END;
       $srcmut$ LANGUAGE plpgsql;
+      DO $graph_slug_aliases$
+      BEGIN
+        IF to_regclass('public.slug_aliases') IS NOT NULL THEN
       DROP TRIGGER IF EXISTS source_mutation_slug_aliases_insert ON slug_aliases;
       CREATE TRIGGER source_mutation_slug_aliases_insert AFTER INSERT ON slug_aliases
         REFERENCING NEW TABLE AS new_rows
@@ -301,6 +309,8 @@ END $modern_graph$;
       CREATE TRIGGER source_mutation_slug_aliases_update AFTER UPDATE ON slug_aliases
         REFERENCING NEW TABLE AS new_rows OLD TABLE AS old_rows
         FOR EACH STATEMENT EXECUTE FUNCTION note_source_mutation_slug_aliases_fn();
+        END IF;
+      END $graph_slug_aliases$;
 
       CREATE OR REPLACE FUNCTION note_source_mutation_takes_fn() RETURNS trigger
       SET search_path = pg_catalog, public AS $srcmut$
