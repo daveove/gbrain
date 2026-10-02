@@ -3,7 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
-import { extractOneShotDailyMemory, lookbackRecoveryDays, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
+import { extractOneShotDailyMemory, lookbackRecoveryDays, lookbackWatermarkAfter, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -209,12 +209,21 @@ test('human day with needs_extract retries only stale generated historical targe
   expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
-test('lookbackRecoveryDays walks from watermark through selected day', () => {
+test('lookbackRecoveryDays drains oldest backlog first and caps', async () => {
   expect(lookbackRecoveryDays('2026-10-01', null)).toEqual(['2026-09-30', '2026-10-01']);
   expect(lookbackRecoveryDays('2026-10-01', '2026-09-28')).toEqual([
     '2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01',
   ]);
   expect(lookbackRecoveryDays('2026-10-01', '2026-10-01')).toEqual(['2026-09-30', '2026-10-01']);
+  expect(lookbackWatermarkAfter('2026-10-01', '2026-09-28')).toBe('2026-10-01');
+
+  await withEnv({ GBRAIN_DAILY_MEMORY_LOOKBACK_DAYS: '3' }, async () => {
+    expect(lookbackRecoveryDays('2026-10-01', '2026-09-20')).toEqual([
+      '2026-09-20', '2026-09-21', '2026-09-22', '2026-09-30', '2026-10-01',
+    ]);
+    expect(lookbackWatermarkAfter('2026-10-01', '2026-09-20')).toBe('2026-09-22');
+    expect(lookbackWatermarkAfter('2026-10-01', null)).toBe('2026-10-01');
+  });
 });
 
 test('scheduled one-shot refreshes previous-day lookback; explicit date stays single-day', async () => {
