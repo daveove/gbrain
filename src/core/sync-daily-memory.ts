@@ -50,8 +50,6 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   const saved = await engine.executeRaw<{ path: string }>(
     'SELECT path FROM op_checkpoint_paths WHERE op = $1 AND fingerprint = $2', [key.op, key.fingerprint]);
   const entries = new Set(saved.map(row => row.path));
-  // One zone for every capture and the queued batch; cycle.timezone may flip mid-handoff.
-  const timezone = await resolveCycleTimeZone(engine);
   const capture = async () => {
     const slugs = new Set([...entries].filter(s => s.startsWith('slug:')).map(s => s.slice(5)));
     for (const slug of await readFullSyncAffectedSlugs(engine, opts)) slugs.add(slug);

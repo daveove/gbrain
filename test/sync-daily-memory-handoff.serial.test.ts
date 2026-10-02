@@ -9,7 +9,6 @@ import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/
 import { prepareSyncDailyMemory } from '../src/core/sync-daily-memory.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { performSync } from '../src/commands/sync.ts';
-import { prepareSyncDailyMemory } from '../src/core/sync-daily-memory.ts';
 import * as checkpoints from '../src/core/op-checkpoint.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
