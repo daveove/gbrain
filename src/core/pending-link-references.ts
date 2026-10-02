@@ -68,6 +68,7 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
     if (parsed.length) yield parsed;
     after = rows.at(-1)!.key;
     opts.onBatchComplete?.(after);
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     if (rows.length < PENDING_BATCH_SIZE) return { incomplete: false, after };
   }
 }

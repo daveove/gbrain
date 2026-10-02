@@ -304,6 +304,32 @@ test('pending registry resume cursor skips the scanned prefix and preserves afte
 });
 
 
+test('pending registry deadline after a fetched batch still yields before advancing after', async () => {
+  for (let i = 0; i < 3; i++) {
+    await engine.putPage(`people/yield-${i}`, page('[[people/missing]]'));
+  }
+  await drain();
+  const keys = (await engine.executeRaw<{ key: string }>(
+    "SELECT key FROM config WHERE key LIKE 'internal.pending-links.%' ORDER BY key")).map(row => row.key);
+  expect(keys.length).toBeGreaterThanOrEqual(3);
+  const start = Date.now();
+  let beforeDeadline = true;
+  const realNow = Date.now;
+  Date.now = () => (beforeDeadline ? start : start + 60_000);
+  try {
+    const iter = pendingLinkReferenceBatches(engine, 'default', { deadline: start + 1_000 });
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    if (first.done) throw new Error('batch must yield before deadline stop');
+    expect(first.value.map(row => row.key).sort()).toEqual([...keys].sort());
+    beforeDeadline = false;
+    expect(await iter.next()).toEqual({ value: { incomplete: true, after: keys.at(-1)! }, done: true });
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+
 test('nearby different missing basename survives an edge with the same excerpt', async () => {
   await engine.setConfig('link_resolution.global_basename', 'true');
   try {

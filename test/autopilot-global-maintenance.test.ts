@@ -210,11 +210,15 @@ describe('dispatchGlobalMaintenance — single-flight gate', () => {
         coalesced: name === 'autopilot-global-maintenance' };
     } } as never;
     await dispatchGlobalMaintenance(engine, queue, { repoPath: '/tmp', slot: 'slot-fixture', timeoutMs: 1,
-      jsonMode: true, emit: () => {}, dailyMemoryDate: '2026-09-30', sourceJobIds: [4,3] });
+      jsonMode: true, emit: () => {}, dailyMemoryDate: '2026-09-30', dailyMemoryTimezone: 'Asia/Manila', sourceJobIds: [4,3] });
     expect(added.map(job => job.name)).toEqual(['autopilot-global-maintenance', 'autopilot-daily-memory', 'autopilot-daily-memory']);
+    expect(added[0].data.daily_memory_date).toBe('2026-09-30');
+    expect(added[0].data.daily_memory_timezone).toBe('Asia/Manila');
     expect(added[1].data.source_cycle_job_ids).toEqual([3,4,10]);
     expect(added[1].data.daily_memory_date).toBe('2026-09-30');
+    expect(added[1].data.daily_memory_timezone).toBe('Asia/Manila');
     expect(added[2].data.daily_memory_date).toBe('2026-09-29');
+    expect(added[2].data.daily_memory_timezone).toBe('Asia/Manila');
     expect(added[1].opts.maxPending).toBeUndefined();
     expect(added[0].data.daily_memory_deferred).toBeUndefined();
   });
@@ -234,9 +238,10 @@ describe('dispatchGlobalMaintenance — single-flight gate', () => {
     } } as never;
     await expect(dispatchGlobalMaintenance(engine, queue, {
       repoPath: '/tmp', slot: 'barrier-fail', timeoutMs: 1, jsonMode: true, emit: () => {},
-      dailyMemoryDate: '2026-09-30', sourceJobIds: [3],
+      dailyMemoryDate: '2026-09-30', dailyMemoryTimezone: 'Asia/Manila', sourceJobIds: [3],
     })).rejects.toThrow('Synthetic barrier enqueue failure');
     expect(accepted?.daily_memory_date).toBe('2026-09-30');
+    expect(accepted?.daily_memory_timezone).toBe('Asia/Manila');
     expect(accepted?.daily_memory_deferred).toBeUndefined();
     expect(updates).toHaveLength(0);
   });
