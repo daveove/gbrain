@@ -81,7 +81,7 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
 test('extractOneShotDailyMemory is a no-op without written or needs_extract', async () => {
   let called = 0;
   await extractOneShotDailyMemory(engine, {
-    written: false, day: '2026-09-30', slug: 'daily-memory/2026-09-30', pages: 0,
+    written: false,
   }, { extract: async () => { called++; return noExtract(engine, {} as never); } });
   expect(called).toBe(0);
 });
