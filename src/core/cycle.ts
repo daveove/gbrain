@@ -2214,7 +2214,7 @@ export async function runCycle(
         // sync checkpoints its progress, holds its own per-source lock (the
         // successor's sync phase skips with lock-busy), and its stall
         // watchdog bounds the dangling import. Signal threading lands in W6.
-        const { result, duration_ms } = await racedTimePhase(() => runPhaseSync(engine, brainDir, dryRun, pull, phases.includes('extract'), opts.sourceId ? opts.privateQueueOwnerJobId ?? undefined : undefined));
+        const { result, duration_ms } = await racedTimePhase(() => runPhaseSync(engine, brainDir, dryRun, pull, phases.includes('extract'), opts.privateQueueOwnerJobId ?? undefined));
         result.duration_ms = duration_ms;
         // Capture changed slugs for incremental extract.
         syncPagesAffected = (result as SyncPhaseResult).pagesAffected;

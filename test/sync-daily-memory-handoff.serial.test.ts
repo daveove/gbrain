@@ -71,7 +71,7 @@ describe('standalone sync daily-memory durable handoff', () => {
         if (mode === 'filesystem-sync') {
           expect(result.report.phases.some((phase: { phase: string; status: string }) => phase.phase === 'sync' && phase.status !== 'skipped')).toBe(true);
           expect(batches).toHaveLength(1);
-          expect(batches[0]!.data.daily_memory_dates).toEqual([day]);
+          expect(batches[0]!.data.daily_memory_dates).toEqual([day, '2026-01-03', '2026-01-04']);
           expect(batches[0]!.data.daily_memory_source_job_id).toBe(job.id);
           expect(retained).toHaveLength(0);
         } else {
@@ -195,7 +195,7 @@ describe('standalone sync daily-memory durable handoff', () => {
     });} finally {rmSync(home,{recursive:true,force:true});}
   });
 
-  test('legacy queued cycle without a source owner accepts standalone old and new filename days',async () => {
+  test('legacy queued cycle owns one handoff for old and new filename days',async () => {
     const home=mkdtempSync(join(tmpdir(),'gbrain-cycle-days-home-'));
     try {await withEnv({GBRAIN_HOME:home},async () => {
       const fixture=await filenameCycleFixture(false);
@@ -204,7 +204,7 @@ describe('standalone sync daily-memory durable handoff', () => {
       const batches=await engine.executeRaw<{data:{daily_memory_dates:string[];daily_memory_source_job_id:number}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
       expect(batches).toHaveLength(1);
       expect(batches[0]!.data.daily_memory_dates).toEqual(expect.arrayContaining(['2026-01-06','2026-01-07']));
-      expect(batches[0]!.data.daily_memory_source_job_id).not.toBe(fixture.job.id);
+      expect(batches[0]!.data.daily_memory_source_job_id).toBe(fixture.job.id);
       expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op IN ('sync-daily-memory','autopilot-sync-daily-memory')")).toHaveLength(0);
     });} finally {rmSync(home,{recursive:true,force:true});}
   });
