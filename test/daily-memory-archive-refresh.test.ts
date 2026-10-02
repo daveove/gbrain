@@ -185,6 +185,27 @@ describe('daily memory refresh on source archive/restore', () => {
     }
   });
 
+  test('page mutation refresh keeps the timezone captured with priorDays', async () => {
+    const sourceId = 'page-mutation-tz', day = '2026-09-28', slug = 'notes/tz-day';
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Page mutation tz fixture')", [sourceId]);
+    await engine.putPage(slug, {
+      type: 'note', title: 'Fixture', compiled_truth: 'Body', frontmatter: { date: day },
+    }, { sourceId });
+    await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
+    const days = await refreshDailyMemoryAfterPageMutation(engine, {
+      sourceId, slug, operation: 'put_page', requestId: '33333333-3333-4333-8333-333333333333',
+      priorDays: ['2026-09-27'], timezone: 'UTC',
+    });
+    expect(days).toEqual(expect.arrayContaining(['2026-09-27', day]));
+    const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'",
+    );
+    expect(jobs.some(j => j.data.daily_memory_timezone === 'UTC' && (
+      j.data.daily_memory_date === '2026-09-27' || (Array.isArray(j.data.daily_memory_dates) && j.data.daily_memory_dates.includes('2026-09-27'))
+    ))).toBe(true);
+  });
+
   test('CLI removal rolls back its accepted first child when the settlement handoff fails', async () => {
     const sourceId = 'remove-atomic', day = '2026-09-30';
     await engine.executeRaw("INSERT INTO sources(id,name) VALUES($1,'Remove fixture')", [sourceId]);

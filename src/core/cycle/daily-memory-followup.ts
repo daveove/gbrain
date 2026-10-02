@@ -324,14 +324,17 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 /** Accept historical index work inside the page publication transaction. */
 export async function refreshDailyMemoryAfterPageMutation(
   engine: BrainEngine,
-  opts: { sourceId: string; slug: string; operation: string; requestId: string; priorDays?: string[] },
+  opts: { sourceId: string; slug: string; operation: string; requestId: string; priorDays?: string[]; timezone?: string },
 ): Promise<string[]> {
   if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
   if (!['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(opts.operation)) return [];
   if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
     throw new Error('Invalid prior daily memory dates');
   }
-  const timezone = await resolveCycleTimeZone(engine);
+  // Prefer the timezone captured with priorDays so a mid-handoff cycle.timezone
+  // flip cannot rewrite old-zone days with new-zone filters.
+  const timezone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
+    : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
   const days = [...new Set([...(opts.priorDays ?? []),
     ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone })])].sort();
   if (!days.length) return [];
