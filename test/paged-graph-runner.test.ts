@@ -120,6 +120,50 @@ describe('paged measure cursor and archived endpoints', () => {
     expect(saved.cursor).toBe(lateId);
   });
 
+  test('same-source links use ownership; checkpoint stores only cross-source ids', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES
+         ('own-a', 'own-a', false),
+         ('own-b', 'own-b', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false, name = EXCLUDED.name`,
+    );
+    await engine.putPage('topics/own-early', {
+      title: 'Early', compiled_truth: 'early', type: 'note',
+    }, { sourceId: 'own-a' });
+    await engine.putPage('topics/own-late', {
+      title: 'Late', compiled_truth: 'late', type: 'note',
+    }, { sourceId: 'own-a' });
+    await engine.putPage('topics/own-other', {
+      title: 'Other', compiled_truth: 'other', type: 'note',
+    }, { sourceId: 'own-b' });
+    await engine.addLink(
+      'topics/own-early', 'topics/own-late', 'same', 'related_to', 'manual',
+      undefined, undefined,
+      { fromSourceId: 'own-a', toSourceId: 'own-a' },
+    );
+    await engine.addLink(
+      'topics/own-late', 'topics/own-other', 'cross', 'related_to', 'manual',
+      undefined, undefined,
+      { fromSourceId: 'own-a', toSourceId: 'own-b' },
+    );
+    const checkpointPath = join(dir, 'ownership-checkpoint.json');
+    const report = await runPagedMeasure(engine, {
+      sourceId: 'own-a',
+      cursor: 0,
+      limit: 1,
+      checkpointPath,
+    });
+    expect(report.link_rows).toBe(2);
+    expect(report.valid_links).toBe(2);
+    expect(report.seen_link_ids).toHaveLength(1);
+    const saved = JSON.parse(readFileSync(checkpointPath, 'utf8')) as {
+      seen_link_ids: number[];
+      link_rows: number;
+    };
+    expect(saved.seen_link_ids).toEqual(report.seen_link_ids);
+    expect(saved.link_rows).toBe(2);
+  });
+
   test('rejects a higher --cursor against a completed checkpoint', async () => {
     const checkpointPath = join(dir, 'done-gap-checkpoint.json');
     const gapWatermark = await readPagedSourceMutationWatermark(engine, 'paged-resume');

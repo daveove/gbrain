@@ -63,7 +63,7 @@ describe('graph fingerprint session-independent timestamp format', () => {
   });
 
   for (const done of [false, true]) {
-    for (const oldFormat of [undefined, 2, 3]) {
+    for (const oldFormat of [undefined, 2, 3, 4]) {
       test(`refuses ${done ? 'done' : 'partial'} checkpoint with ${oldFormat === undefined ? 'missing' : 'old'} fingerprint format`, async () => {
         const freshPath = join(dir, `fresh-${done}-${oldFormat}.json`);
         await runPagedMeasure(engine, { sourceId: 'default', cursor: 0, limit: 1, checkpointPath: freshPath });

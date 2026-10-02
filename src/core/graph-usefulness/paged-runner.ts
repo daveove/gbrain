@@ -21,12 +21,13 @@ export interface PagedScanOpts {
   checkpointPath: string;
 }
 
-/** Paged measure result plus the link ids counted in this walk. */
+/** Paged measure result plus cross-source link ids for multi-source combine. */
 export interface PagedMeasureResult extends GraphMeasureResult {
+  /** Incident links with an endpoint outside this source. Same-source ids are omitted. */
   seen_link_ids: number[];
 }
 
-export const PAGED_FINGERPRINT_FORMAT = 4;
+export const PAGED_FINGERPRINT_FORMAT = 5;
 
 interface Checkpoint {
   fingerprint_format: typeof PAGED_FINGERPRINT_FORMAT;
@@ -40,6 +41,10 @@ interface Checkpoint {
   zero_degree_pages: number;
   degree_counts: Record<string, number>;
   junk: Record<string, { count: number; examples: string[] }>;
+  /**
+   * Cross-source link ids only. Same-source links use deterministic endpoint
+   * ownership, so the checkpoint never rewrites the full incident edge set.
+   */
   seen_link_ids: number[];
   /**
    * Rolling sha256 hex of page and link identity lines seen so far.
@@ -90,7 +95,7 @@ function intId(value: number | string): number {
 
 /** Prefix for one source. Later rows fold in with `rollHash`. */
 export function initialIdentityHash(sourceId: string): string {
-  return createHash('sha256').update('paged-measure-v4\n').update(sourceId).digest('hex');
+  return createHash('sha256').update('paged-measure-v5\n').update(sourceId).digest('hex');
 }
 
 /** Fold one identity line into the running digest. The hex is what we persist. */
@@ -267,7 +272,7 @@ function resultFromCheckpoint(checkpoint: Checkpoint): PagedMeasureResult {
     zero_degree_pages: checkpoint.zero_degree_pages,
   };
   const sha256 = createHash('sha256')
-    .update('paged-measure-v4\n')
+    .update('paged-measure-v5\n')
     .update(JSON.stringify({
       source_id: checkpoint.source_id,
       mutation_watermark: checkpoint.mutation_watermark,
@@ -335,9 +340,11 @@ function linkLine(link: LinkRow): string {
  * matches. Live edges require both endpoint pages undeleted and both
  * endpoint sources not archived.
  *
- * The fingerprint rolls a sha256 once per live page and once per newly seen
- * live link. Page and chunk revisions are read for the current id batch
- * only, so a source is never loaded in one statement.
+ * The fingerprint rolls a sha256 once per live page and once per newly owned
+ * live link. Same-source links belong to min(from,to); only cross-source link
+ * ids are checkpointed for multi-source combine. Page and chunk revisions are
+ * read for the current id batch only, so a source is never loaded in one
+ * statement.
  */
 export async function runPagedMeasure(
   engine: BrainEngine,
@@ -374,7 +381,8 @@ export async function runPagedMeasure(
       opts.sourceId,
     );
   }
-  const seen = new Set(checkpoint.seen_link_ids);
+  // Cross-source ids only; same-source links dedupe via deterministic ownership.
+  const crossSourceSeen = new Set(checkpoint.seen_link_ids);
 
   for (;;) {
     const pages = await engine.executeRaw<PageRow>(
@@ -458,11 +466,13 @@ export async function runPagedMeasure(
         if (degree.has(fromId)) degree.set(fromId, (degree.get(fromId) ?? 0) + 1);
         if (degree.has(toId)) degree.set(toId, (degree.get(toId) ?? 0) + 1);
       }
-      const linkId = intId(link.id);
-      if (seen.has(linkId)) continue;
-      const owners = liveIds.filter(id => id === fromId || id === toId);
-      if (owners.length === 0) continue;
-      const owner = Math.min(...owners);
+      const sameSource =
+        link.from_source_id === opts.sourceId && link.to_source_id === opts.sourceId;
+      // Same-source: one owner across batches. Cross-source: the in-source end.
+      const owner = sameSource
+        ? Math.min(fromId, toId)
+        : Math.min(...[fromId, toId].filter(id => degree.has(id)));
+      if (!Number.isFinite(owner) || !degree.has(owner)) continue;
       firstSeen.get(owner)?.push(link);
     }
 
@@ -476,8 +486,12 @@ export async function runPagedMeasure(
         .sort((a, b) => intId(a.id) - intId(b.id));
       for (const link of fresh) {
         const linkId = intId(link.id);
-        if (seen.has(linkId)) continue;
-        seen.add(linkId);
+        const crossSource =
+          link.from_source_id !== opts.sourceId || link.to_source_id !== opts.sourceId;
+        if (crossSource) {
+          if (crossSourceSeen.has(linkId)) continue;
+          crossSourceSeen.add(linkId);
+        }
         checkpoint.link_rows += 1;
         checkpoint.valid_links += 1;
         checkpoint.identity_hash = rollHash(checkpoint.identity_hash, linkLine(link));
@@ -492,7 +506,7 @@ export async function runPagedMeasure(
     }
 
     checkpoint.cursor = intId(pages[pages.length - 1].id);
-    checkpoint.seen_link_ids = [...seen];
+    checkpoint.seen_link_ids = [...crossSourceSeen];
     await assertCheckpointWatermark(engine, checkpoint);
     writeCheckpoint(opts.checkpointPath, checkpoint);
   }

@@ -559,12 +559,20 @@ function combinePagedFingerprints(
 ): Awaited<ReturnType<typeof computeGraphFingerprint>> {
   const ordered = [...parts].sort((a, b) => a.sourceId.localeCompare(b.sourceId));
   if (ordered.length === 1) return ordered[0]!.fingerprint;
-  // Cross-source edges are incident to both walks. Deduplicate link ids before
-  // summing link_rows / valid_links so an A-to-B apply bumps counts by 1.
-  const linkIds = new Set<number>();
+  // seen_link_ids holds cross-source edges only. Same-source counts come from
+  // each walk's link_rows minus its cross-source id list; union the cross ids
+  // so an A-to-B edge bumps the combined total by 1.
+  const crossIds = new Set<number>();
+  let sameSourceLinks = 0;
   for (const part of ordered) {
-    for (const id of part.seen_link_ids) linkIds.add(id);
+    const cross = new Set(part.seen_link_ids);
+    for (const id of cross) crossIds.add(id);
+    sameSourceLinks += part.fingerprint.link_rows - cross.size;
   }
+  if (sameSourceLinks < 0) {
+    throw new Error('Paged combine saw more cross-source ids than link_rows');
+  }
+  const linkCount = sameSourceLinks + crossIds.size;
   const sha256 = createHash('sha256')
     .update('paged-measure-sources-v2\n')
     .update(JSON.stringify(ordered.map(part => ({
@@ -576,8 +584,8 @@ function combinePagedFingerprints(
     ordered.reduce((total, part) => total + part.fingerprint[key], 0);
   return {
     active_pages: sum('active_pages'),
-    link_rows: linkIds.size,
-    valid_links: linkIds.size,
+    link_rows: linkCount,
+    valid_links: linkCount,
     zero_degree_pages: sum('zero_degree_pages'),
     sha256,
   };
