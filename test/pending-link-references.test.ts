@@ -1031,5 +1031,5 @@ test('default inline budget exhausted during metadata queues an empty cursor wit
   finally { metadata.mockRestore(); now.mockRestore(); }
   expect(await loadPendingLinkReferences(engine)).toEqual(rows);
   const [job] = await engine.executeRaw<{ data: { pending_after: string } }>("SELECT data FROM minion_jobs WHERE data->>'reason'='pending_target_scan_continuation'");
-  expect(job.data.pending_after).toBe('');
+  expect(job).toBeDefined(); expect(job.data.pending_after).toBe('');
 });
