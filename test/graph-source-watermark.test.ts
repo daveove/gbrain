@@ -8,6 +8,7 @@ import { SEARCH_MODE_KEY, SEARCH_MODE_CONFIG_KEYS } from '../src/core/search/mod
 import { PROOF_SEARCH_RAW_KEYS } from '../src/core/graph-usefulness/search-pin.ts';
 import { computeGraphFingerprint } from '../src/core/graph-usefulness/fingerprint.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { sealPageTextProjection } from '../src/core/page-state/projections.ts';
 import { readPagedSourceMutationWatermark, runPagedMeasure } from '../src/core/graph-usefulness/paged-runner.ts';
 
 function generation(watermark: string): bigint { return BigInt(watermark.split(':')[1]!); }
@@ -128,8 +129,9 @@ describe('incident-source graph watermarks', () => {
     const a = 'incarnation-neighbor', b = 'incarnation-endpoint';
     for (const source of [a, b]) {
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [source]);
-      // Synthetic legacy rows have no version or writer-guard children retaining an old incarnation.
+      // Seal the raw fixture so pending projection jobs release the old incarnation.
       await engine.executeRaw("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,'notes/endpoint','note','Synthetic endpoint','Synthetic graph content')", [source]);
+      await sealPageTextProjection(engine, 'notes/endpoint', source);
     }
     await engine.executeRaw(`INSERT INTO links(from_page_id,to_page_id,link_type,link_source)
       SELECT a.id,b.id,'related_to','manual' FROM pages a,pages b WHERE a.source_id=$1 AND b.source_id=$2`, [a, b]);
@@ -137,10 +139,10 @@ describe('incident-source graph watermarks', () => {
     for (const [i, sourceId] of [a, b].entries()) {
       await runPagedMeasure(engine, { sourceId, cursor: 0, limit: 1, checkpointPath: paths[i]! });
     }
-    const beforeNeighbor = await computeGraphFingerprint(engine, { sourceId: a });
+    const beforeFederated = await computeGraphFingerprint(engine, { sourceIds: [a, b] });
     const beforeOwn = await computeGraphFingerprint(engine, { sourceId: b });
     await engine.executeRaw('UPDATE sources SET incarnation=gen_random_uuid() WHERE id=$1', [b]);
-    expect((await computeGraphFingerprint(engine, { sourceId: a })).sha256).not.toBe(beforeNeighbor.sha256);
+    expect((await computeGraphFingerprint(engine, { sourceIds: [a, b] })).sha256).not.toBe(beforeFederated.sha256);
     expect((await computeGraphFingerprint(engine, { sourceId: b })).sha256).not.toBe(beforeOwn.sha256);
     for (const [i, sourceId] of [a, b].entries()) {
       await expect(runPagedMeasure(engine, { sourceId, cursor: 0, limit: 1, checkpointPath: paths[i]! })).rejects.toThrow(/Corpus mutated/);
@@ -153,6 +155,7 @@ describe('incident-source graph watermarks', () => {
     for (const source of sources) {
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [source]);
       await engine.executeRaw("INSERT INTO pages(source_id,slug,type,title,compiled_truth) VALUES($1,'notes/endpoint','note','Synthetic endpoint','Synthetic content')", [source]);
+      await sealPageTextProjection(engine, 'notes/endpoint', source);
     }
     await engine.executeRaw(`INSERT INTO links(from_page_id,to_page_id,origin_page_id,link_type,link_source)
       SELECT a.id,b.id,o.id,'related_to','manual' FROM pages a,pages b,pages o
@@ -160,11 +163,12 @@ describe('incident-source graph watermarks', () => {
     const paths = sources.slice(0,2).map(source => join(dir, source+'.json'));
     for (const [i, sourceId] of sources.slice(0,2).entries()) await runPagedMeasure(engine, { sourceId, cursor: 0, limit: 1, checkpointPath: paths[i]! });
     const originId = (await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [sources[2]]))[0]!.incarnation;
-    const before = await computeGraphFingerprint(engine, { sourceId: sources[0] });
+    const before = await computeGraphFingerprint(engine, { sourceId: sources[1] });
     await engine.executeRaw("UPDATE pages SET slug='notes/origin-renamed' WHERE source_id=$1", [sources[2]]);
-    expect((await computeGraphFingerprint(engine, { sourceId: sources[0] })).sha256).not.toBe(before.sha256);
+    expect((await computeGraphFingerprint(engine, { sourceId: sources[1] })).sha256).not.toBe(before.sha256);
     await engine.executeRaw("UPDATE pages SET slug='notes/endpoint' WHERE source_id=$1", [sources[2]]);
     for (const [i, sourceId] of sources.slice(0,2).entries()) await expect(runPagedMeasure(engine, { sourceId, cursor: 0, limit: 1, checkpointPath: paths[i]! })).rejects.toThrow(/Corpus mutated/);
+    await sealPageTextProjection(engine, 'notes/endpoint', sources[2]!);
     _setRetrievalProofSearchForTests(async () => {
       await engine.executeRaw('UPDATE sources SET incarnation=gen_random_uuid() WHERE id=$1', [sources[2]]);
       await engine.executeRaw('UPDATE sources SET incarnation=$1 WHERE id=$2', [originId, sources[2]]);
