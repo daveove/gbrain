@@ -292,6 +292,29 @@ test('scheduled lookback recovers days missed since watermark', async () => {
   });
 });
 
+test('capped scheduled lookback advances watermark only through drained backlog', async () => {
+  await seed('2026-09-20', 'notes/oneshot-cap-a');
+  await seed('2026-09-21', 'notes/oneshot-cap-b');
+  await seed('2026-09-22', 'notes/oneshot-cap-c');
+  await seed('2026-09-23', 'notes/oneshot-cap-d');
+  await seed('2026-09-29', 'notes/oneshot-cap-prev');
+  await seed('2026-09-30', 'notes/oneshot-cap-sel');
+  await engine.setConfig('cycle.daily_memory_last_lookback_day', '2026-09-20');
+  await withEnv({ GBRAIN_DAILY_MEMORY_LOOKBACK: '1', GBRAIN_DAILY_MEMORY_LOOKBACK_DAYS: '3' }, async () => {
+    const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+      extract: noExtract,
+      now: () => new Date('2026-09-30T12:00:00Z'),
+    });
+    expect(result.day).toBe('2026-09-30');
+    expect((await engine.getPage('daily-memory/2026-09-20', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-cap-a]]');
+    expect((await engine.getPage('daily-memory/2026-09-22', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-cap-c]]');
+    expect(await engine.getPage('daily-memory/2026-09-23', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+    expect(await engine.getConfig('cycle.daily_memory_last_lookback_day')).toBe('2026-09-22');
+  });
+});
+
 test('today includes its capped record indexes but leaves a human reference untouched', async () => {
   await engine.executeRaw(`CREATE TABLE source_records (
     id text PRIMARY KEY, source_type text, source_ref text, entity_type text,
