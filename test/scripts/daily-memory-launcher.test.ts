@@ -15,6 +15,7 @@ function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asi
   homes.push(home);
   mkdirSync(join(home, '.local/bin'), { recursive: true });
   mkdirSync(join(home, '.gbrain'), { recursive: true });
+  mkdirSync(join(home, '.codex/sessions'), { recursive: true });
   const config = join(home, '.gbrain/config.json');
   const original = `${JSON.stringify({ database_url: 'postgres://example:example@127.0.0.1:5432/example', ...configExtra })}\n`;
   writeFileSync(config, original);
@@ -430,6 +431,20 @@ finally:
     expect(result.calls[0].tz).toBe('UTC');
     expect(result.calls[0].zone).toBe('UTC');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
+  });
+
+  it('retains the watermark and skips writing when the sessions root disappears', () => {
+    const { home, run } = fixture();
+    const state = join(home, '.local/state/gbrain');
+    mkdirSync(state, { recursive: true });
+    const watermark = join(state, 'daily-memory-codex-mtime');
+    const prior = '2026-09-28T00:00:00Z\n';
+    writeFileSync(watermark, prior);
+    rmSync(join(home, '.codex/sessions'), { recursive: true });
+    const result = run();
+    expect(result.code).not.toBe(0);
+    expect(result.calls).toHaveLength(0);
+    expect(readFileSync(watermark, 'utf8')).toBe(prior);
   });
 
   it('exits nonzero when a selected Codex transcript cannot be read', () => {

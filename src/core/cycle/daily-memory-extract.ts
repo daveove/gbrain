@@ -1,5 +1,5 @@
 /** Bounded dream-index extraction shared by one-shot and inline autopilot. */
-import type { BrainEngine } from '../engine.ts';
+import type { BrainEngine, PageSnapshot } from '../engine.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
 import {
   DAILY_MEMORY_SOURCE_ID,
@@ -24,10 +24,22 @@ export async function extractOneShotDailyMemory(
   if (!result.written && !result.needs_extract) return;
   const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
   const budget = deps.timeBudgetMs ?? 60_000;
+  const originGuard = async (snapshot: PageSnapshot) => {
+    const page = snapshot.page;
+    if (page.source_id !== DAILY_MEMORY_SOURCE_ID || page.frontmatter.dream_generated !== true) return false;
+    if (!/^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(page.slug)
+      && !(page.slug.startsWith('source-records/') && ['source_record_id', 'source_record_type', 'source_record_ref']
+        .every(key => Object.hasOwn(page.frontmatter, key)))) return false;
+    const [source] = await engine.executeRaw<{ owned: boolean }>(`SELECT archived IS NOT TRUE AND
+      (config @> '{"system_index":true}'::jsonb OR
+        (name='Dream cycle indexes' AND config @> '{"federated":false}'::jsonb)) AS owned
+      FROM sources WHERE id=$1`, [DAILY_MEMORY_SOURCE_ID]);
+    return source?.owned === true;
+  };
   const runTargets = async (slugs: readonly string[], timeBudgetMs: number) => {
     const extracted = await extract(engine, {
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
-      slugs, catchUp: false, timeBudgetMs, signal: deps.signal,
+      slugs, originGuard, catchUp: false, timeBudgetMs, signal: deps.signal,
     });
     if (extracted.staleRemaining > 0) {
       throw new Error(`Daily memory extraction needs retry: ${extracted.staleRemaining} selected daily-index pages remain`);

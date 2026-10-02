@@ -47,7 +47,9 @@ def scandir_sorted(directory: pathlib.Path):
     """List directory entries; surface OSError instead of Path.glob suppression."""
     try:
         return sorted(os.scandir(directory), key=lambda entry: entry.name)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if directory == root:
+            fail_scan('list', directory, exc)
         return []
     except OSError as exc:
         fail_scan('list', directory, exc)
@@ -123,6 +125,12 @@ for directory in directories:
         # run / today's start so late evening messages converge on the next run.
         if meta_in_window or (mtime_floor <= mtime < end):
             selected.append(path)
+
+# A missing root during traversal is not a clean empty scan.
+try:
+    root.stat()
+except OSError as exc:
+    fail_scan('stat', root, exc)
 
 for path in selected:
     # A 00:00-07:59 Manila session lives in the previous UTC folder. Ingest

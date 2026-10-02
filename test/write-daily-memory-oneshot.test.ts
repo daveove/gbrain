@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
@@ -50,7 +50,7 @@ test('one-shot writer runs exact-target extract in-process and queues no Minions
   expect(calls).toHaveLength(1);
   expect(calls[0]).toEqual({
     dryRun: false, jsonMode: true, quiet: true,
-    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], catchUp: false, timeBudgetMs: 60_000,
+    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], originGuard: expect.any(Function), catchUp: false, timeBudgetMs: 60_000,
     signal: controller.signal,
   });
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
@@ -324,3 +324,49 @@ test('historical one-shot exhausted budget reports retained generated debt witho
     [DAILY_MEMORY_SOURCE_ID])).toEqual(before);
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
+
+for (const timing of ['before snapshot', 'after snapshot'] as const) {
+  test(`exact-target extraction preserves human replacement ${timing}`, async () => {
+    await ensureDailyMemorySource(engine);
+    const slug = 'daily-memory/2026-09-30';
+    await engine.putPage('notes/old-target', { type: 'note', title: 'Old target', compiled_truth: '' });
+    await engine.putPage('notes/new-target', { type: 'note', title: 'New target', compiled_truth: '' });
+    await engine.putPage(slug, { type: 'note', title: 'Generated', compiled_truth: '[[default:notes/new-target]]',
+      frontmatter: { dream_generated: true } }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.addLink(slug, 'notes/old-target', '', 'related_to', 'markdown', slug, undefined,
+      { fromSourceId: DAILY_MEMORY_SOURCE_ID, toSourceId: 'default', originSourceId: DAILY_MEMORY_SOURCE_ID });
+    const replaceHuman = () => engine.putPage(slug, { type: 'note', title: 'Human',
+      compiled_truth: '[[default:notes/new-target]]', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    const originalRead = engine.readPageSnapshot.bind(engine);
+    let injected = false;
+    const spy = spyOn(engine, 'readPageSnapshot').mockImplementation(async (target, opts) => {
+      if (target !== slug || injected) return originalRead(target, opts);
+      // Inject only when the stale scan has selected the row, not during its initial count.
+      if (!selected) return originalRead(target, opts);
+      injected = true;
+      if (timing === 'before snapshot') await replaceHuman();
+      const snapshot = await originalRead(target, opts);
+      if (timing === 'after snapshot') await replaceHuman();
+      return snapshot;
+    });
+    let selected = false;
+    const originalList = engine.listStalePagesForExtraction.bind(engine);
+    const listSpy = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
+      const rows = await originalList(opts); selected = rows.length > 0; return rows;
+    });
+    const beforeLinks = await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(beforeLinks.some(link => link.to_slug === 'notes/old-target' && link.link_source === 'markdown')).toBe(true);
+    const beforeMark = await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+      [DAILY_MEMORY_SOURCE_ID, slug]);
+    try {
+      const run = extractOneShotDailyMemory(engine, { written: true, extract_slugs: [slug] });
+      if (timing === 'after snapshot') await expect(run).rejects.toThrow('changed');
+      else await run;
+      expect(injected).toBe(true);
+      expect(await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual(beforeLinks);
+      expect(await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+        [DAILY_MEMORY_SOURCE_ID, slug])).toEqual(beforeMark);
+      expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.frontmatter.dream_generated).toBeUndefined();
+    } finally { spy.mockRestore(); listSpy.mockRestore(); }
+  });
+}
