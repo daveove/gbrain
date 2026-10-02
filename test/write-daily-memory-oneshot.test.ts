@@ -184,7 +184,7 @@ test('selected extraction honors empty targets, missing targets and source ident
   expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
-test('human day with needs_extract falls back to a bounded dream-source sweep', async () => {
+test('human day with needs_extract retries only stale generated historical targets', async () => {
   await ensureDailyMemorySource(engine);
   await engine.putPage('daily-memory/2026-09-28', {
     type: 'note', title: 'Old index', compiled_truth: '', frontmatter: { dream_generated: true },
@@ -198,14 +198,15 @@ test('human day with needs_extract falls back to a bounded dream-source sweep', 
     extract: async (_engine, opts) => {
       called++;
       sawSlugs = opts.slugs;
-      return noExtract(_engine, opts);
+      return extractStaleFromDB(_engine, opts);
     },
   });
   expect(result.reason).toBe('human_page');
   expect(result.needs_extract).toBe(true);
   expect(result.extract_slugs?.length ?? 0).toBe(0);
   expect(called).toBe(1);
-  expect(sawSlugs).toBeUndefined();
+  expect(sawSlugs).toEqual(['daily-memory/2026-09-28']);
+  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
 test('today includes its capped record indexes but leaves a human reference untouched', async () => {
@@ -229,4 +230,53 @@ test('today includes its capped record indexes but leaves a human reference unto
   );
   expect(human?.stamp).toBeNull();
   expect((await engine.getPage(reference, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.title).toBe('Human reference');
+});
+
+
+test('historical one-shot recovery preserves same-source human graph and watermark', async () => {
+  await ensureDailyMemorySource(engine);
+  for (const slug of ['notes/human-target', 'notes/historical-target']) {
+    await engine.putPage(slug, { type: 'note', title: 'Synthetic target', compiled_truth: 'Synthetic fixture' });
+  }
+  const historical = 'daily-memory/2026-09-28';
+  await engine.putPage(historical, { type: 'note', title: 'Generated historical index',
+    compiled_truth: '[[default:notes/historical-target]]', frontmatter: { dream_generated: true } },
+    { sourceId: DAILY_MEMORY_SOURCE_ID });
+  const humanSlugs = ['daily-memory/2026-09-30', 'source-records/human-reference'];
+  for (const slug of humanSlugs) await engine.putPage(slug, {
+    type: 'note', title: 'Human-owned fixture', compiled_truth: '[[default:notes/human-target]]', frontmatter: {},
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  const humanState = async () => Promise.all(humanSlugs.map(async slug => ({
+    snapshot: await engine.readPageSnapshot(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }),
+    graph: await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }),
+    watermark: await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+      [DAILY_MEMORY_SOURCE_ID, slug]),
+  })));
+  const before = await humanState();
+  const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
+  expect(result.reason).toBe('human_page');
+  expect(result.extract_slugs).toBeUndefined();
+  expect((await engine.getLinks(historical, { sourceId: DAILY_MEMORY_SOURCE_ID })).some(link =>
+    link.to_slug === 'notes/historical-target' && link.to_source_id === 'default')).toBe(true);
+  expect(await humanState()).toEqual(before);
+  // Remaining human watermarks neither become extraction targets nor fail the owned retry.
+  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(2);
+  expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+});
+
+test('historical one-shot exhausted budget reports retained generated debt without touching human pages', async () => {
+  await ensureDailyMemorySource(engine);
+  await engine.putPage('daily-memory/2026-09-28', {
+    type: 'note', title: 'Historical fixture', compiled_truth: '', frontmatter: { dream_generated: true },
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  await engine.putPage('daily-memory/2026-09-30', {
+    type: 'note', title: 'Human-owned fixture', compiled_truth: 'Preserve synthetic human fixture', frontmatter: {},
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  const before = await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
+    [DAILY_MEMORY_SOURCE_ID]);
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', { timeBudgetMs: 0 }))
+    .rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+  expect(await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
+    [DAILY_MEMORY_SOURCE_ID])).toEqual(before);
+  expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });

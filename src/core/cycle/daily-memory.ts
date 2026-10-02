@@ -240,18 +240,37 @@ function renderNote(day: string, input: RenderInput): string {
   return lines.join('\n');
 }
 
+// Shared ownership and staleness contract for historical one-shot retries.
+const GENERATED_STALE_INDEXES = `FROM pages JOIN sources s ON s.id=pages.source_id
+  WHERE source_id=$1 AND s.archived IS NOT TRUE AND deleted_at IS NULL
+  AND (s.config @> '{"system_index":true}'::jsonb
+    OR (s.name='Dream cycle indexes' AND s.config @> '{"federated":false}'::jsonb))
+  AND frontmatter @> '{"dream_generated":true}'::jsonb
+  AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
+    AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
+  AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
+    OR updated_at > links_extracted_at)`;
+
 async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
   const [historical] = await engine.executeRaw<{ needed: boolean }>(
-    `SELECT EXISTS (SELECT 1 FROM pages JOIN sources s ON s.id=pages.source_id
-      WHERE source_id=$1 AND s.archived IS NOT TRUE AND deleted_at IS NULL
-      AND (s.config @> '{"system_index":true}'::jsonb
-        OR (s.name='Dream cycle indexes' AND s.config @> '{"federated":false}'::jsonb))
-      AND frontmatter @> '{"dream_generated":true}'::jsonb
-      AND (slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$' OR (slug LIKE 'source-records/%'
-        AND frontmatter ?& ARRAY['source_record_id','source_record_type','source_record_ref']))
-      AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
-        OR updated_at > links_extracted_at)) AS needed`, [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+    `SELECT EXISTS (SELECT 1 ${GENERATED_STALE_INDEXES}) AS needed`,
+    [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
   return historical.needed;
+}
+
+/** Metadata-only keyset for stale generated indexes, excluding human pages. */
+export async function dailyMemoryExtractTargets(engine: BrainEngine, after = ''): Promise<string[]> {
+  const rows = await engine.executeRaw<{ slug: string }>(
+    `SELECT slug ${GENERATED_STALE_INDEXES} AND slug>$3 ORDER BY slug LIMIT 25`,
+    [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS, after]);
+  return rows.map(row => row.slug);
+}
+
+export async function countDailyMemoryExtractTargets(engine: BrainEngine): Promise<number> {
+  const [row] = await engine.executeRaw<{ remaining: number | string }>(
+    `SELECT COUNT(*) AS remaining ${GENERATED_STALE_INDEXES}`,
+    [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
+  return Number(row.remaining);
 }
 
 /**
