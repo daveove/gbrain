@@ -8,13 +8,14 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-codex-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null };
 
 function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
   homes.push(home);
   mkdirSync(join(home, '.local/bin'), { recursive: true });
   mkdirSync(join(home, '.gbrain'), { recursive: true });
+  mkdirSync(join(home, '.codex/sessions'), { recursive: true });
   const config = join(home, '.gbrain/config.json');
   const original = `${JSON.stringify({ database_url: 'postgres://example:example@127.0.0.1:5432/example', ...configExtra })}\n`;
   writeFileSync(config, original);
@@ -34,7 +35,7 @@ if kind == 'tz':
         print(value, end='')
     sys.exit(0)
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK')}) + '\\n')
 if kind == 'resolve':
     if os.environ.get('TEST_RESOLVE_FAIL') == '1':
         print('fixture config resolver failed', file=sys.stderr)
@@ -212,6 +213,7 @@ finally:
     expect(args).not.toContain(input.after);
     expect(result.calls[1].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), input.day]);
     expect(result.calls[1].zone).toBe('Asia/Manila');
+    expect(result.calls[1].lookback).toBe('1');
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
@@ -338,6 +340,7 @@ finally:
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), '2026-09-29']);
+    expect(result.calls[0].lookback).toBeFalsy();
     // Backfill must not advance the Codex mtime watermark.
     expect(readFileSync(mark, 'utf8')).toBe(before);
   });
@@ -406,6 +409,7 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].tz).toBe('Asia/Manila');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date())]);
+    expect(result.calls[0].lookback).toBe('1');
   });
 
   it('uses brain DB cycle.timezone when the file plane omits it', () => {
@@ -429,6 +433,20 @@ finally:
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), day]);
   });
 
+  it('retains the watermark and skips writing when the sessions root disappears', () => {
+    const { home, run } = fixture();
+    const state = join(home, '.local/state/gbrain');
+    mkdirSync(state, { recursive: true });
+    const watermark = join(state, 'daily-memory-codex-mtime');
+    const prior = '2026-09-28T00:00:00Z\n';
+    writeFileSync(watermark, prior);
+    rmSync(join(home, '.codex/sessions'), { recursive: true });
+    const result = run();
+    expect(result.code).not.toBe(0);
+    expect(result.calls).toHaveLength(0);
+    expect(readFileSync(watermark, 'utf8')).toBe(prior);
+  });
+
   it('exits nonzero when a selected Codex transcript cannot be read', () => {
     const { home } = fixture();
     const input = todayInputs(home);
@@ -448,6 +466,27 @@ finally:
     expect(result.status).not.toBe(0);
     expect(result.stderr).toMatch(/cannot (stat|read)/);
     try { chmodSync(broken, 0o644); } catch { /* ignore */ }
+  });
+
+  it('exits nonzero when the Codex sessions root is absent', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const sessions = join(home, '.codex/sessions');
+    rmSync(sessions, { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, sessions, input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cannot list/);
+  });
+
+  it('treats an absent child day directory as empty, not a root failure', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Remove only the currentUtc day folder; an existing sessions root must still succeed.
+    rmSync(dirname(input.currentUtc), { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    const selected = result.stdout.split('\0').filter(Boolean);
+    expect(selected).not.toContain(input.currentUtc);
   });
 
   it('exits nonzero when a session day directory cannot be listed', () => {

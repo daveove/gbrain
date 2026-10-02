@@ -43,12 +43,19 @@ def fail_scan(action: str, target: pathlib.Path, exc: BaseException) -> None:
     raise SystemExit(1)
 
 
-def scandir_sorted(directory: pathlib.Path):
-    """List directory entries; surface OSError instead of Path.glob suppression."""
+def scandir_sorted(directory: pathlib.Path, *, missing_ok: bool = True):
+    """List directory entries; surface OSError instead of Path.glob suppression.
+
+    missing_ok=True (default): a child that disappears mid-walk is empty.
+    missing_ok=False: the top-level sessions root must exist or the selector
+    fails closed so the launcher keeps the prior mtime watermark.
+    """
     try:
         return sorted(os.scandir(directory), key=lambda entry: entry.name)
-    except FileNotFoundError:
-        return []
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return []
+        fail_scan('list', directory, exc)
     except OSError as exc:
         fail_scan('list', directory, exc)
 
@@ -58,7 +65,10 @@ def day_directories(sessions_root: pathlib.Path) -> list[pathlib.Path]:
     # (no watermark yet) must not omit resumed sessions older than 14 days —
     # advancing scan_started afterward would hide them forever by mtime.
     found = []
-    for year_ent in scandir_sorted(sessions_root):
+    # Absent ~/.codex/sessions is not a successful empty day — fail so the
+    # launcher retains daily-memory-codex-mtime instead of skipping restored
+    # sessions forever.
+    for year_ent in scandir_sorted(sessions_root, missing_ok=False):
         if not (year_ent.is_dir(follow_symlinks=False) and len(year_ent.name) == 4 and year_ent.name.isdigit()):
             continue
         year_path = pathlib.Path(year_ent.path)
@@ -123,6 +133,12 @@ for directory in directories:
         # run / today's start so late evening messages converge on the next run.
         if meta_in_window or (mtime_floor <= mtime < end):
             selected.append(path)
+
+# A missing root during traversal is not a clean empty scan.
+try:
+    root.stat()
+except OSError as exc:
+    fail_scan('stat', root, exc)
 
 for path in selected:
     # A 00:00-07:59 Manila session lives in the previous UTC folder. Ingest

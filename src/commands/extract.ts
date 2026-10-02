@@ -44,7 +44,7 @@ import { readFileSync, readdirSync, lstatSync, existsSync } from 'fs';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-attendance-repair.ts';
 import { join, relative, dirname } from 'path';
-import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from '../core/engine.ts';
+import type { BrainEngine, PageSnapshot, LinkBatchInput, TimelineBatchInput } from '../core/engine.ts';
 import { isUndefinedTableError } from '../core/utils.ts';
 import type { PageType } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
@@ -2111,6 +2111,8 @@ export async function extractStaleFromDB(
     sourceIdFilter?: string;
     /** Internal exact-target DB sweep; an empty list processes nothing. */
     slugs?: readonly string[];
+    /** Embedded exact-target callers validate ownership on the consumed revision. */
+    originGuard?: (snapshot: PageSnapshot) => boolean | Promise<boolean>;
     catchUp: boolean;
     /**
      * Wall-clock cap for the sweep (checked between keyset batches).
@@ -2137,7 +2139,19 @@ export async function extractStaleFromDB(
   // Count stale watermarks first; ready dormant references add work without a stale watermark.
   const selected = opts.slugs !== undefined;
   if (selected && !sourceIdFilter) throw new Error('Selected extraction requires an explicit source');
-  const countStale = () => engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs, slugs: opts.slugs });
+  if (opts.originGuard && !selected) throw new Error('Origin ownership guard requires exact targets');
+  const countStale = async () => {
+    let slugs = opts.slugs;
+    if (opts.originGuard) {
+      const owned: string[] = [];
+      for (const slug of slugs!) {
+        const snapshot = await engine.readPageSnapshot(slug, { sourceId: sourceIdFilter });
+        if (snapshot && await opts.originGuard(snapshot)) owned.push(slug);
+      }
+      slugs = owned;
+    }
+    return engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs, slugs });
+  };
   let totalStale = await countStale();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
   const pendingDeadline = catchUp ? Infinity : startMs + timeBudgetMs;
@@ -2241,6 +2255,7 @@ export async function extractStaleFromDB(
       }
       const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
       if (!snapshot) throw new Error('Link extraction origin changed during the stale scan');
+      if (opts.originGuard && !await opts.originGuard(snapshot)) continue;
       const fullContent = snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
       const linkRows: LinkBatchInput[] = [];
       if (!resolvers.has(page.source_id)) resolvers.set(page.source_id, makeResolver(engine, { mode: 'batch', sourceId: page.source_id }));

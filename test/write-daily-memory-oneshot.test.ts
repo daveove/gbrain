@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
@@ -50,7 +50,7 @@ test('one-shot writer runs exact-target extract in-process and queues no Minions
   expect(calls).toHaveLength(1);
   expect(calls[0]).toEqual({
     dryRun: false, jsonMode: true, quiet: true,
-    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], catchUp: false, timeBudgetMs: 60_000,
+    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], originGuard: expect.any(Function), catchUp: false, timeBudgetMs: 60_000,
     signal: controller.signal,
   });
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
@@ -209,6 +209,50 @@ test('human day with needs_extract retries only stale generated historical targe
   expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
+test('scheduled one-shot refreshes previous-day lookback; explicit date stays single-day', async () => {
+  await seed('2026-09-29', 'notes/oneshot-previous');
+  await seed('2026-09-30', 'notes/oneshot-current-day');
+  const scheduled = await runOneShotDailyMemoryWrite(engine, undefined, {
+    extract: noExtract,
+    now: () => new Date('2026-09-30T12:00:00Z'),
+  });
+  expect(scheduled.day).toBe('2026-09-30');
+  expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/oneshot-current-day]]');
+  expect((await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/oneshot-previous]]');
+
+  await resetPgliteState(engine);
+  if (version) await engine.setConfig('version', version);
+  await engine.setConfig('cycle.timezone', 'Asia/Manila');
+  await seed('2026-09-29', 'notes/oneshot-previous-only');
+  await seed('2026-09-30', 'notes/oneshot-explicit-current');
+  const explicit = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: noExtract,
+    now: () => new Date('2026-09-30T12:00:00Z'),
+  });
+  expect(explicit.day).toBe('2026-09-30');
+  expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/oneshot-explicit-current]]');
+  expect(await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+});
+
+test('scheduled launcher lookback flag refreshes previous day with a pinned date argv', async () => {
+  await seed('2026-09-29', 'notes/oneshot-lookback-flag-prev');
+  await seed('2026-09-30', 'notes/oneshot-lookback-flag-cur');
+  await withEnv({ GBRAIN_DAILY_MEMORY_LOOKBACK: '1' }, async () => {
+    const scheduled = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+      extract: noExtract,
+      now: () => new Date('2026-09-30T12:00:00Z'),
+    });
+    expect(scheduled.day).toBe('2026-09-30');
+    expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-lookback-flag-cur]]');
+    expect((await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-lookback-flag-prev]]');
+  });
+});
+
 test('today includes its capped record indexes but leaves a human reference untouched', async () => {
   await engine.executeRaw(`CREATE TABLE source_records (
     id text PRIMARY KEY, source_type text, source_ref text, entity_type text,
@@ -279,4 +323,80 @@ test('historical one-shot exhausted budget reports retained generated debt witho
   expect(await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
     [DAILY_MEMORY_SOURCE_ID])).toEqual(before);
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+});
+
+for (const timing of ['before snapshot', 'after snapshot'] as const) {
+  test(`exact-target extraction preserves human replacement ${timing}`, async () => {
+    await ensureDailyMemorySource(engine);
+    const slug = 'daily-memory/2026-09-30';
+    await engine.putPage('notes/old-target', { type: 'note', title: 'Old target', compiled_truth: '' });
+    await engine.putPage('notes/new-target', { type: 'note', title: 'New target', compiled_truth: '' });
+    await engine.putPage(slug, { type: 'note', title: 'Generated', compiled_truth: '[[default:notes/new-target]]',
+      frontmatter: { dream_generated: true } }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    await engine.addLink(slug, 'notes/old-target', '', 'related_to', 'markdown', slug, undefined,
+      { fromSourceId: DAILY_MEMORY_SOURCE_ID, toSourceId: 'default', originSourceId: DAILY_MEMORY_SOURCE_ID });
+    const replaceHuman = () => engine.putPage(slug, { type: 'note', title: 'Human',
+      compiled_truth: 'Human-authored replacement without links', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    let injected = false;
+    const originalList = engine.listStalePagesForExtraction.bind(engine);
+    const listSpy = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
+      const rows = await originalList(opts);
+      if (timing === 'before snapshot' && rows.some(row => row.slug === slug) && !injected) {
+        injected = true;
+        await replaceHuman();
+      }
+      return rows;
+    });
+    const originalReplace = engine.replaceDerivedLinks.bind(engine);
+    const replaceSpy = spyOn(engine, 'replaceDerivedLinks').mockImplementation(async (origin, links, opts) => {
+      if (timing === 'after snapshot' && origin.slug === slug && !injected) {
+        injected = true;
+        await replaceHuman();
+      }
+      return originalReplace(origin, links, opts);
+    });
+    const beforeLinks = await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(beforeLinks.some(link => link.to_slug === 'notes/old-target' && link.link_source === 'markdown')).toBe(true);
+    const beforeMark = await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+      [DAILY_MEMORY_SOURCE_ID, slug]);
+    try {
+      const run = extractOneShotDailyMemory(engine, { written: true, extract_slugs: [slug] });
+      let runError: unknown;
+      if (timing === 'after snapshot') await expect(run).rejects.toThrow('changed');
+      else { try { await run; } catch (error) { runError = error; } }
+      expect(injected).toBe(true);
+      expect(await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual(beforeLinks);
+      expect(await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+        [DAILY_MEMORY_SOURCE_ID, slug])).toEqual(beforeMark);
+      expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.frontmatter.dream_generated).toBeUndefined();
+      if (runError) throw runError;
+    } finally { listSpy.mockRestore(); replaceSpy.mockRestore(); }
+  });
+}
+
+test('exact-target extract skips a raced human page without advancing its watermark', async () => {
+  await seed();
+  const written = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+  expect(written.extract_slugs).toEqual([written.slug]);
+  // Replace the selected generated index with a human page after targets return.
+  await engine.putPage(written.slug, {
+    type: 'note', title: 'Human-owned day', compiled_truth: '[[default:notes/human-raced]]', frontmatter: {},
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  await engine.putPage('notes/human-raced', {
+    type: 'note', title: 'Human target', compiled_truth: 'Synthetic human target',
+  });
+  const before = await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  );
+  await extractOneShotDailyMemory(engine, {
+    written: true,
+    needs_extract: true,
+    extract_slugs: written.extract_slugs,
+  });
+  expect(await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  )).toEqual(before);
+  expect(await engine.getLinks(written.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual([]);
 });
