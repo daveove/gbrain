@@ -259,6 +259,45 @@ test('scoped bare target arrivals wake only the source-local basename origin', a
   }
 });
 
+test('scoped pending prefilter matches bare basename to a qualified same-source page', async () => {
+  const a = 'basename-prefilter-a', b = 'basename-prefilter-b';
+  await engine.setConfig('link_resolution.global_basename', 'true');
+  await engine.executeRaw(
+    "INSERT INTO sources(id,name,config) VALUES($1,$1,'{}'::jsonb),($2,$2,'{}'::jsonb)",
+    [a, b],
+  );
+  try {
+    await engine.putPage('people/origin', page('[[bob]]'), { sourceId: a });
+    await extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+      sourceIdFilter: a, catchUp: false,
+    });
+    const pending = await loadPendingLinkReferences(engine, a);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.reference.candidates[0]!.targetSlug).toBe('bob');
+
+    // Target clause only: origin lives in A, filter is B. Exact slug bob misses
+    // people/bob; basename tail must include the row for the probe to run.
+    await engine.putPage('people/bob', page(), { sourceId: b });
+    const targeting: Awaited<ReturnType<typeof loadPendingLinkReferences>> = [];
+    for await (const batch of pendingLinkReferenceBatches(engine, b)) targeting.push(...batch);
+    expect(targeting.some(row => row.reference.sourceId === a
+      && row.reference.candidates.some(c => c.targetSlug === 'bob'))).toBe(true);
+
+    // Same-source arrival still wakes through the normal scoped extract path.
+    await engine.putPage('people/bob', page(), { sourceId: a });
+    await extractStaleFromDB(engine, {
+      dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false,
+      sourceIdFilter: a, catchUp: false,
+    });
+    expect(await loadPendingLinkReferences(engine, a)).toHaveLength(0);
+    expect((await engine.getLinks('people/origin', { sourceId: a })).some(link =>
+      link.to_slug === 'people/bob' && link.to_source_id === a)).toBe(true);
+  } finally {
+    await engine.setConfig('link_resolution.global_basename', 'false');
+  }
+});
+
 test('expired readiness deadline preserves dormant registry and watermark', async () => {
   await engine.putPage('people/origin', page('[[people/missing]]')); await drain();
   const rows = await loadPendingLinkReferences(engine);
