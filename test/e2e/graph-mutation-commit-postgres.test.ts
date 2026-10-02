@@ -170,6 +170,7 @@ native('graph epochs follow native PostgreSQL commit order', () => {
         const remaining = await rows();
         if (independentUpdate) {
           expect(committed).toBeDefined();
+          if (!committed) throw new Error('Expected independently committed link identity');
           expect(remaining).toHaveLength(1);
           expect(remaining[0]).toEqual(committed);
           expect(remaining[0].id).toBe(applied!.id);
