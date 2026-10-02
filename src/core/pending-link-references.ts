@@ -38,15 +38,16 @@ function parseReference(value: string): PendingLinkReference | null {
 
 const PENDING_BATCH_SIZE = 100;
 
+export type PendingLinkScanEnd = { incomplete: boolean; after: string };
+
 /** Keyset batches filter origins or changed-source target endpoints before parsing. */
 export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: string,
-  opts: { signal?: AbortSignal; deadline?: number; afterKey?: string; onBatchComplete?: (key: string) => void } = {}): AsyncGenerator<PendingLinkRow[], boolean> {
-  let after = opts.afterKey ?? '';
+  opts: { signal?: AbortSignal; deadline?: number; after?: string; onBatchComplete?: (key: string) => void } = {}): AsyncGenerator<PendingLinkRow[], PendingLinkScanEnd> {
+  let after = opts.after ?? '';
   if (after && (typeof after !== 'string' || !after.startsWith(PREFIX))) throw new Error('Invalid pending link scan cursor');
   while (true) {
     opts.signal?.throwIfAborted();
-    // true = incomplete (deadline); false = reached the end of the registry.
-    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     const rows = await engine.executeRaw<{ key: string; value: string }>(
       `SELECT key,value FROM config WHERE key LIKE $1 AND key > $3
         AND ($2::text IS NULL OR CASE WHEN key LIKE $1 AND pg_input_is_valid(value,'jsonb') THEN
@@ -58,8 +59,8 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
               WHERE p.deleted_at IS NULL AND p.source_id=$2 AND p.slug=candidate->>'targetSlug')) END)
         ORDER BY key LIMIT $4`, [PREFIX + '%', sourceId ?? null, after, PENDING_BATCH_SIZE]);
     opts.signal?.throwIfAborted();
-    if (!rows.length) return false;
-    if (Date.now() >= (opts.deadline ?? Infinity)) return true;
+    if (!rows.length) return { incomplete: false, after };
+    if (Date.now() >= (opts.deadline ?? Infinity)) return { incomplete: true, after };
     const parsed = rows.flatMap(row => {
       const reference = parseReference(row.value);
       return reference ? [{ ...row, reference }] : [];
@@ -67,7 +68,7 @@ export async function* pendingLinkReferenceBatches(engine: Store, sourceId?: str
     if (parsed.length) yield parsed;
     after = rows.at(-1)!.key;
     opts.onBatchComplete?.(after);
-    if (rows.length < PENDING_BATCH_SIZE) return false;
+    if (rows.length < PENDING_BATCH_SIZE) return { incomplete: false, after };
   }
 }
 
@@ -235,23 +236,23 @@ async function probePendingLinkReferenceBatch(engine: Store, rows: PendingLinkRo
 
 /** Continue after successfully probed rows, including a partially consumed final batch. */
 export async function scanPendingLinkReferences(engine: Store,
-  opts: Parameters<typeof probePendingLinkReferences>[2] & { afterKey?: string },
+  opts: Parameters<typeof probePendingLinkReferences>[2] & { after?: string },
   resolves: Parameters<typeof probePendingLinkReferences>[3]) {
-  let afterKey = opts.afterKey ?? '', ready = 0;
+  let afterKey = opts.after ?? '', ready = 0;
   const batches = pendingLinkReferenceBatches(engine, opts.sourceId, {
-    signal: opts.signal, deadline: opts.deadline, afterKey,
+    signal: opts.signal, deadline: opts.deadline, after: afterKey,
     onBatchComplete: key => { afterKey = key; },
   });
   for (;;) {
     const step = await batches.next();
-    if (step.done) return { ready, pendingScanIncomplete: step.value, pendingAfterKey: afterKey };
+    if (step.done) return { ready, pendingScanIncomplete: step.value.incomplete, pendingScanAfter: afterKey };
     let processed = 0;
     ready += await probePendingLinkReferences(engine, step.value, { ...opts,
       onProcessed: key => { afterKey = key; processed++; opts.onProcessed?.(key); },
     }, resolves);
     if (processed < step.value.length) {
-      await batches.return(true);
-      return { ready, pendingScanIncomplete: true, pendingAfterKey: afterKey };
+      await batches.return({ incomplete: true, after: afterKey });
+      return { ready, pendingScanIncomplete: true, pendingScanAfter: afterKey };
     }
   }
 }

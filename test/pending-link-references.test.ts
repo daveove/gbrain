@@ -276,6 +276,31 @@ test('pending registry deadline reports pendingScanIncomplete for continuation',
   expect(result.pagesProcessed).toBe(0);
   expect(result.staleRemaining).toBe(0);
   expect(result.pendingScanIncomplete).toBe(true);
+  expect(result.pendingScanAfter).toBe('');
+});
+
+test('pending registry resume cursor skips the scanned prefix and preserves after on deadline', async () => {
+  for (let i = 0; i < 3; i++) {
+    await engine.putPage(`people/cursor-${i}`, page('[[people/missing]]'));
+  }
+  await drain();
+  const keys = (await engine.executeRaw<{ key: string }>(
+    "SELECT key FROM config WHERE key LIKE 'internal.pending-links.%' ORDER BY key")).map(row => row.key);
+  expect(keys.length).toBeGreaterThanOrEqual(3);
+  const after = keys[0]!;
+  const expired = pendingLinkReferenceBatches(engine, 'default', { deadline: Date.now() - 1, after });
+  expect(await expired.next()).toEqual({ value: { incomplete: true, after }, done: true });
+  const resumed = await extractStaleFromDB(engine, {
+    dryRun: false, jsonMode: true, quiet: true, includeFrontmatter: false, catchUp: false,
+    timeBudgetMs: 0, pendingAfter: after,
+  });
+  expect(resumed.pendingScanIncomplete).toBe(true);
+  expect(resumed.pendingScanAfter).toBe(after);
+  const live = pendingLinkReferenceBatches(engine, 'default', { after });
+  const first = await live.next();
+  expect(first.done).toBe(false);
+  if (first.done) throw new Error('expected pending registry rows after cursor');
+  expect(first.value.every(row => row.key > after)).toBe(true);
 });
 
 
@@ -378,7 +403,7 @@ test('pending registry scans only the requested source in bounded keyset batches
   expect(await engine.getConfig('internal.pending-links.malformed-text')).toBe('{broken');
   const iterator = pendingLinkReferenceBatches(engine, 'default');
   expect((await iterator.next()).value).toHaveLength(100);
-  expect(await iterator.return(false)).toEqual({ value: false, done: true });
+  expect(await iterator.return({ incomplete: false, after: '' })).toEqual({ value: { incomplete: false, after: '' }, done: true });
 });
 
 for (const qualified of [false, true]) test(`slash frontmatter aliases do not create exact body targets (qualified=${qualified})`, async () => {
@@ -410,7 +435,7 @@ test('expired and cancelled pending probes issue no readiness queries', async ()
   engine.executeRaw = async () => { throw new Error('expired probe must not query'); };
   try {
     const expired = pendingLinkReferenceBatches(engine, 'default', { deadline: Date.now() - 1 });
-    expect(await expired.next()).toEqual({ value: true, done: true });
+    expect(await expired.next()).toEqual({ value: { incomplete: true, after: '' }, done: true });
     await expect(pendingLinkReferenceBatches(engine, 'default', { signal: controller.signal }).next()).rejects.toThrow();
     expect(await probePendingLinkReferences(engine, rows, {
       globalBasename: true, deadline: Date.now() - 1,
@@ -770,10 +795,10 @@ test('partial short pending batch resumes after handled origins instead of claim
       dryRun: false, jsonMode: true, quiet: true, catchUp: false, includeFrontmatter: false, timeBudgetMs: 5,
     });
     expect(first.pendingScanIncomplete).toBe(true);
-    expect(first.pendingAfterKey).toBe(rows[2].key);
+    expect(first.pendingScanAfter).toBe(rows[2].key);
     const rest = await extractStaleFromDB(engine, {
       dryRun: false, jsonMode: true, quiet: true, catchUp: true, includeFrontmatter: false,
-      pendingAfterKey: first.pendingAfterKey,
+      pendingAfter: first.pendingScanAfter,
     });
     expect(rest.pendingScanIncomplete).not.toBe(true);
     expect(await loadPendingLinkReferences(engine)).toHaveLength(8);
@@ -796,8 +821,8 @@ test('queued pending budget continuations reach a ready tail beyond a dormant fu
       const next = (await engine.executeRaw<{ id: number; data: Record<string, unknown> }>(
         "SELECT id,data FROM minion_jobs WHERE name='extract' AND data->>'continuation_of'=$1 ORDER BY id DESC LIMIT 1", [String(job.id)]))[0];
       expect(next).toBeDefined();
-      expect(typeof next.data.pendingAfterKey).toBe('string');
-      expect(String(next.data.pendingAfterKey) > String(job.data.pendingAfterKey ?? '')).toBe(true);
+      expect(typeof next.data.pending_after).toBe('string');
+      expect(String(next.data.pending_after) > String(job.data.pending_after ?? '')).toBe(true);
       job = next as typeof job;
     }
     expect(rounds).toBeLessThan(25);
@@ -838,10 +863,10 @@ test('legacy malformed registry keys resume past a consumed invalid prefix', asy
     first = await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true,
       catchUp: false, includeFrontmatter: false, timeBudgetMs: 100 });
     expect(first.pendingScanIncomplete).toBe(true);
-    expect(first.pendingAfterKey).toBe('internal.pending-links.000-legacy-099');
+    expect(first.pendingScanAfter).toBe('internal.pending-links.000-legacy-099');
   } finally { engine.executeRaw = raw; now.mockRestore(); }
   await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true,
-    catchUp: true, includeFrontmatter: false, pendingAfterKey: first!.pendingAfterKey });
+    catchUp: true, includeFrontmatter: false, pendingAfter: first!.pendingScanAfter });
   expect((await engine.getLinks(tail.reference.slug)).some(link => link.to_slug === tail.reference.candidates[0].targetSlug)).toBe(true);
 });
 

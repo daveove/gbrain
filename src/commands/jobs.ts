@@ -2568,20 +2568,20 @@ export async function registerBuiltinHandlers(
         jsonMode: false,
         sourceIdFilter,
         catchUp: false,
-        pendingAfterKey: typeof job.data.pendingAfterKey === 'string' ? job.data.pendingAfterKey : undefined,
-        pendingScanComplete: job.data.pendingScanComplete === true,
+        pendingAfter: typeof job.data.pending_after === 'string' ? job.data.pending_after : undefined,
+        pendingScanComplete: job.data.pending_scan_complete === true,
         signal: job.signal,
       });
       // Continue only after page/readiness progress; resume the pending keyset.
       if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0)
-        || (r.pendingScanIncomplete && r.pendingAfterKey !== (job.data.pendingAfterKey ?? '')))) {
+        || (r.pendingScanIncomplete && r.pendingScanAfter !== (job.data.pending_after ?? '')))) {
         try {
           const queue = new MinionQueue(engine);
           // Unscoped coalescing would swallow this continuation.
           await queue.add(
             'extract',
-            { ...job.data, continuation_of: job.id, pendingAfterKey: r.pendingScanIncomplete ? r.pendingAfterKey : undefined,
-              pendingScanComplete: !r.pendingScanIncomplete },
+            { ...job.data, continuation_of: job.id, pending_after: r.pendingScanIncomplete ? r.pendingScanAfter : undefined,
+              pending_scan_complete: !r.pendingScanIncomplete },
             { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
           );
         } catch { /* best-effort: next sync/manual sweep picks up the rest */ }

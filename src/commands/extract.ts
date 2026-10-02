@@ -2120,12 +2120,12 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
-    pendingAfterKey?: string;
+    pendingAfter?: string;
     pendingScanComplete?: boolean;
     /** Cooperative cancel. Checked between keyset batches, not recorded as a sweep failure. */
     signal?: AbortSignal;
   },
-): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean; pendingAfterKey?: string }> {
+): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; pendingScanIncomplete?: boolean; pendingScanAfter?: string }> {
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const startMs = Date.now();
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
@@ -2172,10 +2172,10 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
-  let pending = { ready: 0, pendingScanIncomplete: false, pendingAfterKey: opts.pendingAfterKey ?? '' };
+  let pending = { ready: 0, pendingScanIncomplete: false, pendingScanAfter: opts.pendingAfter ?? '' };
   if (!selected && !opts.pendingScanComplete) {
     pending = await scanPendingLinkReferences(engine, { globalBasename, signal: opts.signal,
-      deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter, afterKey: opts.pendingAfterKey,
+      deadline: pendingDeadline, dryRun, versionTs, sourceId: sourceIdFilter, after: opts.pendingAfter,
       onReadyForeign: sourceIdFilter ? sourceId => queuePendingOriginExtraction(engine, sourceId, sourceIdFilter) : undefined }, (candidate, origin, pendingSlugs, pendingSources) =>
       resolveCandidateSources(candidate, origin.slug, origin.sourceId, pendingSlugs, pendingSources,
         outboundCrossSourceIds.has(origin.sourceId), { crossSource, defaultSourceId: linkDefaultSourceId }).ok);
@@ -2183,7 +2183,7 @@ export async function extractStaleFromDB(
     totalStale = dryRun ? totalStale + pending.ready : await countStale();
   }
   const pendingResult = { pendingScanIncomplete: pending.pendingScanIncomplete,
-    pendingAfterKey: pending.pendingAfterKey };
+    pendingScanAfter: pending.pendingScanAfter };
   if (dryRun) return reportDryRun();
   if (totalStale === 0) {
     if (pending.pendingScanIncomplete) return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0, ...pendingResult };

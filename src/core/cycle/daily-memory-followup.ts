@@ -376,12 +376,13 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
 /** Accept a complete standalone-sync day handoff before its checkpoint advances. */
 export async function queueStandaloneSyncDailyMemory(
   engine: BrainEngine,
-  opts: { sourceId: string; commit: string; days: string[] },
+  opts: { sourceId: string; commit: string; days: string[]; timezone?: string },
 ): Promise<number | null> {
   if (!opts.sourceId || !opts.commit || !Array.isArray(opts.days) || !opts.days.every(isDay)) {
     throw new Error('Invalid standalone sync daily memory handoff');
   }
-  const timezone = await resolveCycleTimeZone(engine);
+  const timezone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
+    : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
   const days = [...new Set(opts.days)].sort();
   if (!days.length) return null;
   const hash = createHash('sha256').update(JSON.stringify(days)).digest('hex').slice(0, 20);
