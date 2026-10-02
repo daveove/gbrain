@@ -329,10 +329,16 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/ontology-merge-parity.test.ts",
     "test/e2e/chronicle-event-projection-parity.test.ts",
   ],
+  // Graph commit epochs need native transaction ordering, including late ABA commits.
+  "src/core/graph-usefulness/schema.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/fingerprint.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/paged-runner.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/retrieval-proof.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
   // Schema source of truth: any change must pass the cross-engine drift gate.
-  "src/schema.sql": ["test/e2e/schema-drift.test.ts"],
-  "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts"],
+  "src/schema.sql": ["test/e2e/schema-drift.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts"],
   "src/core/migrate.ts": [
+    "test/e2e/graph-mutation-commit-postgres.test.ts",
     "test/e2e/migration-vector-replay-postgres.test.ts",
     "test/e2e/schema-drift.test.ts",
     "test/e2e/migrate-chain.test.ts",

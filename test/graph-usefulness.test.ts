@@ -362,17 +362,19 @@ describe('graph CLI routing', () => {
     ])).toEqual({ kind: 'unknown', flag: '--dry-run' });
   });
 
-  test('bare graph stays on the operation path', () => {
-    const cli = readFileSync(join(import.meta.dir, '../src/cli.ts'), 'utf8');
-    const usefulness = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness.ts'), 'utf8');
-    expect(cli).not.toContain("'graph', 'graph-query'");
-    expect(cli).toContain('dispatchGraphUsefulness');
-    const dispatch = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
-    const rejectAt = dispatch.indexOf('rejectGraphUsefulnessFlagProblem(args)');
-    expect(rejectAt).toBeGreaterThan(-1);
-    expect(rejectAt).toBeLessThan(dispatch.indexOf('await connectEngine()'));
-    expect(cli).not.toContain("case 'graph':");
-    expect(usefulness).not.toContain('runGraphQuery');
+  test('bare graph stays on the operation path', async () => {
+    let connects = 0;
+    for (const args of [
+      ['people/alice-example'],
+      ['--source', 'wiki', 'people/alice-example'],
+      ['people/alice-example', '--depth', '2'],
+    ]) {
+      expect(await dispatchGraphUsefulness(args, async () => {
+        connects += 1;
+        throw new Error('bare traversal must continue to the operation dispatcher');
+      })).toBe(false);
+    }
+    expect(connects).toBe(0);
   });
 
   test('unknown flags and option-valued flags are rejected before apply', async () => {
@@ -422,6 +424,17 @@ describe('graph CLI routing', () => {
         'relations', 'apply', 'manifest.json', '--apply', '--yes', '--dry-run',
       ])).toThrow(exitError);
       expect(code).toBe(1);
+
+      code = -1;
+      let connects = 0;
+      await expect(dispatchGraphUsefulness([
+        'relations', 'apply', 'manifest.json', '--apply', '--yes', '--dry-run',
+      ], async () => {
+        connects += 1;
+        throw new Error('invalid flags must refuse before connecting');
+      })).rejects.toBe(exitError);
+      expect(code).toBe(1);
+      expect(connects).toBe(0);
 
       code = -1;
       await expect(runGraphUsefulness(engine, [
@@ -3916,15 +3929,6 @@ describe('usefulness read source resolution', () => {
 
 describe('usefulness help before connect', () => {
   test('prints help without loading a brain', async () => {
-    const dispatchSrc = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
-    const body = dispatchSrc.slice(dispatchSrc.indexOf('export async function dispatchGraphUsefulness'));
-    const helpAt = body.indexOf('graphUsefulnessWantsHelp');
-    const loadAt = body.indexOf('loadConfig()');
-    const connectAt = body.indexOf('connectEngine()');
-    expect(helpAt).toBeGreaterThan(-1);
-    expect(helpAt).toBeLessThan(loadAt);
-    expect(loadAt).toBeLessThan(connectAt);
-
     const origLog = console.log;
     const origExit = process.exit;
     let out = '';
