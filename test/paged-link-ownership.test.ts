@@ -94,7 +94,7 @@ describe('paged deterministic link ownership', () => {
     });
   }
   test('actual multi-source relation apply combines cross and external incident edges once', async () => {
-    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('apply-owner-a','A'),('apply-owner-b','B'),('apply-owner-x','X')");
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('apply-owner-a','Apply A'),('apply-owner-b','Apply B'),('apply-owner-x','Apply X')");
     for (const [source, slug] of [
       ['apply-owner-x','notes/x'], ['apply-owner-a','notes/a1'], ['apply-owner-b','notes/b1'],
       ['apply-owner-a','notes/a2'], ['apply-owner-a','notes/new-a'], ['apply-owner-b','notes/new-b'],
