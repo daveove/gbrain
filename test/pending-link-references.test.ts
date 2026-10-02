@@ -960,8 +960,9 @@ test('cancelled pending job never publishes a cursor after a durable origin hand
 test('inline target probe completed batch durably resumes after default budget exhaustion', async () => {
   const rows = await pendingFixture(105), tail = rows.at(-1)!;
   await engine.putPage(tail.reference.candidates[0].targetSlug, page());
+  const started = Date.now();
   let clock = 0;
-  const now = spyOn(Date,'now').mockImplementation(() => clock);
+  const now = spyOn(Date,'now').mockImplementation(() => started + clock);
   const raw = engine.executeRaw.bind(engine);
   const query = spyOn(engine,'executeRaw').mockImplementation(async <T = Record<string, unknown>>(
     sql: string, params?: unknown[], opts?: { signal?: AbortSignal },
@@ -1025,8 +1026,9 @@ test('complete inline pending scans do not queue continuation generations', asyn
 
 test('default inline budget exhausted during metadata queues an empty cursor without losing arrivals', async () => {
   const rows = await pendingFixture(1);
+  const started = Date.now();
   let clock = 0;
-  const now = spyOn(Date,'now').mockImplementation(() => clock);
+  const now = spyOn(Date,'now').mockImplementation(() => started + clock);
   const get = engine.getConfig.bind(engine);
   const metadata = spyOn(engine,'getConfig').mockImplementation(async key => { const result = await get(key); clock = 2500; return result; });
   try { await probePendingOriginsForArrivedTargets(engine,'default',{ globalBasename: false }); }
