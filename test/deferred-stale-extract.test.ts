@@ -105,9 +105,11 @@ test('pending scan continuation refuses a returned sweep with another cursor', a
 test('active pending cursor handoff accepts one durable successor for new arrivals', async () => {
   const queue = new MinionQueue(engine), opts = { ...pin, pendingAfter: 'internal.pending-links.cursor' };
   const first = await queueDeferredStaleSweep(engine,opts);
+  if (typeof first !== 'number' || first <= 0) throw new Error('Expected accepted numeric queue ID');
   const active = (await queue.claim('pending-cursor-lock',60_000,'default',['extract']))!;
   expect(active.id).toBe(first);
   const successor = await queueDeferredStaleSweep(engine,opts);
+  if (typeof successor !== 'number' || successor <= 0) throw new Error('Expected accepted numeric successor ID');
   expect(successor).not.toBe(first);
   expect(await queueDeferredStaleSweep(engine,opts)).toBe(successor);
   const [stored] = await engine.executeRaw<{ status: string; data: Record<string,unknown> }>('SELECT status,data FROM minion_jobs WHERE id=$1',[successor]);

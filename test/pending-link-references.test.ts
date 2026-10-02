@@ -963,8 +963,10 @@ test('inline target probe completed batch durably resumes after default budget e
   let clock = 0;
   const now = spyOn(Date,'now').mockImplementation(() => clock);
   const raw = engine.executeRaw.bind(engine);
-  const query = spyOn(engine,'executeRaw').mockImplementation(async (sql,params,opts) => {
-    const result = await raw(sql,params,opts);
+  const query = spyOn(engine,'executeRaw').mockImplementation(async <T = Record<string, unknown>>(
+    sql: string, params?: unknown[], opts?: { signal?: AbortSignal },
+  ): Promise<T[]> => {
+    const result = await raw<T>(sql,params,opts);
     if (sql.includes('SELECT key,value FROM config') && params?.[2]) clock = 2500;
     return result;
   });
