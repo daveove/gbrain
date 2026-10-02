@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine } from './engine.ts';
 import { currentSubmissionAuthority } from './minions/submission-authority.ts';
 import { appendCompleted, clearOpCheckpoint } from './op-checkpoint.ts';
+import { resolveCycleTimeZone } from './cycle/cycle-date.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from './cycle/daily-memory-followup.ts';
 
 /** Source-scoped full-sync reporting includes tombstones retired by reconciliation. */
@@ -48,11 +49,13 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
   const saved = await engine.executeRaw<{ path: string }>(
     'SELECT path FROM op_checkpoint_paths WHERE op = $1 AND fingerprint = $2', [key.op, key.fingerprint]);
   const entries = new Set(saved.map(row => row.path));
+  // One zone for every capture and the queued batch; cycle.timezone may flip mid-handoff.
+  const timezone = await resolveCycleTimeZone(engine);
   const capture = async () => {
     const slugs = new Set([...entries].filter(s => s.startsWith('slug:')).map(s => s.slice(5)));
     for (const slug of await readFullSyncAffectedSlugs(engine, opts)) slugs.add(slug);
     const delta = [...slugs].map(slug => `slug:${slug}`);
-    for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal })) delta.push(`day:${day}`);
+    for (const day of await dailyMemoryDaysForSlugs(engine, opts.sourceId, [...slugs], { signal: opts.signal, timezone })) delta.push(`day:${day}`);
     opts.signal?.throwIfAborted();
     const fresh = delta.filter(value => !entries.has(value));
     if (!await appendCompleted(engine, key, fresh)) throw new Error('Daily-memory sync checkpoint unavailable; anchor retained');
@@ -73,7 +76,7 @@ export async function prepareSyncDailyMemory(engine: BrainEngine, opts: {
       // The enclosing cycle consumes its source debt through its existing handoff.
       if (opts.ownerJobId !== undefined) return;
       const days = [...entries].filter(value => value.startsWith('day:')).map(value => value.slice(4)).sort();
-      const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit, days });
+      const accepted = await queueStandaloneSyncDailyMemory(engine, { sourceId: opts.sourceId, commit: opts.commit, days, timezone });
       opts.signal?.throwIfAborted();
       if (days.length && accepted === null) throw new Error('Daily-memory sync handoff rejected; anchor retained');
     },

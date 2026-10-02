@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
+import { prepareSyncDailyMemory } from '../src/core/sync-daily-memory.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { performSync } from '../src/commands/sync.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -172,6 +173,28 @@ describe('standalone sync daily-memory durable handoff', () => {
     const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>(
       "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
     expect(batches.some(row => days.every(day => row.data.daily_memory_dates?.includes(day)))).toBe(true);
+  });
+
+  test('pins one timezone across sync date capture and enqueue after cycle.timezone flips', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    // 02:00Z is 2026-09-30 in Asia/Manila and 2026-09-29 in America/Los_Angeles.
+    writeFileSync(join(repo, 'notes/tz-pin.md'), '---\ntitle: Timezone pin fixture\n---\nSynthetic fixture.\n');
+    git('add', '-A'); git('commit', '-m', 'timezone pin page');
+    await performSync(engine, { ...opts(), dailyMemoryFollowup: false });
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=NULL, effective_date_source=NULL, updated_at='2026-09-30T02:00:00Z' WHERE source_id='default' AND slug='notes/tz-pin'");
+    expect(await dailyMemoryDaysForSlugs(engine, 'default', ['notes/tz-pin'], { timezone: 'Asia/Manila' })).toContain('2026-09-30');
+    const handoff = await prepareSyncDailyMemory(engine, {
+      sourceId: 'default', commit: git('rev-parse', 'HEAD'), scope: '',
+    });
+    expect(handoff).toBeDefined();
+    await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+    await handoff!.accept();
+    const batches = await engine.executeRaw<{ data: { daily_memory_dates?: string[]; daily_memory_timezone?: string } }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+    expect(batches.some(row => row.data.daily_memory_timezone === 'Asia/Manila'
+      && row.data.daily_memory_dates?.includes('2026-09-30'))).toBe(true);
+    expect(batches.every(row => row.data.daily_memory_timezone !== 'America/Los_Angeles')).toBe(true);
   });
 
   test('a second working-tree edit at the same HEAD receives fresh maintenance after completed jobs', async () => {
