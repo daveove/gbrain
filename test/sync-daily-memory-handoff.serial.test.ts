@@ -8,6 +8,8 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../src/core/cycle/daily-memory-followup.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { performSync } from '../src/commands/sync.ts';
+import { prepareSyncDailyMemory } from '../src/core/sync-daily-memory.ts';
+import * as checkpoints from '../src/core/op-checkpoint.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { DAILY_MEMORY_PAGE_CAP, DAILY_MEMORY_SOURCE_ID, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
@@ -41,6 +43,47 @@ describe('standalone sync daily-memory durable handoff', () => {
     await performSync(engine, { ...opts(), full: true, dailyMemoryFollowup: false });
   });
   afterEach(() => { rmSync(repo, { recursive: true, force: true }); });
+
+  test('standalone sync pins initial final capture and queued writer to one timezone', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const slug = 'notes/near-midnight-pin';
+    await engine.putPage(slug, { type: 'note', title: 'Synthetic midnight fixture', compiled_truth: 'Synthetic content',
+      frontmatter: { date: '2026-09-30T16:30:00Z' }, effective_date: new Date('2026-09-30T16:30:00Z'), effective_date_source: 'date' });
+    await engine.executeRaw('UPDATE pages SET source_path=$1 WHERE source_id=$2 AND slug=$3', ['notes/near-midnight-pin.md', 'default', slug]);
+    const append = checkpoints.appendCompleted;
+    let captures = 0;
+    const flip = spyOn(checkpoints, 'appendCompleted').mockImplementation(async (...args) => {
+      const accepted = await append(...args);
+      if (args[1].op === 'sync-daily-memory') {
+        captures++;
+        if (captures === 1) await engine.setConfig('cycle.timezone', 'UTC');
+        if (captures === 2) await engine.setConfig('cycle.timezone', 'America/Los_Angeles');
+      }
+      return accepted;
+    });
+    try {
+      const followup = (await prepareSyncDailyMemory(engine, { sourceId: 'default', commit: 'synthetic-zone-pin', scope: 'notes/', paths: ['notes/near-midnight-pin.md'] }))!;
+      await followup.accept();
+      expect(captures).toBe(2);
+      expect(await engine.getConfig('cycle.timezone')).toBe('America/Los_Angeles');
+      const queue = new MinionQueue(engine);
+      const jobs = await engine.executeRaw<{ id: number; data: Record<string, unknown> }>("SELECT id,data FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
+      expect(jobs.length).toBeGreaterThan(0);
+      for (const job of jobs) {
+        expect(job.data.daily_memory_date).toBe('2026-10-01');
+        expect(job.data.daily_memory_timezone).toBe('Asia/Manila');
+      }
+      const handlers = new Map<string, (job: any) => Promise<any>>();
+      await registerBuiltinHandlers({ register(name: string, handler: (job: any) => Promise<any>) { handlers.set(name, handler); } } as never, engine);
+      const job = (await queue.claim('synthetic-zone-worker', 60_000, 'default', ['autopilot-daily-memory']))!;
+      await handlers.get('autopilot-daily-memory')!(job);
+      await queue.completeJob(job.id, 'synthetic-zone-worker', {});
+      expect((await engine.getPage('daily-memory/2026-10-01', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
+        .toContain('[[default:notes/near-midnight-pin]]');
+      expect(await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
+      expect(await engine.getConfig('cycle.timezone')).toBe('America/Los_Angeles');
+    } finally { flip.mockRestore(); }
+  });
 
   async function filenameCycleFixture(sourceScoped=true) {
     const from='notes/2026-01-06-zz-fixture.md',to='notes/2026-01-07-zz-fixture.md';
