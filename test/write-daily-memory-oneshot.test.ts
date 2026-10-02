@@ -336,7 +336,7 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
     await engine.addLink(slug, 'notes/old-target', '', 'related_to', 'markdown', slug, undefined,
       { fromSourceId: DAILY_MEMORY_SOURCE_ID, toSourceId: 'default', originSourceId: DAILY_MEMORY_SOURCE_ID });
     const replaceHuman = () => engine.putPage(slug, { type: 'note', title: 'Human',
-      compiled_truth: '[[default:notes/new-target]]', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      compiled_truth: 'Human-authored replacement without links', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
     let injected = false;
     const originalList = engine.listStalePagesForExtraction.bind(engine);
     const listSpy = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
