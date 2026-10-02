@@ -3,7 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
-import { extractOneShotDailyMemory, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
+import { extractOneShotDailyMemory, lookbackRecoveryDays, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -209,6 +209,14 @@ test('human day with needs_extract retries only stale generated historical targe
   expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
+test('lookbackRecoveryDays walks from watermark through selected day', () => {
+  expect(lookbackRecoveryDays('2026-10-01', null)).toEqual(['2026-09-30', '2026-10-01']);
+  expect(lookbackRecoveryDays('2026-10-01', '2026-09-28')).toEqual([
+    '2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01',
+  ]);
+  expect(lookbackRecoveryDays('2026-10-01', '2026-10-01')).toEqual(['2026-09-30', '2026-10-01']);
+});
+
 test('scheduled one-shot refreshes previous-day lookback; explicit date stays single-day', async () => {
   await seed('2026-09-29', 'notes/oneshot-previous');
   await seed('2026-09-30', 'notes/oneshot-current-day');
@@ -250,6 +258,28 @@ test('scheduled launcher lookback flag refreshes previous day with a pinned date
       .toContain('[[default:notes/oneshot-lookback-flag-cur]]');
     expect((await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
       .toContain('[[default:notes/oneshot-lookback-flag-prev]]');
+  });
+});
+
+
+test('scheduled lookback recovers days missed since watermark', async () => {
+  await seed('2026-09-28', 'notes/oneshot-wm-a');
+  await seed('2026-09-29', 'notes/oneshot-wm-b');
+  await seed('2026-09-30', 'notes/oneshot-wm-c');
+  await engine.setConfig('cycle.daily_memory_last_lookback_day', '2026-09-28');
+  await withEnv({ GBRAIN_DAILY_MEMORY_LOOKBACK: '1' }, async () => {
+    const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+      extract: noExtract,
+      now: () => new Date('2026-09-30T12:00:00Z'),
+    });
+    expect(result.day).toBe('2026-09-30');
+    expect((await engine.getPage('daily-memory/2026-09-28', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-wm-a]]');
+    expect((await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-wm-b]]');
+    expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-wm-c]]');
+    expect(await engine.getConfig('cycle.daily_memory_last_lookback_day')).toBe('2026-09-30');
   });
 });
 

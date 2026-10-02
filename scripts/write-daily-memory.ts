@@ -22,6 +22,32 @@ export function dailyMemoryArgs(day: string | undefined): { date?: string } {
   return { date: day };
 }
 
+
+/** Config key: last selected day a scheduled lookback run finished. */
+const DAILY_MEMORY_LOOKBACK_WATERMARK = 'cycle.daily_memory_last_lookback_day';
+const DAILY_MEMORY_LOOKBACK_MAX_DAYS = Math.min(
+  30,
+  Math.max(1, Number(process.env.GBRAIN_DAILY_MEMORY_LOOKBACK_DAYS) || 14),
+);
+
+/** Selected day, one-day late-record lookback, and every day since the watermark. */
+export function lookbackRecoveryDays(selectedDay: string, watermark: string | null | undefined): string[] {
+  const days = new Set<string>([selectedDay]);
+  const prev = previousCalendarDay(selectedDay);
+  if (prev) days.add(prev);
+  if (watermark && /^\d{4}-\d{2}-\d{2}$/.test(watermark) && watermark < selectedDay) {
+    let cursor = previousCalendarDay(selectedDay);
+    let guard = 0;
+    while (cursor && cursor >= watermark && guard < DAILY_MEMORY_LOOKBACK_MAX_DAYS) {
+      days.add(cursor);
+      if (cursor === watermark) break;
+      cursor = previousCalendarDay(cursor);
+      guard++;
+    }
+  }
+  return [...days].sort();
+}
+
 export async function runOneShotDailyMemoryWrite(
   engine: BrainEngine,
   day: string | undefined,
@@ -52,14 +78,17 @@ export async function runOneShotDailyMemoryWrite(
     const timezone = selected || await resolveCycleTimeZone(engine);
     if (day !== undefined) dailyMemoryArgs(day); // validate format
     const selectedDay = day ?? calendarDateInTimeZone(now?.() ?? new Date(), timezone);
+    const watermark = await engine.getConfig(DAILY_MEMORY_LOOKBACK_WATERMARK);
     let primary: DailyMemoryWrite | undefined;
-    for (const date of [selectedDay, previousCalendarDay(selectedDay)].filter((value): value is string => !!value)) {
+    for (const date of lookbackRecoveryDays(selectedDay, watermark)) {
       const daily = await writeDailyMemoryFromSources(engine, { date, timezone, ...(now ? { now } : {}) });
       if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
       await afterWrite(daily);
-      primary ??= daily;
+      if (date === selectedDay) primary = daily;
     }
-    result = primary!;
+    if (!primary) throw new Error(`Daily memory write missed selected day ${selectedDay}`);
+    await engine.setConfig(DAILY_MEMORY_LOOKBACK_WATERMARK, selectedDay);
+    result = primary;
   }
 
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
