@@ -52,6 +52,8 @@
  * Schemas with truncate/replica triggers or rules, inheritance, or external foreign
  * keys retain TRUNCATE CASCADE semantics. Cleanup is one atomic statement;
  * normal trigger behavior is restored before re-seeding or running tests.
+ * Graph search generation is reset to its singleton zero baseline; inserting
+ * the fresh default source records its first source mutation generation.
  * Aggregate table/index/TOAST storage over 8 MiB also uses TRUNCATE so deleted
  * rows cannot accumulate unbounded storage across repeated fixture resets.
  * Identifiers are quoted defensively against pathological table names.
@@ -126,6 +128,10 @@ export async function resetPgliteState(engine: PGLiteEngine): Promise<void> {
         END LOOP;
         PERFORM set_config('session_replication_role', original_role, true);
       END IF;
+      IF to_regclass('public.graph_search_mutation_generation') IS NOT NULL THEN
+        INSERT INTO graph_search_mutation_generation(singleton, generation) VALUES(1, 0)
+          ON CONFLICT(singleton) DO UPDATE SET generation = 0;
+      END IF;
       UPDATE persistence_brain SET brain_id = gen_random_uuid(), enabled = false, activated_at = NULL WHERE singleton = 1;
       INSERT INTO sources (id, name, config)
         VALUES ('default', 'default', '{"federated": true}'::jsonb)
@@ -160,6 +166,7 @@ const TABLE_NAME_RE = /^[a-z_][a-z0-9_]*$/;
  *   - CASCADE follows FKs — truncating `sources` also empties pages etc.
  *   - Re-seeds the default source row ONLY when 'sources' is in the list
  *     (mirrors resetPgliteState).
+ *   - Re-seeds graph search generation ONLY when its table is explicitly listed.
  */
 export async function resetPgliteStateNarrow(
   engine: NarrowResetEngine,
@@ -184,6 +191,11 @@ export async function resetPgliteStateNarrow(
   }
   const quoted = tables.map(t => `"${t}"`).join(', ');
   await engine.executeRaw(`TRUNCATE ${quoted} RESTART IDENTITY CASCADE`);
+  if (tables.includes('graph_search_mutation_generation')) {
+    await engine.executeRaw(
+      'INSERT INTO graph_search_mutation_generation(singleton, generation) VALUES(1, 0)',
+    );
+  }
   if (tables.includes('sources')) {
     await engine.executeRaw(
       `INSERT INTO sources (id, name, config)

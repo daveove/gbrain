@@ -85,6 +85,19 @@ describe('resetPgliteStateNarrow', () => {
     expect(await count('sources')).toBe(2);
   });
 
+  test('restores an explicitly truncated graph singleton and leaves it alone for unrelated resets', async () => {
+    const generation = async () => (await engine.executeRaw<{ generation: string }>('SELECT generation::text AS generation FROM graph_search_mutation_generation WHERE singleton=1'))[0]?.generation;
+    await engine.setConfig('search.mode', 'keyword');
+    expect(await generation()).toBe('1');
+    await resetPgliteStateNarrow(engine, ['narrow_a']);
+    expect(await generation()).toBe('1');
+    await resetPgliteStateNarrow(engine, ['graph_search_mutation_generation']);
+    expect(await generation()).toBe('0');
+    await engine.setConfig('search.mode', 'semantic');
+    expect(await generation()).toBe('1');
+    expect(await engine.executeRaw('SELECT id FROM source_mutation_pending')).toEqual([]);
+  });
+
   test('rejects invalid table names before any SQL runs', async () => {
     await engine.executeRaw(`INSERT INTO narrow_a (v) VALUES ('survivor')`);
     const bad = [
