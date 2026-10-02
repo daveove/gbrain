@@ -8,7 +8,7 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-codex-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null };
 
 function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
@@ -34,7 +34,7 @@ if kind == 'tz':
         print(value, end='')
     sys.exit(0)
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK')}) + '\\n')
 if kind == 'resolve':
     if os.environ.get('TEST_RESOLVE_FAIL') == '1':
         print('fixture config resolver failed', file=sys.stderr)
@@ -212,6 +212,7 @@ finally:
     expect(args).not.toContain(input.after);
     expect(result.calls[1].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), input.day]);
     expect(result.calls[1].zone).toBe('Asia/Manila');
+    expect(result.calls[1].lookback).toBe('1');
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(true);
   });
 
@@ -338,6 +339,7 @@ finally:
     expect(result.code).toBe(0);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), '2026-09-29']);
+    expect(result.calls[0].lookback).toBeFalsy();
     // Backfill must not advance the Codex mtime watermark.
     expect(readFileSync(mark, 'utf8')).toBe(before);
   });
@@ -406,6 +408,7 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].tz).toBe('Asia/Manila');
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date())]);
+    expect(result.calls[0].lookback).toBe('1');
   });
 
   it('uses brain DB cycle.timezone when the file plane omits it', () => {

@@ -168,6 +168,9 @@ raise SystemExit(0 if clean is True else 1)
   fi
   # Pass the same calendar day already used for selector/ingest; zone rides in
   # GBRAIN_DAILY_MEMORY_ZONE so writer timestamp filters match day selection.
+  # LOOKBACK asks the writer for previousCalendarDay refresh (inline/fanout parity)
+  # without dropping the pinned day across a midnight boundary.
+  export GBRAIN_DAILY_MEMORY_LOOKBACK=1
   set -- "$day"
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
