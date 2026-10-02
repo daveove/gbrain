@@ -1,11 +1,18 @@
+/** Bounded dream-index extraction shared by one-shot and inline autopilot. */
 import type { BrainEngine } from '../engine.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
-import { DAILY_MEMORY_SOURCE_ID, dailyMemoryExtractTargets, countDailyMemoryExtractTargets, type DailyMemoryWrite } from './daily-memory.ts';
+import {
+  DAILY_MEMORY_SOURCE_ID,
+  dailyMemoryExtractTargets,
+  countDailyMemoryExtractTargets,
+  type DailyMemoryWrite,
+} from './daily-memory.ts';
 
 /**
- * Repair exact write targets, or discover bounded owned generated historical indexes.
+ * Restrict extraction to owned generated daily/source-record indexes.
+ * Never run a source-wide stale sweep that can rewrite human pages.
  */
-export async function extractDailyMemoryIndexes(
+export async function extractOneShotDailyMemory(
   engine: BrainEngine,
   result: Pick<DailyMemoryWrite, 'written' | 'needs_extract' | 'extract_slugs'>,
   deps: {
@@ -42,4 +49,3 @@ export async function extractDailyMemoryIndexes(
   const remaining = await countDailyMemoryExtractTargets(engine);
   if (remaining) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
 }
-

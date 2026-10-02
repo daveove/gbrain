@@ -4,8 +4,8 @@ import type { CycleOpts, CycleReport } from '../cycle.ts';
 import { calendarDateInTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
 import { writeDailyMemoryFromSources } from './daily-memory.ts';
+import { extractOneShotDailyMemory } from './daily-memory-extract.ts';
 import { drainInlineDailyMemory } from './inline-daily-memory-drain.ts';
-import { extractDailyMemoryIndexes } from './daily-memory-extraction.ts';
 import { previousCalendarDay } from './daily-memory-followup.ts';
 
 export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOpts, deps: {
@@ -24,8 +24,14 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   const canWrite = ['ok', 'clean', 'partial'].includes(report.status) && notAborted;
   if (notAborted) {
     try {
+      // Match the one-shot writer: only owned generated daily/source-record
+      // indexes, never a source-wide stale sweep that can touch human pages.
       const afterWrite = async (daily: import('./daily-memory.ts').DailyMemoryWrite, signal = opts.signal) => {
-        await extractDailyMemoryIndexes(engine, daily, { extract: deps.extract, signal });
+        await extractOneShotDailyMemory(engine, daily, {
+          extract: deps.extract,
+          signal,
+          timeBudgetMs: 60_000,
+        });
       };
       if (canWrite) {
         for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {

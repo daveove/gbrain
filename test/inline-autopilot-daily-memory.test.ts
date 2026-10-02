@@ -111,7 +111,7 @@ test('bounded inline extraction reports remaining work and a later cycle retries
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 1 }),
     onMaintenanceError: error => { observed = error; },
   })).toBe(original);
-  expect((observed as Error).message).toBe('Inline daily memory extraction needs retry: 1 dream-source pages remain');
+  expect((observed as Error).message).toBe('Daily memory extraction needs retry: 1 selected daily-index pages remain');
   expect((await page())?.compiled_truth).toContain('[[default:notes/inline-late]]');
   let retries = 0;
   observed = undefined;
@@ -235,4 +235,35 @@ test('managed transcript deletion refuses before changing the page or atomic dai
     await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
     await daily.release();
   }
+});
+
+test('inline extract targets only owned generated indexes', async () => {
+  // Seed a written daily index plus a stale human page on the dream source.
+  await seed();
+  await runInlineAutopilotCycle(engine, options, {
+    extract: extractFixture, now: () => new Date('2026-09-30T12:00:00Z'),
+    cycle: async () => report('ok'),
+  });
+  const daily = await page();
+  expect(daily).not.toBeNull();
+  await engine.putPage('notes/human-on-dream', {
+    type: 'note', title: 'Human dream page', compiled_truth: 'Human authored',
+    frontmatter: { date: '2026-09-30' },
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID, force: true });
+  // Force both pages stale for extraction.
+  await engine.executeRaw(
+    "UPDATE pages SET links_extracted_at=NULL WHERE source_id=$1",
+    [DAILY_MEMORY_SOURCE_ID],
+  );
+  const calls: Array<Parameters<typeof extractStaleFromDB>[1]> = [];
+  await runInlineAutopilotCycle(engine, options, {
+    now: () => new Date('2026-09-30T12:00:00Z'),
+    extract: async (_engine, opts) => { calls.push(opts); return extractFixture(_engine, opts); },
+    cycle: async () => report('ok'),
+  });
+  expect(calls.length).toBeGreaterThan(0);
+  const targeted = calls.flatMap(call => call.slugs ?? []);
+  expect(targeted.length).toBeGreaterThan(0);
+  expect(targeted.every(slug => slug.startsWith('daily-memory/') || slug.startsWith('source-records/'))).toBe(true);
+  expect(targeted).not.toContain('notes/human-on-dream');
 });

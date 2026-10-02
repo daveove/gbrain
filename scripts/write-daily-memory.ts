@@ -6,7 +6,10 @@ import {
   writeDailyMemoryFromSources,
   type DailyMemoryWrite,
 } from '../src/core/cycle/daily-memory.ts';
+import { extractOneShotDailyMemory } from '../src/core/cycle/daily-memory-extract.ts';
 import { drainInlineDailyMemory } from '../src/core/cycle/inline-daily-memory-drain.ts';
+
+export { extractOneShotDailyMemory };
 
 /** An explicit YYYY-MM-DD is a cycle date, not an instant in a timezone. */
 export function dailyMemoryArgs(day: string | undefined): { date?: string } {
@@ -16,9 +19,6 @@ export function dailyMemoryArgs(day: string | undefined): { date?: string } {
   }
   return { date: day };
 }
-
-export { extractDailyMemoryIndexes as extractOneShotDailyMemory } from '../src/core/cycle/daily-memory-extraction.ts';
-import { extractDailyMemoryIndexes as extractOneShotDailyMemory } from '../src/core/cycle/daily-memory-extraction.ts';
 
 export async function runOneShotDailyMemoryWrite(
   engine: BrainEngine,
