@@ -8,17 +8,37 @@ import { getPGLiteSchema } from '../src/core/pglite-schema.ts';
 import { GRAPH_SOURCE_MUTATION_SCHEMA_SQL } from '../src/core/graph-usefulness/schema.ts';
 import { MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 
+async function initializeReal169(engine: PGLiteEngine): Promise<void> {
+  const rendered = getPGLiteSchema();
+  expect(rendered.split(GRAPH_SOURCE_MUTATION_SCHEMA_SQL)).toHaveLength(2);
+  const schema169 = rendered.replace(GRAPH_SOURCE_MUTATION_SCHEMA_SQL, '');
+  expect(schema169).not.toContain('source_mutation_generation');
+  expect(schema169).not.toContain('migration.source_mutation_generation.modern.170');
+  await engine.runMigration(1, schema169);
+  const originalMigration = engine.runMigration;
+  engine.runMigration = async function(this: PGLiteEngine, version: number, sql: string) {
+    if (version === 170) throw new Error('synthetic-stop-before-graph-170');
+    return originalMigration.call(this, version, sql);
+  };
+  try {
+    await expect(runMigrations(engine)).rejects.toThrow('synthetic-stop-before-graph-170');
+  } finally {
+    engine.runMigration = originalMigration;
+  }
+  expect(await engine.getConfig('version')).toBe('169');
+  expect((await engine.executeRaw<{ relation: string | null }>("SELECT to_regclass('public.takes')::text AS relation"))[0]!.relation).toBe('takes');
+  expect((await engine.executeRaw<{ relation: string | null }>("SELECT to_regclass('public.source_mutation_generation')::text AS relation"))[0]!.relation).toBeNull();
+  expect(await engine.getConfig('migration.source_mutation_generation.modern.170')).toBeNull();
+}
+
 test('a modern169 brain with legacy graph triggers receives additive170 repair', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'graph-upgrade-'));
   const checkpointPath = join(dir, 'checkpoint.json');
   const engine = new PGLiteEngine();
   await engine.connect({});
   try {
-    await engine.initSchema();
-    await engine.runMigration(169, 'DROP TABLE source_mutation_pending CASCADE');
+    await initializeReal169(engine);
     await engine.runMigration(169, readFileSync(new URL('./fixtures/source-mutation-v146.sql', import.meta.url), 'utf8'));
-    await engine.executeRaw("DELETE FROM config WHERE key='migration.source_mutation_generation.modern.170'");
-    await engine.setConfig('version', '169');
     for (const source of ['upgrade-a', 'upgrade-b']) {
       await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [source]);
       await engine.putPage('notes/endpoint', { type: 'note', title: 'Synthetic endpoint', compiled_truth: 'Synthetic content' }, { sourceId: source });
@@ -91,26 +111,7 @@ test('real modern169 schema without graph tables upgrades without changing trans
   const engine = new PGLiteEngine();
   await engine.connect({});
   try {
-    const rendered = getPGLiteSchema();
-    expect(rendered.split(GRAPH_SOURCE_MUTATION_SCHEMA_SQL)).toHaveLength(2);
-    const schema169 = rendered.replace(GRAPH_SOURCE_MUTATION_SCHEMA_SQL, '');
-    expect(schema169).not.toContain('source_mutation_generation');
-    expect(schema169).not.toContain('migration.source_mutation_generation.modern.170');
-    await engine.runMigration(1, schema169);
-    const originalMigration = engine.runMigration;
-    engine.runMigration = async function(this: PGLiteEngine, version: number, sql: string) {
-      if (version === 170) throw new Error('synthetic-stop-before-graph-170');
-      return originalMigration.call(this, version, sql);
-    };
-    try {
-      await expect(runMigrations(engine)).rejects.toThrow('synthetic-stop-before-graph-170');
-    } finally {
-      engine.runMigration = originalMigration;
-    }
-    expect(await engine.getConfig('version')).toBe('169');
-    expect((await engine.executeRaw<{ relation: string | null }>("SELECT to_regclass('public.takes')::text AS relation"))[0]!.relation).toBe('takes');
-    expect((await engine.executeRaw<{ relation: string | null }>("SELECT to_regclass('public.source_mutation_generation')::text AS relation"))[0]!.relation).toBeNull();
-    expect(await engine.getConfig('migration.source_mutation_generation.modern.170')).toBeNull();
+    await initializeReal169(engine);
     await engine.executeRaw(`INSERT INTO extract_atoms_transcript_state(source_id,file_path,content_hash,fail_count,tombstoned)
       VALUES('default','synthetic/transcript.jsonl','synthetic-hash',3,true)`);
     await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,source_id,allowed_operations,grant_revision)
