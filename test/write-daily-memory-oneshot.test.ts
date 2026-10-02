@@ -337,22 +337,23 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
       { fromSourceId: DAILY_MEMORY_SOURCE_ID, toSourceId: 'default', originSourceId: DAILY_MEMORY_SOURCE_ID });
     const replaceHuman = () => engine.putPage(slug, { type: 'note', title: 'Human',
       compiled_truth: '[[default:notes/new-target]]', frontmatter: {} }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-    const originalRead = engine.readPageSnapshot.bind(engine);
     let injected = false;
-    const spy = spyOn(engine, 'readPageSnapshot').mockImplementation(async (target, opts) => {
-      if (target !== slug || injected) return originalRead(target, opts);
-      // Inject only when the stale scan has selected the row, not during its initial count.
-      if (!selected) return originalRead(target, opts);
-      injected = true;
-      if (timing === 'before snapshot') await replaceHuman();
-      const snapshot = await originalRead(target, opts);
-      if (timing === 'after snapshot') await replaceHuman();
-      return snapshot;
-    });
-    let selected = false;
     const originalList = engine.listStalePagesForExtraction.bind(engine);
     const listSpy = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
-      const rows = await originalList(opts); selected = rows.length > 0; return rows;
+      const rows = await originalList(opts);
+      if (timing === 'before snapshot' && rows.some(row => row.slug === slug) && !injected) {
+        injected = true;
+        await replaceHuman();
+      }
+      return rows;
+    });
+    const originalReplace = engine.replaceDerivedLinks.bind(engine);
+    const replaceSpy = spyOn(engine, 'replaceDerivedLinks').mockImplementation(async (origin, links, opts) => {
+      if (timing === 'after snapshot' && origin.slug === slug && !injected) {
+        injected = true;
+        await replaceHuman();
+      }
+      return originalReplace(origin, links, opts);
     });
     const beforeLinks = await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(beforeLinks.some(link => link.to_slug === 'notes/old-target' && link.link_source === 'markdown')).toBe(true);
@@ -367,6 +368,6 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
       expect(await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
         [DAILY_MEMORY_SOURCE_ID, slug])).toEqual(beforeMark);
       expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.frontmatter.dream_generated).toBeUndefined();
-    } finally { spy.mockRestore(); listSpy.mockRestore(); }
+    } finally { listSpy.mockRestore(); replaceSpy.mockRestore(); }
   });
 }
