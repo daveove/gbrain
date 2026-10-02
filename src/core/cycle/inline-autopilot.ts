@@ -13,6 +13,8 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   extract?: typeof extractStaleFromDB;
   onMaintenanceError?: (error: unknown) => void;
 } = {}): Promise<CycleReport> {
+  // Pin day + timezone together so a mid-cycle cycle.timezone flip cannot
+  // rewrite the selected day's timestamp filters.
   const timezone = await resolveCycleTimeZone(engine);
   const day = opts.synthDate ?? calendarDateInTimeZone(deps.now?.() ?? new Date(), timezone);
   const cycle = deps.cycle ?? (await import('../cycle.ts')).runCycle;

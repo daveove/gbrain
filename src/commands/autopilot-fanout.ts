@@ -415,8 +415,10 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
+  // One timezone snapshot owns both the queued day slug and writer filters.
+  const dailyMemoryNow = opts.now?.() ?? new Date();
   const dailyMemoryTimezone = await resolveCycleTimeZone(engine, { now: opts.now });
-  const dailyMemoryDate = calendarDateInTimeZone(opts.now?.() ?? new Date(), dailyMemoryTimezone);
+  const dailyMemoryDate = calendarDateInTimeZone(dailyMemoryNow, dailyMemoryTimezone);
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
