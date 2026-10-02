@@ -3,7 +3,8 @@ import type { BrainEngine } from '../engine.ts';
 import type { CycleOpts, CycleReport } from '../cycle.ts';
 import { calendarDateInTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import type { extractStaleFromDB } from '../../commands/extract.ts';
-import { writeDailyMemoryFromSources, DAILY_MEMORY_SOURCE_ID } from './daily-memory.ts';
+import { writeDailyMemoryFromSources } from './daily-memory.ts';
+import { extractOneShotDailyMemory } from './daily-memory-extract.ts';
 import { drainInlineDailyMemory } from './inline-daily-memory-drain.ts';
 import { previousCalendarDay } from './daily-memory-followup.ts';
 
@@ -23,13 +24,14 @@ export async function runInlineAutopilotCycle(engine: BrainEngine, opts: CycleOp
   const canWrite = ['ok', 'clean', 'partial'].includes(report.status) && notAborted;
   if (notAborted) {
     try {
+      // Match the one-shot writer: only owned generated daily/source-record
+      // indexes, never a source-wide stale sweep that can touch human pages.
       const afterWrite = async (daily: import('./daily-memory.ts').DailyMemoryWrite, signal = opts.signal) => {
-        if (daily.written || daily.needs_extract) {
-          const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
-          const extracted = await extract(engine, { dryRun: false, jsonMode: true, quiet: true,
-            sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal });
-          if (extracted.staleRemaining > 0) throw new Error(`Inline daily memory extraction needs retry: ${extracted.staleRemaining} dream-source pages remain`);
-        }
+        await extractOneShotDailyMemory(engine, daily, {
+          extract: deps.extract,
+          signal,
+          timeBudgetMs: 60_000,
+        });
       };
       if (canWrite) {
         for (const date of [day, previousCalendarDay(day)].filter((value): value is string => !!value)) {

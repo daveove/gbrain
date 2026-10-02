@@ -10,7 +10,17 @@ let engine: PGLiteEngine, version: string | null;
 beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); version = await engine.getConfig('version'); }, 60_000);
 afterAll(async () => { await engine.disconnect(); });
 beforeEach(async () => { await resetPgliteState(engine); if (version) await engine.setConfig('version', version); await engine.setConfig('cycle.timezone', 'Asia/Manila'); });
-const noExtract: typeof extractStaleFromDB = async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0 });
+const noExtract: typeof extractStaleFromDB = async (eng, opts) => {
+  const slugs = opts?.slugs;
+  if (slugs?.length) {
+    await eng.executeRaw(
+      `UPDATE pages SET links_extracted_at = GREATEST(COALESCE(updated_at, now()), $3::timestamptz)
+       WHERE source_id=$1 AND slug=ANY($2::text[]) AND deleted_at IS NULL`,
+      [opts?.sourceIdFilter ?? DAILY_MEMORY_SOURCE_ID, [...slugs], '1970-01-01T00:00:00Z'],
+    );
+  }
+  return { linksCreated: 0, timelineCreated: 0, pagesProcessed: slugs?.length ?? 0, staleRemaining: 0 };
+};
 const options = { brainDir: import.meta.dir }; // Injected cycles never read the repository.
 const report = (status: CycleStatus, reason?: string) => ({ status, reason } as CycleReport);
 const seed = async () => {
@@ -31,8 +41,21 @@ for (const status of ['ok', 'clean', 'partial'] as const) test(`inline ${status}
   expect((await page())?.compiled_truth).toContain('[[default:notes/inline-late]]');
   expect(await engine.getPage('daily-memory/2026-10-01', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
   expect(calls.length).toBeGreaterThan(0);
-  for (const call of calls) expect(call).toEqual({ dryRun: false, jsonMode: true, quiet: true,
-    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, catchUp: false, timeBudgetMs: 60_000, signal: controller.signal });
+  for (const call of calls) {
+    expect(call.dryRun).toBe(false);
+    expect(call.jsonMode).toBe(true);
+    expect(call.quiet).toBe(true);
+    expect(call.sourceIdFilter).toBe(DAILY_MEMORY_SOURCE_ID);
+    expect(call.catchUp).toBe(false);
+    expect(call.signal).toBe(controller.signal);
+    expect(typeof call.timeBudgetMs).toBe('number');
+    // Exact generated targets only — never a source-wide stale sweep.
+    expect(Array.isArray(call.slugs)).toBe(true);
+    expect(call.slugs!.length).toBeGreaterThan(0);
+    for (const slug of call.slugs!) {
+      expect(slug.startsWith('daily-memory/') || slug.startsWith('source-records/')).toBe(true);
+    }
+  }
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
@@ -105,7 +128,7 @@ test('bounded inline extraction reports remaining work and a later cycle retries
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 1 }),
     onMaintenanceError: error => { observed = error; },
   })).toBe(original);
-  expect((observed as Error).message).toBe('Inline daily memory extraction needs retry: 1 dream-source pages remain');
+  expect((observed as Error).message).toBe('Daily memory extraction needs retry: 1 selected daily-index pages remain');
   expect((await page())?.compiled_truth).toContain('[[default:notes/inline-late]]');
   let retries = 0;
   observed = undefined;
@@ -155,3 +178,35 @@ test('inline cycle preserves the timezone captured with its day when config chan
   expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))!.compiled_truth)
     .toContain('[[default:notes/inline-zone]]');
 });
+
+test('inline extract targets only owned generated indexes', async () => {
+  // Seed a written daily index plus a stale human page on the dream source.
+  await seed();
+  await runInlineAutopilotCycle(engine, options, {
+    extract: noExtract, now: () => new Date('2026-09-30T12:00:00Z'),
+    cycle: async () => report('ok'),
+  });
+  const daily = await page();
+  expect(daily).not.toBeNull();
+  await engine.putPage('notes/human-on-dream', {
+    type: 'note', title: 'Human dream page', compiled_truth: 'Human authored',
+    frontmatter: { date: '2026-09-30' },
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID, force: true });
+  // Force both pages stale for extraction.
+  await engine.executeRaw(
+    "UPDATE pages SET links_extracted_at=NULL WHERE source_id=$1",
+    [DAILY_MEMORY_SOURCE_ID],
+  );
+  const calls: Array<Parameters<typeof extractStaleFromDB>[1]> = [];
+  await runInlineAutopilotCycle(engine, options, {
+    now: () => new Date('2026-09-30T12:00:00Z'),
+    extract: async (_engine, opts) => { calls.push(opts); return noExtract(_engine, opts); },
+    cycle: async () => report('ok'),
+  });
+  expect(calls.length).toBeGreaterThan(0);
+  const targeted = calls.flatMap(call => call.slugs ?? []);
+  expect(targeted.length).toBeGreaterThan(0);
+  expect(targeted.every(slug => slug.startsWith('daily-memory/') || slug.startsWith('source-records/'))).toBe(true);
+  expect(targeted).not.toContain('notes/human-on-dream');
+});
+
