@@ -29,28 +29,29 @@ export async function runOneShotDailyMemoryWrite(
 ): Promise<DailyMemoryWrite> {
   // Launcher exports the resolved calendar zone so timestamp filters match day selection.
   const selected = (process.env.GBRAIN_DAILY_MEMORY_ZONE || '').trim();
+  // Scheduled launcher pins the day argv and sets LOOKBACK=1; bare undefined day
+  // (unit tests / direct calls) also looks back. Explicit backfills omit the flag.
+  const lookback = day === undefined || process.env.GBRAIN_DAILY_MEMORY_LOOKBACK === '1';
   const { now, ...extractDeps } = deps;
-  const zoneOpts = {
-    ...(selected ? { timezone: selected } : {}),
-    ...(now ? { now } : {}),
-  };
 
   const afterWrite = async (daily: DailyMemoryWrite, signal = deps.signal) => {
     await extractOneShotDailyMemory(engine, daily, { ...extractDeps, signal });
   };
 
   let result: DailyMemoryWrite;
-  // Explicit-date backfills stay single-day. Scheduled runs also refresh the
-  // previous calendar day so late source_records still land (match inline/fanout).
-  if (day !== undefined) {
+  if (!lookback) {
     result = await writeDailyMemoryFromSources(engine, {
       ...dailyMemoryArgs(day),
-      ...zoneOpts,
+      ...(selected ? { timezone: selected } : {}),
+      ...(now ? { now } : {}),
     });
     await afterWrite(result);
   } else {
+    // Prefer the launcher-pinned day when present so a mid-run midnight cannot
+    // drift the primary write away from the day already used for ingest.
     const timezone = selected || await resolveCycleTimeZone(engine);
-    const selectedDay = calendarDateInTimeZone(now?.() ?? new Date(), timezone);
+    if (day !== undefined) dailyMemoryArgs(day); // validate format
+    const selectedDay = day ?? calendarDateInTimeZone(now?.() ?? new Date(), timezone);
     let primary: DailyMemoryWrite | undefined;
     for (const date of [selectedDay, previousCalendarDay(selectedDay)].filter((value): value is string => !!value)) {
       const daily = await writeDailyMemoryFromSources(engine, { date, timezone, ...(now ? { now } : {}) });

@@ -237,6 +237,27 @@ test('scheduled one-shot refreshes previous-day lookback; explicit date stays si
   expect(await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID })).toBeNull();
 });
 
+test('scheduled launcher lookback flag refreshes previous day with a pinned date argv', async () => {
+  await seed('2026-09-29', 'notes/oneshot-lookback-flag-prev');
+  await seed('2026-09-30', 'notes/oneshot-lookback-flag-cur');
+  const prev = process.env.GBRAIN_DAILY_MEMORY_LOOKBACK;
+  process.env.GBRAIN_DAILY_MEMORY_LOOKBACK = '1';
+  try {
+    const scheduled = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+      extract: noExtract,
+      now: () => new Date('2026-09-30T12:00:00Z'),
+    });
+    expect(scheduled.day).toBe('2026-09-30');
+    expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-lookback-flag-cur]]');
+    expect((await engine.getPage('daily-memory/2026-09-29', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+      .toContain('[[default:notes/oneshot-lookback-flag-prev]]');
+  } finally {
+    if (prev === undefined) delete process.env.GBRAIN_DAILY_MEMORY_LOOKBACK;
+    else process.env.GBRAIN_DAILY_MEMORY_LOOKBACK = prev;
+  }
+});
+
 test('today includes its capped record indexes but leaves a human reference untouched', async () => {
   await engine.executeRaw(`CREATE TABLE source_records (
     id text PRIMARY KEY, source_type text, source_ref text, entity_type text,
