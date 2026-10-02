@@ -115,10 +115,10 @@ export async function dailyMemoryDaysForSlugs(
   engine: BrainEngine,
   sourceId: string,
   slugs: string[],
-  opts: { signal?: AbortSignal } = {},
+  opts: { signal?: AbortSignal; timezone?: string } = {},
 ): Promise<string[]> {
   if (slugs.length === 0) return [];
-  const zone = await resolveCycleTimeZone(engine);
+  const zone = opts.timezone ?? await resolveCycleTimeZone(engine);
   const days = new Set<string>();
   for (let offset = 0; offset < slugs.length; offset += 100) {
     opts.signal?.throwIfAborted();
@@ -273,7 +273,8 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (isDay(entry.day)) savedDays.add(entry.day);
     else savedSlugs.add(entry.slug);
   }
-  const days = [...new Set([...savedDays, ...await dailyMemoryDaysForSlugs(engine, sourceId, [...savedSlugs], { signal: job.signal })])].sort();
+  const timezone = pinnedDailyMemoryTimezone(job.data) ?? await resolveCycleTimeZone(engine);
+  const days = [...new Set([...savedDays, ...await dailyMemoryDaysForSlugs(engine, sourceId, [...savedSlugs], { signal: job.signal, timezone })])].sort();
   const dateEntries = days.map(day => JSON.stringify({ jobId: job.id, day }));
   if (dateEntries.length && !await appendCompleted(engine, key, dateEntries)) throw new Error('Source daily memory dates were not persisted');
   debt.push(...dateEntries.map(path => ({ path })));
@@ -292,7 +293,6 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
     if (!written.length) throw new Error('Affected daily memory dates were not persisted');
     job.data.daily_memory_affected_dates = days;
   }
-  const timezone = pinnedDailyMemoryTimezone(job.data) ?? await resolveCycleTimeZone(engine);
   await queueDailyDateBatch(new MinionQueue(engine), days, job.id, 0, [], 0, 0, 0, randomUUID(), timezone);
   await retireSnapshot();
 }
@@ -308,11 +308,12 @@ export async function refreshDailyMemoryAfterPageMutation(
   if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
     throw new Error('Invalid prior daily memory dates');
   }
+  const timezone = await resolveCycleTimeZone(engine);
   const days = [...new Set([...(opts.priorDays ?? []),
-    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug])])].sort();
+    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone })])].sort();
   if (!days.length) return [];
   await queueStandaloneSyncDailyMemory(engine, {
-    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days,
+    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days, timezone,
   });
   return days;
 }
@@ -324,6 +325,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
   if (!sourceId || sourceId === DAILY_MEMORY_SOURCE_ID) return [];
+  const timezone = await resolveCycleTimeZone(engine);
   const affectedDays = new Set<string>();
   let cursor = '';
   for (;;) {
@@ -332,7 +334,7 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
       `SELECT slug FROM pages WHERE source_id=$1 AND slug>$2 ORDER BY slug LIMIT 500`,
       [sourceId, cursor],
     );
-    for (const day of await dailyMemoryDaysForSlugs(engine, sourceId, rows.map(row => row.slug), opts)) {
+    for (const day of await dailyMemoryDaysForSlugs(engine, sourceId, rows.map(row => row.slug), { ...opts, timezone })) {
       affectedDays.add(day);
     }
     if (rows.length < 500) break;
@@ -344,7 +346,6 @@ export async function refreshDailyMemoryAfterSourceArchiveChange(
   // The lifecycle caller owns the transaction boundary; separate transitions need fresh refreshes.
   const transitionKey = `archive:${sourceId}:${randomUUID()}`;
   opts.signal?.throwIfAborted();
-  const timezone = await resolveCycleTimeZone(engine);
   const firstChild = await queueFanoutDailyMemory(queue, { day: days[0], ids: [], key: transitionKey, timezone });
   await queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
   return days;

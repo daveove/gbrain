@@ -184,7 +184,7 @@ test('selected extraction honors empty targets, missing targets and source ident
   expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
 });
 
-test('human day does not trigger extraction of unrelated dream indexes', async () => {
+test('human day with needs_extract falls back to a bounded dream-source sweep', async () => {
   await ensureDailyMemorySource(engine);
   await engine.putPage('daily-memory/2026-09-28', {
     type: 'note', title: 'Old index', compiled_truth: '', frontmatter: { dream_generated: true },
@@ -193,13 +193,19 @@ test('human day does not trigger extraction of unrelated dream indexes', async (
     type: 'note', title: 'Human day', compiled_truth: 'Preserve this note',
   });
   let called = 0;
+  let sawSlugs: readonly string[] | undefined;
   const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
-    extract: async () => { called++; return noExtract(engine, {} as never); },
+    extract: async (_engine, opts) => {
+      called++;
+      sawSlugs = opts.slugs;
+      return noExtract(_engine, opts);
+    },
   });
   expect(result.reason).toBe('human_page');
   expect(result.needs_extract).toBe(true);
-  expect(called).toBe(0);
-  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(1);
+  expect(result.extract_slugs?.length ?? 0).toBe(0);
+  expect(called).toBe(1);
+  expect(sawSlugs).toBeUndefined();
 });
 
 test('today includes its capped record indexes but leaves a human reference untouched', async () => {

@@ -442,6 +442,45 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
   });
 
 
+  test('source-sync discovery and batch share one resolved timezone', async () => {
+    await engine.setConfig('cycle.timezone', 'Asia/Manila');
+    const sourceId = 'tz-once-source';
+    const day = '2026-09-30';
+    const slug = 'notes/tz-once';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    await engine.putPage(slug, {
+      type: 'note', title: 'Timezone once fixture', compiled_truth: 'Synthetic fixture', frontmatter: {},
+    }, { sourceId });
+    // Instant is 2026-09-30 in Manila and 2026-09-29 in Los Angeles.
+    await engine.executeRaw(
+      "UPDATE pages SET effective_date=NULL, effective_date_source=NULL, updated_at='2026-09-30T02:00:00Z' WHERE source_id=$1 AND slug=$2",
+      [sourceId, slug]);
+    const zones: string[] = [];
+    const original = engine.getConfig.bind(engine);
+    engine.getConfig = async (key: string) => {
+      if (key === 'cycle.timezone') zones.push('read');
+      return original(key);
+    };
+    try {
+      const queue = new MinionQueue(engine);
+      const source = await queue.add('autopilot-cycle', { source_id: sourceId });
+      const claimed = (await queue.claim('tz-once-lock', 60_000, 'default', ['autopilot-cycle']))!;
+      await refreshDailyMemoryAfterSourceSync(engine, claimed, sourceId, {
+        status: 'ok', phases: [{ phase: 'sync', pagesAffected: [slug] }],
+      });
+      const batch = (await engine.executeRaw<{ data: Record<string, unknown> }>(
+        "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates' ORDER BY id DESC LIMIT 1"))[0];
+      expect(batch.data.daily_memory_timezone).toBe('Asia/Manila');
+      expect(batch.data.daily_memory_dates).toEqual([day]);
+      // One resolve for discovery+batch (not a second resolve after discovery).
+      expect(zones.filter(z => z === 'read').length).toBe(1);
+      await queue.completeJob(source.id, 'tz-once-lock', {});
+    } finally {
+      engine.getConfig = original;
+    }
+  });
+
+
   test('completed identical daily barriers are idempotent but changed dependency sets get a new job', async () => {
     const queue = new MinionQueue(engine), day = '2026-09-30';
     const id = await queueFanoutDailyMemory(queue, { day, ids: [], key: 'same-slot' });
