@@ -264,6 +264,24 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     expect(result.source_job_ids).toEqual([100]);
   });
 
+  test('fanout derives day and timezone from one cycle.timezone snapshot', async () => {
+    // 02:00Z is 2026-09-30 in Asia/Manila and 2026-09-29 in America/Los_Angeles.
+    const { engine, queue, fanoutOpts } = makeStubs([src('repo-a')]);
+    let reads = 0;
+    engine.getConfig = async key => {
+      if (key !== 'cycle.timezone') return null;
+      reads += 1;
+      return reads === 1 ? 'Asia/Manila' : 'America/Los_Angeles';
+    };
+    const result = await dispatchPerSource(engine, queue, {
+      ...fanoutOpts,
+      now: () => new Date('2026-09-30T02:00:00Z'),
+    });
+    expect(result.daily_memory_date).toBe('2026-09-30');
+    expect(result.daily_memory_timezone).toBe('Asia/Manila');
+    expect(reads).toBe(1);
+  });
+
   test('empty sources list falls back to legacy single-job dispatch', async () => {
     const { engine, queue, added, fanoutOpts } = makeStubs([]);
     const result = await dispatchPerSource(engine, queue, fanoutOpts);

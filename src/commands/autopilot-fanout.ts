@@ -33,7 +33,7 @@
  */
 
 import { existsSync } from 'fs';
-import { resolveCycleDate, resolveCycleTimeZone } from '../core/cycle/cycle-date.ts';
+import { calendarDateInTimeZone, resolveCycleTimeZone } from '../core/cycle/cycle-date.ts';
 import { queueFanoutDailyMemory, queueFanoutDailyMemoryWithRecordLookback } from '../core/cycle/daily-memory-followup.ts';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
@@ -415,8 +415,10 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
-  const dailyMemoryDate = await resolveCycleDate(engine, { now: opts.now });
+  // One timezone snapshot owns both the queued day slug and writer filters.
+  const dailyMemoryNow = opts.now?.() ?? new Date();
   const dailyMemoryTimezone = await resolveCycleTimeZone(engine, { now: opts.now });
+  const dailyMemoryDate = calendarDateInTimeZone(dailyMemoryNow, dailyMemoryTimezone);
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
