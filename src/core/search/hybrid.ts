@@ -38,7 +38,7 @@ import {
   resolveAdaptiveReturn,
   applyAdaptiveReturn,
   adaptiveReturnFromConfig,
-  type AdaptiveReturnDecision,
+  type AdaptiveReturnConfig, type AdaptiveReturnDecision,
 } from './return-policy.ts';
 import { applyAutocut, type AutocutDecision } from './autocut.ts';
 import {

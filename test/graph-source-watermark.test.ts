@@ -179,7 +179,7 @@ describe('incident-source graph watermarks', () => {
   });
 
   test('search-config mutation allowlist matches the public mode and proof snapshot APIs', () => {
-    expect([...GRAPH_RETRIEVAL_CONFIG_KEYS]).toEqual([...new Set([
+    expect([...GRAPH_RETRIEVAL_CONFIG_KEYS] as string[]).toEqual([...new Set([
       SEARCH_MODE_KEY, ...SEARCH_MODE_CONFIG_KEYS, ...PROOF_SEARCH_RAW_KEYS,
       'embedding_columns', 'search_embedding_column',
     ])].sort());
