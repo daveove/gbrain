@@ -31,14 +31,16 @@ export async function extractOneShotDailyMemory(
     timeBudgetMs?: number;
   } = {},
 ): Promise<void> {
-  if ((!result.written && !result.needs_extract) || !result.extract_slugs?.length) return;
+  if (!result.written && !result.needs_extract) return;
   const extract = deps.extract ?? (await import('../src/commands/extract.ts')).extractStaleFromDB;
+  // Exact slugs when present; otherwise a bounded dream-source sweep retries
+  // historical indexes left stale by a prior failed one-shot extract.
   const extracted = await extract(engine, {
     dryRun: false,
     jsonMode: true,
     quiet: true,
     sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
-    slugs: result.extract_slugs,
+    ...(result.extract_slugs?.length ? { slugs: result.extract_slugs } : {}),
     catchUp: false,
     timeBudgetMs: deps.timeBudgetMs ?? 60_000,
     signal: deps.signal,

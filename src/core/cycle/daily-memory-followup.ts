@@ -331,11 +331,12 @@ export async function refreshDailyMemoryAfterPageMutation(
   if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
     throw new Error('Invalid prior daily memory dates');
   }
+  const timezone = await resolveCycleTimeZone(engine);
   const days = [...new Set([...(opts.priorDays ?? []),
-    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug])])].sort();
+    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone })])].sort();
   if (!days.length) return [];
   await queueStandaloneSyncDailyMemory(engine, {
-    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days,
+    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days, timezone,
   });
   return days;
 }
