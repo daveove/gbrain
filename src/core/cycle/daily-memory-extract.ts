@@ -5,6 +5,7 @@ import {
   DAILY_MEMORY_SOURCE_ID,
   dailyMemoryExtractTargets,
   countDailyMemoryExtractTargets,
+  isOwnedGeneratedDailyIndex,
   type DailyMemoryWrite,
 } from './daily-memory.ts';
 
@@ -26,10 +27,8 @@ export async function extractOneShotDailyMemory(
   const budget = deps.timeBudgetMs ?? 60_000;
   const originGuard = async (snapshot: PageSnapshot) => {
     const page = snapshot.page;
-    if (page.source_id !== DAILY_MEMORY_SOURCE_ID || page.frontmatter.dream_generated !== true) return false;
-    if (!/^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(page.slug)
-      && !(page.slug.startsWith('source-records/') && ['source_record_id', 'source_record_type', 'source_record_ref']
-        .every(key => Object.hasOwn(page.frontmatter, key)))) return false;
+    if (page.source_id !== DAILY_MEMORY_SOURCE_ID
+      || !isOwnedGeneratedDailyIndex(page.slug, page.frontmatter)) return false;
     const [source] = await engine.executeRaw<{ owned: boolean }>(`SELECT archived IS NOT TRUE AND
       (config @> '{"system_index":true}'::jsonb OR
         (name='Dream cycle indexes' AND config @> '{"federated":false}'::jsonb)) AS owned

@@ -117,6 +117,21 @@ export function dailyMemorySlug(day: string): string {
   return `${DAILY_MEMORY_SLUG_PREFIX}/${day}`;
 }
 
+/** True when slug+frontmatter still match an owned generated daily/source-record index. */
+export function isOwnedGeneratedDailyIndex(
+  slug: string,
+  frontmatter: Record<string, unknown> | null | undefined,
+): boolean {
+  if (frontmatter?.dream_generated !== true) return false;
+  if (/^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(slug)) return true;
+  if (!slug.startsWith('source-records/')) return false;
+  return (
+    Object.hasOwn(frontmatter, 'source_record_id')
+    && Object.hasOwn(frontmatter, 'source_record_type')
+    && Object.hasOwn(frontmatter, 'source_record_ref')
+  );
+}
+
 export interface SourcePageRow {
   source_id: string;
   slug: string;

@@ -468,6 +468,27 @@ finally:
     try { chmodSync(broken, 0o644); } catch { /* ignore */ }
   });
 
+  it('exits nonzero when the Codex sessions root is absent', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    const sessions = join(home, '.codex/sessions');
+    rmSync(sessions, { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, sessions, input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toMatch(/cannot list/);
+  });
+
+  it('treats an absent child day directory as empty, not a root failure', () => {
+    const { home } = fixture();
+    const input = todayInputs(home);
+    // Remove only the currentUtc day folder; an existing sessions root must still succeed.
+    rmSync(dirname(input.currentUtc), { recursive: true, force: true });
+    const result = spawnSync('python3', [selector, join(home, '.codex/sessions'), input.day, 'Asia/Manila'], { encoding: 'utf8' });
+    expect(result.status).toBe(0);
+    const selected = result.stdout.split('\0').filter(Boolean);
+    expect(selected).not.toContain(input.currentUtc);
+  });
+
   it('exits nonzero when a session day directory cannot be listed', () => {
     const { home } = fixture();
     const input = todayInputs(home);

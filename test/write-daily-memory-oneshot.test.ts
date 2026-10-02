@@ -373,3 +373,30 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
     } finally { listSpy.mockRestore(); replaceSpy.mockRestore(); }
   });
 }
+
+test('exact-target extract skips a raced human page without advancing its watermark', async () => {
+  await seed();
+  const written = await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+  expect(written.extract_slugs).toEqual([written.slug]);
+  // Replace the selected generated index with a human page after targets return.
+  await engine.putPage(written.slug, {
+    type: 'note', title: 'Human-owned day', compiled_truth: '[[default:notes/human-raced]]', frontmatter: {},
+  }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+  await engine.putPage('notes/human-raced', {
+    type: 'note', title: 'Human target', compiled_truth: 'Synthetic human target',
+  });
+  const before = await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  );
+  await extractOneShotDailyMemory(engine, {
+    written: true,
+    needs_extract: true,
+    extract_slugs: written.extract_slugs,
+  });
+  expect(await engine.executeRaw(
+    'SELECT knowledge_revision, links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
+    [DAILY_MEMORY_SOURCE_ID, written.slug],
+  )).toEqual(before);
+  expect(await engine.getLinks(written.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual([]);
+});
