@@ -1,0 +1,12 @@
+{
+  "proof_version": 2,
+  "questions": [
+    {
+      "id": "q1",
+      "query": "parent note topic",
+      "relevant_slugs": ["topics/parent-note"],
+      "top_k": 5,
+      "min_hits_in_top_k": 1
+    }
+  ]
+}

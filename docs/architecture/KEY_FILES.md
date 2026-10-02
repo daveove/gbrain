@@ -21,6 +21,7 @@ boundary and add its link here rather than raising the cap.
 | Subsystem | Entry range / scope |
 |---|---|
 | [Page identity and writer administration](key-files/page-identity-and-administration.md) | Opaque result IDs, current grants, state-bound ownership changes |
+| [Graph measurement and guarded receipts](key-files/graph-usefulness.md) | Local graph reports, source watermarks, relation manifests and retrieval proofs |
 | [Canonical reconciliation](key-files/canonical-reconciliation.md) | Exact-page repair, private retained originals, derived atom state and receipt diagnostics |
 | [Company-brain ingestion](key-files/company-brain.md) | Inspection, admission, receipts, derived relationships and schema; [operator guide](../guides/company-brain-ingestion.md) |
 | [Commands (1/6)](key-files/commands-1.md) | `src/commands/agent-logs.ts` through `src/commands/db-repair.ts` |

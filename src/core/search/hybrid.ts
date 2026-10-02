@@ -1124,6 +1124,14 @@ export interface HybridSearchOpts extends SearchOpts {
    * (`[CDX-5+6]`), which leave this undefined. Not part of the public contract.
    */
   _searchModeInput?: ResolveSearchModeInput;
+
+  /** Trusted internal retrieval-proof snapshot; never an operation/MCP parameter. */
+  _pinnedSearch?: {
+    embeddingColumn: import('../types.ts').ResolvedColumn;
+    adaptiveReturn: Partial<AdaptiveReturnConfig>;
+    intentPatterns: string | null;
+    embeddingMultimodalModel: string | null;
+  };
 }
 
 const QUERY_EMBED_TIMEOUT_MS = (() => {
@@ -1301,9 +1309,12 @@ export async function hybridSearch(
   // Failing cfg load (pre-config brain, mid-migration, no engine.getConfig)
   // falls through to the file-plane sync loadConfig() — same shape, just
   // misses DB-plane overrides.
-  const mergedCfg = await loadConfigWithEngine(engine).catch(() => null);
-  const cfgForColumn = mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
-  const resolvedCol = cfgForColumn
+  const pinned = opts?._pinnedSearch;
+  const mergedCfg = pinned ? null : await loadConfigWithEngine(engine).catch(() => null);
+  const cfgForColumn = pinned ? null : mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
+  const resolvedCol = pinned
+    ? resolveEmbeddingColumn({ embeddingColumn: pinned.embeddingColumn }, { engine: 'pglite' })
+    : cfgForColumn
     ? resolveEmbeddingColumn(opts, cfgForColumn)
     : resolveEmbeddingColumn(opts, { engine: 'pglite' });
 
@@ -1319,7 +1330,9 @@ export async function hybridSearch(
   // weight-adjustment path. Intent weighting is on by default (off via
   // `opts.intentWeighting = false`; mode bundle supplies the default).
   // #4415: merges the brain's `search.intent_patterns` config over the banks.
-  const suggestions = await classifyQueryWithBrainPatterns(engine, query);
+  const suggestions = await classifyQueryWithBrainPatterns(
+    pinned ? { getConfig: async () => pinned.intentPatterns } : engine, query,
+  );
   const intentWeightingOn = resolvedMode.intentWeighting;
   const intentWeights = intentWeightingOn
     ? weightsForIntent(suggestions.intent)
@@ -1579,7 +1592,7 @@ export async function hybridSearch(
   // this guard a multimodal-only install would fall to keyword-only here and
   // never run the image/unified vector path.
   const multimodalProviderProbe =
-    cfgForColumn?.embedding_multimodal_model ?? 'voyage:voyage-multimodal-3';
+    (pinned ? pinned.embeddingMultimodalModel : cfgForColumn?.embedding_multimodal_model) ?? 'voyage:voyage-multimodal-3';
   // The LLM intent tie-break (below) can escalate a regex-'text' query to
   // 'image'/'both'; account for that possibility so an ambiguous query on a
   // multimodal-only install still reaches the multimodal branch.
@@ -2356,7 +2369,7 @@ export async function hybridSearch(
   // survives the trim.
   const adaptiveCfg = resolveAdaptiveReturn(
     opts?.adaptiveReturn,
-    adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
+    pinned ? pinned.adaptiveReturn : adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
   let returnPool = aliasHopped;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;

@@ -1,3 +1,4 @@
+import { GRAPH_SOURCE_MUTATION_SCHEMA_SQL } from './graph-usefulness/schema.ts';
 import { SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL } from './company-brain/receipt-schema.ts';
 import { MANAGED_WRITER_GUARD_SQL } from './persistence/writer-guard-schema.ts';
 import { PERSISTENCE_TOPOLOGY_SCHEMA_SQL } from './persistence/topology-schema.ts';
@@ -6708,6 +6709,7 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
     idempotent: true,
     sql: FACT_WITHDRAWAL_SUBJECT_SQL,
   },
+  { version: 170, name: 'modern_graph_source_mutation_generation', idempotent: true, sql: GRAPH_SOURCE_MUTATION_SCHEMA_SQL },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

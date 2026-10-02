@@ -555,6 +555,9 @@ async function main() {
     return;
   }
 
+  // Usefulness flags are validated before connecting; bare traversal keeps its dispatcher.
+  if (command === 'graph' && await (await import('./commands/graph-usefulness-dispatch.ts')).dispatchGraphUsefulness(subArgs, connectEngine)) return;
+
   // Per-command --help. For `agent`, the scan STOPS at the `--` terminator:
   // everything after it is literal prompt text, so `agent run -- --help`
   // must submit the prompt, never print help (cathedral-6 eng review).
