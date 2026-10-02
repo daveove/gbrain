@@ -96,6 +96,37 @@ describe('incident-source graph watermarks', () => {
     await expect(runPagedMeasure(engine, { sourceId: p.a, cursor: 0, limit: 1, checkpointPath: p.checkpointPath })).rejects.toThrow(/Corpus mutated/);
   });
 
+  test('type-only ABA advances committed epochs and refuses a proof after the type is restored', async () => {
+    const p = await pair('type-only-aba');
+    const snapshot = async () => (await engine.executeRaw<{ type: string; title: string; knowledge_revision: string }>(
+      'SELECT type,title,knowledge_revision FROM pages WHERE source_id=$1', [p.a]))[0]!;
+    const before = await snapshot();
+    const epoch = generation(await readPagedSourceMutationWatermark(engine, p.a));
+    const typeABA = async () => {
+      await engine.executeRaw("UPDATE pages SET type='event' WHERE source_id=$1", [p.a]);
+      await engine.executeRaw("UPDATE pages SET type='note' WHERE source_id=$1", [p.a]);
+    };
+    await typeABA();
+    const after = await snapshot();
+    expect(after.type).toBe(before.type);
+    expect(after.title).toBe(before.title);
+    expect(after.knowledge_revision).not.toBe(before.knowledge_revision);
+    expect(generation(await readPagedSourceMutationWatermark(engine, p.a))).toBe(epoch + 2n);
+    await expect(runPagedMeasure(engine, { sourceId: p.a, cursor: 0, limit: 1, checkpointPath: p.checkpointPath })).rejects.toThrow(/Corpus mutated/);
+    await sealPageTextProjection(engine, 'notes/endpoint', p.a);
+    _setRetrievalProofSearchForTests(async () => {
+      await typeABA();
+      return [{ source_id: p.a, slug: 'notes/endpoint' }];
+    });
+    try {
+      const result = await runRetrievalProof(engine, { proof_version: 2, questions: [{
+        id: 'type-only-aba', query: 'Synthetic endpoint', relevant_pages: [{ source_id: p.a, slug: 'notes/endpoint' }],
+      }] }, { sourceId: p.a });
+      expect(result.checks.production_mutations).toBeGreaterThan(0);
+      expect(result.passed).toBe(false);
+    } finally { _setRetrievalProofSearchForTests(null); }
+  });
+
   test('materialization preserves semantic revision while changed projected content invalidates graph receipt', async () => {
     const p = await pair('projection-revision');
     const [before] = await engine.executeRaw<{ knowledge_revision: string }>('SELECT knowledge_revision FROM pages WHERE source_id=$1', [p.a]);
