@@ -22,6 +22,61 @@ export function dailyMemoryArgs(day: string | undefined): { date?: string } {
   return { date: day };
 }
 
+
+/** Config key: recovery completed through this calendar day (inclusive). */
+const DAILY_MEMORY_LOOKBACK_WATERMARK = 'cycle.daily_memory_last_lookback_day';
+
+function lookbackMaxDays(): number {
+  // The inclusive watermark consumes one slot; leave one for forward progress.
+  return Math.min(30, Math.max(2, Number(process.env.GBRAIN_DAILY_MEMORY_LOOKBACK_DAYS) || 14));
+}
+
+function nextCalendarDay(day: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
+  const dt = new Date(`${day}T00:00:00.000Z`);
+  if (dt.toISOString().slice(0, 10) !== day) return null;
+  dt.setUTCDate(dt.getUTCDate() + 1);
+  const next = dt.toISOString().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(next) ? next : null;
+}
+
+/** Selected day, late-record predecessor, and a capped oldest-first drain from the watermark. */
+export function lookbackRecoveryDays(selectedDay: string, watermark: string | null | undefined): string[] {
+  const days = new Set<string>([selectedDay]);
+  const prev = previousCalendarDay(selectedDay);
+  if (prev) days.add(prev);
+  if (watermark && /^\d{4}-\d{2}-\d{2}$/.test(watermark) && watermark < selectedDay) {
+    let cursor: string | null = watermark;
+    let guard = 0;
+    const max = lookbackMaxDays();
+    while (cursor && cursor <= selectedDay && guard < max) {
+      days.add(cursor);
+      if (cursor === selectedDay) break;
+      cursor = nextCalendarDay(cursor);
+      guard++;
+    }
+  }
+  return [...days].sort();
+}
+
+/** Advance watermark only through the backlog this run actually drained. */
+export function lookbackWatermarkAfter(selectedDay: string, watermark: string | null | undefined): string {
+  if (!watermark || !/^\d{4}-\d{2}-\d{2}$/.test(watermark) || watermark >= selectedDay) {
+    return selectedDay;
+  }
+  let cursor: string | null = watermark;
+  let last = watermark;
+  let guard = 0;
+  const max = lookbackMaxDays();
+  while (cursor && cursor <= selectedDay && guard < max) {
+    last = cursor;
+    if (cursor === selectedDay) return selectedDay;
+    cursor = nextCalendarDay(cursor);
+    guard++;
+  }
+  return last;
+}
+
 export async function runOneShotDailyMemoryWrite(
   engine: BrainEngine,
   day: string | undefined,
@@ -52,14 +107,17 @@ export async function runOneShotDailyMemoryWrite(
     const timezone = selected || await resolveCycleTimeZone(engine);
     if (day !== undefined) dailyMemoryArgs(day); // validate format
     const selectedDay = day ?? calendarDateInTimeZone(now?.() ?? new Date(), timezone);
+    const watermark = await engine.getConfig(DAILY_MEMORY_LOOKBACK_WATERMARK);
     let primary: DailyMemoryWrite | undefined;
-    for (const date of [selectedDay, previousCalendarDay(selectedDay)].filter((value): value is string => !!value)) {
+    for (const date of lookbackRecoveryDays(selectedDay, watermark)) {
       const daily = await writeDailyMemoryFromSources(engine, { date, timezone, ...(now ? { now } : {}) });
       if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
       await afterWrite(daily);
-      primary ??= daily;
+      if (date === selectedDay) primary = daily;
     }
-    result = primary!;
+    if (!primary) throw new Error(`Daily memory write missed selected day ${selectedDay}`);
+    await engine.setConfig(DAILY_MEMORY_LOOKBACK_WATERMARK, lookbackWatermarkAfter(selectedDay, watermark));
+    result = primary;
   }
 
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.

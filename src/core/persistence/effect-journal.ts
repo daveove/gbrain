@@ -44,6 +44,7 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
       operation: row.operation,
       requestId: row.id,
       priorDays: prepared?.dailyMemoryPriorDays,
+      timezone: prepared?.dailyMemoryTimezone,
     });
     if (days.length) outcome.daily_memory_affected_dates = days;
   }

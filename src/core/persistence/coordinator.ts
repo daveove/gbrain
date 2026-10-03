@@ -31,6 +31,8 @@ interface PreparedMutationBase {
   deferEmbedding?: boolean;
   /** Dates captured under page locks before canonical mutation. */
   dailyMemoryPriorDays?: string[];
+  /** Timezone used when capturing dailyMemoryPriorDays. */
+  dailyMemoryTimezone?: string;
   /** Must perform only transaction-composable database work. */
   apply(tx: BrainEngine): Promise<Record<string, unknown>>;
   validate?(tx: BrainEngine): Promise<void>;
@@ -208,7 +210,10 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
       if (!skill && !prepared.noop && row.source_id !== 'dream'
         && ['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(row.operation)) {
         const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
-        prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, [row.slug]);
+        const { resolveCycleTimeZone } = await import('../cycle/cycle-date.ts');
+        const timezone = await resolveCycleTimeZone(tx);
+        prepared.dailyMemoryTimezone = timezone;
+        prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, [row.slug], { timezone });
       }
       if (recovery) {
         const records = recoveryFiles(recovery);

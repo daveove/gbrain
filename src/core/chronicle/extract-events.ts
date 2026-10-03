@@ -10,6 +10,7 @@
 // configured it returns zero events (auto-emit is a no-op, never an error).
 import { randomUUID } from 'node:crypto';
 import { dailyMemoryDaysForSlugs, refreshDailyMemoryAfterPageMutation } from '../cycle/daily-memory-followup.ts';
+import { resolveCycleTimeZone } from '../cycle/cycle-date.ts';
 import type { BrainEngine } from '../engine.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 
@@ -161,7 +162,8 @@ export async function runChronicleExtract(
     const eventSlug = `life/events/${day}-${hash}`;
     await engine.transaction(async tx => {
       opts.signal?.throwIfAborted();
-      const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [eventSlug], { signal: opts.signal });
+      const timezone = await resolveCycleTimeZone(tx);
+      const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [eventSlug], { signal: opts.signal, timezone });
       await tx.putPage(eventSlug, {
         type: 'event',
         title: ev.what.slice(0, 120),
@@ -181,7 +183,7 @@ export async function runChronicleExtract(
       });
       opts.signal?.throwIfAborted();
       await refreshDailyMemoryAfterPageMutation(tx, {
-        sourceId, slug: eventSlug, operation: 'put_page', requestId: randomUUID(), priorDays,
+        sourceId, slug: eventSlug, operation: 'put_page', requestId: randomUUID(), priorDays, timezone,
       });
       opts.signal?.throwIfAborted();
     });

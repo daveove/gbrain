@@ -2580,16 +2580,15 @@ export async function registerBuiltinHandlers(
       // Continue only after page/readiness progress; resume the pending keyset.
       if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0)
         || (r.pendingScanIncomplete && r.pendingScanAfter !== (job.data.pending_after ?? '')))) {
-        try {
-          const queue = new MinionQueue(engine);
-          // Unscoped coalescing would swallow this continuation.
-          await queue.add(
-            'extract',
-            { ...job.data, continuation_of: job.id, pending_after: r.pendingScanIncomplete ? r.pendingScanAfter : undefined,
-              pending_scan_complete: !r.pendingScanIncomplete },
-            { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
-          );
-        } catch { /* best-effort: next sync/manual sweep picks up the rest */ }
+        const queue = new MinionQueue(engine);
+        // Unscoped coalescing would swallow this continuation. Throw on
+        // enqueue failure so worker retry keeps the durable pending/stale work.
+        await queue.add(
+          'extract',
+          { ...job.data, continuation_of: job.id, pending_after: r.pendingScanIncomplete ? r.pendingScanAfter : undefined,
+            pending_scan_complete: !r.pendingScanIncomplete },
+          { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
+        );
       }
       return { stale: true, source_id: sourceIdFilter ?? null, ...r };
     }

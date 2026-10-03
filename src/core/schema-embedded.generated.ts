@@ -2304,6 +2304,7 @@ END \$modern_graph\$;
                 OR n.generation IS DISTINCT FROM o.generation
                 OR n.content_hash IS DISTINCT FROM o.content_hash
                 OR n.compiled_truth IS DISTINCT FROM o.compiled_truth
+                OR n.type IS DISTINCT FROM o.type
           )
           SELECT DISTINCT affected.source_id FROM (
             SELECT source_id FROM changed

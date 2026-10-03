@@ -5,14 +5,22 @@ import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from './sources-
 import { scanPendingLinkReferences, queuePendingOriginExtraction } from './pending-link-references.ts';
 import { queueDeferredStaleSweep } from './deferred-stale-extract.ts';
 
-export const INLINE_PENDING_PROBE_BUDGET_MS = 2000;
+/** Wall budget for waking dormant origins after a small inline extract. */
+export const INLINE_PENDING_PROBE_BUDGET_MS = Math.min(2000, Math.max(
+  1000, Number(process.env.GBRAIN_INLINE_PENDING_PROBE_BUDGET_MS) || 2000,
+));
 
 /** Inline extraction stamps only affected pages; arriving targets must also wake dormant origins. */
 export async function probePendingOriginsForArrivedTargets(
   engine: BrainEngine,
   sourceId: string,
-  opts: { globalBasename: boolean; signal?: AbortSignal; deadline?: number } = { globalBasename: false },
-): Promise<void> {
+  opts: {
+    globalBasename: boolean;
+    signal?: AbortSignal;
+    deadline?: number;
+    after?: string;
+  } = { globalBasename: false },
+): Promise<{ pendingScanIncomplete: boolean; pendingScanAfter: string }> {
   const deadline = Math.min(opts.deadline ?? Infinity, Date.now() + INLINE_PENDING_PROBE_BUDGET_MS);
   opts.signal?.throwIfAborted();
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
@@ -20,7 +28,7 @@ export async function probePendingOriginsForArrivedTargets(
   const outboundCrossSourceIds = new Set((await loadAllSources(engine))
     .filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id));
   const result = await scanPendingLinkReferences(engine, {
-    globalBasename: opts.globalBasename, signal: opts.signal, deadline,
+    globalBasename: opts.globalBasename, signal: opts.signal, deadline, after: opts.after,
     versionTs: LINK_EXTRACTOR_VERSION_TS, sourceId,
     onReadyOrigin: originSourceId => queuePendingOriginExtraction(engine, originSourceId, sourceId),
   }, (candidate, origin, pendingSlugs, pendingSources) =>
@@ -34,4 +42,5 @@ export async function probePendingOriginsForArrivedTargets(
     });
     if (accepted === null) throw new Error('Pending target scan continuation was not accepted');
   }
+  return result;
 }

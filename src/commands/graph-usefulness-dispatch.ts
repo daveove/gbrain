@@ -11,6 +11,8 @@ import type { BrainEngine } from '../core/engine.ts';
 import { finishCliTeardown } from '../core/cli-force-exit.ts';
 import { isThinClient, loadConfig } from '../core/config.ts';
 import {
+  argsBeforeOptionTerminator,
+  graphPositionals,
   graphUsefulnessSubcommand,
   graphUsefulnessWantsHelp,
   printGraphUsefulnessHelp,
@@ -23,7 +25,20 @@ export async function dispatchGraphUsefulness(
   connectEngine: () => Promise<BrainEngine>,
 ): Promise<boolean> {
   const sub = graphUsefulnessSubcommand(args);
-  if (!sub) return false;
+  if (!sub) {
+    // Top-level `gbrain graph --help` / `-h` has no usefulness subcommand.
+    // Still print the combined help; do not steal `gbrain graph <slug> --help`.
+    // graphPositionals treats `-h` as a positional (only `--*` are flags), so
+    // drop bare help tokens before deciding this is a traversal slug.
+    const optionArgs = argsBeforeOptionTerminator(args);
+    const wantsHelp = optionArgs.includes('--help') || optionArgs.includes('-h');
+    const slugLike = graphPositionals(args).filter(p => p !== '-h' && !p.startsWith('-'));
+    if (wantsHelp && slugLike.length === 0) {
+      printGraphUsefulnessHelp();
+      return true;
+    }
+    return false;
+  }
   rejectGraphUsefulnessFlagProblem(args);
 
   // Help is local text. Do this before config load, thin-client refusal, and

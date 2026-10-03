@@ -564,6 +564,30 @@ test('small sync target arrival wakes a pending origin without a stale sweep', a
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('inline arrival probe deadline hands off a durable stale-sweep continuation', async () => {
+  for (let i = 0; i < 3; i++) await engine.putPage(`people/arrive-${i}`, page('[[people/future]]'));
+  await drain();
+  expect((await loadPendingLinkReferences(engine)).length).toBeGreaterThanOrEqual(3);
+  const incomplete = await probePendingOriginsForArrivedTargets(engine, 'default', {
+    globalBasename: false, deadline: Date.now() - 1, after: '',
+  });
+  expect(incomplete.pendingScanIncomplete).toBe(true);
+  expect(incomplete.pendingScanAfter).toBe('');
+
+  const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-probe-deadline-'));
+  try {
+    mkdirSync(join(dir, 'people'));
+    writeFileSync(join(dir, 'people/future.md'), '---\ntype: person\n---\nSynthetic future');
+    await engine.putPage('people/future', page());
+    await extractLinksForSlugs(engine, dir, ['people/future'], { deadline: Date.now() - 1 });
+    const jobs = await engine.executeRaw<{ data: { reason?: string; sourceId?: string }; status: string }>(
+      "SELECT data,status FROM minion_jobs WHERE name='extract' AND data->>'reason'='pending_target_scan_continuation'");
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].data.sourceId).toBe('default');
+    expect(jobs[0].status).toBe('waiting');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('incremental registry failure does not report the origin safe to stamp', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'gbrain-inline-pending-fail-'));
   mkdirSync(join(dir, 'people'));
@@ -907,6 +931,21 @@ test('queued pending scan with no processed origin cannot create an endless cont
     expect(result.pagesProcessed).toBe(0);
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
   } finally { clock.mockRestore(); }
+});
+
+test('queued pending continuation enqueue failure fails the extract job', async () => {
+  await pendingFixture(105);
+  const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
+  const job = await queue.add('extract', { stale: true, sourceId: 'default' });
+  const clock = pendingProbeClock(STALE_TIME_BUDGET_MS / 8);
+  const add = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('Synthetic continuation enqueue failure'));
+  try {
+    await expect(handler(job)).rejects.toThrow('Synthetic continuation enqueue failure');
+  } finally {
+    add.mockRestore();
+    clock.mockRestore();
+  }
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
 });
 
 
