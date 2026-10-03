@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
-import { probePendingOriginsForArrivedTargets } from '../src/core/pending-link-target-arrivals.ts';
+import { INLINE_PENDING_PROBE_BUDGET_MS, probePendingOriginsForArrivedTargets } from '../src/core/pending-link-target-arrivals.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -960,19 +960,18 @@ test('cancelled pending job never publishes a cursor after a durable origin hand
 test('inline target probe completed batch durably resumes after default budget exhaustion', async () => {
   const rows = await pendingFixture(105), tail = rows.at(-1)!;
   await engine.putPage(tail.reference.candidates[0].targetSlug, page());
-  const started = Date.now();
-  let clock = 0;
-  const now = spyOn(Date,'now').mockImplementation(() => started + clock);
   const raw = engine.executeRaw.bind(engine);
   const query = spyOn(engine,'executeRaw').mockImplementation(async <T = Record<string, unknown>>(
     sql: string, params?: unknown[], opts?: { signal?: AbortSignal },
   ): Promise<T[]> => {
     const result = await raw<T>(sql,params,opts);
-    if (sql.includes('SELECT key,value FROM config') && params?.[2]) clock = 2500;
+    if (sql.includes('SELECT key,value FROM config') && params?.[2]) {
+      await Bun.sleep(INLINE_PENDING_PROBE_BUDGET_MS + 100);
+    }
     return result;
   });
   try { await probePendingOriginsForArrivedTargets(engine,'default',{ globalBasename: false }); }
-  finally { query.mockRestore(); now.mockRestore(); }
+  finally { query.mockRestore(); }
   const [job] = await engine.executeRaw<{ id: number; data: { pending_after: string } }>(
     "SELECT id,data FROM minion_jobs WHERE data->>'reason'='pending_target_scan_continuation'");
   expect(job).toBeDefined(); expect(job.data.pending_after).toBe(rows[99].key);
@@ -1026,13 +1025,15 @@ test('complete inline pending scans do not queue continuation generations', asyn
 
 test('default inline budget exhausted during metadata queues an empty cursor without losing arrivals', async () => {
   const rows = await pendingFixture(1);
-  const started = Date.now();
-  let clock = 0;
-  const now = spyOn(Date,'now').mockImplementation(() => started + clock);
   const get = engine.getConfig.bind(engine);
-  const metadata = spyOn(engine,'getConfig').mockImplementation(async key => { const result = await get(key); clock = 2500; return result; });
+  let waited = false;
+  const metadata = spyOn(engine,'getConfig').mockImplementation(async key => {
+    const result = await get(key);
+    if (!waited) { waited = true; await Bun.sleep(INLINE_PENDING_PROBE_BUDGET_MS + 100); }
+    return result;
+  });
   try { await probePendingOriginsForArrivedTargets(engine,'default',{ globalBasename: false }); }
-  finally { metadata.mockRestore(); now.mockRestore(); }
+  finally { metadata.mockRestore(); }
   expect(await loadPendingLinkReferences(engine)).toEqual(rows);
   const [job] = await engine.executeRaw<{ data: { pending_after: string } }>("SELECT data FROM minion_jobs WHERE data->>'reason'='pending_target_scan_continuation'");
   expect(job).toBeDefined(); expect(job.data.pending_after).toBe('');
