@@ -621,9 +621,14 @@ async function fingerprintForApply(
       opts.receiptPath,
       manifestSha,
     );
+    // After-phase checkpoints are newly derived per receipt/manifest. A nonzero
+    // resume cursor belongs to the before phase; starting after at that cursor
+    // with no after checkpoint makes runPagedMeasure reject. Use cursor zero
+    // for a fresh after scan; an existing after checkpoint keeps its saved cursor.
+    const cursor = phase === 'after' ? 0 : opts.pageScan.cursor;
     const report: PagedMeasureResult = await runPagedMeasure(engine, {
       sourceId,
-      cursor: opts.pageScan.cursor,
+      cursor,
       limit: opts.pageScan.limit,
       checkpointPath,
       unionSourceIds: ids,
@@ -686,8 +691,9 @@ function readInsertedXmin(value: unknown): string | null {
 /**
  * Recheck `no_incident_edge` and insert in one transaction.
  *
- * The endpoint pages are locked FOR UPDATE first, so another session cannot
- * commit a link that references them until this transaction ends. The
+ * Source rows are locked FOR UPDATE first (sorted), matching lockTopologyRows
+ * and DELETE FROM sources, so a concurrent source purge cannot deadlock by
+ * taking the opposite lock order. Endpoint pages are locked next. The
  * following statement then sees every edge that committed before the lock
  * and inserts only when neither endpoint has any incident edge, in either
  * direction, including an edge to a third page. ON CONFLICT DO NOTHING does
@@ -705,6 +711,12 @@ async function insertNoIncidentEdge(
   const linkSource = row.link_source;
 
   return engine.transaction(async (tx) => {
+    // Sources before pages: same order as lockTopologyRows / source lifecycle.
+    const sourceLockIds = [...new Set([fromSrc, toSrc])].sort();
+    await tx.executeRaw(
+      `SELECT id FROM sources WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,
+      [sourceLockIds],
+    );
     const locked = await tx.executeRaw<{ id: number; slug: string; source_id: string }>(
       `SELECT id, slug, source_id FROM pages
         WHERE deleted_at IS NULL
@@ -720,14 +732,7 @@ async function insertNoIncidentEdge(
     const to = locked.find(p => p.slug === row.to_slug && p.source_id === toSrc);
     if (!from) throw new PageMissingError('addLink', 'from', row.from_slug, fromSrc);
     if (!to) throw new PageMissingError('addLink', 'to', row.to_slug, toSrc);
-    // Hold the source rows across the insert. An archive that commits after
-    // the preflight blocks here until this transaction ends, and one that
-    // already committed is visible to the re-read below.
-    await tx.executeRaw(
-      `SELECT id FROM sources WHERE id = $1 OR id = $2 ORDER BY id FOR UPDATE`,
-      [fromSrc, toSrc],
-    );
-    // Pages and sources stay locked. A competing edge or archive inserted
+    // Sources and pages stay locked. A competing edge or archive inserted
     // here is visible to the recheck below.
     await beforeGuardedLinkInsertForTests?.(tx, row);
     const sourceIds = fromSrc === toSrc ? [fromSrc] : [fromSrc, toSrc];

@@ -1453,6 +1453,52 @@ describe('relation manifest', () => {
     }
   });
 
+  test('relation apply locks source rows before endpoint pages', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, archived) VALUES ('lock-a', 'lock-a', false), ('lock-b', 'lock-b', false)
+       ON CONFLICT (id) DO UPDATE SET archived = false`,
+    );
+    await engine.putPage('topics/lock-from', { title: 'From', compiled_truth: 'from', type: 'note' }, { sourceId: 'lock-a' });
+    await engine.putPage('topics/lock-to', { title: 'To', compiled_truth: 'to', type: 'note' }, { sourceId: 'lock-b' });
+    const lockOrder: string[] = [];
+    const origTx = engine.transaction.bind(engine);
+    engine.transaction = (async (fn: any) => origTx(async (tx: any) => {
+      const raw = tx.executeRaw.bind(tx);
+      tx.executeRaw = async (sql: string, params?: unknown[]) => {
+        if (/FOR UPDATE/i.test(sql)) {
+          if (/FROM sources/i.test(sql)) lockOrder.push('sources');
+          else if (/FROM pages/i.test(sql)) lockOrder.push('pages');
+        }
+        return raw(sql, params);
+      };
+      return fn(tx);
+    })) as typeof engine.transaction;
+    try {
+      const manifest = parseRelationManifest(JSON.stringify({
+        manifest_version: 1,
+        rows: [{
+          id: 'lock-order',
+          from_slug: 'topics/lock-from',
+          to_slug: 'topics/lock-to',
+          from_source_id: 'lock-a',
+          to_source_id: 'lock-b',
+          link_type: 'related_to',
+          link_source: 'tana-relation-r2',
+          guards: TRUE_GUARDS,
+        }],
+      }));
+      const result = await applyRelationManifest(engine, manifest, JSON.stringify(manifest), { apply: true });
+      expect(result.applied).toBe(1);
+      const sourcesAt = lockOrder.indexOf('sources');
+      const pagesAt = lockOrder.indexOf('pages');
+      expect(sourcesAt).toBeGreaterThanOrEqual(0);
+      expect(pagesAt).toBeGreaterThanOrEqual(0);
+      expect(sourcesAt).toBeLessThan(pagesAt);
+    } finally {
+      engine.transaction = origTx;
+    }
+  });
+
   test('the receipt names a row before its link transaction commits', async () => {
     await engine.putPage('topics/dur-a', { title: 'Dur A', compiled_truth: 'a', type: 'note' });
     await engine.putPage('topics/dur-b', { title: 'Dur B', compiled_truth: 'b', type: 'note' });

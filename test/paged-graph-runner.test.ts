@@ -1,5 +1,6 @@
+import { createHash } from 'crypto';
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -648,6 +649,73 @@ describe('paged multi-source fingerprint combine', () => {
     expect(second.applied).toBe(0);
     expect(second.before.sha256).toBe(second.after.sha256);
     expect(second.before.sha256).toBe(first.after.sha256);
+  });
+
+  test('resume with nonzero --cursor starts a fresh after-phase scan at cursor zero', async () => {
+    await engine.putPage('topics/az-from', {
+      title: 'AZ from', compiled_truth: 'az from', type: 'note',
+    }, { sourceId: 'xa' });
+    await engine.putPage('topics/az-to', {
+      title: 'AZ to', compiled_truth: 'az to', type: 'note',
+    }, { sourceId: 'xa' });
+    const pages = await engine.executeRaw<{ id: number }>(
+      `SELECT id FROM pages WHERE source_id = 'xa' ORDER BY id LIMIT 1`,
+    );
+    const nonzero = Number(pages[0]!.id);
+    expect(nonzero).toBeGreaterThan(0);
+
+    const raw = relationManifest([{
+      id: 'az-row',
+      from_slug: 'topics/az-from',
+      to_slug: 'topics/az-to',
+      from_source_id: 'xa',
+      to_source_id: 'xa',
+      link_type: 'related_to',
+      link_source: 'tana-relation-r2',
+      guards: TRUE_GUARDS,
+    }]);
+    const manifest = parseRelationManifest(raw);
+    const receiptPath = join(dir, 'az-receipt.json');
+    const checkpointBase = join(dir, 'az-checkpoint.json');
+    const manifestSha = createHash('sha256').update(raw).digest('hex');
+    const runId = createHash('sha256')
+      .update(receiptPath)
+      .update('\n')
+      .update(manifestSha)
+      .digest('hex')
+      .slice(0, 16);
+    const beforePath = `${checkpointBase}.before.xa.${runId}`;
+
+    // Complete a before-phase checkpoint under this receipt so nonzero --cursor
+    // can resume before, then hit a fresh after-phase path.
+    const beforeMeasure = await runPagedMeasure(engine, {
+      sourceId: 'xa',
+      cursor: 0,
+      limit: 50,
+      checkpointPath: beforePath,
+      unionSourceIds: ['xa'],
+    });
+    expect(beforeMeasure.active_pages).toBeGreaterThan(0);
+    expect(existsSync(beforePath)).toBe(true);
+
+    const afterPath = `${checkpointBase}.after.xa.${runId}`;
+    expect(existsSync(afterPath)).toBe(false);
+
+    // Nonzero CLI cursor + missing after checkpoint previously rejected apply.
+    const result = await applyRelationManifest(engine, manifest, raw, {
+      apply: true,
+      receiptPath,
+      defaultSourceId: 'xa',
+      pageScan: {
+        sourceId: 'xa',
+        cursor: nonzero,
+        limit: 50,
+        checkpointPath: checkpointBase,
+      },
+    });
+    expect(result.applied).toBe(1);
+    expect(result.before.sha256).not.toBe(result.after.sha256);
+    expect(existsSync(afterPath)).toBe(true);
   });
 
   test('same receipt path with a different manifest does not reuse phase checkpoints', async () => {

@@ -2577,6 +2577,15 @@ export async function registerBuiltinHandlers(
         pendingScanComplete: job.data.pending_scan_complete === true,
         signal: job.signal,
       });
+      // Incomplete pending scan with no cursor progress still needs a durable
+      // retry. Do not succeed and suppress the successor; fail so the worker
+      // retries this job instead of spawning an endless same-cursor chain.
+      if (!job.data.dryRun && r.pendingScanIncomplete
+        && r.pendingScanAfter === (job.data.pending_after ?? '')) {
+        throw new Error(
+          'Pending link reference scan incomplete without cursor progress; retrying',
+        );
+      }
       // Continue only after page/readiness progress; resume the pending keyset.
       if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0)
         || (r.pendingScanIncomplete && r.pendingScanAfter !== (job.data.pending_after ?? '')))) {

@@ -920,15 +920,14 @@ test('queued pending budget continuations reach a ready tail beyond a dormant fu
   } finally { clock.mockRestore(); }
 }, 120_000);
 
-test('queued pending scan with no processed origin cannot create an endless continuation', async () => {
+test('queued pending scan with no cursor progress fails for worker retry instead of going dormant', async () => {
   await pendingFixture(2);
   const handler = await pendingExtractHandler(), queue = new MinionQueue(engine);
   const job = await queue.add('extract', { stale: true, sourceId: 'default' });
   const clock = pendingProbeClock(STALE_TIME_BUDGET_MS);
   try {
-    const result = await handler(job);
-    expect(result.pendingScanIncomplete).toBe(true);
-    expect(result.pagesProcessed).toBe(0);
+    await expect(handler(job)).rejects.toThrow(/incomplete without cursor progress/);
+    // No same-cursor successor chain; worker retry of this job is the durable path.
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)])).toHaveLength(0);
   } finally { clock.mockRestore(); }
 });
