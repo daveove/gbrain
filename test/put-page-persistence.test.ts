@@ -311,7 +311,10 @@ describe('put_page persistence boundary', () => {
     expect((await replay(result)).payload.state).toBe('committed');
     expect(result.payload.write_through.written).toBe(true);
     expect((await engine.getChunks(slug, { sourceId: 'default' })).every(chunk => chunk.embedding_is_null)).toBe(true);
-    expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+    const jobs = await engine.executeRaw<{ name: string; data: Record<string, unknown> }>('SELECT name, data FROM minion_jobs');
+    expect(jobs.length).toBeGreaterThan(0);
+    expect(jobs.every(job => job.name === 'autopilot-daily-memory'
+      && (job.data.daily_memory_only === true || Array.isArray(job.data.daily_memory_dates)))).toBe(true);
   });
 
   test('successful post-persistence embeddings fill only the written page', async () => {
@@ -328,7 +331,10 @@ describe('put_page persistence boundary', () => {
     expect(await embedding(result)).toMatchObject({ state: 'committed' });
     expect((await engine.getChunks(slug, { sourceId: 'default' })).every(chunk => !chunk.embedding_is_null)).toBe(true);
     expect((await engine.getChunks('notes/unrelated', { sourceId: 'default' })).every(chunk => chunk.embedding_is_null)).toBe(true);
-    expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+    const jobs = await engine.executeRaw<{ name: string; data: Record<string, unknown> }>('SELECT name, data FROM minion_jobs');
+    expect(jobs.length).toBeGreaterThan(0);
+    expect(jobs.every(job => job.name === 'autopilot-daily-memory'
+      && (job.data.daily_memory_only === true || Array.isArray(job.data.daily_memory_dates)))).toBe(true);
   });
 
   test('slow optional embedding releases the worktree and cannot overwrite a newer file-backed revision', async () => {

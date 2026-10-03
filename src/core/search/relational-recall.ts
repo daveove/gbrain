@@ -46,7 +46,7 @@ export interface RelationalArmOpts extends PageReadPolicy {
    * (resolveExcludePrivatePages) here, same as the keyword/vector arms;
    * without it a remote relational query leaked private titles + snippets.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   onMeta?: (meta: RelationalArmMeta) => void;
 }
 

@@ -320,9 +320,10 @@ function parseArgs(args: string[]): DreamArgs {
  *      use it (matches `gbrain sync`, lets that source's filesystem phases run).
  *   3. The legacy `sync.repo_path` config key (pre-v0.18 default-source brains).
  *   4. `null` — no local checkout. The cycle then SKIPS filesystem phases
- *      (lint/backlinks/sync/synthesize/extract/patterns) with reason
- *      `no_brain_dir` and runs the DB-only phases (resolve_symbol_edges, embed,
- *      orphans, ...). This is what makes `gbrain dream` work on a postgres /
+ *      (lint/backlinks/sync/synthesize/patterns) with reason
+ *      `no_brain_dir`. Extract skips its walk and still drains stale DB links.
+ *      DB-only phases (resolve_symbol_edges, embed, orphans, ...) still run.
+ *      This is what makes `gbrain dream` work on a postgres /
  *      Supabase brain with no checkout. `runDream` owns the only hard error:
  *      no checkout AND no engine = truly nothing to run.
  *
@@ -415,8 +416,8 @@ Options:
   --dir <path>        Brain directory (default: configured brain). On a
                       postgres/remote brain with no local checkout, the
                       filesystem phases (lint, backlinks, sync, synthesize,
-                      extract, patterns) are skipped (reason: no_brain_dir)
-                      and the DB-only phases still run.
+                      patterns) are skipped (reason: no_brain_dir). Extract
+                      still drains stale links from the database.
 
   --source <id>       Scope the cycle to one source so doctor's
                       cycle_freshness check sees a fresh stamp on

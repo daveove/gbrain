@@ -29,6 +29,10 @@ interface PreparedMutationBase {
   additionalPageKeys?: readonly {sourceId:string;slug:string}[];
   noop?: boolean;
   deferEmbedding?: boolean;
+  /** Dates captured under page locks before canonical mutation. */
+  dailyMemoryPriorDays?: string[];
+  /** Timezone used when capturing dailyMemoryPriorDays. */
+  dailyMemoryTimezone?: string;
   /** Must perform only transaction-composable database work. */
   apply(tx: BrainEngine): Promise<Record<string, unknown>>;
   validate?(tx: BrainEngine): Promise<void>;
@@ -203,6 +207,14 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         if ((snapshot?.revision ?? null) !== prepared.observedRevision) throw new OperationError('revision_conflict', 'The page changed during preparation.', 'Read its current revision and submit the updated intent with a new request_id.');
       }
       await prepared.validate?.(tx);
+      if (!skill && !prepared.noop && row.source_id !== 'dream'
+        && ['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(row.operation)) {
+        const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
+        const { resolveCycleTimeZone } = await import('../cycle/cycle-date.ts');
+        const timezone = await resolveCycleTimeZone(tx);
+        prepared.dailyMemoryTimezone = timezone;
+        prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, [row.slug], { timezone });
+      }
       if (recovery) {
         const records = recoveryFiles(recovery);
         for (const record of records) if ((skill ? bundleFileHash(record) : fileHash(record.path)) !== record.beforeHash) {

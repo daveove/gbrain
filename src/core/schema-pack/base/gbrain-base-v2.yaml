@@ -349,6 +349,8 @@ page_types:
     expert_routing: false
 
 link_types:
+  # Write vocabulary only; extraction has no inference rule for this verb.
+  - name: contains
   - name: partner_of
     inverse: partner_of
   - name: relates_to

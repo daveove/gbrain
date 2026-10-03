@@ -16,6 +16,7 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { installFixtureChunks } from '../helpers/page-projection.ts';
+import { withEnv } from '../helpers/with-env.ts';
 import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import type { ChunkInput, SearchResult } from '../../src/core/types.ts';
@@ -1114,6 +1115,15 @@ describeBoth('Engine parity — Postgres vs PGLite', () => {
     // NULL arm: all 3 stale on both engines.
     expect(await pgEngine.countStalePagesForExtraction({ sourceId: SRC })).toBe(3);
     expect(await pgliteEngine.countStalePagesForExtraction({ sourceId: SRC })).toBe(3);
+
+    await withEnv({ GBRAIN_RLS_SCOPE_BINDING: '1' }, async () => {
+      for (const eng of [pgEngine, pgliteEngine]) {
+        expect(await eng.countStalePagesForExtraction({ sourceId: SRC, slugs: ['sp/2'] })).toBe(1);
+        expect((await eng.listStalePagesForExtraction({ batchSize: 10, sourceId: SRC, slugs: ['sp/2'] })).map(row => row.slug)).toEqual(['sp/2']);
+        expect(await eng.countStalePagesForExtraction({ sourceId: SRC, slugs: [] })).toBe(0);
+        expect(await eng.listStalePagesForExtraction({ batchSize: 10, sourceId: SRC, slugs: [] })).toEqual([]);
+      }
+    });
 
     // listStalePagesForExtraction: same slugs + content columns populated.
     const pgList = (await pgEngine.listStalePagesForExtraction({ batchSize: 10, sourceId: SRC })).map(r => r.slug).sort();

@@ -1,3 +1,4 @@
+import { prepareSyncDailyMemory, readFullSyncAffectedSlugs } from '../core/sync-daily-memory.ts';
 import { assertManagedFilesystemWrite } from '../core/persistence/filesystem-guard.ts';
 import { assertSyncDispatchActive, resolveSyncPersistenceMode } from '../core/persistence/sync-authority.ts';
 import { formatManagedSyncFailure, readManagedSyncFailures, syncFailureJsonFields, type ManagedSyncFailure } from '../core/persistence/sync-failures.ts';
@@ -10,6 +11,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { DELETE_BATCH_SIZE } from '../core/engine-constants.ts';
 import { refreshProjectionStatistics } from '../core/search/projection-statistics.ts';
 import { importFile, importImageFile, isImageFilePath as isImageImportPath, MAX_FILE_SIZE } from '../core/import-file.ts';
+import { INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
 import { parseMarkdown } from '../core/markdown.ts';
 import { validateSlug } from '../core/utils.ts';
 import { collectSyncableFiles, shouldLogIngest } from './import.ts';
@@ -330,6 +332,9 @@ export {
 } from '../core/sync-cost-gate.ts';
 
 export interface SyncOpts {
+  /** Bank affected days before advancing; cycle owners reuse their existing handoff. */
+  dailyMemoryFollowup?: boolean;
+  dailyMemoryOwnerJobId?: number;
   repoPath?: string;
   dryRun?: boolean;
   full?: boolean;
@@ -2271,33 +2276,19 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     };
   }
 
-  // Delete pages that became un-syncable (modified but filtered out).
-  // v0.20.0 Cathedral II SP-5: resolveSlugForPath picks the right slug shape
-  // (markdown vs code) based on the chunker's classifier, so a Rust file that
-  // became un-syncable (e.g., moved under `.gitignore` or filtered by
-  // strategy=markdown) deletes the actual code-slug page, not a ghost
-  // markdown-slug that never existed.
-  //
-  // v0.41.13 (#1433): the original cleanup loop deleted EVERY pre-existing
-  // page for unsyncable-modified paths, including `log.md`, `schema.md`,
-  // `index.md`, `README.md` — files that fail `isSyncable` precisely
-  // because they're metafiles by convention, not because the user
-  // "removed" them from the strategy. infiniteGameExp's domain `log.md`
-  // pages had been indexed by an older gbrain version (or via direct
-  // put_page) and were silently dropped on every subsequent sync. The
-  // fix uses `unsyncableReason` (factored from `isSyncable` so they
-  // cannot drift) to skip the delete when the reason is `'metafile'`.
-  //
-  // Honest scope: this guard only fixes the `manifest.modified` case.
-  // `manifest.deleted` is filtered upstream at sync.ts:757 via the same
-  // `isSyncable` call, so `rm log.md` followed by sync also doesn't
-  // delete the page. That's the same pre-fix behavior — removing the
-  // page requires `gbrain pages purge-deleted` or a direct MCP delete.
-  // Filed as v0.42+ follow-up for a `gbrain pages remove <slug>` surface.
+  // Retire only genuinely unsyncable modifications; metafiles and pruned paths
+  // remain protected below. Capture old dates before those rows become tombstones.
   const unsyncableModified = manifest.modified.filter(p => inScope(p) && !isSelectedForRun(p, syncOpts));
   // v0.18.0+ multi-source: scope getPage + deletePage to opts.sourceId so
   // unsyncable cleanup in source A doesn't accidentally sweep same-slug
   // pages in sources B/C/D.
+  const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: opts.dailyMemoryOwnerJobId,
+    sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: pin, scope: '', signal: opts.signal,
+    paths: [...filtered.added, ...filtered.modified, ...filtered.deleted,
+      ...filtered.renamed.flatMap(row => [row.from, row.to]), ...unsyncableModified].map(modePath),
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
   const pageOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
   // #4786: pages this loop retires count as `deleted` in the result (only rows
   // that actually transitioned), so a sweep-only run never reports up_to_date.
@@ -2368,10 +2359,12 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // (#1794): advance to the PINNED target, and clear any checkpoint (a resume
     // whose remaining range turned out to have no syncable changes still
     // completes cleanly here).
+    await dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await dailyFollowup?.clear();
     // A commit whose ONLY changes are malformed filenames lands here with
     // totalChanges === 0 — the anchor advances past those files forever, so
     // this early return must surface the skips too (structured-review P2).
@@ -3639,11 +3632,13 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
     // "fresh". The checkpoint rows clear here — CONVERGENCE CONTRACT: sync
     // convergence == IMPORT convergence; downstream extract/facts/embed is
     // decoupled (its own resumable stale sweeps).
+    await dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await dailyFollowup?.clear();
   };
 
   // issue #1939 adversarial finding #1: a file that failed to parse (open ledger
@@ -3836,62 +3831,18 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
   // the stale sweep scans the whole source, so banked-across-runs pages are
   // covered regardless.
   const extractOpts = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
-  if (!opts.noExtract && totalChanges > 100 && pagesAffected.length > 0) {
+  if (!opts.noExtract && totalChanges > INLINE_EXTRACT_CHANGE_LIMIT && pagesAffected.length > 0) {
     // #2849: above the size gate the deferred extraction must be DURABLY
-    // QUEUED, not just hinted. The autopilot cycle's extract phase is
-    // slug-scoped (an up_to_date follow-up sync hands it an empty
-    // pagesAffected), so a webhook-driven large sync left
-    // `links_extracted_at` unstamped FOREVER unless an operator ran
-    // `gbrain extract --stale` by hand. Submit a source-scoped stale-sweep
-    // job bound to the consumed commit (idempotency key) so repeated
-    // webhook deliveries / sync retries of the same commit coalesce onto
-    // one job. The sweep itself is the watermark scan — it picks up the
-    // pages this run imported AND any banked across resumed runs.
-    // Best-effort: queue submission failure falls back to the hint-only
-    // behavior (the pages stay stale + visible to doctor, never mis-stamped).
+    // QUEUED, not just hinted. queueDeferredStaleSweep is that path (also
+    // used by a large import). Best-effort: a submission failure leaves the
+    // pages stale and visible to doctor, never mis-stamped.
     let queuedJobId: number | string | null = null;
     try {
-      const { MinionQueue } = await import('../core/minions/queue.ts');
-      const { STALE_TIME_BUDGET_MS } = await import('./extract.ts');
-      const queue = new MinionQueue(engine);
-      const payload = {
-        stale: true,
-        ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
+      queuedJobId = await queueDeferredStaleSweep(engine, {
+        sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID,
+        commit: pin,
         reason: 'sync_size_gate',
-        // Bound to the PIN this run drained to (== headCommit unless resuming
-        // a stored target), not live HEAD — the sweep covers what we imported.
-        deferred_commit: pin,
-      };
-      // The stale sweep has its own internal wall-clock budget
-      // (GBRAIN_EXTRACT_TIME_BUDGET_MS-derived); without an explicit
-      // timeout_ms the job would inherit the tight null-default and get
-      // wall-clock-killed mid-sweep (#1737 class). 5-min headroom.
-      const timeoutMs = STALE_TIME_BUDGET_MS + 5 * 60 * 1000;
-      // NO maxWaiting here: with an unscoped (NULL-sourceId) payload the
-      // queue's coalesce filter matches ANY waiting 'extract' job (e.g. a
-      // remediation-submitted {mode:'links'} row) and returns THAT job —
-      // silently dropping the sweep while we log "queued". The idempotency
-      // key alone is the dedup for repeat submissions toward the same pin.
-      const key = `extract-stale:${opts.sourceId ?? 'default'}:${pin}`;
-      const isLiveSweep = (j: { status: string; data: Record<string, unknown> }): boolean =>
-        j.data?.stale === true && ['waiting', 'delayed', 'active'].includes(j.status);
-      let job = await queue.add('extract', payload, { idempotency_key: key, timeout_ms: timeoutMs });
-      if (!isLiveSweep(job)) {
-        // The key slot holds a FINISHED row: a prior sweep toward this pin
-        // that completed BEFORE this run's pages landed (checkpoint-resume /
-        // blocked-advance re-sync of the same target). Those pages went
-        // stale after that sweep's watermark pass, so coalescing onto the
-        // finished row would strand them — queue a fresh sweep under a
-        // run-unique key. (An 'active' sweep is safe to coalesce onto: its
-        // end-of-run staleRemaining re-count chains a continuation.)
-        job = await queue.add('extract', payload, {
-          idempotency_key: `${key}:${Date.now()}`,
-          timeout_ms: timeoutMs,
-        });
-      }
-      // Only claim "queued" once we verified the returned row IS a live
-      // stale sweep — never trust queue.add's row blind.
-      if (isLiveSweep(job)) queuedJobId = job.id;
+      });
     } catch { /* best-effort — hint below still tells the operator */ }
     slog(
       `  Large sync: deferring link/timeline extraction` +
@@ -3901,7 +3852,7 @@ async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Promise<Sy
       ` Run 'gbrain extract --stale${opts.sourceId ? ` --source-id ${opts.sourceId}` : ''}' to extract now.`,
     );
   }
-  if (!opts.noExtract && totalChanges <= 100 && pagesAffected.length > 0) {
+  if (!opts.noExtract && totalChanges <= INLINE_EXTRACT_CHANGE_LIMIT && pagesAffected.length > 0) {
     try {
       const { extractLinksForSlugs, extractTimelineForSlugs, stampExtracted, slugsSafeToStamp } = await import('./extract.ts');
       // #774: pages' source_path is git-root-relative, so extract resolves
@@ -4120,6 +4071,15 @@ async function performFullSync(
   // v0.30.x: thread sourceId so performFullSync routes pages to the named
   // source (incremental path already does this).
   // #753/#774: thread exclude (--exclude CLI) + slugRoot (monorepo subdir).
+  const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: opts.dailyMemoryOwnerJobId,
+    sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID, commit: headCommit,
+    scope: slugRoot && syncScopeRoot !== gitContextRoot ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '',
+    signal: opts.signal,
+    acceptsPath: path => isSyncable(path, opts.strategy ? { strategy: opts.strategy } : undefined)
+      || isPoisonedPath(path),
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
   const _fullImportT0 = Date.now();
   serr(`[gbrain phase] sync.fullsync.import start strategy=${opts.strategy ?? 'markdown'}`);
   opts.onProgress?.({ phase: 'full_import' });
@@ -4134,6 +4094,8 @@ async function performFullSync(
       includeHidden: opts.includeHidden,
       includeGitignored: opts.includeGitignored,
       slugRoot,
+      fullSync: true,
+      noExtract: opts.noExtract,
       // issue #1939: performFullSync owns the failure ledger + bookmark via the
       // shared gate below; don't let runImport double-record or write its own.
       managedBookmark: true,
@@ -4154,6 +4116,30 @@ async function performFullSync(
     `imported=${result.imported} skipped=${result.skipped} errors=${result.errors}`,
   );
 
+  // A thrown link sweep is not a clean full sync. Pages are already imported;
+  // the bookmark must not advance, or the next run looks up to date while
+  // edges are missing.
+  const linkExtractionError = result.linkExtractionError
+    ?? result.failures.find((f) => f.path === '<link-extraction>')?.error;
+  if (linkExtractionError) {
+    serr(`\nFull sync blocked: link extraction failed: ${linkExtractionError}`);
+    await engine.setConfig('sync.last_run', new Date().toISOString());
+    await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
+    return {
+      status: 'blocked_by_failures',
+      fromCommit: null,
+      toCommit: headCommit,
+      added: 0,
+      modified: 0,
+      deleted: 0,
+      renamed: 0,
+      chunksCreated: result.chunksCreated,
+      embedded: 0,
+      pagesAffected: [],
+      failedFiles: result.errors,
+    };
+  }
+
   // issue #1939 — gate the full-sync bookmark through the SAME shared ledger as
   // the incremental path (Codex #6: a wedge here on first/forced sync was
   // previously unreachable by the valve). A full re-import is authoritative for
@@ -4165,13 +4151,23 @@ async function performFullSync(
   const fullSucceeded = loadSyncFailures()
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
+  let reconciledDeletes = 0;
+  let fullPagesAffected: string[] = [];
   const advanceFull = async (): Promise<void> => {
+    await reconcileFullSource();
+    fullPagesAffected = await readFullSyncAffectedSlugs(engine, {
+      sourceId: fullSourceId, signal: opts.signal,
+      scope: slugRoot && syncScopeRoot !== gitContextRoot ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '',
+      acceptsPath: path => isSyncable(path, opts.strategy ? { strategy: opts.strategy } : undefined) || isPoisonedPath(path),
+    });
+    await dailyFollowup?.accept();
     // Persist sync state so the next sync is incremental. Routed through
     // writeSyncAnchor so --source pins the right sources row.
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(gitContextRoot), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, String(CHUNKER_VERSION));
+    await dailyFollowup?.clear();
   };
 
   const fullGate = await applySyncFailureGate({
@@ -4278,7 +4274,7 @@ async function performFullSync(
   //      used, so paths are in the identical relative form as source_path).
   // Skipped on the legacy no-sourceId path (the batch delete primitives require
   // a sourceId; matches every other source-scoped feature).
-  let reconciledDeletes = 0;
+  async function reconcileFullSource(): Promise<void> {
   if (opts.sourceId) {
     const sid = opts.sourceId;
     const reconcileSyncOpts = opts.strategy ? { strategy: opts.strategy } : undefined;
@@ -4426,13 +4422,15 @@ async function performFullSync(
     }
   }
 
-  // #3479 blocker 2 — the post-gate sweep above ran BEFORE this reconcile,
-  // so a `<rename:…>` sentinel whose stale row the reconcile just removed
-  // would stay open until the NEXT run. Sweep again afterwards: a full sync
+  }
+
+  // #3479 blocker 2 — verify sentinel convergence after gated reconciliation.
+  // A `<rename:…>` row removed by reconciliation must clear during this run.
+  // Sweep again afterwards: a full sync
   // is the operator's usual reset move, and it should converge in one run.
   await sweepOrphanedRenameSentinels(engine, fullSourceId, fullFailureSet);
 
-  // Full sync doesn't track pagesAffected, so fall back to embed --stale.
+  // Full imports defer embeddings to their stale sweep.
   // v0.37 fix wave (Lane D.3 + CDX2-8): switched to runEmbedCore for the
   // same reason as the incremental path — surface dim-mismatch via hint
   // instead of silently swallowing or killing the process.
@@ -4463,7 +4461,7 @@ async function performFullSync(
     renamed: 0,
     chunksCreated: result.chunksCreated,
     embedded,
-    pagesAffected: [],
+    pagesAffected: fullPagesAffected,
     // Warning aggregates ride the result for worker/JSON consumers — a full
     // sync that only prints to a daemon's stderr hides them from cron
     // topologies (codex re-review; same rationale as the incremental path).
@@ -5114,6 +5112,7 @@ See also:
         : undefined;
       timer?.unref?.();
       const repoOpts: SyncOpts = {
+        dailyMemoryFollowup: true,
         repoPath: msysToNativePath(src.local_path!), // #2955: heal MSYS /c/... before joins
         dryRun, full, noPull,
         noEmbed: effectiveNoEmbed,
@@ -5353,6 +5352,7 @@ See also:
   const singleSourceInterrupt = new AbortController();
   const onSingleSourceSigint = () => { try { singleSourceInterrupt.abort(new Error('SIGINT')); } catch { /* */ } };
   const opts: SyncOpts = {
+    dailyMemoryFollowup: true,
     repoPath, dryRun, full, noPull, noEmbed, noExtract, skipFailed, retryFailed, noSchemaPack, includeGitignored, workingTree, sourceId,
     strategy: strategyArg, concurrency,
     srcSubpath,

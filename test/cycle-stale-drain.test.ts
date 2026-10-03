@@ -65,6 +65,28 @@ afterEach(() => {
 });
 
 describe('cycle extract phase stale drain (#4062)', () => {
+  test('checkout-free cancellation stops the drain before graph writes', async () => {
+    const controller = new AbortController();
+    const original = engine.listStalePagesForExtraction.bind(engine);
+    const read = spyOn(engine, 'listStalePagesForExtraction').mockImplementation(async opts => {
+      const rows = await original(opts);
+      controller.abort(new Error('lease lost'));
+      return rows;
+    });
+    try {
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        await expect(runCycle(engine, {
+          brainDir: null, sourceId: 'wiki', phases: ['extract'], signal: controller.signal,
+        })).rejects.toThrow('lease lost');
+      });
+      expect(await engine.executeRaw('SELECT id FROM links')).toHaveLength(0);
+      const stamps = await engine.executeRaw('SELECT links_extracted_at FROM pages');
+      expect(stamps.every(row => row.links_extracted_at === null)).toBe(true);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   test('extraction totals count scanned pages rather than links', async () => {
     writeFileSync(join(brainDir, 'quiet.md'), '# Quiet page\nNo outgoing links.\n');
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
@@ -207,6 +229,30 @@ describe('cycle extract phase stale drain (#4062)', () => {
     expect(Number(stale[0]?.n ?? -1)).toBe(0);
   });
 
+  test('no checkout drains stale pages into a links row and skips the filesystem walk', async () => {
+    await engine.executeRaw(`UPDATE sources SET local_path = NULL WHERE id = 'wiki'`);
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const report = await runCycle(engine, {
+        brainDir: null,
+        sourceId: 'wiki',
+        phases: ['extract'],
+      });
+      const extractPhase = report.phases.find(p => p.phase === 'extract');
+      expect(extractPhase?.status).toBe('ok');
+      expect(extractPhase?.details?.reason).not.toBe('no_brain_dir');
+      expect(Number(extractPhase?.details?.pages_processed ?? -1)).toBe(0);
+      expect(Number(extractPhase?.details?.stale_pages_drained ?? -1)).toBe(2);
+    });
+
+    const links = await engine.executeRaw<{ from_slug: string; to_slug: string }>(
+      `SELECT pf.slug AS from_slug, pt.slug AS to_slug
+       FROM links l
+       JOIN pages pf ON pf.id = l.from_page_id
+       JOIN pages pt ON pt.id = l.to_page_id`,
+    );
+    expect(links.some(l => l.from_slug === 'people/alice' && l.to_slug === 'people/bob')).toBe(true);
+  });
+
   test('second cycle is a no-op drain (nothing stale, staleRemaining 0)', async () => {
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
       await runCycle(engine, { brainDir, sourceId: 'wiki', phases: ['extract'] });
@@ -256,6 +302,8 @@ describe('cycle extract phase stale drain (#4062)', () => {
     // Same two-channel contract as the links flush: under jsonMode a dropped
     // timeline batch must land on stderr as a batch_error event, never on stdout.
     writeFileSync(join(brainDir, 'carol.md'), '# Carol\n\n## Timeline\n- **2026-01-02** | Signed the term sheet\n');
+    // Filesystem extraction requires an imported canonical origin.
+    await engine.putPage('carol', { type: 'note', title: 'Carol', compiled_truth: '# Carol', timeline: '' }, { sourceId: 'wiki' });
     const addTimeline = spyOn(engine, 'addTimelineEntriesBatch').mockRejectedValueOnce(new Error('pool exhausted'));
     const log = spyOn(console, 'log').mockImplementation(() => {});
     const stdout = spyOn(process.stdout, 'write').mockReturnValue(true);

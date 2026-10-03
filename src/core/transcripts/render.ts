@@ -285,15 +285,31 @@ function speakerLabel(m: TranscriptMessage): string {
 }
 
 /**
+ * Calendar day of a session instant. No zone keeps the UTC date prefix.
+ * A zone projects the instant, so 2026-09-29T16:30Z is 2026-09-30 in Manila.
+ */
+export function calendarDayInZone(iso: string, timeZone?: string): string {
+  if (!timeZone) return iso.slice(0, 10);
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return iso.slice(0, 10);
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(instant);
+}
+
+/**
  * Render one redacted session into 1..N part pages. Timestamps: each message
  * uses its own REAL timestamp; a message missing one carries the previous
  * message's timestamp forward (carried, never fabricated — documented in the
  * page header note); a session with NO timestamps at all is unrenderable and
  * throws (the adapter contract requires real times).
+ *
+ * `dateZone` changes only the frontmatter calendar date. The slug stays on
+ * the UTC day so a zone projection updates the same page instead of forking it.
  */
 export function renderSessionParts(
   redacted: RedactedSession,
-  opts: { sourcePath: string } = { sourcePath: '' },
+  opts: { sourcePath: string; dateZone?: string } = { sourcePath: '' },
 ): RenderSessionResult {
   const { session, imperativesFlagged } = redacted;
   const { meta, messages } = session;
@@ -354,7 +370,7 @@ export function renderSessionParts(
     const fm: Record<string, unknown> = {
       type: 'conversation',
       title: of > 1 ? `${title} (part ${part} of ${of})` : title,
-      date: dateIso.slice(0, 10),
+      date: calendarDayInZone(dateIso, opts.dateZone),
       id: frontmatterId,
       transcript_import: {
         harness: meta.harness,

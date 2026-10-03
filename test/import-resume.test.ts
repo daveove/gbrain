@@ -30,6 +30,7 @@ import { permsEnforced } from './helpers/fs-perms.ts';
 import { runImport } from '../src/commands/import.ts';
 
 let engine: PGLiteEngine;
+let initializedVersion: string | null;
 let workspace: string;        // GBRAIN_HOME target — `${workspace}/.gbrain/` holds the checkpoint file
 let gbrainHomeDir: string;    // Resolves to `${workspace}/.gbrain` — the actual checkpoint dir
 let cpPath: string;           // The checkpoint file path inside gbrainHomeDir
@@ -39,6 +40,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  initializedVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -47,6 +49,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (initializedVersion) await engine.setConfig('version', initializedVersion);
   workspace = mkdtempSync(join(tmpdir(), 'gbrain-import-resume-home-'));
   // GBRAIN_HOME is the parent dir; configDir() appends '.gbrain' itself.
   // The checkpoint lives at `${workspace}/.gbrain/import-checkpoint.json`.

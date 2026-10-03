@@ -11,6 +11,12 @@ import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { authorizeStoredRequest, ownRequestAccessible, submissionAuthority } from '../src/core/persistence/authority.ts';
 import { getWriteRequest, admitWrite } from '../src/core/persistence/journal.ts';
+import { operationsByName } from '../src/core/operations.ts';
+import { importFromContent } from '../src/core/import-file.ts';
+import { serializeMarkdown } from '../src/core/markdown.ts';
+import { withEnv } from './helpers/with-env.ts';
+import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
+import { requireWritablePage } from '../src/core/ops/context.ts';
 import { listWriteRequests, cancelWriteRequest } from '../src/core/persistence/control.ts';
 
 const engines: BrainEngine[] = [];
@@ -97,3 +103,115 @@ test('sandboxed subagents keep intentional database-only writes despite a config
     expect(bindings).toHaveLength(0);
   }
 });
+
+
+test('owner aggregates remain inaccessible under both private opt-outs while local and ordinary private access remain', async () => {
+  for (const engine of engines) {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('dream','Dream fixture') ON CONFLICT DO NOTHING");
+    for (const ownerSource of ['default', 'dream']) {
+      const remote = { ...context(engine), sourceId: ownerSource,
+        auth: { token: 'fixture', clientId: 'fixture', scopes: ['read', 'write'], allowedSources: [ownerSource] } } as OperationContext;
+      const local = { ...remote, remote: false };
+      const day = 'daily-memory/2026-09-30', ref = 'source-records/gmail/fixture';
+      for (const slug of [day, ref]) {
+        const frontmatter = { visibility: 'world', dream_generated: true,
+          ...(slug === ref ? { source_record_id: 'fixture', source_record_type: 'gmail', source_record_ref: 'fixture' } : {}) };
+        await importFromContent(engine, slug, serializeMarkdown(frontmatter, 'Aggregate fixture evidence', '', {
+          type: 'note', title: 'Aggregate fixture', tags: [],
+        }), { sourceId: ownerSource, noEmbed: true, forceRechunk: true });
+        await engine.createVersion(slug, { sourceId: ownerSource });
+        expect((await engine.getVersions(slug, { sourceId: ownerSource })).length).toBeGreaterThan(0);
+      }
+      await engine.putPage('notes/ordinary-private', page('private'), { sourceId: ownerSource });
+      await engine.putPage('daily-memory/2026-09-28', { ...page(), frontmatter: { dream_generated: 'true' } }, { sourceId: ownerSource });
+      await engine.setConfig('search.mcp_keyword_only', 'true');
+      for (const policy of ['config', 'env']) {
+        await engine.setConfig('search.remote_private_pages', policy === 'config' ? 'visible' : 'false');
+        await withEnv({ GBRAIN_REMOTE_PRIVATE_PAGES: policy === 'env' ? '1' : undefined }, async () => {
+          __resetPrivateVisibilityCacheForTests();
+          for (const slug of [day, ref]) {
+            await expect(operationsByName.get_page.handler(remote, { slug })).rejects.toMatchObject({ code: 'page_not_found' });
+            expect((await operationsByName.get_page.handler(local, { slug }) as { slug: string }).slug).toBe(slug);
+            await expect(submitPageMutation(remote, { operation: 'put_page', params: {
+              slug, content: 'Marker removed', force: true, request_id: randomUUID(),
+            } })).rejects.toMatchObject({ code: 'page_not_found' });
+            expect((await engine.getPage(slug, { sourceId: ownerSource }))!.frontmatter.dream_generated).toBe(true);
+            expect(await engine.getVersions(slug, { sourceId: ownerSource, excludePrivate: 'owner-only' })).toEqual([]);
+          }
+          const remoteRows = await operationsByName.list_pages.handler(remote, { limit: 100 }) as { slug: string }[];
+          expect(remoteRows.some(row => row.slug === day || row.slug === ref)).toBe(false);
+          expect(remoteRows.some(row => row.slug === 'notes/ordinary-private')).toBe(true);
+          expect(remoteRows.some(row => row.slug === 'daily-memory/2026-09-28')).toBe(true);
+          const searched = await operationsByName.search.handler(remote, { query: 'Aggregate fixture' }) as { slug: string }[];
+          expect(searched.some(row => row.slug === day || row.slug === ref)).toBe(false);
+          const localSearch = await operationsByName.search.handler(local, { query: 'Aggregate fixture' }) as { slug: string }[];
+          expect(localSearch.some(row => row.slug === day)).toBe(true);
+          const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [ownerSource]);
+          const ordinary = await submissionAuthority(remote, 'put_page', ownerSource, source.incarnation, 'notes/ordinary-private');
+          expect(ordinary.excludePrivate).toBe(false);
+          const ordinaryWrite = await submitPageMutation(remote, { operation: 'put_page', params: {
+            slug: 'notes/ordinary-private', content: '---\nvisibility: private\n---\nOrdinary replacement', force: true, request_id: randomUUID(),
+          } });
+          expect(ordinaryWrite.state).toBe('committed');
+          expect((await operationsByName.get_page.handler(remote, { slug: 'notes/ordinary-privat', fuzzy: true }) as { slug: string }).slug).toBe('notes/ordinary-private');
+        });
+      }
+    }
+    await engine.executeRaw("DELETE FROM config WHERE key='search.remote_private_pages'");
+    __resetPrivateVisibilityCacheForTests();
+  }
+}, 120_000);
+
+
+test('opt-out cannot expose a stored receipt after its target becomes an owner aggregate', async () => {
+  for (const engine of engines) {
+    const ctx = { ...context(engine), sourceId: 'default' };
+    const slug = 'daily-memory/2026-09-27';
+    await engine.setConfig('search.remote_private_pages', 'visible');
+    try {
+      await engine.putPage(slug, page(), { sourceId: 'default' });
+      const [source] = await engine.executeRaw<{ incarnation: string }>("SELECT incarnation FROM sources WHERE id='default'");
+      const authority = await submissionAuthority(ctx, 'put_page', 'default', source.incarnation, slug);
+      expect(authority.excludePrivate).toBe(false);
+      const row = await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page',
+        sourceId: 'default', sourceIncarnation: source.incarnation, slug, requestId: randomUUID(), callerIntent: {}, intent: {} });
+      await engine.putPage(slug, { ...page(), frontmatter: { dream_generated: true } }, { sourceId: 'default' });
+      expect(await ownRequestAccessible(ctx, row)).toBe(false);
+      await expect(authorizeStoredRequest(engine, row)).rejects.toMatchObject({ code: 'page_not_found' });
+      expect((await listWriteRequests(engine, authority.principal, { sourceId: 'default' })).requests.some(r => r.id === row.id)).toBe(false);
+    } finally {
+      await engine.executeRaw("DELETE FROM config WHERE key='search.remote_private_pages'");
+    }
+  }
+});
+
+
+test('remote create at reserved owner-aggregate identities is rejected; generated path still protected', async () => {
+  for (const engine of engines) {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('dream','Dream fixture') ON CONFLICT DO NOTHING");
+    for (const ownerSource of ['default', 'dream']) {
+      const remote = { ...context(engine), sourceId: ownerSource,
+        auth: { token: 'fixture', clientId: 'fixture', scopes: ['read', 'write'], allowedSources: [ownerSource] } } as OperationContext;
+      const day = `daily-memory/2026-10-02`;
+      const ref = 'source-records/gmail/create-block';
+      for (const slug of [day, ref]) {
+        await expect(submitPageMutation(remote, { operation: 'put_page', params: {
+          slug, content: 'Remote mint attempt', request_id: randomUUID(),
+        } })).rejects.toMatchObject({ code: 'page_not_found' });
+        expect(await engine.getPage(slug, { sourceId: ownerSource })).toBeNull();
+      }
+      await expect(requireWritablePage(remote, day, 'put_page', 'page', true)).rejects.toMatchObject({ code: 'page_not_found' });
+      await expect(requireWritablePage({ ...remote, remote: false }, day, 'put_page', 'page', true)).resolves.toBeUndefined();
+      await engine.putPage(day, { ...page(), frontmatter: { dream_generated: true } }, { sourceId: ownerSource });
+      await expect(submitPageMutation(remote, { operation: 'put_page', params: {
+        slug: day, content: 'Overwrite generated', force: true, request_id: randomUUID(),
+      } })).rejects.toMatchObject({ code: 'page_not_found' });
+      expect((await engine.getPage(day, { sourceId: ownerSource }))!.frontmatter.dream_generated).toBe(true);
+      const ordinarySlug = `notes/remote-ordinary-${randomUUID().slice(0, 8)}`;
+      const ordinary = await submitPageMutation(remote, { operation: 'put_page', params: {
+        slug: ordinarySlug, content: 'Ordinary remote create', request_id: randomUUID(),
+      } });
+      expect(ordinary.state).toBe('committed');
+    }
+  }
+}, 120_000);

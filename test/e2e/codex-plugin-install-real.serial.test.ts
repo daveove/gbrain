@@ -43,6 +43,7 @@ import {
 } from '../helpers/agent-harness.ts';
 import { operations } from '../../src/core/operations.ts';
 import { filterOpsForSurface } from '../../src/mcp/surface.ts';
+import { operationScopesAllowed } from '../../src/core/scope.ts';
 import { codexPluginProvidesName } from '../../src/core/bootstrap/harness.ts';
 
 const REPO_ROOT = resolve(import.meta.dir, '..', '..');
@@ -217,8 +218,15 @@ describe.skipIf(!PLUGIN_CAPABLE)('codex plugin door — INSTALL (no auth needed)
         env: probeEnv,
         timeoutMs: 120_000,
       });
-      const expected = filterOpsForSurface(operations, 'starter').map((o) => o.name).sort();
+      // This seeded pipe has no verified stdio grant. Its catalog must omit
+      // operations that require explicit membership or editor authority.
+      const expected = filterOpsForSurface(operations, 'starter')
+        .filter((o) => !o.requiredScopes?.length || operationScopesAllowed([], o))
+        .map((o) => o.name).sort();
       expect(tools.sort()).toEqual(expected);
+      for (const name of ['join_brain', 'sync_brain_skills', 'leave_brain', 'put_skill', 'delete_skill']) {
+        expect(tools).not.toContain(name);
+      }
 
       // (f) cold-home fast-fail: fresh empty GBRAIN_HOME → actionable exit,
       // never a hang or silent auto-init.

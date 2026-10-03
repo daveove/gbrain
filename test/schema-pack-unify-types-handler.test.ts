@@ -30,6 +30,15 @@ beforeEach(async () => {
   _resetPackCacheForTests();
 });
 
+// Applying a pack also persists file-plane config; each test owns that home.
+function isolatedIt(name: string, run: () => void | Promise<void>): void {
+  it(name, async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-unify-isolated-'));
+    try { await withEnv({ GBRAIN_HOME: home }, run); }
+    finally { rmSync(home, { recursive: true, force: true }); }
+  });
+}
+
 function ctxOf() {
   return {
     engine,
@@ -51,7 +60,7 @@ async function seed(slug: string, type: string, fm: Record<string, unknown> = {}
 
 describe('runUnifyTypes', () => {
   describe('preflight', () => {
-    it('refuses target pack with no mapping_rules', async () => {
+    isolatedIt('refuses target pack with no mapping_rules', async () => {
       // gbrain-base has no mapping_rules
       await expect(runUnifyTypes(ctxOf(), {
         target_pack: 'gbrain-base',
@@ -59,7 +68,7 @@ describe('runUnifyTypes', () => {
       })).rejects.toThrow(/mapping_rules/);
     });
 
-    it('refuses unknown target pack', async () => {
+    isolatedIt('refuses unknown target pack', async () => {
       await expect(runUnifyTypes(ctxOf(), {
         target_pack: 'nonexistent-pack',
         apply: false,
@@ -68,7 +77,7 @@ describe('runUnifyTypes', () => {
   });
 
   describe('dry-run', () => {
-    it('returns shape with would_apply counts; no mutation', async () => {
+    isolatedIt('returns shape with would_apply counts; no mutation', async () => {
       await seed('tweets/a', 'tweet-single');
       const result = await runUnifyTypes(ctxOf(), {
         target_pack: 'gbrain-base-v2',
@@ -86,7 +95,7 @@ describe('runUnifyTypes', () => {
   });
 
   describe('apply (full lifecycle)', () => {
-    it('runs all 4 phases + active-pack flip (D13)', async () => {
+    isolatedIt('runs all 4 phases + active-pack flip (D13)', async () => {
       await seed('tweets/a', 'tweet-single');
       await seed('articles/x', 'media/article');
       await seed('atoms/a', 'atom-extraction');
@@ -125,7 +134,7 @@ describe('runUnifyTypes', () => {
       expect(aliasRows.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('catch-all rule retypes unknown types to note with legacy_type', async () => {
+    isolatedIt('catch-all rule retypes unknown types to note with legacy_type', async () => {
       await seed('odd/x', 'some-weird-type');  // not in any explicit rule
       const result = await runUnifyTypes(ctxOf(), {
         target_pack: 'gbrain-base-v2',
@@ -141,7 +150,7 @@ describe('runUnifyTypes', () => {
   });
 
   describe('idempotency', () => {
-    it('second apply run is mostly no-op', async () => {
+    isolatedIt('second apply run is mostly no-op', async () => {
       await seed('tweets/a', 'tweet-single');
       const r1 = await runUnifyTypes(ctxOf(), {
         target_pack: 'gbrain-base-v2',
@@ -168,7 +177,7 @@ describe('runUnifyTypes', () => {
 // (legacy_type stamp) — silently emptying the facts-extraction backlog
 // after a pack upgrade.
 describe('#2184 conversation-shaped types survive v2 unify', () => {
-  it('meeting/conversation/slack keep their types through apply', async () => {
+  isolatedIt('meeting/conversation/slack keep their types through apply', async () => {
     await seed('meetings/2026-04-03', 'meeting');
     await seed('conversations/imessage/alice-example', 'conversation');
     await seed('slack/general-2026-04-03', 'slack');
@@ -189,7 +198,7 @@ describe('#2184 conversation-shaped types survive v2 unify', () => {
     }
   });
 
-  it('gbrain-base-v2 statically declares meeting + conversation (temporal, extractable)', () => {
+  isolatedIt('gbrain-base-v2 statically declares meeting + conversation (temporal, extractable)', () => {
     const p = new URL('../src/core/schema-pack/base/gbrain-base-v2.yaml', import.meta.url);
     const manifest = parseSchemaPackManifest(parseYamlMini(readFileSync(p, 'utf-8')), {
       path: p.pathname,
@@ -259,7 +268,7 @@ describe('#4651 catch-all retype carries slug_filter/path_filter into synthesize
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('dry-run: slug_filter scopes the synthesized rules — out-of-filter pages are not counted', async () => {
+  isolatedIt('dry-run: slug_filter scopes the synthesized rules — out-of-filter pages are not counted', async () => {
     await seed('inbox/legacy-a', 'widget-legacy');
     await seed('keep/legacy-b', 'widget-legacy');
     const result = await withEnv({ GBRAIN_HOME: home }, () => runUnifyTypes(ctxOf(), {
@@ -271,7 +280,7 @@ describe('#4651 catch-all retype carries slug_filter/path_filter into synthesize
     expect(result.per_phase.retype_catch_all.would_apply).toBe(1);
   });
 
-  it('apply: path_filter parity — a same-type page outside the filter keeps its type', async () => {
+  isolatedIt('apply: path_filter parity — a same-type page outside the filter keeps its type', async () => {
     await seed('inbox/legacy-a', 'widget-legacy');
     await seed('keep/legacy-b', 'widget-legacy');
     const result = await withEnv({ GBRAIN_HOME: home }, () => runUnifyTypes(ctxOf(), {
@@ -289,7 +298,7 @@ describe('#4651 catch-all retype carries slug_filter/path_filter into synthesize
 });
 
 describe('#1575 unify-types worker dry-run default', () => {
-  it('jobs.ts worker registration defaults apply to false, matching the handler contract', () => {
+  isolatedIt('jobs.ts worker registration defaults apply to false, matching the handler contract', () => {
     const jobsSource = readFileSync(new URL('../src/commands/jobs.ts', import.meta.url), 'utf-8');
     const workerBlock = jobsSource.slice(jobsSource.indexOf("worker.register('unify-types'"));
     const registration = workerBlock.slice(0, workerBlock.indexOf('});'));

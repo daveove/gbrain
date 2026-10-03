@@ -3,6 +3,15 @@ import { parseDataFrontmatter, stringifyDataFrontmatter } from '../src/core/data
 import { parseMarkdown } from '../src/core/markdown.ts';
 
 describe('frontmatter data and serialization compatibility', () => {
+  test('calendar date strings and explicit datetime instants survive serialization distinctly', () => {
+    const parsed = parseDataFrontmatter('---\ndate: 2026-09-30\nevent_date: 2026-09-30T00:00:00Z\npublished: 2026-09-30T00:00:00-07:00\n---\nbody');
+    expect(parsed.data.date).toBe('2026-09-30');
+    expect(parsed.data.event_date).toEqual(new Date('2026-09-30T00:00:00Z'));
+    expect(parsed.data.published).toEqual(new Date('2026-09-30T07:00:00Z'));
+    const reparsed = parseDataFrontmatter(stringifyDataFrontmatter(parsed.content, parsed.data));
+    expect(reparsed.data).toEqual(parsed.data);
+  });
+
   test('preserves independently specified field order, scalar types and quoting', () => {
     const data = { title: 'A title', count: 3, enabled: true, date: new Date('2024-06-01'), code: '001', multiline: 'one\ntwo\n' };
     const expected = "---\ntitle: A title\ncount: 3\nenabled: true\ndate: 2024-06-01T00:00:00.000Z\ncode: '001'\nmultiline: |\n  one\n  two\n---\n# Body\n\n---\nend\n";

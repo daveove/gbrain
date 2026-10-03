@@ -95,7 +95,8 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     ].join('\n'));
     git('git add -A && git commit -m "initial"');
     const { performSync } = await import('../src/commands/sync.ts');
-    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true });
+    // This suite measures incremental deferral, separate from the full-sync job.
+    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true, noExtract: true });
   });
 
   afterEach(() => {
@@ -118,6 +119,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // …bound to the consumed commit so webhook redeliveries coalesce…
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
     expect(jobs[0].data.deferred_commit).toBe(headCommit());
+    expect(jobs[0].data.sourceId).toBe('default');
     // …and it carries an explicit wall-clock budget covering the sweep.
     const rows = await engine.executeRaw<{ timeout_ms: number | null }>(
       `SELECT timeout_ms FROM minion_jobs WHERE id = $1`, [jobs[0].id],
@@ -164,6 +166,90 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(jobs.length).toBe(1);
     expect(jobs[0].status).toBe('waiting');
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
+  }, 120_000);
+
+  test('pages landing after an active sweep counted the backlog get a durable successor', async () => {
+    const { performSync } = await import('../src/commands/sync.ts');
+    const { MinionQueue } = await import('../src/core/minions/queue.ts');
+    const queue = new MinionQueue(engine), lockToken = 'active-sweep-fixture';
+    const baseCommit = headCommit();
+    writeLinkedPages(101);
+    git('git add -A && git commit -m "big drop"');
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const [first] = await staleExtractJobs();
+    // The worker has finished its final count but has not banked completion.
+    expect((await queue.claim(lockToken, 120_000, 'default', ['extract']))?.id).toBe(first.id);
+    await engine.executeRaw(`UPDATE pages SET links_extracted_at = now()`);
+    expect(await engine.countStalePagesForExtraction()).toBe(0);
+    // A second import of the same pin lands before that worker completes.
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    expect(await engine.countStalePagesForExtraction()).toBeGreaterThan(0);
+    expect((await queue.completeJob(first.id, lockToken, { staleRemaining: 0 }))?.status).toBe('completed');
+    const waiting = (await staleExtractJobs()).filter(job => job.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].id).not.toBe(first.id);
+    expect(waiting[0].data.deferred_commit).toBe(headCommit());
+    expect(waiting[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}:after:${first.id}`);
+  }, 120_000);
+
+
+  test('a completed successor does not strand later same-pin writes: chain another generation', async () => {
+    // Codex tip P1 on 3023b6e: after base finishes, every probe reused the
+    // single `after:<baseId>` key; once that successor completed, later
+    // calls returned null and left daily-memory / pending-target handoffs
+    // permanently stale. Chain from the returned tip instead.
+    const { performSync } = await import('../src/commands/sync.ts');
+    const baseCommit = headCommit();
+    writeLinkedPages(101);
+    git('git add -A && git commit -m "big drop"');
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const [first] = await staleExtractJobs();
+    await engine.executeRaw(`UPDATE minion_jobs SET status = 'completed' WHERE id = $1`, [first.id]);
+    // First re-sync mints after:<baseId>.
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const afterBase = (await staleExtractJobs()).filter(j => j.status === 'waiting');
+    expect(afterBase).toHaveLength(1);
+    expect(afterBase[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}:after:${first.id}`);
+    // Complete that successor, then re-sync again — must mint after:<successorId>.
+    await engine.executeRaw(`UPDATE minion_jobs SET status = 'completed' WHERE id = $1`, [afterBase[0].id]);
+    await engine.setConfig('sync.last_commit', baseCommit);
+    await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test-2' WHERE slug LIKE 'notes/%'`);
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const waiting = (await staleExtractJobs()).filter(j => j.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].id).not.toBe(first.id);
+    expect(waiting[0].id).not.toBe(afterBase[0].id);
+    expect(waiting[0].idempotency_key).toBe(
+      `extract-stale:default:${headCommit()}:after:${afterBase[0].id}`,
+    );
+  }, 120_000);
+
+  test('a stable import pin accepts generation 66 and concurrent callers reuse its live tip', async () => {
+    const { queueDeferredStaleSweep } = await import('../src/core/deferred-stale-extract.ts');
+    const { MinionQueue } = await import('../src/core/minions/queue.ts');
+    const queue = new MinionQueue(engine);
+    const input = { sourceId: 'default', commit: 'import', reason: 'fixture' };
+    let previous = 0;
+    for (let generation = 0; generation < 65; generation++) {
+      const id = await queueDeferredStaleSweep(engine, input);
+      if (typeof id !== 'number') throw new Error('Expected accepted stable-pin sweep ID');
+      const token = `stable-pin-${generation}`;
+      expect((await queue.claim(token, 60_000, 'default', ['extract']))?.id).toBe(id);
+      expect((await queue.completeJob(id, token, {}))?.status).toBe('completed');
+      previous = id;
+    }
+    const ids = await Promise.all([
+      queueDeferredStaleSweep(engine, input), queueDeferredStaleSweep(engine, input),
+    ]);
+    expect(ids[0]).not.toBeNull();
+    expect(ids[1]).toBe(ids[0]);
+    const waiting = (await staleExtractJobs()).filter(job => job.status === 'waiting');
+    expect(waiting).toHaveLength(1);
+    expect(waiting[0].idempotency_key).toBe(`extract-stale:default:import:after:${previous}`);
   }, 120_000);
 
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {
@@ -220,6 +306,10 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     expect(await stampOf('notes/page-7')).toBeNull();
     expect(await engine.getLinks('notes/page-7')).toHaveLength(0);
 
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('scope-other','Scope fixture')");
+    await engine.putPage('notes/other-origin', { type: 'note', title: 'Other fixture', compiled_truth: 'See [[notes/other-target]].' }, { sourceId: 'scope-other' });
+    await engine.putPage('notes/other-target', { type: 'note', title: 'Target fixture', compiled_truth: 'Synthetic fixture' }, { sourceId: 'scope-other' });
+
     // Run the registered handler exactly as a jobs worker would.
     const { MinionWorker } = await import('../src/core/minions/worker.ts');
     const { registerBuiltinHandlers } = await import('../src/commands/jobs.ts');
@@ -249,5 +339,10 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     const links = await engine.getLinks('notes/page-7');
     expect(links.some(l => l.to_slug === 'people/alice')).toBe(true);
     expect(await stampOf('notes/page-7')).not.toBeNull();
+    const untouched = await engine.executeRaw<{ links_extracted_at: string | null }>(
+      "SELECT links_extracted_at FROM pages WHERE source_id='scope-other' ORDER BY slug");
+    expect(untouched).toHaveLength(2);
+    expect(untouched.every(row => row.links_extracted_at === null)).toBe(true);
+    expect(await engine.getLinks('notes/other-origin', { sourceId: 'scope-other' })).toHaveLength(0);
   }, 180_000);
 });

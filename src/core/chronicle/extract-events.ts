@@ -8,6 +8,9 @@
 // The judge is injectable so the deterministic write path is testable without a
 // real gateway. The default judge calls the chat gateway; when no gateway is
 // configured it returns zero events (auto-emit is a no-op, never an error).
+import { randomUUID } from 'node:crypto';
+import { dailyMemoryDaysForSlugs, refreshDailyMemoryAfterPageMutation } from '../cycle/daily-memory-followup.ts';
+import { resolveCycleTimeZone } from '../cycle/cycle-date.ts';
 import type { BrainEngine } from '../engine.ts';
 import { computeContentHash } from '../ingestion/types.ts';
 
@@ -157,22 +160,32 @@ export async function runChronicleExtract(
     const day = isoDay(when, tz);
     const hash = computeContentHash(`${who.join(',')}|${ev.what}|${opts.slug}`).slice(0, 8);
     const eventSlug = `life/events/${day}-${hash}`;
-    await engine.putPage(eventSlug, {
-      type: 'event',
-      title: ev.what.slice(0, 120),
-      compiled_truth: `${ev.what} — see [[${opts.slug}]].`,
-      frontmatter: {
+    await engine.transaction(async tx => {
+      opts.signal?.throwIfAborted();
+      const timezone = await resolveCycleTimeZone(tx);
+      const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [eventSlug], { signal: opts.signal, timezone });
+      await tx.putPage(eventSlug, {
         type: 'event',
-        event: {
-          when, who, what: ev.what, where: ev.where ?? null,
-          kind: normalizeKind(ev.kind), depth: opts.slug,
+        title: ev.what.slice(0, 120),
+        compiled_truth: `${ev.what} — see [[${opts.slug}]].`,
+        frontmatter: {
+          type: 'event',
+          event: {
+            when, who, what: ev.what, where: ev.where ?? null,
+            kind: normalizeKind(ev.kind), depth: opts.slug,
+          },
+          captured_via: 'life-chronicle:auto',
         },
-        captured_via: 'life-chronicle:auto',
-      },
-      effective_date: safeDate(when),
-    }, { sourceId });
-    await engine.upsertEventProjection({
-      depthSlug: opts.slug, eventSlug, date: day, summary: ev.what, sourceId,
+        effective_date: safeDate(when),
+      }, { sourceId });
+      await tx.upsertEventProjection({
+        depthSlug: opts.slug, eventSlug, date: day, summary: ev.what, sourceId,
+      });
+      opts.signal?.throwIfAborted();
+      await refreshDailyMemoryAfterPageMutation(tx, {
+        sourceId, slug: eventSlug, operation: 'put_page', requestId: randomUUID(), priorDays, timezone,
+      });
+      opts.signal?.throwIfAborted();
     });
     written++;
   }

@@ -86,7 +86,7 @@ function searchOutput(ctx: OperationContext, results: SearchResult[], meta: Reco
  * runs on every empty remote result — on a fully sealed brain the COALESCE
  * form walked every markdown page.
  */
-async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean): Promise<boolean> {
+async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean | 'owner-only'): Promise<boolean> {
   if (scope.sourceIds?.length === 0) return false;
   const params: unknown[] = [];
   const policy = pageReadFilter('p', { ...scope, excludePrivate }, params, true);

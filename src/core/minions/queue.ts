@@ -2110,20 +2110,20 @@ export class MinionQueue {
   }
 
   /** Promote delayed jobs whose delay_until has passed. Returns promoted jobs. */
-  async promoteDelayed(): Promise<MinionJob[]> {
+  async promoteDelayed(opts?: { registeredNames?: string[]; queue?: string }): Promise<MinionJob[]> {
     await assertNoUnreviewedJobs(this.engine);
     const rows = await this.lockRetry(() => this.engine.executeRaw<Record<string, unknown>>(
       `UPDATE minion_jobs SET status = 'waiting', delay_until = NULL,
         started_at = NULL,
         lock_token = NULL, lock_until = NULL, updated_at = now()
        WHERE status = 'delayed' AND delay_until <= now()
-       RETURNING *`
+         AND ($1::text[] IS NULL OR name=ANY($1::text[])) AND ($2::text IS NULL OR queue=$2)
+       RETURNING *`, [opts?.registeredNames ?? null, opts?.queue ?? null]
     ));
     return rows.map(rowToMinionJob);
   }
-
   /** Detect and handle stalled jobs. Single CTE, no off-by-one. Returns affected jobs. */
-  async handleStalled(graceMsOverride?: number): Promise<{ requeued: MinionJob[]; dead: MinionJob[] }> {
+  async handleStalled(graceMsOverride?: number, scope?: { registeredNames?: string[]; queue?: string }): Promise<{ requeued: MinionJob[]; dead: MinionJob[] }> {
     await assertNoUnreviewedJobs(this.engine);
     // W0 fix-wave (Tier-1 #4): the dead-letter branch previously emitted NO
     // child_done and never unblocked aggregator parents — a child that died
@@ -2141,8 +2141,9 @@ export class MinionQueue {
         `SELECT id, parent_job_id, stalled_counter, max_stalled
            FROM minion_jobs
           WHERE status = 'active'
-            AND lock_until < now() - ($1::double precision * interval '1 millisecond')`,
-        [graceMs]
+            AND lock_until < now() - ($1::double precision * interval '1 millisecond')
+            AND ($2::text[] IS NULL OR name=ANY($2::text[])) AND ($3::text IS NULL OR queue=$3)`,
+        [graceMs, scope?.registeredNames ?? null, scope?.queue ?? null]
       );
       if (candidates.length === 0) return { requeued: [], dead: [] };
       const ids = candidates.map(c => c.id);
@@ -2195,19 +2196,17 @@ export class MinionQueue {
       // forward-only — parents stranded in 'waiting-children' by PRE-upgrade
       // stall-deaths (children already status='dead') are never revisited by
       // any per-event unblock site. This idempotent sweep self-heals ALL
-      // stranding classes, retroactive included, once per stall tick: any
-      // waiting-children parent with zero non-terminal children flips back to
-      // 'waiting'. Cheap (single UPDATE, NOT EXISTS on an indexed FK) at the
-      // 30s sweep cadence.
+      // zero-live-child stranding, including historical rows, within the optional scope.
       try {
         await this.engine.executeRaw(
           `UPDATE minion_jobs SET status = 'waiting', started_at = NULL, updated_at = now()
             WHERE status = 'waiting-children'
+              AND ($1::text[] IS NULL OR name=ANY($1::text[])) AND ($2::text IS NULL OR queue=$2)
               AND NOT EXISTS (
                 SELECT 1 FROM minion_jobs c
                 WHERE c.parent_job_id = minion_jobs.id
                   AND c.status NOT IN ('completed', 'failed', 'dead', 'cancelled')
-              )`
+              )`, [scope?.registeredNames ?? null, scope?.queue ?? null]
         );
       } catch { /* best-effort backstop; the per-kill unblock is the primary path */ }
       return result;

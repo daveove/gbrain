@@ -555,6 +555,9 @@ async function main() {
     return;
   }
 
+  // Usefulness flags are validated before connecting; bare traversal keeps its dispatcher.
+  if (command === 'graph' && await (await import('./commands/graph-usefulness-dispatch.ts')).dispatchGraphUsefulness(subArgs, connectEngine)) return;
+
   // Per-command --help. For `agent`, the scan STOPS at the `--` terminator:
   // everything after it is literal prompt text, so `agent run -- --help`
   // must submit the prompt, never print help (cathedral-6 eng review).
@@ -3085,7 +3088,7 @@ async function handleCliOnly(command: string, args: string[]) {
         // so wrappers (sync, CI scripts, `&& gbrain doctor`) propagate.
         try {
           const importResult = await runImport(engine, args);
-          if (importResult.errors > 0) {
+          if (importResult.errors > 0 || importResult.linkExtractionError) {
             setCliExitVerdict(1);
           }
         } catch (e) {

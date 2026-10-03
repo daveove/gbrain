@@ -36,6 +36,18 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
       else await queue('facts-backstop', { visibility: await resolveDefaultVisibility(tx) });
     }
   }
+  if (['put_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(row.operation)) {
+    const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
+    const days = await refreshDailyMemoryAfterPageMutation(tx, {
+      sourceId: row.source_id,
+      slug: row.slug,
+      operation: row.operation,
+      requestId: row.id,
+      priorDays: prepared?.dailyMemoryPriorDays,
+      timezone: prepared?.dailyMemoryTimezone,
+    });
+    if (days.length) outcome.daily_memory_affected_dates = days;
+  }
 }
 
 /** Claims release their database connection before waiting for a filesystem lock/provider. */

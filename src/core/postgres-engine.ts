@@ -1,3 +1,4 @@
+import { dateProvenanceForWrite } from './effective-date.ts';
 import { tryAcquirePoolLongHold, PoolCapacityError } from './pool-budget.ts';
 import { replaceDerivedLinks, type DerivedLinkOrigin, type DerivedLinkReplacementOptions } from './derived-links.ts';
 import { mutatePageTag } from './page-state/tags.ts';
@@ -732,8 +733,8 @@ export class PostgresEngine implements BrainEngine {
     slug = validateSlug(slug);
     const sql = this.sql;
     const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    const frontmatter = await dateProvenanceForWrite(this, sourceId, slug, page.frontmatter || {});
 
     // Data-loss guard: a page edit is a read-modify-write; if the read returned
     // empty, the modify lands on nothing and this upsert would blank the body
@@ -1079,8 +1080,8 @@ export class PostgresEngine implements BrainEngine {
     // #4352: untrusted-caller private-page filter (see PageFilters.excludePrivate).
     // Static code-provided fragment (never user input) — same sql.unsafe
     // pattern as the PAGE_SORT_SQL whitelist below.
-    const privateCondition = filters?.excludePrivate === true
-      ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}`)
+    const privateCondition = filters?.excludePrivate
+      ? sql.unsafe(`AND ${privatePagesFilterFragment('p', filters?.excludePrivate)}`)
       : sql``;
     const effectiveAfterCondition = filters?.effective_after
       ? sql`AND p.effective_date >= ${filters.effective_after}::timestamptz`
@@ -1379,7 +1380,7 @@ export class PostgresEngine implements BrainEngine {
     }, { alwaysTransaction: typeof opts.seed === 'number' });
   }
 
-  async resolveSlugs(partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<string[]> {
+  async resolveSlugs(partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' }): Promise<string[]> {
     const sql = this.sql;
 
     // v0.41.13 #1436: source scope via postgres.js tagged-template
@@ -1389,7 +1390,7 @@ export class PostgresEngine implements BrainEngine {
     // — they're not legitimate match targets for a remote `get_page`.
     const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
-    const privacy = opts?.excludePrivate ? sql.unsafe(` AND ${privatePagesFilterFragment('pages')}`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(` AND ${privatePagesFilterFragment('pages', opts?.excludePrivate)}`) : sql``;
     const scopeFragment = sources
       ? sql` AND source_id = ANY(${sources}::text[])`
       : scalar
@@ -2505,7 +2506,7 @@ export class PostgresEngine implements BrainEngine {
     );
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean | 'owner-only'; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const scalarSourceId = opts?.sourceId ?? 'default';
     // S2: embedding_is_null reports the registry-ACTIVE column's truth —
@@ -2537,7 +2538,7 @@ export class PostgresEngine implements BrainEngine {
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE p.slug = ${slug} AND ${scope}
-          ${opts?.excludePrivate ? tx.unsafe(`AND ${privatePagesFilterFragment('p')}`) : tx``}
+          ${opts?.excludePrivate ? tx.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : tx``}
           ${opts?.includeUnsealed ? tx`` : tx.unsafe(`AND ${currentTextProjectionFilter('p')}`)}
           ${requiresSafeChunks(opts) ? tx.unsafe(`AND ${safeChunksFilter('p')}`) : tx``}
         ORDER BY cc.chunk_index
@@ -2900,7 +2901,7 @@ export class PostgresEngine implements BrainEngine {
   // ── v0.42.7 (#1696): link/timeline extraction freshness watermark ──
 
   /** Shared stale-for-extraction predicate. Returns `{ where, params }`. */
-  private buildStalePagesWhere(opts?: { sourceId?: string; versionTs?: string }): { where: string; params: unknown[] } {
+  private buildStalePagesWhere(opts?: { sourceId?: string; versionTs?: string; slugs?: readonly string[] }): { where: string; params: unknown[] } {
     const conds: string[] = ['deleted_at IS NULL'];
     const params: unknown[] = [];
     if (opts?.versionTs) {
@@ -2913,10 +2914,14 @@ export class PostgresEngine implements BrainEngine {
       params.push(opts.sourceId);
       conds.push(`source_id = $${params.length}`);
     }
+    if (opts?.slugs !== undefined) {
+      params.push([...new Set(opts.slugs)]);
+      conds.push(`slug = ANY($${params.length}::text[])`);
+    }
     return { where: conds.join(' AND '), params };
   }
 
-  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string }): Promise<number> {
+  async countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; slugs?: readonly string[] }): Promise<number> {
     const { where, params } = this.buildStalePagesWhere(opts);
     // RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING).
     return await this.withScopedReadTransaction(undefined, opts?.sourceId, async (tx) => {
@@ -2933,6 +2938,7 @@ export class PostgresEngine implements BrainEngine {
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    slugs?: readonly string[];
   }): Promise<StalePageRow[]> {
     const { where, params } = this.buildStalePagesWhere(opts);
     let afterClause = '';
@@ -3175,8 +3181,8 @@ export class PostgresEngine implements BrainEngine {
     }
   }
 
-  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<Link[]> {
-    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f')} AND ${privatePagesFilterFragment('t')} AND ${privateLinkOriginFilterFragment('l')}` : '';
+  async getLinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' }): Promise<Link[]> {
+    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f', opts?.excludePrivate)} AND ${privatePagesFilterFragment('t', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}` : '';
     // Two layers of defense (see getPage for the full pattern):
     //   1. RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING)
     //   2. App-layer source filter (#2200 federated)
@@ -3243,8 +3249,8 @@ export class PostgresEngine implements BrainEngine {
     });
   }
 
-  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<Link[]> {
-    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f')} AND ${privatePagesFilterFragment('t')} AND ${privateLinkOriginFilterFragment('l')}` : '';
+  async getBacklinks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' }): Promise<Link[]> {
+    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f', opts?.excludePrivate)} AND ${privatePagesFilterFragment('t', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}` : '';
     // Two layers of defense (see getPage for the full pattern):
     //   1. RLS scope binding (opt-in via GBRAIN_RLS_SCOPE_BINDING)
     //   2. App-layer source filter (#2200 federated)
@@ -3388,7 +3394,7 @@ export class PostgresEngine implements BrainEngine {
   ): Promise<GraphNode[]> {
     const sql = this.sql;
     const privacy = (page: string, link?: string) => opts?.excludePrivate
-      ? sql.unsafe(`AND ${privatePagesFilterFragment(page)}${link ? ` AND ${privateLinkOriginFilterFragment(link)}` : ''}`) : sql``;
+      ? sql.unsafe(`AND ${privatePagesFilterFragment(page, opts?.excludePrivate)}${link ? ` AND ${privateLinkOriginFilterFragment(link, opts?.excludePrivate)}` : ''}`) : sql``;
     // v0.34.1 (#861 — P0 leak seal): scope visited nodes to the caller's
     // source(s). Without this, the walk follows edges into pages from
     // foreign sources, leaking topology + page metadata. The filter
@@ -3485,18 +3491,18 @@ export class PostgresEngine implements BrainEngine {
 
   async traversePaths(
     slug: string,
-    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
+    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' },
   ): Promise<GraphPath[]> {
     return (await this.traversePathsDetailed(slug, opts)).paths;
   }
 
   async traversePathsDetailed(
     slug: string,
-    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
+    opts?: { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both'; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' },
   ): Promise<{ paths: GraphPath[]; truncated: boolean }> {
     const sql = this.sql;
     const privacy = (page: string, link?: string) => opts?.excludePrivate
-      ? sql.unsafe(`AND ${privatePagesFilterFragment(page)}${link ? ` AND ${privateLinkOriginFilterFragment(link)}` : ''}`) : sql``;
+      ? sql.unsafe(`AND ${privatePagesFilterFragment(page, opts?.excludePrivate)}${link ? ` AND ${privateLinkOriginFilterFragment(link, opts?.excludePrivate)}` : ''}`) : sql``;
     const depth = opts?.depth ?? 5;
     const direction = opts?.direction ?? 'out';
     const linkType = opts?.linkType ?? null;
@@ -3688,7 +3694,7 @@ export class PostgresEngine implements BrainEngine {
   async findOrphanPages(opts?: {
     sourceId?: string;
     sourceIds?: string[];
-    excludePrivate?: boolean;
+    excludePrivate?: boolean | 'owner-only';
     mode?: 'inbound' | 'islanded';
   }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean }>> {
     const sql = this.sql;
@@ -3720,7 +3726,7 @@ export class PostgresEngine implements BrainEngine {
             FROM links l
             JOIN pages tgt ON tgt.id = l.to_page_id
             WHERE l.from_page_id = p.id
-              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
+              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('tgt', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}`) : sql``}
           )`
         : sql``;
     const rows = await sql`
@@ -3731,14 +3737,14 @@ export class PostgresEngine implements BrainEngine {
         p.type,
         (NOT ${sql.unsafe(QUARANTINE_FILTER_FRAGMENT)}) AS quarantined
       FROM pages p
-      WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}`) : sql``}
+      WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sql``}
         ${sourceFilter}
         AND NOT EXISTS (
           SELECT 1
           FROM links l
           JOIN pages src ON src.id = l.from_page_id
           WHERE l.to_page_id = p.id
-            AND src.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sql``}
+            AND src.deleted_at IS NULL ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('src', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}`) : sql``}
         )
         ${outboundFilter}
       ORDER BY p.slug
@@ -3755,7 +3761,7 @@ export class PostgresEngine implements BrainEngine {
     return mutatePageTag(this, { sourceId: opts?.sourceId ?? 'default', slug }, tag, false);
   }
 
-  async getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean }): Promise<string[]> {
+  async getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; liveOnly?: boolean }): Promise<string[]> {
     const sql = this.sql;
     // #2200: federated grant (sourceIds[]) wins over scalar sourceId. Use
     // `page_id IN (subquery)` — NOT `= (subquery)` — because a federated read of
@@ -3766,7 +3772,7 @@ export class PostgresEngine implements BrainEngine {
       opts?.sourceIds && opts.sourceIds.length > 0
         ? sql`source_id = ANY(${opts.sourceIds}::text[])`
         : sql`source_id = ${opts?.sourceId ?? 'default'}`;
-    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('pages')}`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('pages', opts?.excludePrivate)}`) : sql``;
     const live = opts?.liveOnly ? sql`AND deleted_at IS NULL` : sql``;
     const rows = await sql`
       SELECT DISTINCT tag FROM tags
@@ -3866,8 +3872,8 @@ export class PostgresEngine implements BrainEngine {
     const rows = await sql`
       SELECT te.* FROM timeline_entries te JOIN pages p ON p.id = te.page_id
       WHERE p.slug = ${slug} ${sourceCond} ${afterCond} ${beforeCond}
-        ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}
-          AND ${privateTimelineEventFilterFragment('te')}`) : sql``}
+        ${opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}
+          AND ${privateTimelineEventFilterFragment('te', opts?.excludePrivate)}`) : sql``}
       ORDER BY te.date DESC LIMIT ${limit}`;
     return rows as unknown as TimelineEntry[];
   }
@@ -3881,7 +3887,7 @@ export class PostgresEngine implements BrainEngine {
   private chronicleSourceCond(opts?: PageReadScope, ep = false) {
     const sql = this.sql;
     const privacy = opts?.excludePrivate && !ep
-      ? sql.unsafe(`AND ${privatePagesFilterFragment('p')} AND ${privateTimelineEventFilterFragment('te')}`)
+      ? sql.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)} AND ${privateTimelineEventFilterFragment('te', opts?.excludePrivate)}`)
       : sql``;
     if (opts?.sourceIds && opts.sourceIds.length > 0)
       return ep ? sql`AND ep.source_id = ANY(${opts.sourceIds}::text[])` : sql`AND p.source_id = ANY(${opts.sourceIds}::text[]) ${privacy}`;
@@ -4080,7 +4086,7 @@ export class PostgresEngine implements BrainEngine {
       : sql`AND (${opts?.sourceId ?? null}::text IS NULL OR source_id = ${opts?.sourceId ?? null})`;
     // Page-visibility gate on the provenance page, applied BEFORE DISTINCT ON
     // so the untrusted caller resolves the newest value they may see.
-    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privateProvenanceFilterFragment('facts')}`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privateProvenanceFilterFragment('facts', opts?.excludePrivate)}`) : sql``;
     const rows = await sql<OntologyValue[]>`
       SELECT DISTINCT ON (dimension)
         dimension, value, confidence,
@@ -4118,7 +4124,7 @@ export class PostgresEngine implements BrainEngine {
       : sql`AND (${opts?.sourceId ?? null}::text IS NULL OR source_id = ${opts?.sourceId ?? null})`;
     // Same provenance-page gate as getOntology, inside the CTE so a conflict
     // that only exists because of a hidden provenance is never reported.
-    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privateProvenanceFilterFragment('facts')}`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privateProvenanceFilterFragment('facts', opts?.excludePrivate)}`) : sql``;
     const rows = await sql<{ entity_slug: string; dimension: string; values: OntologyConflict['values'] }[]>`
       WITH cur AS (
         SELECT entity_slug, dimension, value, source_markdown_slug AS source, confidence, id AS fact_id
@@ -4180,7 +4186,7 @@ export class PostgresEngine implements BrainEngine {
     opts?: PageReadScope & { includeDeleted?: boolean },
   ): Promise<RawData[]> {
     const sql = this.sql;
-    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p')}`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sql``;
     const alive = opts?.includeDeleted ? sql`` : sql`AND p.deleted_at IS NULL`; // raw_data follows the page soft-delete
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const sourceId = sourceIds ? undefined : opts?.sourceId;
@@ -4638,10 +4644,10 @@ export class PostgresEngine implements BrainEngine {
     return createPageVersion(this, slug, opts?.sourceId ?? 'default');
   }
 
-  async getVersions(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<PageVersion[]> {
+  async getVersions(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' }): Promise<PageVersion[]> {
     const sql = this.sql;
     const privacy = opts?.excludePrivate
-      ? sql.unsafe(`AND ${privatePagesFilterFragment('p')} AND ${privatePagesFilterFragment('pv')}`) : sql``;
+      ? sql.unsafe(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)} AND ${privatePagesFilterFragment('pv', opts?.excludePrivate, 'p')}`) : sql``;
     if (opts?.sourceIds && opts.sourceIds.length > 0) {
       const rows = await sql`
         SELECT pv.* FROM page_versions pv
@@ -5053,7 +5059,7 @@ export class PostgresEngine implements BrainEngine {
   async resolveSlugWithAlias(
     slug: string,
     sourceOrSources: string | readonly string[],
-    opts?: { excludePrivate?: boolean },
+    opts?: { excludePrivate?: boolean | 'owner-only' },
   ): Promise<string> {
     return (await this.resolveSlugWithAliasDetailed(slug, sourceOrSources, opts))?.canonical_slug ?? slug;
   }
@@ -5061,12 +5067,12 @@ export class PostgresEngine implements BrainEngine {
   async resolveSlugWithAliasDetailed(
     slug: string,
     sourceOrSources: string | readonly string[],
-    opts?: { excludePrivate?: boolean },
+    opts?: { excludePrivate?: boolean | 'owner-only' },
   ): Promise<{ canonical_slug: string; source_id: string } | null> {
     const sql = this.sql;
     const sources = Array.isArray(sourceOrSources) ? sourceOrSources : [sourceOrSources];
     if (sources.length === 0) return null;
-    const privacy = opts?.excludePrivate ? sql.unsafe(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterFragment('p')})`) : sql``;
+    const privacy = opts?.excludePrivate ? sql.unsafe(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterFragment('p', opts?.excludePrivate)})`) : sql``;
     try {
       const rows = await sql`
         SELECT canonical_slug, source_id

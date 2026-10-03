@@ -33,6 +33,8 @@
  */
 
 import { existsSync } from 'fs';
+import { calendarDateInTimeZone, resolveCycleTimeZone } from '../core/cycle/cycle-date.ts';
+import { queueFanoutDailyMemory, queueFanoutDailyMemoryWithRecordLookback } from '../core/cycle/daily-memory-followup.ts';
 import type { BrainEngine, SourceRow } from '../core/engine.ts';
 import type { MinionQueue } from '../core/minions/queue.ts';
 import { SOURCE_FRESHNESS_PHASES, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } from '../core/cycle.ts';
@@ -58,6 +60,7 @@ export interface CooldownOpts { baseMin: number; capMin: number; }
 
 export interface FanoutOpts {
   repoPath: string;
+  now?: () => Date;
   slot: string;
   timeoutMs: number;
   /**
@@ -75,6 +78,9 @@ export interface FanoutOpts {
 }
 
 export interface FanoutResult {
+  source_job_ids?: number[];
+  daily_memory_date?: string;
+  daily_memory_timezone?: string;
   /** Source ids whose submission INSERTED a fresh job this tick. */
   dispatched: string[];
   /** Source ids whose submission coalesced onto an existing pending job
@@ -409,6 +415,10 @@ export async function dispatchPerSource(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
+  // One timezone snapshot owns both the queued day slug and writer filters.
+  const dailyMemoryNow = opts.now?.() ?? new Date();
+  const dailyMemoryTimezone = await resolveCycleTimeZone(engine, { now: opts.now });
+  const dailyMemoryDate = calendarDateInTimeZone(dailyMemoryNow, dailyMemoryTimezone);
   let sources: SourceRow[];
   try {
     sources = await engine.listAllSources({ localPathOnly: true });
@@ -453,6 +463,14 @@ export async function dispatchPerSource(
     } else {
       log(`[dispatch] job #${job.id} autopilot-cycle (legacy single-source)`);
     }
+    // Pure-DB / source-less brains never enter the per-source daily barrier.
+    // Carry the pinned day and legacy cycle id so daily memory still runs.
+    await queueFanoutDailyMemoryWithRecordLookback(queue, {
+      day: dailyMemoryDate,
+      ids: [job.id],
+      key: `legacy:${opts.slot}`,
+      timezone: dailyMemoryTimezone,
+    });
     return {
       dispatched: [],
       coalesced: [],
@@ -463,6 +481,9 @@ export async function dispatchPerSource(
       legacy_fallback: true,
       all_sources_fresh: false,
       all_sources_handled: false,
+      daily_memory_date: dailyMemoryDate,
+      daily_memory_timezone: dailyMemoryTimezone,
+      source_job_ids: [job.id],
     };
   }
 
@@ -504,6 +525,7 @@ export async function dispatchPerSource(
 
   const dispatched: string[] = [];
   const coalesced: string[] = [];
+  const sourceJobIds: number[] = [];
   for (const src of dispatch) {
     try {
       // #4399: config.syncEnabled=false excludes the source from automatic
@@ -517,6 +539,7 @@ export async function dispatchPerSource(
         {
           repoPath: opts.repoPath,
           source_id: src.id,
+          daily_memory_timezone: dailyMemoryTimezone,
           pull: shouldPull,
           // Freshness is stamped by bounded deterministic work only. LLM-backed
           // source enrichment (atoms, takes, thin-page development, etc.) is
@@ -540,6 +563,7 @@ export async function dispatchPerSource(
           maxPending: 1,
         },
       );
+      sourceJobIds.push(job.id);
       if (job.coalesced) {
         coalesced.push(src.id);
         if (opts.jsonMode) {
@@ -600,6 +624,8 @@ export async function dispatchPerSource(
   }
 
   return {
+    source_job_ids: sourceJobIds, daily_memory_date: dailyMemoryDate,
+    daily_memory_timezone: dailyMemoryTimezone,
     dispatched,
     coalesced,
     skipped_fresh: skippedFresh.map(s => s.id),
@@ -636,7 +662,7 @@ export function isGlobalMaintenanceStale(lastGlobalAtIso: string | null, now = D
 export async function dispatchGlobalMaintenance(
   engine: BrainEngine,
   queue: MinionQueue,
-  opts: { repoPath: string; slot: string; timeoutMs: number; jsonMode: boolean; emit?: (l: string) => void; log?: (l: string) => void },
+  opts: { repoPath: string; slot: string; timeoutMs: number; jsonMode: boolean; dailyMemoryDate?: string; dailyMemoryTimezone?: string; sourceJobIds?: number[]; emit?: (l: string) => void; log?: (l: string) => void },
 ): Promise<{ dispatched: boolean; coalesced?: boolean; reason: 'stale' | 'fresh' }> {
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
@@ -649,12 +675,17 @@ export async function dispatchGlobalMaintenance(
   }
   const lastGlobalAt = await engine.getConfig(LAST_GLOBAL_AT_KEY);
   if (!isGlobalMaintenanceStale(lastGlobalAt, Date.now(), floorMin)) {
+    if (opts.dailyMemoryDate) await queueFanoutDailyMemoryWithRecordLookback(queue, {
+      day: opts.dailyMemoryDate, ids: opts.sourceJobIds ?? [], key: opts.slot, timezone: opts.dailyMemoryTimezone,
+    });
     return { dispatched: false, reason: 'fresh' };
   }
 
   const job = await queue.add(
     'autopilot-global-maintenance',
-    { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES },
+    { repoPath: opts.repoPath, phases: MAINTENANCE_PHASES,
+      ...(opts.dailyMemoryDate ? { daily_memory_date: opts.dailyMemoryDate } : {}),
+      ...(opts.dailyMemoryTimezone !== undefined ? { daily_memory_timezone: opts.dailyMemoryTimezone } : {}) },
     {
       queue: 'default',
       // Structural single-flight: one global job per slot; maxPending:1
@@ -666,6 +697,10 @@ export async function dispatchGlobalMaintenance(
       maxPending: 1,
     },
   );
+  if (opts.dailyMemoryDate) await queueFanoutDailyMemoryWithRecordLookback(queue, {
+    day: opts.dailyMemoryDate, ids: [...(opts.sourceJobIds ?? []), job.id], key: opts.slot,
+    timezone: opts.dailyMemoryTimezone,
+  });
   if (job.coalesced) {
     if (opts.jsonMode) {
       emit(JSON.stringify({ event: 'dispatch_coalesced', job_id: job.id, mode: 'global_maintenance', slot: opts.slot }));

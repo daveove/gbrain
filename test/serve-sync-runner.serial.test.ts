@@ -36,6 +36,7 @@ import {
 } from '../src/core/serve-sync-runner.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string;
 let repoPath: string;
 
 function gitInit(repo: string): void {
@@ -72,6 +73,7 @@ describe('serve-sync-runner delegated jobs', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = (await engine.getConfig('version'))!;
   }, 60_000);
 
   afterAll(async () => {
@@ -81,6 +83,7 @@ describe('serve-sync-runner delegated jobs', () => {
   beforeEach(async () => {
     __resetDelegatedSyncForTests();
     await resetPgliteState(engine);
+    await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-ssr-'));
     gitInit(repoPath);
     mkdirSync(join(repoPath, 'topics'), { recursive: true });

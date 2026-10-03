@@ -129,5 +129,7 @@ export async function submitPageMutation(ctx: OperationContext,
   const row = await admitWrite(ctx.engine, { principal, operation: input.operation, sourceId, sourceIncarnation: source.incarnation,
     slug, pageId: snapshot?.page.id ?? null, requestId, callerIntent, intent, authority,
     worktreeId: writeThrough ? binding?.worktree_id : null, topologyGeneration: writeThrough ? binding?.topology_generation : null });
+  // Daily-memory refresh is scheduled from committed publication (queuePublicationEffects),
+  // not from this waiter: waitMs:0 / timeouts would otherwise skip the handoff forever.
   return writeResponse(await waitForWrite(ctx.engine, row, ctx.config, input.waitMs));
 }

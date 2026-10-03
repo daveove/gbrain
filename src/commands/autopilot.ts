@@ -1417,14 +1417,13 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
             fanoutMax,
             jsonMode,
           });
-          // #2194 fix #3 / #2227 bug #3: dispatch the single brain-wide
-          // maintenance job (embed/orphans/purge/…) once per window — the per-
-          // source cycles above no longer run global phases, so this is where
-          // the brain-wide work happens (single-flight, no RSS blowout). Only on
-          // the per-source path (legacy single-source still runs everything).
+          // Per-source cycles run freshness phases; global maintenance runs
+          // mixed/global work once per window. Legacy cycles still run everything.
           if (!result.legacy_fallback) {
             try {
-              await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode });
+              await dispatchGlobalMaintenance(engine, queue, { repoPath, slot, timeoutMs: fullCycleTimeoutMs, jsonMode,
+                dailyMemoryDate: result.daily_memory_date, dailyMemoryTimezone: result.daily_memory_timezone,
+                sourceJobIds: result.source_job_ids });
             } catch (e) {
               if (jsonMode) process.stderr.write(JSON.stringify({ event: 'global_maintenance_dispatch_failed', error: e instanceof Error ? e.message : String(e) }) + '\n');
             }
@@ -1527,10 +1526,10 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
       // extract + embed, which didn't match the Minions-dispatch
       // path's phase set). Now both converge on the same primitive.
       try {
-        const { runCycle } = await import('../core/cycle.ts');
+        const { runInlineAutopilotCycle } = await import('../core/cycle/inline-autopilot.ts');
         // #1872: track the promise so closeEngine can drain it on shutdown,
         // and pass the abort signal so the cycle winds down between phases.
-        const cyclePromise = runCycle(engine, {
+        const cyclePromise = runInlineAutopilotCycle(engine, {
           brainDir: repoPath,
           // Autopilot daemon path: pulls by default (matches
           // pre-v0.17 autopilot behavior). CLI dream defaults false
@@ -1540,7 +1539,7 @@ export async function runAutopilot(engine: BrainEngine, args: string[]) {
           yieldBetweenPhases: async () => {
             await new Promise(r => setImmediate(r));
           },
-        });
+        }, { onMaintenanceError: error => logError('cycle-inline-daily-memory', error) });
         inflightInlineCycle = cyclePromise;
         const report = await cyclePromise.finally(() => { inflightInlineCycle = null; });
         // Only 'failed' (every attempted phase failed) trips the autopilot

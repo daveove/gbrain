@@ -312,6 +312,17 @@ export function checkDestructiveConfirmation(
   );
 }
 
+/** System indexes are retained; archival and expiry must not remove their history. */
+export async function assertSourceNotSystemIndex(engine: BrainEngine, sourceId: string): Promise<void> {
+  if (sourceId === 'default') throw new Error('The default source cannot be archived, purged, or removed.');
+  const owned = await engine.executeRaw<{ protected: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM sources WHERE id=$1 AND (
+      (${SOURCE_CONFIG_OBJECT_SQL})->>'system_index'='true'
+      OR (id='dream' AND name='Dream cycle indexes'
+        AND (${SOURCE_CONFIG_OBJECT_SQL})->>'federated'='false'))) AS protected`, [sourceId]);
+  if (owned[0]?.protected === true) throw Object.assign(new Error(`Source '${sourceId}' is a system index and cannot be archived, purged, or removed.`), { code: 'system_index_source' });
+}
+
 // ── Soft Delete ─────────────────────────────────────────────
 
 /**
@@ -330,29 +341,42 @@ export async function softDeleteSource(
   engine: BrainEngine,
   sourceId: string,
 ): Promise<SoftDeletedSource | null> {
+  await assertSourceNotSystemIndex(engine, sourceId);
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
+    // Archive refresh runs inside runManagedSourceLifecycle so admin ops get it too.
     const result=await runManagedSourceLifecycle(engine,{operation:'archive',sourceId});
     if(result.noop)return null;
     const [row]=await engine.executeRaw<{name:string;archived_at:string;archive_expires_at:string;n:number}>(`SELECT name,archived_at,archive_expires_at,
       (SELECT count(*)::integer FROM pages WHERE source_id=$1) AS n FROM sources WHERE id=$1`,[sourceId]);
-    return row?{id:sourceId,name:row.name,deletedAt:new Date(row.archived_at),expiresAt:new Date(row.archive_expires_at),pageCount:row.n}:null;
+    if(row){
+      return {id:sourceId,name:row.name,deletedAt:new Date(row.archived_at),expiresAt:new Date(row.archive_expires_at),pageCount:row.n};
+    }
+    return null;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources archive');
-  // Atomic: only flip rows that are currently active. Returns the metadata
-  // we need without a follow-up SELECT. RETURNING projects the columns the
-  // caller cares about; pageCount is a separate count.
+  // Atomic: only flip rows that are currently active. Transition + refresh
+  // share one transaction so a crash cannot leave archive without handoff.
   const expiresClause = `now() + (${SOFT_DELETE_TTL_HOURS} || ' hours')::interval`;
-  const rows = await engine.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
-    `UPDATE sources
-     SET archived = true,
-         archived_at = now(),
-         archive_expires_at = ${expiresClause},
-         config = ${SOURCE_CONFIG_OBJECT_SQL} || '{"federated": false}'::jsonb
-     WHERE id = $1 AND archived = false
-     RETURNING id, name, archived_at, archive_expires_at`,
-    [sourceId],
-  );
+  const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+  const transition = async (tx: BrainEngine) => {
+    const rows = await tx.executeRaw<{ id: string; name: string; archived_at: string; archive_expires_at: string }>(
+      `UPDATE sources
+       SET archived = true,
+           archived_at = now(),
+           archive_expires_at = ${expiresClause},
+           config = ${SOURCE_CONFIG_OBJECT_SQL} || '{"federated": false}'::jsonb
+       WHERE id = $1 AND archived = false
+       RETURNING id, name, archived_at, archive_expires_at`,
+      [sourceId],
+    );
+    // No-op retries still re-enqueue refresh when a prior handoff was lost.
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, sourceId);
+    return rows;
+  };
+  const rows = typeof engine.transaction === 'function'
+    ? await engine.transaction(transition)
+    : await transition(engine);
   if (rows.length === 0) return null;
   const row = rows[0];
 
@@ -361,6 +385,7 @@ export async function softDeleteSource(
     [sourceId],
   );
   const pageCount = pageRows[0]?.n ?? 0;
+
 
   return {
     id: sourceId,
@@ -386,20 +411,31 @@ export async function restoreSource(
 ): Promise<boolean> {
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
-    const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});return !result.noop;
+    // Restore refresh runs inside runManagedSourceLifecycle so admin ops get it too.
+    const result=await runManagedSourceLifecycle(engine,{operation:'restore',sourceId,refederate});
+    return !result.noop;
   }
   await assertUnmanagedCanonicalWriter(engine, 'sources restore');
   const federatedPatch = refederate ? '{"federated": true}' : '{"federated": false}';
-  const rows = await engine.executeRaw<{ id: string }>(
-    `UPDATE sources
-     SET archived = false,
-         archived_at = NULL,
-         archive_expires_at = NULL,
-         config = ${SOURCE_CONFIG_OBJECT_SQL} || $1::text::jsonb
-     WHERE id = $2 AND archived = true
-     RETURNING id`,
-    [federatedPatch, sourceId],
-  );
+  const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+  const transition = async (tx: BrainEngine) => {
+    const rows = await tx.executeRaw<{ id: string }>(
+      `UPDATE sources
+       SET archived = false,
+           archived_at = NULL,
+           archive_expires_at = NULL,
+           config = ${SOURCE_CONFIG_OBJECT_SQL} || $1::text::jsonb
+       WHERE id = $2 AND archived = true
+       RETURNING id`,
+      [federatedPatch, sourceId],
+    );
+    // No-op retries still re-enqueue refresh when a prior handoff was lost.
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, sourceId);
+    return rows;
+  };
+  const rows = typeof engine.transaction === 'function'
+    ? await engine.transaction(transition)
+    : await transition(engine);
   return rows.length > 0;
 }
 
@@ -476,7 +512,7 @@ export async function purgeExpiredSources(
       AND archive_expires_at IS NOT NULL AND archive_expires_at<=now() ORDER BY id`);
     const result:PurgeExpiredResult={purged:[],blocked:[]};
     for(const source of candidates){
-      try{const receipt=await runManagedSourceLifecycle(engine,{operation:'purge',sourceId:source.id,expectedIncarnation:source.incarnation,confirmDestructive:true,expiredOnly:true});if(!receipt.noop)result.purged.push(source.id);}
+      try{await assertSourceNotSystemIndex(engine,source.id);const receipt=await runManagedSourceLifecycle(engine,{operation:'purge',sourceId:source.id,expectedIncarnation:source.incarnation,confirmDestructive:true,expiredOnly:true});if(!receipt.noop)result.purged.push(source.id);}
       catch(error){result.blocked.push({id:source.id,reason:error instanceof Error?error.message:'Source lifecycle could not finish.'});}
     }
     return result;
@@ -495,15 +531,25 @@ export async function purgeExpiredSources(
   for (const candidate of candidates) {
     const { id } = candidate;
     try {
-      const rows = await engine.executeRaw<{ id: string }>(
-        `DELETE FROM sources
-         WHERE id = $1
-           AND archived = true
-           AND archive_expires_at IS NOT NULL
-           AND archive_expires_at <= now()
-         RETURNING id`,
-        [id],
-      );
+      await assertSourceNotSystemIndex(engine, id);
+      // Discover + enqueue before delete so archive-time refresh gaps cannot leave
+      // dead daily-memory links after pages cascade away.
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+      const deleteExpired = async (tx: BrainEngine) => {
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
+        return tx.executeRaw<{ id: string }>(
+          `DELETE FROM sources
+           WHERE id = $1
+             AND archived = true
+             AND archive_expires_at IS NOT NULL
+             AND archive_expires_at <= now()
+           RETURNING id`,
+          [id],
+        );
+      };
+      const rows = typeof engine.transaction === 'function'
+        ? await engine.transaction(deleteExpired)
+        : await deleteExpired(engine);
       if (rows.length > 0) {
         purged.push(id);
         // github-kind mirrors are gbrain-owned only when created at the
@@ -538,6 +584,10 @@ export async function purgeExpiredSources(
       // 0 rows = restored/already gone between SELECT and DELETE; neither
       // purged nor blocked.
     } catch (err) {
+      if ((err as { code?: string })?.code === 'system_index_source') {
+        blocked.push({ id, reason: (err as Error).message });
+        continue;
+      }
       // SQLSTATE 23503 foreign_key_violation — same detection idiom as
       // oauth-provider.ts's delete path for this exact FK.
       if ((err as { code?: string })?.code === '23503') {
