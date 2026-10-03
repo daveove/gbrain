@@ -322,7 +322,6 @@ test('one-day lookback setting still advances past the inclusive watermark', asy
   await engine.setConfig('cycle.daily_memory_last_lookback_day', '2026-09-20');
   await withEnv({ GBRAIN_DAILY_MEMORY_LOOKBACK: '1', GBRAIN_DAILY_MEMORY_LOOKBACK_DAYS: '1' }, async () => {
     const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
-      extract: noExtract,
       now: () => new Date('2026-09-30T12:00:00Z'),
     });
     expect(result.day).toBe('2026-09-30');
