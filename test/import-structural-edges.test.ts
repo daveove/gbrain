@@ -252,6 +252,56 @@ describe('import structural edges', () => {
     }
   }, 60_000);
 
+  test('incomplete pending scan after inline import enqueues cursor continuation', async () => {
+    const sourceId = 'pending-scan-incomplete-src';
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [sourceId]);
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-pending-scan-'));
+    writeFileSync(join(dir, 'pending-scan-note.md'), '---\ntype: concept\n---\n# Note\n\nbody\n');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-home-'));
+    const cursor = 'internal.pending-links.ready-tail-key';
+    const extractMod = await import('../src/commands/extract.ts');
+    const spy = spyOn(extractMod, 'extractStaleFromDB').mockResolvedValue({
+      pagesProcessed: 0,
+      linksCreated: 0,
+      timelineCreated: 0,
+      staleRemaining: 0,
+      pendingScanIncomplete: true,
+      pendingScanAfter: cursor,
+    });
+    try {
+      await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+        expect(result.imported).toBe(1);
+        expect(result.errors).toBe(0);
+        expect(result.linkExtractionError).toBeUndefined();
+        expect(spy).toHaveBeenCalled();
+        const jobs = await engine.executeRaw<{ data: unknown; idempotency_key: string | null }>(
+          `SELECT data, idempotency_key FROM minion_jobs WHERE name = 'extract' AND data->>'sourceId'=$1`,
+          [sourceId],
+        );
+        expect(jobs).toHaveLength(1);
+        const data = (typeof jobs[0].data === 'string' ? JSON.parse(jobs[0].data) : jobs[0].data) as {
+          reason?: string; stale?: boolean; pending_after?: string; deferred_commit?: string;
+        };
+        expect(data.stale).toBe(true);
+        expect(data.reason).toBe('import_pending_scan_incomplete');
+        expect(data.pending_after).toBe(cursor);
+        expect(data.deferred_commit).toBe(`pending-target-scan:${cursor}`);
+        expect(jobs[0].idempotency_key).toBe(`extract-stale:${sourceId}:pending-target-scan:${cursor}`);
+        const rejected = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => {
+          throw new Error('Synthetic pending-scan continuation rejection');
+        });
+        try {
+          const failed = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId });
+          expect(failed.errors).toBe(1);
+          expect(failed.linkExtractionError).toContain('Synthetic pending-scan continuation rejection');
+        } finally { rejected.mockRestore(); }
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  }, 60_000);
+
   test('large unchanged imports queue only real stale work and retain full-sync handoff', async () => {
     const sourceId = 'unchanged-large-src';
     await engine.executeRaw('INSERT INTO sources (id,name) VALUES ($1,$1)', [sourceId]);

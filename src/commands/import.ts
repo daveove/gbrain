@@ -1016,18 +1016,36 @@ export async function runImport(
         signal,
       });
       structuralLinks = extracted.linksCreated;
-      if (extracted.staleRemaining === 0) {
+      // staleRemaining===0 can still leave pendingScanIncomplete when the
+      // pending-reference registry exhausts its budget before a ready tail.
+      // Treat that as unfinished work: enqueue a cursor continuation instead
+      // of clearing recovered/checkpoint as if extraction finished.
+      const pendingIncomplete = extracted.pendingScanIncomplete === true;
+      if (extracted.staleRemaining === 0 && !pendingIncomplete) {
         linkExtractionRecovered = true;
       } else {
-        console.error(
-          `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
-        );
+        if (extracted.staleRemaining > 0) {
+          console.error(
+            `  ${extracted.staleRemaining} page(s) still need link extraction. Run 'gbrain extract --stale' to continue.`,
+          );
+        } else {
+          console.error(
+            `  Pending link scan incomplete at cursor ${JSON.stringify(extracted.pendingScanAfter ?? '')}; queueing continuation.`,
+          );
+        }
         // Incomplete inline sweep must not look like a clean import: either
         // hand off a durable continuation or count as <link-extraction>.
         const queuedJobId = await queueDeferredStaleSweep(engine, {
           sourceId: sourceId ?? 'default',
-          commit: opts.commit ?? 'import',
-          reason: 'import_inline_incomplete',
+          commit: pendingIncomplete
+            ? `pending-target-scan:${extracted.pendingScanAfter ?? ''}`
+            : (opts.commit ?? 'import'),
+          reason: pendingIncomplete
+            ? 'import_pending_scan_incomplete'
+            : 'import_inline_incomplete',
+          ...(pendingIncomplete
+            ? { pendingAfter: extracted.pendingScanAfter ?? '' }
+            : {}),
         });
         if (queuedJobId == null) {
           throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
