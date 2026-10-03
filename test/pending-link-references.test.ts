@@ -999,18 +999,19 @@ test('cancelled pending job never publishes a cursor after a durable origin hand
 test('inline target probe completed batch durably resumes after default budget exhaustion', async () => {
   const rows = await pendingFixture(105), tail = rows.at(-1)!;
   await engine.putPage(tail.reference.candidates[0].targetSlug, page());
-  const raw = engine.executeRaw.bind(engine);
-  const query = spyOn(engine,'executeRaw').mockImplementation(async <T = Record<string, unknown>>(
-    sql: string, params?: unknown[], opts?: { signal?: AbortSignal },
-  ): Promise<T[]> => {
-    const result = await raw<T>(sql,params,opts);
+  const raw = engine.executeRaw;
+  // Preserve the receiver: queueing runs through a transaction-scoped engine.
+  engine.executeRaw = async function<T = Record<string, unknown>>(
+    this: PGLiteEngine, sql: string, params?: unknown[], opts?: { signal?: AbortSignal },
+  ): Promise<T[]> {
+    const result = await raw.call(this,sql,params,opts) as T[];
     if (sql.includes('SELECT key,value FROM config') && params?.[2]) {
       await Bun.sleep(INLINE_PENDING_PROBE_BUDGET_MS + 100);
     }
     return result;
-  });
+  };
   try { await probePendingOriginsForArrivedTargets(engine,'default',{ globalBasename: false }); }
-  finally { query.mockRestore(); }
+  finally { engine.executeRaw = raw; }
   const [job] = await engine.executeRaw<{ id: number; data: { pending_after: string } }>(
     "SELECT id,data FROM minion_jobs WHERE data->>'reason'='pending_target_scan_continuation'");
   expect(job).toBeDefined(); expect(job.data.pending_after).toBe(rows[99].key);
@@ -1064,15 +1065,15 @@ test('complete inline pending scans do not queue continuation generations', asyn
 
 test('default inline budget exhausted during metadata queues an empty cursor without losing arrivals', async () => {
   const rows = await pendingFixture(1);
-  const get = engine.getConfig.bind(engine);
+  const get = engine.getConfig;
   let waited = false;
-  const metadata = spyOn(engine,'getConfig').mockImplementation(async key => {
-    const result = await get(key);
+  engine.getConfig = async function(this: PGLiteEngine, key: string) {
+    const result = await get.call(this,key);
     if (!waited) { waited = true; await Bun.sleep(INLINE_PENDING_PROBE_BUDGET_MS + 100); }
     return result;
-  });
+  };
   try { await probePendingOriginsForArrivedTargets(engine,'default',{ globalBasename: false }); }
-  finally { metadata.mockRestore(); }
+  finally { engine.getConfig = get; }
   expect(await loadPendingLinkReferences(engine)).toEqual(rows);
   const [job] = await engine.executeRaw<{ data: { pending_after: string } }>("SELECT data FROM minion_jobs WHERE data->>'reason'='pending_target_scan_continuation'");
   expect(job).toBeDefined(); expect(job.data.pending_after).toBe('');
