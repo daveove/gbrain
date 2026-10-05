@@ -1,6 +1,6 @@
 {
   "name": "@daveove/gbrain-evidence-context",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "type": "module",
   "description": "Read-only source evidence and context assembly with injected storage",
   "exports": { ".": { "types": "./index.d.mts", "import": "./index.mjs" } },
