@@ -10,6 +10,8 @@ Only explicitly business-tagged records are included. The checked host must auth
 
 Conversation candidates use the existing store's millisecond keyset ordering. Cursors bind the account, network, thread, source and contract. Reads are current reads, not an immutable database snapshot. Conversation cursors retain their anchor position. Bodies that do not fit the remaining packet budget are deferred to a later page. Continuation pages bound repeated anchor excerpts to 12,000 characters so unread bodies can fit. Finish the current conversation before advancing to later anchors; supplying both progress fields keeps the cursor position until that conversation is exhausted. Resume each returned continuation until the query is exhausted; do not infer completeness from a display limit.
 
+Cursors use authenticated encryption with a process-scoped key. They do not reveal denied record references or timestamps. Continuations must return to the same process; a restart or another worker rejects them, requiring a queue refresh. Cursor randomness does not change the source revision.
+
 Run `npm test` from this directory. Publish this directory as a package-only commit in the owned repository, and pin consumers to that immutable commit. Do not install the root GBrain package in a Node application.
 
 After committing reviewed changes, run `bash scripts/package-evidence-context.sh` from the repository to produce the package commit. `--push` publishes that commit to the package branch after checking the owned destination. There are no install scripts, binaries or engine dependencies in the package root. Ordinary `npm ci` verifies the pinned dependency from its lockfile.
