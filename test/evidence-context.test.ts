@@ -31,6 +31,8 @@ test('injected SQL reader runs exact resolution and tied keysets in an isolated 
     for (const ref of ['a', 'b', 'c', 'd']) {
       const payload = { sourceSystem: 'chat', channel: 'network', profileId: 'owner-a', chatId: 'thread',
         evidence: { body: `Original ${ref}`, complete: true }, metadata: { sensitivity: { level: 'business' } } };
+      if (ref === 'c') { delete (payload as { chatId?: string }).chatId; Object.assign(payload.metadata, { threadId: 'thread' }); }
+      if (ref === 'd') { delete (payload as { chatId?: string }).chatId; Object.assign(payload, { message: { conversationId: 'thread' } }); }
       await db.query('INSERT INTO source_records VALUES ($1,$2,$3,$2,$4::text::jsonb,$5::timestamptz)',
         ['comms_channel', ref, 'comms_channel_message', JSON.stringify(payload), '2026-01-01T12:00:00.123456Z']);
     }

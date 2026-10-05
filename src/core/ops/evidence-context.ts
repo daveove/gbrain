@@ -18,9 +18,9 @@ export function evidenceRecordReader(executeRaw: (sql: string, params: unknown[]
         const matches: string[] = [];
         for (const { equals } of payloadAny) {
           for (const [field, value] of Object.entries(equals)) {
-            if (!['conversationId', 'chatId', 'threadId'].includes(field)) throw new OperationError('invalid_input', 'Unsupported conversation field');
+            if (!/^(?:(metadata|message)\.)?(conversationId|chatId|threadId)$/.test(field)) throw new OperationError('invalid_input', 'Unsupported conversation field');
             params.push(value);
-            matches.push(`payload_json->>'${field}' = $${params.length}`);
+            matches.push(`payload_json#>>'{${field.split('.').join(',')}}' = $${params.length}`);
           }
         }
         clauses.push(`(${matches.join(' OR ')})`);
