@@ -268,3 +268,27 @@ test('clipping only a preview preserves the complete body capability', async () 
   assert.ok(!packet.gaps.includes('body_incomplete')); assert.ok(!packet.gaps.includes('body_truncated'));
   assert.ok(packet.gaps.includes('preview_truncated'));
 });
+
+
+test('a complete final body deferred by the packet budget is recovered on the next page', async () => {
+  const rows = [row('a', { evidence: { body: 'a'.repeat(3500), complete: true } }),
+    ...['b', 'c', 'd', 'e', 'f', 'g'].map(ref => row(ref, { evidence: { body: ref.repeat(12000), complete: true } }))];
+  const first = (await run([input('a')], rows)).packets[0];
+  assert.ok(!first.evidence.some(e => e.reference.sourceRef === 'g'));
+  assert.equal(first.continuation.length, 1);
+  const second = (await run([{ ...input('a'), continuation: first.continuation }], rows)).packets[0];
+  const recovered = second.evidence.find(e => e.reference.sourceRef === 'g');
+  assert.equal(recovered.body, 'g'.repeat(12000)); assert.equal(recovered.bodyState, 'complete');
+  assert.equal(second.continuation.length, 0); assert.equal(second.coverage.queryExhausted, true);
+});
+
+test('start cursors recover bodies even when the repeated anchor would otherwise occupy most of the packet', async () => {
+  const rows = [row('z-anchor', { evidence: { body: 'a'.repeat(50000), complete: true } }),
+    row('a-new', { evidence: { body: 'n'.repeat(50000), complete: true } })];
+  const first = (await run([input('z-anchor')], rows, { maxBodyChars: 50000 })).packets[0];
+  assert.equal(first.evidence[0].body.length, 50000); assert.equal(first.continuation.length, 1);
+  const second = (await run([{ ...input('z-anchor'), continuation: first.continuation }], rows, { maxBodyChars: 50000 })).packets[0];
+  const recovered = second.evidence.find(e => e.reference.sourceRef === 'a-new');
+  assert.equal(recovered.body.length, 50000); assert.equal(recovered.bodyState, 'complete');
+  assert.equal(second.continuation.length, 0); assert.equal(second.coverage.queryExhausted, true);
+});

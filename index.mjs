@@ -123,12 +123,17 @@ function cursorFor(row, scope, anchorOffset) {
   return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, anchorOffset, updatedAt: iso(row.updated_at),
     sourceType: text(row.source_type), sourceRef: text(row.source_ref) })).toString('base64url');
 }
+function startCursor(scope, anchorOffset) {
+  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, anchorOffset, start: true })).toString('base64url');
+}
 function decodeCursor(value, scope) {
   if (!value) return undefined;
   if (typeof value !== 'string' || value.length > 4096) throw new Error('invalid_continuation');
   try {
     const c = JSON.parse(Buffer.from(value, 'base64url').toString());
-    if (c.contract !== CONTRACT || c.scope !== scope || !iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
+    if (c.contract !== CONTRACT || c.scope !== scope) throw 0;
+    if (c.start === true && Number.isInteger(c.anchorOffset) && c.anchorOffset >= 0) return undefined;
+    if (!iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
     return { updatedAt: iso(c.updatedAt), sourceType: c.sourceType, sourceRef: c.sourceRef };
   } catch { throw new Error('invalid_continuation'); }
 }
@@ -176,20 +181,17 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       const identity = resolveIdentity(row);
       return identity && !identity.conflict && await authorize(row, identity, item) === true;
     };
-    const include = row => {
+    const include = (row, maxChars = bodyLimit) => {
       const refKey = key(recordReference(row));
       if (evidence.has(refKey)) return true;
       if (evidence.size >= 200 || bodyChars >= 64000) { addGap('packet_budget_reached'); return false; }
-      const normalized = normalizeEvidence(row, { identity: resolveIdentity(row), maxBodyChars: bodyLimit });
+      const normalized = normalizeEvidence(row, { identity: resolveIdentity(row), maxBodyChars: maxChars });
       const remaining = Math.max(0, 64000 - bodyChars);
+      // A packet budget must not permanently clip an otherwise readable body.
+      if ((normalized.body?.length || 0) > remaining) { addGap('packet_budget_reached'); return false; }
       if ((normalized.body?.length || 0) + (normalized.preview?.length || 0) > remaining) {
-        const bodySize = normalized.body?.length || 0, previewSize = normalized.preview?.length || 0;
-        normalized.body = normalized.body?.slice(0, remaining) || null;
         normalized.preview = normalized.preview?.slice(0, Math.max(0, remaining - (normalized.body?.length || 0))) || null;
-        if ((normalized.body?.length || 0) < bodySize) {
-          normalized.bodyState = 'partial'; normalized.truncated = true;
-        }
-        if ((normalized.preview?.length || 0) < previewSize) normalized.previewTruncated = true;
+        normalized.previewTruncated = true;
         addGap('packet_budget_reached');
       }
       bodyChars += (normalized.body?.length || 0) + (normalized.preview?.length || 0);
@@ -213,17 +215,17 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (!row || !referenceMatches(row, ref)) { addGap('reference_unavailable'); exhausted = false; continue; }
         if (!await approved(row)) { addGap('reference_unavailable'); exhausted = false; continue; }
         packet.coverage.anchorsResolved++;
-        if (!include(row)) { packet.nextAnchorOffset = anchorIndex; exhausted = false; break; }
         const identity = resolveIdentity(row);
-        if (!identity.account || !identity.conversationId || !identity.system || !identity.network) {
-          addGap('conversation_identity_missing'); exhausted = false; continue;
-        }
         const { system, network, accountKind, account, conversationId } = identity;
-        const scope = hash({ sourceId, sourceType: row.source_type,
-          system, network, accountKind, account, conversationId });
+        const scope = system && network && account && conversationId
+          ? hash({ sourceId, sourceType: row.source_type, system, network, accountKind, account, conversationId }) : null;
+        const cursor = scope && list(item.continuation).find(c => c.scope === scope)?.cursor;
+        // Repeated anchors retain a current authorized excerpt while reserving
+        // enough space for one unread body even at the 50K per-body limit.
+        if (!include(row, cursor ? Math.min(bodyLimit, 12000) : bodyLimit)) { packet.nextAnchorOffset = anchorIndex; exhausted = false; break; }
+        if (!scope) { addGap('conversation_identity_missing'); exhausted = false; continue; }
         if (conversations.has(scope)) continue;
         conversations.add(scope);
-        const cursor = list(item.continuation).find(c => c.scope === scope)?.cursor;
         const after = decodeCursor(cursor, scope);
         if (list(item.continuation).some(c => !c || !text(c.scope))) throw new Error('invalid_continuation');
         // Each page stops at its first unfinished conversation. Later scopes
@@ -244,9 +246,8 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         packet.coverage.candidatesExamined += examined;
         if (rows.length > examined) {
           const last = lastProcessed;
-          if (!last) { packet.nextAnchorOffset = anchorIndex; addGap('packet_budget_reached'); exhausted = false; break; }
-          if (!iso(last.updated_at)) throw new Error('reader_failed');
-          packet.continuation.push({ scope, cursor: cursorFor(last, scope, anchorIndex) });
+          if (last && !iso(last.updated_at)) throw new Error('reader_failed');
+          packet.continuation.push({ scope, cursor: last ? cursorFor(last, scope, anchorIndex) : cursor || startCursor(scope, anchorIndex) });
           packet.anchorOffset = anchorIndex;
           packet.nextAnchorOffset = anchorIndex + 1 < refs.length ? anchorIndex + 1 : undefined;
           addGap('bounded_read'); exhausted = false; break;
@@ -261,10 +262,10 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       || key(a.reference).localeCompare(key(b.reference)));
     packet.dependencies = packet.evidence.map(e => ({ ...e.reference, revision: e.revision }));
     packet.coverage.queryExhausted = refs.length > 0 && exhausted && packet.nextAnchorOffset == null && !packet.gaps.includes('anchor_limit')
-      && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
+      && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 9, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 10, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
