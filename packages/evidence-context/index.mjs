@@ -1,0 +1,237 @@
+import { createHash } from 'node:crypto';
+
+export const CONTRACT = 'gbrain.evidence-context/v1';
+const obj = v => v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+const text = v => typeof v === 'string' ? v.trim() : '';
+const list = v => Array.isArray(v) ? v : [];
+const iso = v => v && Number.isFinite(new Date(v).getTime()) ? new Date(v).toISOString() : null;
+const key = ref => JSON.stringify([ref.sourceType, ref.sourceRef]);
+const stable = v => Array.isArray(v) ? v.map(stable) : v && typeof v === 'object'
+  ? Object.fromEntries(Object.keys(v).sort().map(k => [k, stable(v[k])])) : v;
+const hash = v => createHash('sha256').update(JSON.stringify(stable(v))).digest('hex');
+const bound = (v, fallback, max) => Number.isInteger(v) && v > 0 ? Math.min(v, max) : fallback;
+
+export function recordReference(row) {
+  return { sourceType: text(row?.source_type), sourceRef: text(row?.source_ref),
+    entityType: text(row?.entity_type), entityId: text(row?.entity_id) };
+}
+
+// Producers can supply explicit intake identity. Legacy identity is conservative:
+// unrelated resources are never joined by titles, senders or timestamps.
+export function recordIdentity(row) {
+  const p = obj(row?.payload_json), m = obj(p.metadata), message = obj(p.message);
+  const intake = obj(m.intake || p.intake);
+  const emails = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
+    message.mailboxEmail, message.profileEmail].map(text).filter(Boolean).map(v => v.toLowerCase());
+  const profiles = [p.profileId, m.profileId, message.profileId].map(text).filter(Boolean);
+  const accounts = [intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId].map(text).filter(Boolean);
+  const systems = [intake.system, p.sourceSystem, m.sourceSystem].map(text).filter(Boolean);
+  const identityValues = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
+    message.mailboxEmail, message.profileEmail, p.profileId, m.profileId, message.profileId,
+    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem];
+  const conflict = [emails, profiles, accounts, systems].some(values => new Set(values).size > 1)
+    || identityValues.some(value => value != null && typeof value !== 'string')
+    || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
+  const system = text(intake.system || p.sourceSystem || (row?.source_type === 'comms_channel' ? '' : row?.source_type));
+  return { system, network: text(p.network || p.channel || system),
+    accountKind: accounts.length ? 'source-account' : emails.length ? 'mailbox' : profiles.length ? 'profile' : 'unknown',
+    account: accounts[0] || emails[0] || profiles[0] || null,
+    conversationId: text(p.conversationId || p.chatId || p.threadId || m.threadId || message.threadId),
+    resourceType: text(intake.resourceType || row?.entity_type),
+    resourceId: text(intake.resourceId || row?.entity_id), conflict };
+}
+
+const THREAD_FIELDS = ['conversationId', 'chatId', 'threadId'];
+export function conversationSearch(identity, sourceType, { after, limit = 51 } = {}) {
+  // Email's native thread can be nested under metadata/message. The shared
+  // store only filters top-level payload fields, so scan that source boundedly
+  // and verify full identity before release instead of omitting nested records.
+  return { sourceTypes: [sourceType], payloadAny: sourceType === 'comms_channel'
+    ? THREAD_FIELDS.map(field => ({ equals: { [field]: identity.conversationId } })) : undefined,
+    after, limit };
+}
+
+function referenceMatches(row, ref) {
+  const actual = recordReference(row);
+  return key(actual) === key(ref) && (!ref.entityType || ref.entityType === actual.entityType)
+    && (!ref.entityId || ref.entityId === actual.entityId);
+}
+function sameConversation(a, b) {
+  return !a.conflict && !b.conflict && a.account && a.conversationId
+    && ['system', 'network', 'accountKind', 'account', 'conversationId'].every(k => a[k] === b[k]);
+}
+function lifecycleSuppressed(p) {
+  return p.deleted === true || p.suppressed === true || p.archived === true
+    || ['deleted', 'suppressed', 'archived', 'retired'].includes(text(p.lifecycle || p.state).toLowerCase());
+}
+function sensitivityOf(p) { return text(obj(obj(p.metadata).sensitivity).level || obj(p.sensitivity).level); }
+
+export function normalizeEvidence(row, { identity = recordIdentity(row), maxBodyChars = 12000 } = {}) {
+  const p = obj(row.payload_json), message = obj(p.message), e = obj(p.evidence);
+  const type = text(row.entity_type), source = text(row.source_type);
+  const family = source === 'gmail' || source === 'email' || Object.keys(message).length ? 'email'
+    : type === 'comms_channel_message' ? 'message'
+    : /circleback|pocket|meeting|transcript/.test(`${source} ${type}`) ? 'meeting'
+    : /linear/.test(`${source} ${type}`) ? 'issue'
+    : /calendar/.test(`${source} ${type}`) ? 'calendar'
+    : /readwise|article|document|capture/.test(`${source} ${type}`) ? 'document' : 'unsupported';
+  const original = text(e.body || message.body || p.body || p.text || p.content || p.transcript || p.markdown || p.description);
+  const providerNotes = family === 'meeting' ? text(p.circlebackNotes || p.notes) : '';
+  const availableBody = original || providerNotes;
+  const preview = text(p.preview || p.snippet || message.snippet || p.summary || p.generatedSummary || p.detail);
+  const explicitComplete = (e.complete === true || obj(p.metadata).bodyComplete === true)
+    && e.truncated !== true && obj(p.metadata).truncated !== true && p.truncated !== true;
+  const state = family === 'unsupported' ? 'unsupported' : availableBody
+    ? original && explicitComplete && original.length <= maxBodyChars ? 'complete' : 'partial'
+    : preview ? 'preview-only' : 'unavailable';
+  return { reference: recordReference(row), identity, family, trust: 'untrusted_evidence',
+    title: text(p.title || message.subject || p.subject || p.chatTitle).slice(0, 1000),
+    sender: text(p.sender || message.sender).slice(0, 500),
+    body: family === 'unsupported' ? null : availableBody.slice(0, maxBodyChars) || null,
+    contentKind: original ? family === 'meeting' && p.transcript && !e.body ? 'transcript' : 'source-content'
+      : providerNotes ? 'provider-notes' : preview ? 'preview-or-summary' : 'unavailable',
+    preview: preview.slice(0, 1000) || null, bodyState: state,
+    occurredAt: iso(p.occurredAt || p.sentAt || message.sentAt || p.startTime || obj(p.start).dateTime || p.capturedAt),
+    occurrenceDate: text(obj(p.start).date) || null,
+    observedAt: iso(p.importedAt || p.observedAt || p.retrievedAt), updatedAt: iso(row.updated_at),
+    revision: hash({ reference: recordReference(row), payload: p, updatedAt: iso(row.updated_at) }),
+    links: list(p.sourceLinks).filter(link => /^https?:\/\//i.test(text(link?.url))).slice(0, 20),
+    lifecycle: text(p.lifecycle) || 'observed', providerState: text(p.status) || null,
+    truncated: availableBody.length > maxBodyChars };
+}
+
+function cursorFor(row, scope) {
+  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, updatedAt: iso(row.updated_at),
+    sourceType: text(row.source_type), sourceRef: text(row.source_ref) })).toString('base64url');
+}
+function decodeCursor(value, scope) {
+  if (!value) return undefined;
+  if (typeof value !== 'string' || value.length > 4096) throw new Error('invalid_continuation');
+  try {
+    const c = JSON.parse(Buffer.from(value, 'base64url').toString());
+    if (c.contract !== CONTRACT || c.scope !== scope || !iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
+    return { updatedAt: iso(c.updatedAt), sourceType: c.sourceType, sourceRef: c.sourceRef };
+  } catch { throw new Error('invalid_continuation'); }
+}
+
+/** Storage and authorization are supplied by a checked host. This module never
+ * constructs an engine, reads credentials, executes source text, or writes memory. */
+export async function assembleEvidenceContexts({ items, reader, authorize, resolveIdentity = recordIdentity,
+  sourceId, perItemLimit = 50, maxBodyChars = 12000, signal } = {}) {
+  if (!text(sourceId) || !reader || typeof authorize !== 'function' || !Array.isArray(items))
+    throw new TypeError('items, sourceId, reader and a host authorization policy are required');
+  const limit = bound(perItemLimit, 50, 200), bodyLimit = bound(maxBodyChars, 12000, 50000);
+  const cache = new Map();
+  const conversationCache = new Map();
+  const readExact = ref => {
+    if (!cache.has(key(ref))) cache.set(key(ref), Promise.resolve().then(() => reader.findBySourceRef(ref.sourceType, ref.sourceRef)));
+    return cache.get(key(ref));
+  };
+  const packets = [];
+  for (const item of items) {
+    const refs = list(item?.references);
+    const offset = Number.isInteger(item?.anchorOffset) && item.anchorOffset >= 0 ? item.anchorOffset : 0;
+    const packet = { contract: CONTRACT, itemId: text(item?.id), sourceId, anchorOffset: offset,
+      state: 'unavailable', evidence: [], dependencies: [], gaps: [], continuation: [],
+      coverage: { anchorsRequested: refs.length, anchorsResolved: 0, candidatesExamined: 0,
+        queryExhausted: false, historyComplete: false, sourceFreshness: 'unknown' } };
+    const addGap = code => { if (!packet.gaps.includes(code)) packet.gaps.push(code); };
+    const evidence = new Map();
+    let bodyChars = 0;
+    const approved = async row => {
+      const p = obj(row?.payload_json);
+      if (lifecycleSuppressed(p)) return false;
+      // Missing metadata never silently upgrades old content to business evidence.
+      if (sensitivityOf(p) !== 'business') return false;
+      const identity = resolveIdentity(row);
+      return identity && !identity.conflict && await authorize(row, identity, item) === true;
+    };
+    const include = row => {
+      const refKey = key(recordReference(row));
+      if (evidence.has(refKey)) return true;
+      if (evidence.size >= 200 || bodyChars >= 64000) { addGap('packet_budget_reached'); return false; }
+      const normalized = normalizeEvidence(row, { identity: resolveIdentity(row), maxBodyChars: bodyLimit });
+      const remaining = Math.max(0, 64000 - bodyChars);
+      if ((normalized.body?.length || 0) + (normalized.preview?.length || 0) > remaining) {
+        normalized.body = normalized.body?.slice(0, remaining) || null;
+        normalized.preview = null;
+        normalized.bodyState = 'partial'; normalized.truncated = true;
+        addGap('packet_budget_reached');
+      }
+      bodyChars += (normalized.body?.length || 0) + (normalized.preview?.length || 0);
+      if (bodyChars >= 64000) addGap('packet_budget_reached');
+      evidence.set(key(normalized.reference), normalized);
+      if (normalized.bodyState !== 'complete') addGap(normalized.bodyState === 'unsupported' ? 'unsupported_record' : 'body_incomplete');
+      if (normalized.truncated) addGap('body_truncated');
+      return true;
+    };
+    let exhausted = true;
+    const conversations = new Set();
+    if (offset > refs.length || (item?.anchorOffset != null && offset !== item.anchorOffset)) addGap('invalid_continuation');
+    if (refs.length - offset > 100) { packet.nextAnchorOffset = offset + 100; addGap('anchor_limit'); }
+    for (const [relativeIndex, ref] of refs.slice(offset, offset + 100).entries()) {
+      const anchorIndex = offset + relativeIndex;
+      if (signal?.aborted) { addGap('cancelled'); exhausted = false; break; }
+      if (!text(ref?.sourceType) || !text(ref?.sourceRef)) { addGap('reference_invalid'); exhausted = false; continue; }
+      try {
+        const row = await readExact(ref);
+        if (!row || !referenceMatches(row, ref)) { addGap('reference_unavailable'); exhausted = false; continue; }
+        if (!await approved(row)) { addGap('reference_unavailable'); exhausted = false; continue; }
+        packet.coverage.anchorsResolved++;
+        if (!include(row)) { packet.nextAnchorOffset = anchorIndex; exhausted = false; break; }
+        const identity = resolveIdentity(row);
+        if (!identity.account || !identity.conversationId || !identity.system || !identity.network) {
+          addGap('conversation_identity_missing'); exhausted = false; continue;
+        }
+        const scope = hash({ sourceId, sourceType: row.source_type, identity });
+        if (conversations.has(scope)) continue;
+        conversations.add(scope);
+        const cursor = list(item.continuation).find(c => c.scope === scope)?.cursor;
+        const after = decodeCursor(cursor, scope);
+        if (list(item.continuation).some(c => !c || !text(c.scope))) throw new Error('invalid_continuation');
+        // A batch continuation can contain only the scopes with remaining rows.
+        // Exhausted scopes stay as current exact anchors and need no new scan.
+        if (list(item.continuation).length && !cursor) continue;
+        if (typeof reader.searchRecords !== 'function') { addGap('conversation_reader_unavailable'); exhausted = false; continue; }
+        const query = conversationSearch(identity, row.source_type, { after, limit: limit + 1 });
+        const queryKey = hash(query);
+        if (!conversationCache.has(queryKey)) conversationCache.set(queryKey, Promise.resolve().then(() => reader.searchRecords(query)));
+        const rows = await conversationCache.get(queryKey);
+        if (!Array.isArray(rows)) throw new Error('reader_failed');
+        let examined = 0, lastProcessed = null;
+        for (const candidate of rows.slice(0, limit)) {
+          if (candidate.source_type === row.source_type && sameConversation(identity, resolveIdentity(candidate)) && await approved(candidate)
+            && !include(candidate)) break;
+          examined++; lastProcessed = candidate;
+          if (packet.gaps.includes('packet_budget_reached')) break;
+        }
+        packet.coverage.candidatesExamined += examined;
+        if (rows.length > examined) {
+          const last = lastProcessed;
+          if (!last) { packet.nextAnchorOffset = anchorIndex; addGap('packet_budget_reached'); exhausted = false; break; }
+          if (!iso(last.updated_at)) throw new Error('reader_failed');
+          packet.continuation.push({ scope, cursor: cursorFor(last, scope) });
+          addGap('bounded_read'); exhausted = false;
+        }
+      } catch (error) {
+        addGap(error?.message === 'invalid_continuation' ? 'invalid_continuation' : 'reader_failed'); exhausted = false;
+      }
+    }
+    if (!refs.length) addGap('references_missing');
+    if (list(item?.continuation).some(value => !conversations.has(value?.scope))) addGap('invalid_continuation');
+    packet.evidence = [...evidence.values()].sort((a, b) => (a.occurredAt || a.updatedAt || '').localeCompare(b.occurredAt || b.updatedAt || '')
+      || key(a.reference).localeCompare(key(b.reference)));
+    packet.dependencies = packet.evidence.map(e => ({ ...e.reference, revision: e.revision }));
+    packet.coverage.queryExhausted = refs.length > 0 && exhausted && packet.nextAnchorOffset == null && !packet.gaps.includes('anchor_limit')
+      && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
+    addGap('source_freshness_unknown');
+    packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 1, sourceId, itemId: packet.itemId,
+      references: refs, anchorOffset: offset, dependencies: packet.dependencies,
+      gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
+    packets.push(packet);
+  }
+  return { contract: CONTRACT, packets, coverage: { requested: items.length, processed: packets.length,
+    ready: packets.filter(p => p.state === 'ready').length, partial: packets.filter(p => p.state === 'partial').length,
+    unavailable: packets.filter(p => p.state === 'unavailable').length } };
+}

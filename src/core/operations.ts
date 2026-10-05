@@ -78,6 +78,7 @@ import { adminOperations } from './ops/admin.ts';
 import { skillsCatalogOperations } from './ops/skills-catalog.ts';
 import { syncStatusOperations } from './ops/sync-status.ts';
 import { rawDataOperations } from './ops/raw-data.ts';
+import { evidenceContextOperations } from './ops/evidence-context.ts';
 import { chunksOperations } from './ops/chunks.ts';
 import { ingestLogOperations } from './ops/ingest-log.ts';
 import { usageOperations } from './ops/usage.ts';
@@ -122,10 +123,9 @@ export { parseTtlParam } from './ops/facts.ts';
 export { __resetRequestToolsPersistLimiterForTests } from './ops/request-tools.ts';
 
 export const operations: Operation[] = [
-  // MEMORY_VERBS v1 (Cathedral 1) — remember/entity/synthesize/forget live in
-  // verbs.ts; the remaining three of the seven verbs (the extended `recall`,
-  // plus the v0.45.x boundary verbs `context_pack`/`delta`) are defined below.
-  // Spread first so `--surface verbs` agents see them at the top of the list.
+  ...evidenceContextOperations,
+  // MEMORY_VERBS v1 — the seven verbs lead the agent-facing surface;
+  // evidenceContextOperations above is owner-local and absent there.
   ...verbOperations,
   // Page CRUD (get_page, put_page, delete_page, list_pages + the v0.26.5
   // destructive-guard ops restore_page, purge_deleted_pages) — ops/pages.ts
