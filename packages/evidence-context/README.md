@@ -6,7 +6,7 @@ Every input receives a packet, including missing, denied and unsupported records
 
 `queryExhausted` describes the bounded stored-record query, never complete provider history. Provider freshness remains unknown without a producer receipt. Callers should display these gaps and reassemble before preparing work. Use `revision` to invalidate prepared context when dependencies or coverage change.
 
-Only explicitly business-tagged records are included. The checked host must authorize every record; page-source grants do not grant access to raw account records. Missing or conflicting identity never authorizes a join. Complete body status requires an explicit producer claim. Old previews stay partial.
+Only explicitly business-tagged records are included. The checked host must authorize every record; page-source grants do not grant access to raw account records. Missing or conflicting identity never authorizes a join. Complete body status requires an explicit producer claim. Old previews stay partial. Preview truncation is reported separately from body capability.
 
 Conversation candidates use the existing store's millisecond keyset ordering. Cursors bind the account, network, thread, source and contract. Reads are current reads, not an immutable database snapshot. Conversation cursors retain their anchor position. Finish the current conversation before advancing to later anchors; supplying both progress fields keeps the cursor position until that conversation is exhausted. Resume each returned continuation until the query is exhausted; do not infer completeness from a display limit.
 
