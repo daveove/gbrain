@@ -100,7 +100,7 @@ describe('gbrain schema CLI (Phase C)', () => {
     expect(r.stdout).toContain('Page types (28)');
     expect(r.stdout).toContain('event :: temporal');
     expect(r.stdout).toContain('diary :: temporal');
-    expect(r.stdout).toContain('Link verbs (12)');
+    expect(r.stdout).toContain('Link verbs (13)');
     expect(r.stdout).toContain('Takes kinds: fact, take, bet, hunch');
     expect(r.stdout).toContain('person :: entity');
     expect(r.stdout).toContain('company :: entity');
@@ -133,7 +133,7 @@ describe('gbrain schema CLI (Phase C)', () => {
     // v1.3.0 (entity recall): +account page type (alias crm).
     expect(r.stdout).toContain('gbrain-base-v2 v1.3.0');
     expect(r.stdout).toContain('Page types (');
-    expect(r.stdout).toContain('Link verbs (17)');
+    expect(r.stdout).toContain('Link verbs (18)');
   });
 
   test('schema active loads configured gbrain-recommended with real types', async () => {
