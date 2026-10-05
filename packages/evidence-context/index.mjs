@@ -110,7 +110,11 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
     occurrenceDate: text(obj(p.start).date) || null,
     observedAt: iso(p.importedAt || p.observedAt || p.retrievedAt), updatedAt: iso(row.updated_at),
     revision: hash({ reference: recordReference(row), payload: p, updatedAt: iso(row.updated_at) }),
-    links: list(p.sourceLinks).filter(link => /^https?:\/\//i.test(text(link?.url))).slice(0, 20),
+    links: list(p.sourceLinks).flatMap(link => {
+      const url = text(link?.url), label = text(link?.label).slice(0, 200);
+      if (!/^https?:\/\//i.test(url) || url.length > 2048) return [];
+      return [{ url, ...(label ? { label } : {}) }];
+    }).slice(0, 20),
     lifecycle: text(p.lifecycle) || 'observed', providerState: text(p.status) || null,
     truncated: availableBody.length > maxBodyChars };
 }
@@ -209,7 +213,9 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (!identity.account || !identity.conversationId || !identity.system || !identity.network) {
           addGap('conversation_identity_missing'); exhausted = false; continue;
         }
-        const scope = hash({ sourceId, sourceType: row.source_type, identity });
+        const { system, network, accountKind, account, conversationId } = identity;
+        const scope = hash({ sourceId, sourceType: row.source_type,
+          system, network, accountKind, account, conversationId });
         if (conversations.has(scope)) continue;
         conversations.add(scope);
         const cursor = list(item.continuation).find(c => c.scope === scope)?.cursor;
@@ -253,7 +259,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 6, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 7, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
