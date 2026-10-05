@@ -29,7 +29,6 @@ const REPO_ROOT = join(import.meta.dir, '..');
  * file that merely lists the name.
  */
 const LEDGER: Record<string, string> = {
-  get_evidence_context: 'test/evidence-context.test.ts',
   remember: 'test/memory-verbs-conformance.test.ts',
   entity: 'test/memory-verbs-conformance.test.ts',
   synthesize: 'test/memory-verbs-conformance.test.ts',

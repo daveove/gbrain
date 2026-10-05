@@ -226,7 +226,6 @@ describe('mcpOperations filter — localOnly ops are excluded from the HTTP-expo
       'file_list',
       'file_upload',
       'file_url',
-      'get_evidence_context',
       'get_recent_transcripts',
       'migrate_embeddings',
       'purge_deleted_pages',

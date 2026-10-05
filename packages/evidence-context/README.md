@@ -1,6 +1,6 @@
 # Source evidence and context
 
-This package assembles current records from GBrain's existing `source_records` boundary. A host supplies its existing reader and authorization policy. The package has no database connection, provider dependency, install hook or write path.
+This package assembles current records from GBrain's existing `source_records` boundary. A host supplies its existing reader and authorization policy. Stock GBrain engines do not contain Cockpit's source_records table; this package does not advertise a stock engine operation or create that table. The package has no database connection, provider dependency, install hook or write path.
 
 Every input receives a packet, including missing, denied and unsupported records. Packets contain exact references, revisions, content capability, bounded conversation evidence and coverage. Source text is untrusted evidence. Account and thread identity must match before conversation expansion. Unknown accounts allow authorized exact reads only.
 

@@ -1,11 +1,10 @@
 import { test, expect } from 'bun:test';
 import { PGlite } from '@electric-sql/pglite';
 import { spawnSync } from 'node:child_process';
-import type { OperationContext } from '../src/core/ops/contract.ts';
-import { evidenceContextOperations, evidenceRecordReader } from '../src/core/ops/evidence-context.ts';
+import { operations } from '../src/core/operations.ts';
+import { evidenceRecordReader } from '../src/core/evidence-context-reader.ts';
 import { assembleEvidenceContexts } from '../packages/evidence-context/index.mjs';
 
-const operation = evidenceContextOperations.find(op => op.name === 'get_evidence_context')!;
 const params = { source_id: 'default', accounts: [{ system: 'chat', network: 'network', accountKind: 'profile', account: 'owner-a' }], items: [{ id: 'item', references: [{ sourceType: 'comms_channel', sourceRef: 'a' }] }] };
 
 test('the shared package runs its behavior suite under ordinary Node without Bun or engine imports', () => {
@@ -14,14 +13,8 @@ test('the shared package runs its behavior suite under ordinary Node without Bun
   expect(result.stdout).toContain('fail 0');
 });
 
-test('get_evidence_context denies remote, missing trust and page scopes before any SQL', async () => {
-  let queries = 0;
-  const base = { engine: { executeRaw: async () => { queries++; return []; } } };
-  for (const remote of [true, undefined]) {
-    await expect(operation.handler({ ...base, remote } as unknown as OperationContext, params)).rejects.toThrow('owner-local');
-  }
-  await expect(operation.handler({ ...base, remote: false, sourceId: 'team' } as unknown as OperationContext, params)).rejects.toThrow('page-source');
-  expect(queries).toBe(0);
+test('stock GBrain does not advertise an operation backed by a host-only intake table', () => {
+  expect(operations.some(op => op.name === 'get_evidence_context')).toBe(false);
 });
 
 test('injected SQL reader runs exact resolution and tied keysets in an isolated database', async () => {
@@ -42,22 +35,12 @@ test('injected SQL reader runs exact resolution and tied keysets in an isolated 
     const second = await assembleEvidenceContexts({ items: [{ ...params.items[0], continuation: first.packets[0].continuation }], reader, sourceId: 'default', authorize: () => true, perItemLimit: 2 });
     expect(second.packets[0].evidence.map(e => e.reference.sourceRef)).toEqual(['a', 'c', 'd']);
     expect(second.packets[0].coverage.queryExhausted).toBe(true);
-    const engine = { executeRaw: async (sql: string, values: unknown[]) => (await db.query(sql, values)).rows };
-    const ctx = { engine, remote: false, sourceId: 'default' } as unknown as OperationContext;
-    const allowed = await operation.handler(ctx, params) as typeof first;
-    expect(allowed.packets[0].evidence.length).toBe(4);
-    const denied = await operation.handler(ctx, { ...params, accounts: [{ ...params.accounts[0], account: 'other' }] }) as typeof first;
-    expect(denied.packets[0].evidence).toEqual([]);
-    for (const field of ['system', 'network', 'accountKind']) {
-      const crossScope = await operation.handler(ctx, { ...params, accounts: [{ ...params.accounts[0], [field]: 'unrelated' }] }) as typeof first;
-      expect(crossScope.packets[0].evidence).toEqual([]);
-    }
   } finally { await db.close(); }
 });
 
 test('missing intake schema becomes an explicit per-item reader failure without database details', async () => {
-  const ctx = { remote: false, sourceId: 'default', engine: { executeRaw: async () => { throw new Error('relation source_records does not exist: private details'); } } } as unknown as OperationContext;
-  const result = await operation.handler(ctx, params) as { packets: { gaps: string[] }[] };
+  const reader = evidenceRecordReader(async () => { throw new Error('relation source_records does not exist: private details'); });
+  const result = await assembleEvidenceContexts({ items: params.items, sourceId: 'default', reader, authorize: () => true });
   expect(result.packets[0].gaps).toContain('reader_failed');
   expect(JSON.stringify(result)).not.toContain('private details');
 });
