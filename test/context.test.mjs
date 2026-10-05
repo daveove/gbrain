@@ -152,3 +152,16 @@ test('provider notes remain distinct from original transcripts and all-day dates
   const calendar = normalizeEvidence({ ...row('a', { occurredAt: undefined, start: { date: '2026-01-01' } }), source_type: 'calendar', entity_type: 'calendar_event' });
   assert.equal(calendar.occurredAt, null); assert.equal(calendar.occurrenceDate, '2026-01-01');
 });
+
+test('conflicting or malformed network aliases are rejected before host authorization', async () => {
+  for (const overrides of [{ network: 'network', channel: 'foreign' }, { network: 17 },
+    { intake: { network: 'foreign' } }, { metadata: { network: 'foreign', sensitivity: { level: 'business' } } }]) {
+    let grants = 0;
+    const record = row('a', overrides);
+    assert.equal(recordIdentity(record).conflict, true);
+    const packet = (await run([input('a')], [record], { authorize: () => { grants++; return true; } })).packets[0];
+    assert.equal(grants, 0); assert.equal(packet.evidence.length, 0);
+    assert.ok(!JSON.stringify(packet).includes('Please review'));
+  }
+  assert.equal(recordIdentity(row('a', { network: 'network' })).conflict, false);
+});
