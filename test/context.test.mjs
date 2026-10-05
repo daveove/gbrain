@@ -165,3 +165,24 @@ test('conflicting or malformed network aliases are rejected before host authoriz
   }
   assert.equal(recordIdentity(row('a', { network: 'network' })).conflict, false);
 });
+
+test('contradictory thread aliases and sensitivity classifications never release evidence', async () => {
+  for (const overrides of [{ conversationId: 'foreign-thread' }, { threadId: 17 },
+    { metadata: { threadId: 'foreign-thread', sensitivity: { level: 'business' } } },
+    { sensitivity: { level: 'restricted' } }, { sensitivity: 'business' }, { sensitivity: {} }]) {
+    let grants = 0;
+    const packet = (await run([input('a')], [row('a', overrides)], { authorize: () => { grants++; return true; } })).packets[0];
+    assert.equal(grants, 0); assert.equal(packet.evidence.length, 0);
+    assert.ok(!JSON.stringify(packet).includes('Please review'));
+  }
+  const consistent = row('a', { threadId: 'thread', sensitivity: { level: 'business' } });
+  assert.equal(recordIdentity(consistent).conflict, false);
+  assert.equal((await run([input('a')], [consistent])).packets[0].evidence.length, 1);
+});
+
+test('lifecycle suppression and producer completeness cannot be overridden by another alias', async () => {
+  const suppressed = row('a', { lifecycle: 'active', state: 'deleted' });
+  assert.equal((await run([input('a')], [suppressed])).packets[0].evidence.length, 0);
+  const contradictory = row('a', { metadata: { bodyComplete: false, sensitivity: { level: 'business' } } });
+  assert.equal((await run([input('a')], [contradictory])).packets[0].evidence[0].bodyState, 'partial');
+});
