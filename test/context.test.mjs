@@ -223,3 +223,22 @@ test('both progress dimensions retain every thread across the body budget', asyn
 test('nested chat envelopes remain message evidence', () => {
   assert.equal(normalizeEvidence(row('chat', { message: { conversationId: 'thread' } })).family, 'message');
 });
+
+
+test('different message resource IDs in one thread share exactly one conversation scan', async () => {
+  const rows = ['a', 'b', 'c'].map(ref => row(ref)); let scans = 0;
+  const base = reader(rows);
+  const packet = (await run([{ id: 'thread', references: rows.map(record => input(record.source_ref).references[0]) }], [], {
+    reader: { ...base, searchRecords: options => { scans++; return base.searchRecords(options); } },
+  })).packets[0];
+  assert.equal(scans, 1); assert.equal(packet.evidence.length, 3);
+  assert.equal(packet.continuation.length, 0); assert.equal(packet.coverage.queryExhausted, true);
+});
+
+test('source links expose only bounded declared fields', () => {
+  const links = normalizeEvidence(row('links', { sourceLinks: [
+    { url: 'https://example.test/source', label: 'x'.repeat(300), headers: { authorization: 'secret' }, extra: 'y'.repeat(100000) },
+    { url: 'https://example.test/' + 'z'.repeat(3000) }, { url: 'javascript:alert(1)' },
+  ] })).links;
+  assert.deepEqual(links, [{ url: 'https://example.test/source', label: 'x'.repeat(200) }]);
+});
