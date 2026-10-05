@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 
 export const CONTRACT = 'gbrain.evidence-context/v1';
 const obj = v => v && typeof v === 'object' && !Array.isArray(v) ? v : {};
@@ -119,18 +119,34 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
     truncated: availableBody.length > maxBodyChars };
 }
 
+// Process-scoped authenticated encryption keeps denied-row keysets private.
+// A restart invalidates progress; callers must refresh their initial packet.
+const cursorKey = randomBytes(32);
+function sealCursor(cursor) {
+  const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', cursorKey, nonce);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(cursor), 'utf8'), cipher.final()]);
+  return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]).toString('base64url');
+}
+function openCursor(value) {
+  if (typeof value !== 'string' || !value || value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) throw 0;
+  const bytes = Buffer.from(value, 'base64url');
+  if (bytes.length <= 28) throw 0;
+  const decipher = createDecipheriv('aes-256-gcm', cursorKey, bytes.subarray(0, 12));
+  decipher.setAuthTag(bytes.subarray(12, 28));
+  return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8'));
+}
 function cursorFor(row, scope, anchorOffset) {
-  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, anchorOffset, updatedAt: iso(row.updated_at),
-    sourceType: text(row.source_type), sourceRef: text(row.source_ref) })).toString('base64url');
+  return sealCursor({ contract: CONTRACT, scope, anchorOffset, updatedAt: iso(row.updated_at),
+    sourceType: text(row.source_type), sourceRef: text(row.source_ref) });
 }
 function startCursor(scope, anchorOffset) {
-  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, anchorOffset, start: true })).toString('base64url');
+  return sealCursor({ contract: CONTRACT, scope, anchorOffset, start: true });
 }
 function decodeCursor(value, scope) {
   if (!value) return undefined;
   if (typeof value !== 'string' || value.length > 4096) throw new Error('invalid_continuation');
   try {
-    const c = JSON.parse(Buffer.from(value, 'base64url').toString());
+    const c = openCursor(value);
     if (c.contract !== CONTRACT || c.scope !== scope) throw 0;
     if (c.start === true && Number.isInteger(c.anchorOffset) && c.anchorOffset >= 0) return undefined;
     if (!iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
@@ -160,7 +176,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
     const pendingOffsets = list(item?.continuation).flatMap(value => {
       try {
         if (typeof value?.cursor !== 'string' || value.cursor.length > 4096) return [];
-        const cursor = JSON.parse(Buffer.from(value.cursor, 'base64url').toString());
+        const cursor = openCursor(value.cursor);
         return Number.isInteger(cursor.anchorOffset) && cursor.anchorOffset >= 0 && cursor.anchorOffset < refs.length
           ? [cursor.anchorOffset] : [];
       } catch { return []; }
@@ -265,9 +281,10 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 12, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 13, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
-      gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
+      gaps: packet.gaps, coverage: packet.coverage,
+      continuation: packet.continuation.map(({ scope, cursor }) => ({ scope, keyset: openCursor(cursor) })) });
     packets.push(packet);
   }
   return { contract: CONTRACT, packets, coverage: { requested: items.length, processed: packets.length,

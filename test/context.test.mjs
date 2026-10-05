@@ -16,6 +16,26 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('opaque cursors advance past denied rows without leaking their metadata', async () => {
+  for (const forbidden of [row('secret-other-account', { profileId: 'account-b' }), row('secret-host-denied')]) {
+    const rows = [row('a'), forbidden, row('zz-allowed')];
+    const options = { perItemLimit: 2, authorize: candidate => candidate.source_ref !== 'secret-host-denied' };
+    const first = (await run([input('a')], rows, options)).packets[0];
+    const repeat = (await run([input('a')], rows, options)).packets[0];
+    assert.equal(first.revision, repeat.revision);
+    const cursor = first.continuation[0].cursor;
+    const decoded = Buffer.from(cursor, 'base64url').toString();
+    assert.ok(!decoded.includes(forbidden.source_ref)); assert.ok(!decoded.includes(forbidden.updated_at));
+    assert.throws(() => JSON.parse(decoded));
+    const next = (await run([{ ...input('a'), continuation: first.continuation }], rows, options)).packets[0];
+    assert.ok(next.evidence.some(e => e.reference.sourceRef === 'zz-allowed'));
+    assert.ok(!next.evidence.some(e => e.reference.sourceRef === forbidden.source_ref));
+    const bytes = Buffer.from(cursor, 'base64url'); bytes[28] ^= 1;
+    const tampered = (await run([{ ...input('a'), continuation: [{ ...first.continuation[0], cursor: bytes.toString('base64url') }] }], rows, options)).packets[0];
+    assert.ok(tampered.gaps.includes('invalid_continuation'));
+  }
+});
+
 test('supplied null identity aliases and intake envelopes deny content before authorization', async () => {
   const paths = ['mailboxEmail', 'profileEmail', 'profileId', 'sourceAccountId', 'sourceSystem', 'network', 'channel', 'conversationId', 'chatId', 'threadId', 'intake',
     ...['mailboxEmail', 'profileEmail', 'profileId', 'sourceAccountId', 'sourceSystem', 'network', 'channel', 'conversationId', 'chatId', 'threadId', 'intake'].map(k => `metadata.${k}`),
