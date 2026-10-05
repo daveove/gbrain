@@ -16,6 +16,24 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('foreign-item or wrong-scope cursors cannot skip earlier anchors', async () => {
+  const rows = [row('one-0', { chatId: 'one' }), row('two-0', { chatId: 'two' }), row('two-1', { chatId: 'two' })];
+  const original = { id: 'original', references: [input('one-0').references[0], input('two-0').references[0]] };
+  const first = (await run([original], rows, { perItemLimit: 1 })).packets[0];
+  assert.equal(first.anchorOffset, 1); assert.equal(first.continuation.length, 1);
+  for (const target of [{ ...original, id: 'another', continuation: first.continuation },
+    { ...original, continuation: first.continuation.map(c => ({ ...c, scope: 'wrong-scope' })) },
+    { ...original, references: [...original.references, input('two-1').references[0]], continuation: first.continuation }]) {
+    const packet = (await run([target], rows, { perItemLimit: 1 })).packets[0];
+    assert.ok(packet.gaps.includes('invalid_continuation'));
+    assert.ok(packet.evidence.some(e => e.reference.sourceRef === 'one-0'));
+    assert.ok(packet.coverage.anchorsResolved >= 1);
+  }
+  const next = (await run([{ ...original, continuation: first.continuation }], rows, { perItemLimit: 1 })).packets[0];
+  assert.ok(next.evidence.some(e => e.reference.sourceRef === 'two-1'));
+  assert.ok(!next.gaps.includes('invalid_continuation'));
+});
+
 test('noncanonical or oversized identity aliases fail closed before authorization', async () => {
   for (const path of ['profileId', 'sourceAccountId', 'conversationId', 'metadata.profileId', 'message.chatId', 'intake.sourceAccountId']) {
     for (const value of [' account-a', 'account-a ', 'x'.repeat(200000)]) {
