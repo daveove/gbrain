@@ -28,17 +28,20 @@ export function recordIdentity(row) {
   const systems = [intake.system, p.sourceSystem, m.sourceSystem].map(text).filter(Boolean);
   const networkValues = [intake.network, p.network, p.channel, m.network, m.channel, message.network, message.channel];
   const networks = networkValues.map(text).filter(Boolean);
+  const conversationValues = [p.conversationId, p.chatId, p.threadId, m.conversationId, m.chatId, m.threadId,
+    message.conversationId, message.chatId, message.threadId];
+  const conversations = conversationValues.map(text).filter(Boolean);
   const identityValues = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
     message.mailboxEmail, message.profileEmail, p.profileId, m.profileId, message.profileId,
-    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem, ...networkValues];
-  const conflict = [emails, profiles, accounts, systems, networks].some(values => new Set(values).size > 1)
+    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem, ...networkValues, ...conversationValues];
+  const conflict = [emails, profiles, accounts, systems, networks, conversations].some(values => new Set(values).size > 1)
     || identityValues.some(value => value != null && typeof value !== 'string')
     || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   const system = text(intake.system || p.sourceSystem || (row?.source_type === 'comms_channel' ? '' : row?.source_type));
   return { system, network: networks[0] || system,
     accountKind: accounts.length ? 'source-account' : emails.length ? 'mailbox' : profiles.length ? 'profile' : 'unknown',
     account: accounts[0] || emails[0] || profiles[0] || null,
-    conversationId: text(p.conversationId || p.chatId || p.threadId || m.threadId || message.threadId),
+    conversationId: conversations[0] || '',
     resourceType: text(intake.resourceType || row?.entity_type),
     resourceId: text(intake.resourceId || row?.entity_id), conflict };
 }
@@ -64,9 +67,13 @@ function sameConversation(a, b) {
 }
 function lifecycleSuppressed(p) {
   return p.deleted === true || p.suppressed === true || p.archived === true
-    || ['deleted', 'suppressed', 'archived', 'retired'].includes(text(p.lifecycle || p.state).toLowerCase());
+    || [p.lifecycle, p.state].some(value => value != null && (typeof value !== 'string'
+      || ['deleted', 'suppressed', 'archived', 'retired'].includes(text(value).toLowerCase())));
 }
-function sensitivityOf(p) { return text(obj(obj(p.metadata).sensitivity).level || obj(p.sensitivity).level); }
+function sensitivityOf(p) {
+  const classifications = [obj(p.metadata).sensitivity, p.sensitivity].filter(value => value != null);
+  return classifications.length && classifications.every(value => obj(value).level === 'business') ? 'business' : '';
+}
 
 export function normalizeEvidence(row, { identity = recordIdentity(row), maxBodyChars = 12000 } = {}) {
   const p = obj(row.payload_json), message = obj(p.message), e = obj(p.evidence);
@@ -81,7 +88,8 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
   const providerNotes = family === 'meeting' ? text(p.circlebackNotes || p.notes) : '';
   const availableBody = original || providerNotes;
   const preview = text(p.preview || p.snippet || message.snippet || p.summary || p.generatedSummary || p.detail);
-  const explicitComplete = (e.complete === true || obj(p.metadata).bodyComplete === true)
+  const completeClaims = [e.complete, obj(p.metadata).bodyComplete].filter(value => value != null);
+  const explicitComplete = completeClaims.length > 0 && completeClaims.every(value => value === true)
     && e.truncated !== true && obj(p.metadata).truncated !== true && p.truncated !== true;
   const state = family === 'unsupported' ? 'unsupported' : availableBody
     ? original && explicitComplete && original.length <= maxBodyChars ? 'complete' : 'partial'
@@ -228,7 +236,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 2, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 3, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);

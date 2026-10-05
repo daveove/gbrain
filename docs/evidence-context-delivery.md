@@ -2,7 +2,7 @@
 
 Issue: DAV-6842. The implementation belongs to GBrain; Cockpit consumes the same package with its existing source-record store.
 
-Touch: `packages/evidence-context`, the evidence operation and registry, their tests and contract documentation. Cockpit integration touches queue assembly, situation evidence, and existing communications content retention if the producer provides original text.
+Touch: `packages/evidence-context`, the evidence operation and registry, their tests and contract documentation. Cockpit integration touches queue assembly, situation evidence, native context reads and package delivery. Existing communications records keep bounded previews; context reads existing canonical source content without copying it into normalized records.
 
 Leave: engine factories, connection pools, credentials, installed runtime, import schedules, canonical page writes, inbox ranking and existing action approvals. No schema migration or duplicate source store is needed.
 
