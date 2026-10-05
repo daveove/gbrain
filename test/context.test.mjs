@@ -251,6 +251,20 @@ test('preview-only evidence retains available text when the packet has little sp
   const packet = (await run([input('a')], rows)).packets[0];
   const preview = packet.evidence.find(e => e.reference.sourceRef === 'g');
   assert.equal(preview.preview, 'p'.repeat(500)); assert.equal(preview.body, null);
-  assert.equal(preview.bodyState, 'partial'); assert.equal(preview.truncated, true);
+  assert.equal(preview.bodyState, 'preview-only'); assert.equal(preview.truncated, false);
+  assert.equal(preview.previewTruncated, true); assert.ok(packet.gaps.includes('preview_truncated'));
   assert.ok(packet.gaps.includes('packet_budget_reached'));
+});
+
+
+test('clipping only a preview preserves the complete body capability', async () => {
+  const rows = [row('a', { evidence: { body: 'a'.repeat(3500), complete: true } }),
+    ...['b', 'c', 'd', 'e', 'f'].map(ref => row(ref, { evidence: { body: ref.repeat(12000), complete: true } })),
+    row('g', { evidence: { body: 'g'.repeat(500), complete: true }, preview: 'p'.repeat(1000) })];
+  const packet = (await run([input('a')], rows)).packets[0];
+  const intact = packet.evidence.find(e => e.reference.sourceRef === 'g');
+  assert.equal(intact.body, 'g'.repeat(500)); assert.equal(intact.bodyState, 'complete');
+  assert.equal(intact.truncated, false); assert.equal(intact.previewTruncated, true);
+  assert.ok(!packet.gaps.includes('body_incomplete')); assert.ok(!packet.gaps.includes('body_truncated'));
+  assert.ok(packet.gaps.includes('preview_truncated'));
 });

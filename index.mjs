@@ -105,7 +105,7 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
     body: family === 'unsupported' ? null : availableBody.slice(0, maxBodyChars) || null,
     contentKind: original ? family === 'meeting' && p.transcript && !e.body ? 'transcript' : 'source-content'
       : providerNotes ? 'provider-notes' : preview ? 'preview-or-summary' : 'unavailable',
-    preview: preview.slice(0, 1000) || null, bodyState: state,
+    preview: preview.slice(0, 1000) || null, previewTruncated: preview.length > 1000, bodyState: state,
     occurredAt: iso(p.occurredAt || p.sentAt || message.sentAt || p.startTime || obj(p.start).dateTime || p.capturedAt),
     occurrenceDate: text(obj(p.start).date) || null,
     observedAt: iso(p.importedAt || p.observedAt || p.retrievedAt), updatedAt: iso(row.updated_at),
@@ -183,9 +183,13 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       const normalized = normalizeEvidence(row, { identity: resolveIdentity(row), maxBodyChars: bodyLimit });
       const remaining = Math.max(0, 64000 - bodyChars);
       if ((normalized.body?.length || 0) + (normalized.preview?.length || 0) > remaining) {
+        const bodySize = normalized.body?.length || 0, previewSize = normalized.preview?.length || 0;
         normalized.body = normalized.body?.slice(0, remaining) || null;
         normalized.preview = normalized.preview?.slice(0, Math.max(0, remaining - (normalized.body?.length || 0))) || null;
-        normalized.bodyState = 'partial'; normalized.truncated = true;
+        if ((normalized.body?.length || 0) < bodySize) {
+          normalized.bodyState = 'partial'; normalized.truncated = true;
+        }
+        if ((normalized.preview?.length || 0) < previewSize) normalized.previewTruncated = true;
         addGap('packet_budget_reached');
       }
       bodyChars += (normalized.body?.length || 0) + (normalized.preview?.length || 0);
@@ -193,6 +197,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       evidence.set(key(normalized.reference), normalized);
       if (normalized.bodyState !== 'complete') addGap(normalized.bodyState === 'unsupported' ? 'unsupported_record' : 'body_incomplete');
       if (normalized.truncated) addGap('body_truncated');
+      if (normalized.previewTruncated) addGap('preview_truncated');
       return true;
     };
     let exhausted = true;
@@ -259,7 +264,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 8, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 9, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
