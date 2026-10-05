@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { assembleEvidenceContexts, recordIdentity, normalizeEvidence } from '../index.mjs';
 
 const row = (ref, overrides = {}) => ({ source_type: 'comms_channel', source_ref: ref,
@@ -15,6 +16,31 @@ function reader(rows) {
       .filter(r => !after || r.updated_at < after.updatedAt || (r.updated_at === after.updatedAt && r.source_ref > after.sourceRef)).slice(0, limit) };
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
+
+test('an injected shared cursor secret survives a different worker process', async () => {
+  const rows = ['a', 'b', 'c'].map(ref => row(ref));
+  const secret = 'synthetic-shared-cursor-secret';
+  const first = (await run([input('a')], rows, { perItemLimit: 2, cursorSecret: secret })).packets[0];
+  const script = `import { readFileSync } from 'node:fs';
+    import { assembleEvidenceContexts } from './packages/evidence-context/index.mjs';
+    const { rows, item, secret } = JSON.parse(readFileSync(0, 'utf8'));
+    const reader = { findBySourceRef: async (_type, ref) => rows.find(r => r.source_ref === ref),
+      searchRecords: async ({ after, limit }) => rows.filter(r => !after || r.source_ref > after.sourceRef).slice(0, limit) };
+    const result = await assembleEvidenceContexts({ items: [item], reader, sourceId: 'default', authorize: () => true, perItemLimit: 2, cursorSecret: secret });
+    process.stdout.write(JSON.stringify(result.packets[0]));`;
+  for (const workerSecret of [secret, 'different-synthetic-cursor-secret']) {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: new URL('../../../', import.meta.url), encoding: 'utf8',
+      input: JSON.stringify({ rows, item: { ...input('a'), continuation: first.continuation }, secret: workerSecret }),
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const packet = JSON.parse(result.stdout);
+    if (workerSecret === secret) {
+      assert.ok(packet.evidence.some(e => e.reference.sourceRef === 'c')); assert.ok(!packet.gaps.includes('invalid_continuation'));
+    } else assert.ok(packet.gaps.includes('invalid_continuation'));
+  }
+  await assert.rejects(run([input('a')], rows, { cursorSecret: '' }), /cursorSecret/);
+});
 
 test('source metadata is bounded independently of the body and reports clipping', async () => {
   const record = row('a', { lifecycle: 'x'.repeat(200000), status: 'y'.repeat(200000),
