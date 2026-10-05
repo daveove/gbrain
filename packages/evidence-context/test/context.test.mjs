@@ -16,6 +16,43 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('noncanonical or oversized identity aliases fail closed before authorization', async () => {
+  for (const path of ['profileId', 'sourceAccountId', 'conversationId', 'metadata.profileId', 'message.chatId', 'intake.sourceAccountId']) {
+    for (const value of [' account-a', 'account-a ', 'x'.repeat(200000)]) {
+      const record = row('a'); let target = record.payload_json;
+      const keys = path.split('.'); for (const key of keys.slice(0, -1)) target = target[key] ||= {};
+      target[keys.at(-1)] = value;
+      let grants = 0;
+      const packet = (await run([input('a')], [record], { authorize: () => { grants++; return true; } })).packets[0];
+      assert.equal(recordIdentity(record).conflict, true); assert.equal(grants, 0); assert.equal(packet.evidence.length, 0);
+      assert.ok(JSON.stringify(packet).length < 2000);
+    }
+  }
+});
+
+test('denied rows do not change visible coverage, revisions or pagination depth', async () => {
+  const allowed = [row('a'), row('z-allowed'), row('zz-allowed')];
+  const denied = Array.from({ length: 100 }, (_, i) => row(`b-secret-${String(i).padStart(3, '0')}`, { profileId: i % 2 ? 'other' : 'account-a' }));
+  const options = { perItemLimit: 2, authorize: candidate => !candidate.source_ref.startsWith('b-secret') };
+  const plain = (await run([input('a')], allowed, options)).packets[0];
+  const mixed = (await run([input('a')], [...allowed, ...denied], options)).packets[0];
+  assert.deepEqual(mixed.coverage, plain.coverage); assert.deepEqual(mixed.gaps, plain.gaps);
+  assert.equal(mixed.revision, plain.revision); assert.equal(mixed.continuation.length, plain.continuation.length);
+  const plainNext = (await run([{ ...input('a'), continuation: plain.continuation }], allowed, options)).packets[0];
+  const mixedNext = (await run([{ ...input('a'), continuation: mixed.continuation }], [...allowed, ...denied], options)).packets[0];
+  assert.deepEqual(mixedNext.coverage, plainNext.coverage); assert.equal(mixedNext.revision, plainNext.revision);
+  assert.equal(mixedNext.continuation.length, 0);
+});
+
+test('internal denied-row scans stop at their private work bound without client progress', async () => {
+  let reads = 0;
+  const denied = Array.from({ length: 2100 }, (_, i) => row(`b-${String(i).padStart(4, '0')}`, { profileId: 'other' }));
+  const base = reader([row('a'), ...denied]);
+  const packet = (await run([input('a')], [], { reader: { ...base, searchRecords: opts => { reads++; return base.searchRecords(opts); } } })).packets[0];
+  assert.ok(packet.gaps.includes('reader_failed')); assert.equal(packet.continuation.length, 0);
+  assert.equal(packet.coverage.candidatesExamined, 0); assert.ok(reads <= 40);
+});
+
 test('packet revisions invalidate changed body and candidate limits', async () => {
   const rows = [row('a', { evidence: { body: 'x'.repeat(20000), complete: true } })];
   const small = (await run([input('a')], rows, { maxBodyChars: 12000 })).packets[0];
@@ -30,7 +67,7 @@ test('packet revisions invalidate changed body and candidate limits', async () =
 
 test('opaque cursors advance past denied rows without leaking their metadata', async () => {
   for (const forbidden of [row('secret-other-account', { profileId: 'account-b' }), row('secret-host-denied')]) {
-    const rows = [row('a'), forbidden, row('zz-allowed')];
+    const rows = [row('a'), forbidden, row('z-allowed'), row('zz-allowed')];
     const options = { perItemLimit: 2, authorize: candidate => candidate.source_ref !== 'secret-host-denied' };
     const first = (await run([input('a')], rows, options)).packets[0];
     const repeat = (await run([input('a')], rows, options)).packets[0];

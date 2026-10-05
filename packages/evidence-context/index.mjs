@@ -34,13 +34,15 @@ export function recordIdentity(row) {
   const conversationValues = [p.conversationId, p.chatId, p.threadId, m.conversationId, m.chatId, m.threadId,
     message.conversationId, message.chatId, message.threadId];
   const conversations = conversationValues.map(text).filter(Boolean);
-  const identityValues = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
+  const identityValues = [row?.source_type, row?.source_ref, row?.entity_type, row?.entity_id,
+    p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
     message.mailboxEmail, message.profileEmail, p.profileId, m.profileId, message.profileId,
     ...intakeFields('sourceAccountId'), p.sourceAccountId, m.sourceAccountId, ...intakeFields('system'), p.sourceSystem, m.sourceSystem,
     ...intakeFields('resourceType'), ...intakeFields('resourceId'), ...networkValues, ...conversationValues];
   const conflict = [emails, profiles, accounts, systems, networks, conversations, resourceTypes, resourceIds].some(values => new Set(values).size > 1)
     || intakeAliases.some(value => !value || typeof value !== 'object' || Array.isArray(value))
-    || identityValues.some(value => value !== undefined && typeof value !== 'string')
+    || identityValues.some(value => value !== undefined && (typeof value !== 'string'
+      || value !== value.trim() || value.length > 512))
     || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   const system = systems[0] || text(row?.source_type === 'comms_channel' ? '' : row?.source_type);
   return { system, network: networks[0] || system,
@@ -247,15 +249,31 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         // Each page stops at its first unfinished conversation. Later scopes
         // have not been scanned yet and must start after this one is exhausted.
         if (typeof reader.searchRecords !== 'function') { addGap('conversation_reader_unavailable'); exhausted = false; continue; }
-        const query = conversationSearch(identity, row.source_type, { after, limit: limit + 1 });
-        const queryKey = hash(query);
-        if (!conversationCache.has(queryKey)) conversationCache.set(queryKey, Promise.resolve().then(() => reader.searchRecords(query)));
-        const rows = await conversationCache.get(queryKey);
-        if (!Array.isArray(rows)) throw new Error('reader_failed');
+        // Filter before exposing counts or progress. Denied rows stay inside a
+        // bounded internal scan and never become client pagination boundaries.
+        const rows = []; let scanAfter = after, scanned = 0;
+        while (rows.length <= limit) {
+          if (signal?.aborted) throw new Error('reader_failed');
+          const query = conversationSearch(identity, row.source_type, { after: scanAfter, limit: limit + 1 });
+          const queryKey = hash(query);
+          if (!conversationCache.has(queryKey)) conversationCache.set(queryKey, Promise.resolve().then(() => reader.searchRecords(query)));
+          const batch = await conversationCache.get(queryKey);
+          if (!Array.isArray(batch) || batch.length > limit + 1) throw new Error('reader_failed');
+          for (const candidate of batch) {
+            if (++scanned > 2000) throw new Error('reader_failed');
+            if (candidate.source_type === row.source_type && sameConversation(identity, resolveIdentity(candidate)) && await approved(candidate)) rows.push(candidate);
+            if (rows.length > limit) break;
+          }
+          if (rows.length > limit || batch.length < limit + 1) break;
+          const last = batch.at(-1);
+          if (!iso(last?.updated_at) || !text(last?.source_type) || !text(last?.source_ref)) throw new Error('reader_failed');
+          const next = { updatedAt: iso(last.updated_at), sourceType: last.source_type, sourceRef: last.source_ref };
+          if (JSON.stringify(next) === JSON.stringify(scanAfter)) throw new Error('reader_failed');
+          scanAfter = next;
+        }
         let examined = 0, lastProcessed = null;
         for (const candidate of rows.slice(0, limit)) {
-          if (candidate.source_type === row.source_type && sameConversation(identity, resolveIdentity(candidate)) && await approved(candidate)
-            && !include(candidate)) break;
+          if (!include(candidate)) break;
           examined++; lastProcessed = candidate;
           if (packet.gaps.includes('packet_budget_reached')) break;
         }
@@ -281,7 +299,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 14, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 15, sourceId, itemId: packet.itemId,
       limits: { perItemLimit: limit, maxBodyChars: bodyLimit }, evidence: packet.evidence,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage,
