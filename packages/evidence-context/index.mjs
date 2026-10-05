@@ -26,14 +26,16 @@ export function recordIdentity(row) {
   const profiles = [p.profileId, m.profileId, message.profileId].map(text).filter(Boolean);
   const accounts = [intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId].map(text).filter(Boolean);
   const systems = [intake.system, p.sourceSystem, m.sourceSystem].map(text).filter(Boolean);
+  const networkValues = [intake.network, p.network, p.channel, m.network, m.channel, message.network, message.channel];
+  const networks = networkValues.map(text).filter(Boolean);
   const identityValues = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
     message.mailboxEmail, message.profileEmail, p.profileId, m.profileId, message.profileId,
-    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem];
-  const conflict = [emails, profiles, accounts, systems].some(values => new Set(values).size > 1)
+    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem, ...networkValues];
+  const conflict = [emails, profiles, accounts, systems, networks].some(values => new Set(values).size > 1)
     || identityValues.some(value => value != null && typeof value !== 'string')
     || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   const system = text(intake.system || p.sourceSystem || (row?.source_type === 'comms_channel' ? '' : row?.source_type));
-  return { system, network: text(p.network || p.channel || system),
+  return { system, network: networks[0] || system,
     accountKind: accounts.length ? 'source-account' : emails.length ? 'mailbox' : profiles.length ? 'profile' : 'unknown',
     account: accounts[0] || emails[0] || profiles[0] || null,
     conversationId: text(p.conversationId || p.chatId || p.threadId || m.threadId || message.threadId),
@@ -226,7 +228,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 1, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 2, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
