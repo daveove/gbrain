@@ -20,7 +20,7 @@ export function recordReference(row) {
 // unrelated resources are never joined by titles, senders or timestamps.
 export function recordIdentity(row) {
   const p = obj(row?.payload_json), m = obj(p.metadata), message = obj(p.message);
-  const intakeAliases = [m.intake, p.intake].filter(value => value != null);
+  const intakeAliases = [m.intake, p.intake].filter(value => value !== undefined);
   const intakeFields = field => intakeAliases.map(value => obj(value)[field]);
   const resourceTypes = intakeFields('resourceType').map(text).filter(Boolean);
   const resourceIds = intakeFields('resourceId').map(text).filter(Boolean);
@@ -40,7 +40,7 @@ export function recordIdentity(row) {
     ...intakeFields('resourceType'), ...intakeFields('resourceId'), ...networkValues, ...conversationValues];
   const conflict = [emails, profiles, accounts, systems, networks, conversations, resourceTypes, resourceIds].some(values => new Set(values).size > 1)
     || intakeAliases.some(value => !value || typeof value !== 'object' || Array.isArray(value))
-    || identityValues.some(value => value != null && typeof value !== 'string')
+    || identityValues.some(value => value !== undefined && typeof value !== 'string')
     || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
   const system = systems[0] || text(row?.source_type === 'comms_channel' ? '' : row?.source_type);
   return { system, network: networks[0] || system,
@@ -265,7 +265,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 11, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 12, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
