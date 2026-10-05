@@ -109,7 +109,7 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
       : providerNotes ? 'provider-notes' : preview ? 'preview-or-summary' : 'unavailable',
     preview: preview.slice(0, 1000) || null, previewTruncated: preview.length > 1000, bodyState: state,
     occurredAt: iso(p.occurredAt || p.sentAt || message.sentAt || p.startTime || obj(p.start).dateTime || p.capturedAt),
-    occurrenceDate: text(obj(p.start).date) || null,
+    occurrenceDate: /^\d{4}-\d{2}-\d{2}$/.test(text(obj(p.start).date)) ? text(obj(p.start).date) : null,
     observedAt: iso(p.importedAt || p.observedAt || p.retrievedAt), updatedAt: iso(row.updated_at),
     revision: hash({ reference: recordReference(row), payload: p, updatedAt: iso(row.updated_at) }),
     links: list(p.sourceLinks).flatMap(link => {
@@ -117,7 +117,9 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
       if (!/^https?:\/\//i.test(url) || url.length > 2048) return [];
       return [{ url, ...(label ? { label } : {}) }];
     }).slice(0, 20),
-    lifecycle: text(p.lifecycle) || 'observed', providerState: text(p.status) || null,
+    lifecycle: text(p.lifecycle).slice(0, 80) || 'observed', providerState: text(p.status).slice(0, 200) || null,
+    metadataTruncated: text(p.lifecycle).length > 80 || text(p.status).length > 200
+      || text(p.title || message.subject || p.subject || p.chatTitle).length > 1000 || text(p.sender || message.sender).length > 500,
     truncated: availableBody.length > maxBodyChars };
 }
 
@@ -220,6 +222,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       if (normalized.bodyState !== 'complete') addGap(normalized.bodyState === 'unsupported' ? 'unsupported_record' : 'body_incomplete');
       if (normalized.truncated) addGap('body_truncated');
       if (normalized.previewTruncated) addGap('preview_truncated');
+      if (normalized.metadataTruncated) addGap('source_metadata_truncated');
       return true;
     };
     let exhausted = true;
@@ -301,7 +304,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 16, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 17, sourceId, itemId: packet.itemId,
       limits: { perItemLimit: limit, maxBodyChars: bodyLimit }, evidence: packet.evidence,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage,

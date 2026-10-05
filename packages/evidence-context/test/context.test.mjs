@@ -16,6 +16,19 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('source metadata is bounded independently of the body and reports clipping', async () => {
+  const record = row('a', { lifecycle: 'x'.repeat(200000), status: 'y'.repeat(200000),
+    title: 't'.repeat(200000), sender: 's'.repeat(200000), start: { date: 'd'.repeat(200000) },
+    evidence: { body: 'ok', complete: true } });
+  const packet = (await run([input('a')], [record])).packets[0];
+  const evidence = packet.evidence[0];
+  assert.equal(evidence.lifecycle.length, 80); assert.equal(evidence.providerState.length, 200);
+  assert.equal(evidence.title.length, 1000); assert.equal(evidence.sender.length, 500);
+  assert.equal(evidence.occurrenceDate, null); assert.equal(evidence.metadataTruncated, true);
+  assert.equal(evidence.bodyState, 'complete'); assert.equal(evidence.body, 'ok');
+  assert.ok(packet.gaps.includes('source_metadata_truncated')); assert.ok(JSON.stringify(packet).length < 5000);
+});
+
 test('foreign-item or wrong-scope cursors cannot skip earlier anchors', async () => {
   const rows = [row('one-0', { chatId: 'one' }), row('two-0', { chatId: 'two' }), row('two-1', { chatId: 'two' })];
   const original = { id: 'original', references: [input('one-0').references[0], input('two-0').references[0]] };
