@@ -397,8 +397,9 @@ describe('gbrain extract --stale', () => {
     const strk = links.find(l => l.to_slug === 'projects/struktura');
     expect(strk).toBeDefined();
     expect(strk!.link_type).toBe('wikilink_basename');
-    // Still stamped like every processed page.
-    expect(await stampOf('concepts/knowledge-graph')).not.toBeNull();
+    // The literal target is still missing even though its basename resolves.
+    // The current hold-stamp policy leaves this page visible for a later import.
+    expect(await stampOf('concepts/knowledge-graph')).toBeNull();
   });
 
   test('#2576: bare wikilink still drops on --stale when global_basename is OFF (back-compat)', async () => {
@@ -412,9 +413,9 @@ describe('gbrain extract --stale', () => {
     await runExtract(engine, ['--stale']);
 
     expect((await engine.getLinks('concepts/knowledge-graph'))).toHaveLength(0);
-    // The gate lives in extractPageLinks opts now, not in a resolver swap —
-    // the page is still stamped either way.
-    expect(await stampOf('concepts/knowledge-graph')).not.toBeNull();
+    // A missing target keeps the page stale so a later import can create
+    // the edge; disabling basename resolution does not hide that gap.
+    expect(await stampOf('concepts/knowledge-graph')).toBeNull();
   });
 
   test('#4062 review: timeBudgetMs caps the sweep between batches (in-cycle drain stays bounded)', async () => {

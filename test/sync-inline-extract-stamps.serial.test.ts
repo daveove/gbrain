@@ -16,7 +16,7 @@
  *
  * IRON RULE: pins (a) an incremental sync NOW stamps links_extracted_at for the
  * pages it processed, and (b) the existing link extraction is unchanged. Plus
- * --no-extract: the changed page stays unstamped AND no links are created.
+ * --no-extract: the watermark does not advance AND no links are created.
  *
  * Marked .serial.test.ts — spawns git subprocesses + shares one PGLite engine.
  */
@@ -102,8 +102,9 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     expect(await stampOf('companies/acme')).not.toBeNull();
   }, 60_000);
 
-  test('--no-extract: changed page is NOT stamped and no links are created', async () => {
+  test('--no-extract: changed page keeps its old stale watermark and creates no links', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
+    const previousStamp = await stampOf('companies/acme');
     // Disk-relative link form (how real brain files reference each other on
     // disk; the FS extractor resolves relative to the file's directory).
     writeAcme('[Alice](../people/alice.md) is the CEO of Acme.');
@@ -112,6 +113,13 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     expect(['synced', 'first_sync']).toContain(result.status);
 
     expect(await engine.getLinks('companies/acme')).toHaveLength(0);
-    expect(await stampOf('companies/acme')).toBeNull();
+    // Import may retain an older extraction watermark; --no-extract must not
+    // advance it. The changed page still has to be stale for the next sweep.
+    expect(await stampOf('companies/acme')).toEqual(previousStamp);
+    const rows = await engine.executeRaw<{ stale: boolean }>(
+      `SELECT links_extracted_at IS NULL OR updated_at > links_extracted_at AS stale
+       FROM pages WHERE slug = $1 AND source_id = 'default'`, ['companies/acme'],
+    );
+    expect(rows[0]?.stale).toBe(true);
   }, 60_000);
 });
