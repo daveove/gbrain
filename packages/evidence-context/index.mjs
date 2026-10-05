@@ -184,7 +184,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       const remaining = Math.max(0, 64000 - bodyChars);
       if ((normalized.body?.length || 0) + (normalized.preview?.length || 0) > remaining) {
         normalized.body = normalized.body?.slice(0, remaining) || null;
-        normalized.preview = null;
+        normalized.preview = normalized.preview?.slice(0, Math.max(0, remaining - (normalized.body?.length || 0))) || null;
         normalized.bodyState = 'partial'; normalized.truncated = true;
         addGap('packet_budget_reached');
       }
@@ -259,7 +259,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 7, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 8, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);

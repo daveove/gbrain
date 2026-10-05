@@ -242,3 +242,15 @@ test('source links expose only bounded declared fields', () => {
   ] })).links;
   assert.deepEqual(links, [{ url: 'https://example.test/source', label: 'x'.repeat(200) }]);
 });
+
+
+test('preview-only evidence retains available text when the packet has little space left', async () => {
+  const rows = [row('a', { evidence: { body: 'a'.repeat(3500), complete: true } }),
+    ...['b', 'c', 'd', 'e', 'f'].map(ref => row(ref, { evidence: { body: ref.repeat(12000), complete: true } })),
+    row('g', { evidence: undefined, preview: 'p'.repeat(1000) })];
+  const packet = (await run([input('a')], rows)).packets[0];
+  const preview = packet.evidence.find(e => e.reference.sourceRef === 'g');
+  assert.equal(preview.preview, 'p'.repeat(500)); assert.equal(preview.body, null);
+  assert.equal(preview.bodyState, 'partial'); assert.equal(preview.truncated, true);
+  assert.ok(packet.gaps.includes('packet_budget_reached'));
+});
