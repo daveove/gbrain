@@ -16,6 +16,24 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('supplied null identity aliases and intake envelopes deny content before authorization', async () => {
+  const paths = ['mailboxEmail', 'profileEmail', 'profileId', 'sourceAccountId', 'sourceSystem', 'network', 'channel', 'conversationId', 'chatId', 'threadId', 'intake',
+    ...['mailboxEmail', 'profileEmail', 'profileId', 'sourceAccountId', 'sourceSystem', 'network', 'channel', 'conversationId', 'chatId', 'threadId', 'intake'].map(k => `metadata.${k}`),
+    ...['mailboxEmail', 'profileEmail', 'profileId', 'network', 'channel', 'conversationId', 'chatId', 'threadId'].map(k => `message.${k}`),
+    ...['intake', 'metadata.intake'].flatMap(prefix => ['sourceAccountId', 'system', 'network', 'resourceType', 'resourceId'].map(k => `${prefix}.${k}`))];
+  for (const path of paths) {
+    const record = row('a'); let target = record.payload_json;
+    const keys = path.split('.');
+    for (const k of keys.slice(0, -1)) target = target[k] ||= {};
+    target[keys.at(-1)] = null;
+    assert.equal(recordIdentity(record).conflict, true, path);
+    let grants = 0, scans = 0;
+    const packet = (await run([input('a')], [], { reader: { findBySourceRef: async () => record,
+      searchRecords: async () => { scans++; return []; } }, authorize: () => { grants++; return true; } })).packets[0];
+    assert.equal(grants, 0, path); assert.equal(scans, 0, path); assert.equal(packet.evidence.length, 0, path);
+  }
+});
+
 test('all inputs remain represented beyond the display limit; exact and conversation reads deduplicate', async () => {
   let exact = 0, scans = 0;
   const r = row('a'), base = reader([r]);
