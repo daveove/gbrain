@@ -123,34 +123,34 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
     truncated: availableBody.length > maxBodyChars };
 }
 
-// Process-scoped authenticated encryption keeps denied-row keysets private.
-// A restart invalidates progress; callers must refresh their initial packet.
+// Authenticated encryption keeps denied-row keysets private. Hosts can inject
+// an existing shared secret for stateless continuation across workers.
 const cursorKey = randomBytes(32);
-function sealCursor(cursor) {
-  const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', cursorKey, nonce, { authTagLength: 16 });
+function sealCursor(cursor, encryptionKey) {
+  const nonce = randomBytes(12), cipher = createCipheriv('aes-256-gcm', encryptionKey, nonce, { authTagLength: 16 });
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(cursor), 'utf8'), cipher.final()]);
   return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]).toString('base64url');
 }
-function openCursor(value) {
+function openCursor(value, encryptionKey) {
   if (typeof value !== 'string' || !value || value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) throw 0;
   const bytes = Buffer.from(value, 'base64url');
   if (bytes.length <= 28) throw 0;
-  const decipher = createDecipheriv('aes-256-gcm', cursorKey, bytes.subarray(0, 12), { authTagLength: 16 });
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, bytes.subarray(0, 12), { authTagLength: 16 });
   decipher.setAuthTag(bytes.subarray(12, 28));
   return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8'));
 }
-function cursorFor(row, scope, anchorOffset, binding) {
+function cursorFor(row, scope, anchorOffset, binding, encryptionKey) {
   return sealCursor({ contract: CONTRACT, scope, anchorOffset, binding, updatedAt: iso(row.updated_at),
-    sourceType: text(row.source_type), sourceRef: text(row.source_ref) });
+    sourceType: text(row.source_type), sourceRef: text(row.source_ref) }, encryptionKey);
 }
-function startCursor(scope, anchorOffset, binding) {
-  return sealCursor({ contract: CONTRACT, scope, anchorOffset, binding, start: true });
+function startCursor(scope, anchorOffset, binding, encryptionKey) {
+  return sealCursor({ contract: CONTRACT, scope, anchorOffset, binding, start: true }, encryptionKey);
 }
-function decodeCursor(value, scope, binding) {
+function decodeCursor(value, scope, binding, encryptionKey) {
   if (!value) return undefined;
   if (typeof value !== 'string' || value.length > 4096) throw new Error('invalid_continuation');
   try {
-    const c = openCursor(value);
+    const c = openCursor(value, encryptionKey);
     if (c.contract !== CONTRACT || c.scope !== scope || c.binding !== binding) throw 0;
     if (c.start === true && Number.isInteger(c.anchorOffset) && c.anchorOffset >= 0) return undefined;
     if (!iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
@@ -161,9 +161,13 @@ function decodeCursor(value, scope, binding) {
 /** Storage and authorization are supplied by a checked host. This module never
  * constructs an engine, reads credentials, executes source text, or writes memory. */
 export async function assembleEvidenceContexts({ items, reader, authorize, resolveIdentity = recordIdentity,
-  sourceId, perItemLimit = 50, maxBodyChars = 12000, signal } = {}) {
+  sourceId, perItemLimit = 50, maxBodyChars = 12000, cursorSecret, signal } = {}) {
   if (!text(sourceId) || !reader || typeof authorize !== 'function' || !Array.isArray(items))
     throw new TypeError('items, sourceId, reader and a host authorization policy are required');
+  if (cursorSecret !== undefined && (!(typeof cursorSecret === 'string' || cursorSecret instanceof Uint8Array) || cursorSecret.length < 16))
+    throw new TypeError('cursorSecret must contain at least 16 characters or bytes');
+  const encryptionKey = cursorSecret === undefined ? cursorKey : createHash('sha256')
+    .update('gbrain.evidence-context/cursor-key/v1\0').update(cursorSecret).digest();
   const limit = bound(perItemLimit, 50, 200), bodyLimit = bound(maxBodyChars, 12000, 50000);
   const cache = new Map();
   const conversationCache = new Map();
@@ -181,7 +185,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
     const pendingOffsets = list(item?.continuation).flatMap(value => {
       try {
         if (typeof value?.cursor !== 'string' || value.cursor.length > 4096) return [];
-        const cursor = openCursor(value.cursor);
+        const cursor = openCursor(value.cursor, encryptionKey);
         if (cursor.contract !== CONTRACT || cursor.scope !== value.scope || cursor.binding !== binding) return [];
         return Number.isInteger(cursor.anchorOffset) && cursor.anchorOffset >= 0 && cursor.anchorOffset < refs.length
           ? [cursor.anchorOffset] : [];
@@ -249,7 +253,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (!scope) { addGap('conversation_identity_missing'); exhausted = false; continue; }
         if (conversations.has(scope)) continue;
         conversations.add(scope);
-        const after = decodeCursor(cursor, scope, binding);
+        const after = decodeCursor(cursor, scope, binding, encryptionKey);
         if (list(item.continuation).some(c => !c || !text(c.scope))) throw new Error('invalid_continuation');
         // Each page stops at its first unfinished conversation. Later scopes
         // have not been scanned yet and must start after this one is exhausted.
@@ -286,7 +290,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (rows.length > examined) {
           const last = lastProcessed;
           if (last && !iso(last.updated_at)) throw new Error('reader_failed');
-          packet.continuation.push({ scope, cursor: last ? cursorFor(last, scope, anchorIndex, binding) : cursor || startCursor(scope, anchorIndex, binding) });
+          packet.continuation.push({ scope, cursor: last ? cursorFor(last, scope, anchorIndex, binding, encryptionKey) : cursor || startCursor(scope, anchorIndex, binding, encryptionKey) });
           packet.anchorOffset = anchorIndex;
           packet.nextAnchorOffset = anchorIndex + 1 < refs.length ? anchorIndex + 1 : undefined;
           addGap('bounded_read'); exhausted = false; break;
@@ -304,11 +308,11 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 17, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 18, sourceId, itemId: packet.itemId,
       limits: { perItemLimit: limit, maxBodyChars: bodyLimit }, evidence: packet.evidence,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage,
-      continuation: packet.continuation.map(({ scope, cursor }) => ({ scope, keyset: openCursor(cursor) })) });
+      continuation: packet.continuation.map(({ scope, cursor }) => ({ scope, keyset: openCursor(cursor, encryptionKey) })) });
     packets.push(packet);
   }
   return { contract: CONTRACT, packets, coverage: { requested: items.length, processed: packets.length,

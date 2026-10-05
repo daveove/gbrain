@@ -12,7 +12,7 @@ Supplied identity strings must be canonical and at most 512 characters; surround
 
 Conversation candidates use the existing store's millisecond keyset ordering. Cursors bind the account, network, thread, source and contract. Reads are current reads, not an immutable database snapshot. Conversation cursors retain their anchor position. Bodies that do not fit the remaining packet budget are deferred to a later page. Continuation pages bound repeated anchor excerpts to 12,000 characters so unread bodies can fit. Finish the current conversation before advancing to later anchors; supplying both progress fields keeps the cursor position until that conversation is exhausted. Resume each returned continuation until the query is exhausted; do not infer completeness from a display limit.
 
-Cursors use authenticated encryption with a process-scoped key. They do not reveal denied record references or timestamps. Continuations must return to the same process; a restart or another worker rejects them, requiring a queue refresh. Cursor randomness does not change the source revision.
+Cursors use authenticated encryption and do not reveal denied record references or timestamps. Hosts with multiple workers supply an existing deployment-stable cursorSecret (at least 16 characters or bytes); the package derives a separate encryption key without reading credentials. Without this option, progress is process-scoped and requires refresh after restart. Cursor randomness does not change the source revision.
 
 Run `npm test` from this directory. Publish this directory as a package-only commit in the owned repository, and pin consumers to that immutable commit. Do not install the root GBrain package in a Node application.
 
