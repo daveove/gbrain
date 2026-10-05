@@ -100,7 +100,7 @@ describe('gbrain schema CLI (Phase C)', () => {
     expect(r.stdout).toContain('Page types (27)');
     expect(r.stdout).toContain('event :: temporal');
     expect(r.stdout).toContain('diary :: temporal');
-    expect(r.stdout).toContain('Link verbs (12)');
+    expect(r.stdout).toContain('Link verbs (13)');
     expect(r.stdout).toContain('Takes kinds: fact, take, bet, hunch');
     expect(r.stdout).toContain('person :: entity');
     expect(r.stdout).toContain('company :: entity');
@@ -128,11 +128,10 @@ describe('gbrain schema CLI (Phase C)', () => {
   test('schema show exposes bundled gbrain-base-v2 successor pack', () => {
     const r = cached('schema', 'show', 'gbrain-base-v2');
     expect(r.exitCode).toBe(0);
-    // v1.2.0 (v0.47 open-loop engine): +owes_to +awaiting_reply_from — 15
-    // link verbs became 17. (#2117 history: 14 became 15 with `advises`.)
+    // The bundled vocabulary now also includes contains in both packs.
     expect(r.stdout).toContain('gbrain-base-v2 v1.2.0');
     expect(r.stdout).toContain('Page types (');
-    expect(r.stdout).toContain('Link verbs (17)');
+    expect(r.stdout).toContain('Link verbs (18)');
   });
 
   test('schema active loads configured gbrain-recommended with real types', async () => {

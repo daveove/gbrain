@@ -361,10 +361,13 @@ describe('graph CLI routing', () => {
   });
 
   test('bare graph stays on the operation path', () => {
+    // test-reads-source-ok: pin CLI dispatch ownership; handlers are exercised below.
     const cli = readFileSync(join(import.meta.dir, '../src/cli.ts'), 'utf8');
+    // test-reads-source-ok: prevent operation dispatch from importing the CLI runner.
     const usefulness = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness.ts'), 'utf8');
     expect(cli).not.toContain("'graph', 'graph-query'");
     expect(cli).toContain('dispatchGraphUsefulness');
+    // test-reads-source-ok: rejection must precede engine connection in dispatch.
     const dispatch = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
     const rejectAt = dispatch.indexOf('rejectGraphUsefulnessFlagProblem(args)');
     expect(rejectAt).toBeGreaterThan(-1);
@@ -3760,6 +3763,7 @@ describe('usefulness read source resolution', () => {
 
 describe('usefulness help before connect', () => {
   test('prints help without loading a brain', async () => {
+    // test-reads-source-ok: help must precede config loading and engine connection.
     const dispatchSrc = readFileSync(join(import.meta.dir, '../src/commands/graph-usefulness-dispatch.ts'), 'utf8');
     const body = dispatchSrc.slice(dispatchSrc.indexOf('export async function dispatchGraphUsefulness'));
     const helpAt = body.indexOf('graphUsefulnessWantsHelp');
