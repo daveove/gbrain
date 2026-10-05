@@ -83,8 +83,8 @@ function sensitivityOf(p) {
 export function normalizeEvidence(row, { identity = recordIdentity(row), maxBodyChars = 12000 } = {}) {
   const p = obj(row.payload_json), message = obj(p.message), e = obj(p.evidence);
   const type = text(row.entity_type), source = text(row.source_type);
-  const family = source === 'gmail' || source === 'email' || Object.keys(message).length ? 'email'
-    : type === 'comms_channel_message' ? 'message'
+  const family = type === 'comms_channel_message' ? 'message'
+    : source === 'gmail' || source === 'email' || Object.keys(message).length ? 'email'
     : /circleback|pocket|meeting|transcript/.test(`${source} ${type}`) ? 'meeting'
     : /linear/.test(`${source} ${type}`) ? 'issue'
     : /calendar/.test(`${source} ${type}`) ? 'calendar'
@@ -115,8 +115,8 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
     truncated: availableBody.length > maxBodyChars };
 }
 
-function cursorFor(row, scope) {
-  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, updatedAt: iso(row.updated_at),
+function cursorFor(row, scope, anchorOffset) {
+  return Buffer.from(JSON.stringify({ contract: CONTRACT, scope, anchorOffset, updatedAt: iso(row.updated_at),
     sourceType: text(row.source_type), sourceRef: text(row.source_ref) })).toString('base64url');
 }
 function decodeCursor(value, scope) {
@@ -145,7 +145,18 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
   const packets = [];
   for (const item of items) {
     const refs = list(item?.references);
-    const offset = Number.isInteger(item?.anchorOffset) && item.anchorOffset >= 0 ? item.anchorOffset : 0;
+    const requestedOffset = Number.isInteger(item?.anchorOffset) && item.anchorOffset >= 0 ? item.anchorOffset : 0;
+    // A conversation cursor retains its anchor position. When a caller supplies
+    // both progress dimensions, finish that conversation before later anchors.
+    const pendingOffsets = list(item?.continuation).flatMap(value => {
+      try {
+        if (typeof value?.cursor !== 'string' || value.cursor.length > 4096) return [];
+        const cursor = JSON.parse(Buffer.from(value.cursor, 'base64url').toString());
+        return Number.isInteger(cursor.anchorOffset) && cursor.anchorOffset >= 0 && cursor.anchorOffset < refs.length
+          ? [cursor.anchorOffset] : [];
+      } catch { return []; }
+    });
+    const offset = pendingOffsets.length ? Math.min(...pendingOffsets) : requestedOffset;
     const packet = { contract: CONTRACT, itemId: text(item?.id), sourceId, anchorOffset: offset,
       state: 'unavailable', evidence: [], dependencies: [], gaps: [], continuation: [],
       coverage: { anchorsRequested: refs.length, anchorsResolved: 0, candidatesExamined: 0,
@@ -182,7 +193,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
     };
     let exhausted = true;
     const conversations = new Set();
-    if (offset > refs.length || (item?.anchorOffset != null && offset !== item.anchorOffset)) addGap('invalid_continuation');
+    if (requestedOffset > refs.length || (item?.anchorOffset != null && requestedOffset !== item.anchorOffset)) addGap('invalid_continuation');
     if (refs.length - offset > 100) { packet.nextAnchorOffset = offset + 100; addGap('anchor_limit'); }
     for (const [relativeIndex, ref] of refs.slice(offset, offset + 100).entries()) {
       const anchorIndex = offset + relativeIndex;
@@ -204,9 +215,8 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         const cursor = list(item.continuation).find(c => c.scope === scope)?.cursor;
         const after = decodeCursor(cursor, scope);
         if (list(item.continuation).some(c => !c || !text(c.scope))) throw new Error('invalid_continuation');
-        // A batch continuation can contain only the scopes with remaining rows.
-        // Exhausted scopes stay as current exact anchors and need no new scan.
-        if (list(item.continuation).length && !cursor) continue;
+        // Each page stops at its first unfinished conversation. Later scopes
+        // have not been scanned yet and must start after this one is exhausted.
         if (typeof reader.searchRecords !== 'function') { addGap('conversation_reader_unavailable'); exhausted = false; continue; }
         const query = conversationSearch(identity, row.source_type, { after, limit: limit + 1 });
         const queryKey = hash(query);
@@ -225,8 +235,10 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
           const last = lastProcessed;
           if (!last) { packet.nextAnchorOffset = anchorIndex; addGap('packet_budget_reached'); exhausted = false; break; }
           if (!iso(last.updated_at)) throw new Error('reader_failed');
-          packet.continuation.push({ scope, cursor: cursorFor(last, scope) });
-          addGap('bounded_read'); exhausted = false;
+          packet.continuation.push({ scope, cursor: cursorFor(last, scope, anchorIndex) });
+          packet.anchorOffset = anchorIndex;
+          packet.nextAnchorOffset = anchorIndex + 1 < refs.length ? anchorIndex + 1 : undefined;
+          addGap('bounded_read'); exhausted = false; break;
         }
       } catch (error) {
         addGap(error?.message === 'invalid_continuation' ? 'invalid_continuation' : 'reader_failed'); exhausted = false;
@@ -241,7 +253,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 5, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 6, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
