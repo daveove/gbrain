@@ -281,7 +281,8 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 13, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 14, sourceId, itemId: packet.itemId,
+      limits: { perItemLimit: limit, maxBodyChars: bodyLimit }, evidence: packet.evidence,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage,
       continuation: packet.continuation.map(({ scope, cursor }) => ({ scope, keyset: openCursor(cursor) })) });

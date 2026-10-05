@@ -16,6 +16,18 @@ function reader(rows) {
 }
 const run = (items, rows, options = {}) => assembleEvidenceContexts({ items, reader: reader(rows), sourceId: 'default', authorize: () => true, ...options });
 
+test('packet revisions invalidate changed body and candidate limits', async () => {
+  const rows = [row('a', { evidence: { body: 'x'.repeat(20000), complete: true } })];
+  const small = (await run([input('a')], rows, { maxBodyChars: 12000 })).packets[0];
+  const large = (await run([input('a')], rows, { maxBodyChars: 15000 })).packets[0];
+  assert.equal(small.evidence[0].body.length, 12000); assert.equal(large.evidence[0].body.length, 15000);
+  assert.deepEqual(small.dependencies, large.dependencies); assert.deepEqual(small.gaps, large.gaps);
+  assert.notEqual(small.revision, large.revision);
+  const fewer = (await run([input('a')], rows, { maxBodyChars: 12000, perItemLimit: 10 })).packets[0];
+  assert.notEqual(small.revision, fewer.revision);
+  assert.equal(small.revision, (await run([input('a')], rows, { maxBodyChars: 12000 })).packets[0].revision);
+});
+
 test('opaque cursors advance past denied rows without leaking their metadata', async () => {
   for (const forbidden of [row('secret-other-account', { profileId: 'account-b' }), row('secret-host-denied')]) {
     const rows = [row('a'), forbidden, row('zz-allowed')];
