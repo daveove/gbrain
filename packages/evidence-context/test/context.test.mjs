@@ -292,3 +292,32 @@ test('start cursors recover bodies even when the repeated anchor would otherwise
   assert.equal(recovered.body.length, 50000); assert.equal(recovered.bodyState, 'complete');
   assert.equal(second.continuation.length, 0); assert.equal(second.coverage.queryExhausted, true);
 });
+
+
+test('every supplied suppression flag must be boolean false before any authorization', async () => {
+  for (const field of ['deleted', 'suppressed', 'archived']) {
+    for (const value of [true, 'true', 'false', 1, 0, null, {}, []]) {
+      let grants = 0;
+      const packet = (await run([input('a')], [row('a', { [field]: value })], {
+        authorize: () => { grants++; return true; },
+      })).packets[0];
+      assert.equal(grants, 0); assert.equal(packet.evidence.length, 0);
+    }
+    assert.equal((await run([input('a')], [row('a', { [field]: false })])).packets[0].evidence.length, 1);
+  }
+  for (const overrides of [{ lifecycle: null }, { state: null }, { sensitivity: null }]) {
+    assert.equal((await run([input('a')], [row('a', overrides)])).packets[0].evidence.length, 0);
+  }
+});
+
+test('all supplied truncation and completeness markers must have valid affirmative types', () => {
+  for (const value of [true, 'true', 'false', 1, 0, null, {}, []]) {
+    for (const overrides of [{ truncated: value },
+      { metadata: { bodyComplete: true, truncated: value, sensitivity: { level: 'business' } } },
+      { evidence: { body: 'Original', complete: true, truncated: value } }]) {
+      assert.equal(normalizeEvidence(row('a', overrides)).bodyState, 'partial');
+    }
+  }
+  assert.equal(normalizeEvidence(row('a', { truncated: false })).bodyState, 'complete');
+  assert.equal(normalizeEvidence(row('a', { evidence: { body: 'Original', complete: null }, metadata: { bodyComplete: true } })).bodyState, 'partial');
+});

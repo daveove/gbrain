@@ -71,12 +71,12 @@ function sameConversation(a, b) {
     && ['system', 'network', 'accountKind', 'account', 'conversationId'].every(k => a[k] === b[k]);
 }
 function lifecycleSuppressed(p) {
-  return p.deleted === true || p.suppressed === true || p.archived === true
-    || [p.lifecycle, p.state].some(value => value != null && (typeof value !== 'string'
+  return [p.deleted, p.suppressed, p.archived].some(value => value !== undefined && value !== false)
+    || [p.lifecycle, p.state].some(value => value !== undefined && (typeof value !== 'string'
       || ['deleted', 'suppressed', 'archived', 'retired'].includes(text(value).toLowerCase())));
 }
 function sensitivityOf(p) {
-  const classifications = [obj(p.metadata).sensitivity, p.sensitivity].filter(value => value != null);
+  const classifications = [obj(p.metadata).sensitivity, p.sensitivity].filter(value => value !== undefined);
   return classifications.length && classifications.every(value => obj(value).level === 'business') ? 'business' : '';
 }
 
@@ -93,9 +93,9 @@ export function normalizeEvidence(row, { identity = recordIdentity(row), maxBody
   const providerNotes = family === 'meeting' ? text(p.circlebackNotes || p.notes) : '';
   const availableBody = original || providerNotes;
   const preview = text(p.preview || p.snippet || message.snippet || p.summary || p.generatedSummary || p.detail);
-  const completeClaims = [e.complete, obj(p.metadata).bodyComplete].filter(value => value != null);
+  const completeClaims = [e.complete, obj(p.metadata).bodyComplete].filter(value => value !== undefined);
   const explicitComplete = completeClaims.length > 0 && completeClaims.every(value => value === true)
-    && e.truncated !== true && obj(p.metadata).truncated !== true && p.truncated !== true;
+    && [e.truncated, obj(p.metadata).truncated, p.truncated].filter(value => value !== undefined).every(value => value === false);
   const state = family === 'unsupported' ? 'unsupported' : availableBody
     ? original && explicitComplete && original.length <= maxBodyChars ? 'complete' : 'partial'
     : preview ? 'preview-only' : 'unavailable';
@@ -265,7 +265,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 10, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 11, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);
