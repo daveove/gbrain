@@ -197,3 +197,29 @@ test('top-level and metadata intake envelopes must agree on every explicit ident
   }
   assert.equal(recordIdentity(row('a', { intake: 'malformed' })).conflict, true);
 });
+
+
+test('both progress dimensions retain every thread across the body budget', async () => {
+  const rows = ['one', 'two'].flatMap(thread => Array.from({ length: 9 }, (_, i) => row(`${thread}-${i}`, {
+    chatId: thread, evidence: { body: thread.repeat(4000), complete: true },
+  })));
+  const item = { id: 'both', references: [input('one-0').references[0], input('two-0').references[0]] };
+  const base = reader(rows);
+  const scoped = { ...base, searchRecords: opts => base.searchRecords(opts).then(found =>
+    found.filter(record => record.payload_json.chatId === opts.payloadAny[0].equals.conversationId)) };
+  const seen = new Set(); let progress = item; let final;
+  for (let page = 0; page < 20; page++) {
+    const packet = (await run([progress], [], { reader: scoped, perItemLimit: 50 })).packets[0]; final = packet;
+    assert.ok(!packet.gaps.includes('invalid_continuation'));
+    packet.evidence.forEach(e => seen.add(e.reference.sourceRef));
+    if (!packet.continuation.length && packet.nextAnchorOffset == null) break;
+    progress = { ...item, continuation: packet.continuation,
+      anchorOffset: packet.nextAnchorOffset ?? packet.anchorOffset };
+  }
+  assert.equal(seen.size, rows.length); assert.equal(final.continuation.length, 0);
+  assert.equal(final.nextAnchorOffset, undefined);
+});
+
+test('nested chat envelopes remain message evidence', () => {
+  assert.equal(normalizeEvidence(row('chat', { message: { conversationId: 'thread' } })).family, 'message');
+});

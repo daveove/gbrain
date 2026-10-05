@@ -8,7 +8,7 @@ Every input receives a packet, including missing, denied and unsupported records
 
 Only explicitly business-tagged records are included. The checked host must authorize every record; page-source grants do not grant access to raw account records. Missing or conflicting identity never authorizes a join. Complete body status requires an explicit producer claim. Old previews stay partial.
 
-Conversation candidates use the existing store's millisecond keyset ordering. Cursors bind the account, network, thread, source and contract. Reads are current reads, not an immutable database snapshot. Resume each returned continuation until the query is exhausted; do not infer completeness from a display limit.
+Conversation candidates use the existing store's millisecond keyset ordering. Cursors bind the account, network, thread, source and contract. Reads are current reads, not an immutable database snapshot. Conversation cursors retain their anchor position. Finish the current conversation before advancing to later anchors; supplying both progress fields keeps the cursor position until that conversation is exhausted. Resume each returned continuation until the query is exhausted; do not infer completeness from a display limit.
 
 Run `npm test` from this directory. Publish this directory as a package-only commit in the owned repository, and pin consumers to that immutable commit. Do not install the root GBrain package in a Node application.
 
