@@ -137,19 +137,19 @@ function openCursor(value) {
   decipher.setAuthTag(bytes.subarray(12, 28));
   return JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString('utf8'));
 }
-function cursorFor(row, scope, anchorOffset) {
-  return sealCursor({ contract: CONTRACT, scope, anchorOffset, updatedAt: iso(row.updated_at),
+function cursorFor(row, scope, anchorOffset, binding) {
+  return sealCursor({ contract: CONTRACT, scope, anchorOffset, binding, updatedAt: iso(row.updated_at),
     sourceType: text(row.source_type), sourceRef: text(row.source_ref) });
 }
-function startCursor(scope, anchorOffset) {
-  return sealCursor({ contract: CONTRACT, scope, anchorOffset, start: true });
+function startCursor(scope, anchorOffset, binding) {
+  return sealCursor({ contract: CONTRACT, scope, anchorOffset, binding, start: true });
 }
-function decodeCursor(value, scope) {
+function decodeCursor(value, scope, binding) {
   if (!value) return undefined;
   if (typeof value !== 'string' || value.length > 4096) throw new Error('invalid_continuation');
   try {
     const c = openCursor(value);
-    if (c.contract !== CONTRACT || c.scope !== scope) throw 0;
+    if (c.contract !== CONTRACT || c.scope !== scope || c.binding !== binding) throw 0;
     if (c.start === true && Number.isInteger(c.anchorOffset) && c.anchorOffset >= 0) return undefined;
     if (!iso(c.updatedAt) || !text(c.sourceType) || !text(c.sourceRef)) throw 0;
     return { updatedAt: iso(c.updatedAt), sourceType: c.sourceType, sourceRef: c.sourceRef };
@@ -172,6 +172,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
   const packets = [];
   for (const item of items) {
     const refs = list(item?.references);
+    const binding = hash({ sourceId, itemId: text(item?.id), references: refs });
     const requestedOffset = Number.isInteger(item?.anchorOffset) && item.anchorOffset >= 0 ? item.anchorOffset : 0;
     // A conversation cursor retains its anchor position. When a caller supplies
     // both progress dimensions, finish that conversation before later anchors.
@@ -179,6 +180,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       try {
         if (typeof value?.cursor !== 'string' || value.cursor.length > 4096) return [];
         const cursor = openCursor(value.cursor);
+        if (cursor.contract !== CONTRACT || cursor.scope !== value.scope || cursor.binding !== binding) return [];
         return Number.isInteger(cursor.anchorOffset) && cursor.anchorOffset >= 0 && cursor.anchorOffset < refs.length
           ? [cursor.anchorOffset] : [];
       } catch { return []; }
@@ -244,7 +246,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (!scope) { addGap('conversation_identity_missing'); exhausted = false; continue; }
         if (conversations.has(scope)) continue;
         conversations.add(scope);
-        const after = decodeCursor(cursor, scope);
+        const after = decodeCursor(cursor, scope, binding);
         if (list(item.continuation).some(c => !c || !text(c.scope))) throw new Error('invalid_continuation');
         // Each page stops at its first unfinished conversation. Later scopes
         // have not been scanned yet and must start after this one is exhausted.
@@ -281,7 +283,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
         if (rows.length > examined) {
           const last = lastProcessed;
           if (last && !iso(last.updated_at)) throw new Error('reader_failed');
-          packet.continuation.push({ scope, cursor: last ? cursorFor(last, scope, anchorIndex) : cursor || startCursor(scope, anchorIndex) });
+          packet.continuation.push({ scope, cursor: last ? cursorFor(last, scope, anchorIndex, binding) : cursor || startCursor(scope, anchorIndex, binding) });
           packet.anchorOffset = anchorIndex;
           packet.nextAnchorOffset = anchorIndex + 1 < refs.length ? anchorIndex + 1 : undefined;
           addGap('bounded_read'); exhausted = false; break;
@@ -299,7 +301,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 15, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 16, sourceId, itemId: packet.itemId,
       limits: { perItemLimit: limit, maxBodyChars: bodyLimit }, evidence: packet.evidence,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage,
