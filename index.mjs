@@ -20,39 +20,44 @@ export function recordReference(row) {
 // unrelated resources are never joined by titles, senders or timestamps.
 export function recordIdentity(row) {
   const p = obj(row?.payload_json), m = obj(p.metadata), message = obj(p.message);
-  const intake = obj(m.intake || p.intake);
+  const intakeAliases = [m.intake, p.intake].filter(value => value != null);
+  const intakeFields = field => intakeAliases.map(value => obj(value)[field]);
+  const resourceTypes = intakeFields('resourceType').map(text).filter(Boolean);
+  const resourceIds = intakeFields('resourceId').map(text).filter(Boolean);
   const emails = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
     message.mailboxEmail, message.profileEmail].map(text).filter(Boolean).map(v => v.toLowerCase());
   const profiles = [p.profileId, m.profileId, message.profileId].map(text).filter(Boolean);
-  const accounts = [intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId].map(text).filter(Boolean);
-  const systems = [intake.system, p.sourceSystem, m.sourceSystem].map(text).filter(Boolean);
-  const networkValues = [intake.network, p.network, p.channel, m.network, m.channel, message.network, message.channel];
+  const accounts = [...intakeFields('sourceAccountId'), p.sourceAccountId, m.sourceAccountId].map(text).filter(Boolean);
+  const systems = [...intakeFields('system'), p.sourceSystem, m.sourceSystem].map(text).filter(Boolean);
+  const networkValues = [...intakeFields('network'), p.network, p.channel, m.network, m.channel, message.network, message.channel];
   const networks = networkValues.map(text).filter(Boolean);
   const conversationValues = [p.conversationId, p.chatId, p.threadId, m.conversationId, m.chatId, m.threadId,
     message.conversationId, message.chatId, message.threadId];
   const conversations = conversationValues.map(text).filter(Boolean);
   const identityValues = [p.mailboxEmail, p.profileEmail, m.mailboxEmail, m.profileEmail,
     message.mailboxEmail, message.profileEmail, p.profileId, m.profileId, message.profileId,
-    intake.sourceAccountId, p.sourceAccountId, m.sourceAccountId, intake.system, p.sourceSystem, m.sourceSystem, ...networkValues, ...conversationValues];
-  const conflict = [emails, profiles, accounts, systems, networks, conversations].some(values => new Set(values).size > 1)
+    ...intakeFields('sourceAccountId'), p.sourceAccountId, m.sourceAccountId, ...intakeFields('system'), p.sourceSystem, m.sourceSystem,
+    ...intakeFields('resourceType'), ...intakeFields('resourceId'), ...networkValues, ...conversationValues];
+  const conflict = [emails, profiles, accounts, systems, networks, conversations, resourceTypes, resourceIds].some(values => new Set(values).size > 1)
+    || intakeAliases.some(value => !value || typeof value !== 'object' || Array.isArray(value))
     || identityValues.some(value => value != null && typeof value !== 'string')
     || emails.some(email => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email));
-  const system = text(intake.system || p.sourceSystem || (row?.source_type === 'comms_channel' ? '' : row?.source_type));
+  const system = systems[0] || text(row?.source_type === 'comms_channel' ? '' : row?.source_type);
   return { system, network: networks[0] || system,
     accountKind: accounts.length ? 'source-account' : emails.length ? 'mailbox' : profiles.length ? 'profile' : 'unknown',
     account: accounts[0] || emails[0] || profiles[0] || null,
     conversationId: conversations[0] || '',
-    resourceType: text(intake.resourceType || row?.entity_type),
-    resourceId: text(intake.resourceId || row?.entity_id), conflict };
+    resourceType: resourceTypes[0] || text(row?.entity_type),
+    resourceId: resourceIds[0] || text(row?.entity_id), conflict };
 }
 
 const THREAD_FIELDS = ['conversationId', 'chatId', 'threadId'];
 export function conversationSearch(identity, sourceType, { after, limit = 51 } = {}) {
-  // Email's native thread can be nested under metadata/message. The shared
-  // store only filters top-level payload fields, so scan that source boundedly
-  // and verify full identity before release instead of omitting nested records.
+  // Readers support these fixed identity paths; every result still passes full
+  // account/network/thread validation before it becomes evidence.
   return { sourceTypes: [sourceType], payloadAny: sourceType === 'comms_channel'
-    ? THREAD_FIELDS.map(field => ({ equals: { [field]: identity.conversationId } })) : undefined,
+    ? ['', 'metadata.', 'message.'].flatMap(prefix => THREAD_FIELDS.map(field =>
+      ({ equals: { [prefix + field]: identity.conversationId } }))) : undefined,
     after, limit };
 }
 
@@ -236,7 +241,7 @@ export async function assembleEvidenceContexts({ items, reader, authorize, resol
       && !packet.gaps.includes('packet_budget_reached') && !packet.gaps.includes('invalid_continuation');
     addGap('source_freshness_unknown');
     packet.state = packet.evidence.length ? packet.gaps.some(g => g !== 'source_freshness_unknown') ? 'partial' : 'ready' : 'unavailable';
-    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 3, sourceId, itemId: packet.itemId,
+    packet.revision = hash({ contract: CONTRACT, normalizerVersion: 5, sourceId, itemId: packet.itemId,
       references: refs, anchorOffset: offset, dependencies: packet.dependencies,
       gaps: packet.gaps, coverage: packet.coverage, continuation: packet.continuation });
     packets.push(packet);

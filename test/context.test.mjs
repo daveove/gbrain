@@ -186,3 +186,14 @@ test('lifecycle suppression and producer completeness cannot be overridden by an
   const contradictory = row('a', { metadata: { bodyComplete: false, sensitivity: { level: 'business' } } });
   assert.equal((await run([input('a')], [contradictory])).packets[0].evidence[0].bodyState, 'partial');
 });
+
+test('top-level and metadata intake envelopes must agree on every explicit identity field', async () => {
+  for (const field of ['sourceAccountId', 'system', 'network', 'resourceType', 'resourceId']) {
+    const record = row('a', { intake: { [field]: 'first' }, metadata: { intake: { [field]: 'second' }, sensitivity: { level: 'business' } } });
+    assert.equal(recordIdentity(record).conflict, true);
+    let grants = 0;
+    const packet = (await run([input('a')], [record], { authorize: () => { grants++; return true; } })).packets[0];
+    assert.equal(grants, 0); assert.equal(packet.evidence.length, 0);
+  }
+  assert.equal(recordIdentity(row('a', { intake: 'malformed' })).conflict, true);
+});
