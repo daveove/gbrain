@@ -21,9 +21,14 @@ beforeEach(async () => {
   await engine.setConfig('cycle.timezone', 'Asia/Manila');
 });
 
-const noExtract: typeof extractStaleFromDB = async () => ({
-  linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0,
-});
+/** Extraction that finds no links: it only stamps the selected pages as extracted. */
+const noExtract: typeof extractStaleFromDB = async (stubEngine, opts) => {
+  if (opts?.slugs?.length) {
+    await stubEngine.executeRaw('UPDATE pages SET links_extracted_at=GREATEST(updated_at, now()) WHERE source_id=$1 AND slug=ANY($2::text[])',
+      [opts.sourceIdFilter, [...opts.slugs]]);
+  }
+  return { linksCreated: 0, timelineCreated: 0, pagesProcessed: opts?.slugs?.length ?? 0, staleRemaining: 0 };
+};
 
 const seed = async (day = '2026-09-30', slug = 'notes/oneshot-day') => {
   await engine.putPage(slug, {
@@ -72,7 +77,7 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
   await seed();
   await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 2 }),
-  })).rejects.toThrow('Daily memory extraction needs retry: 2 generated daily-index pages remain');
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
   expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
     .toContain('[[default:notes/oneshot-day]]');
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
@@ -86,6 +91,18 @@ test('one-shot extract fails when a generated index lands during the sweep', asy
         type: 'note', title: 'Late generated index', compiled_truth: '', frontmatter: { dream_generated: true },
       }, { sourceId: DAILY_MEMORY_SOURCE_ID });
       return noExtract(_engine, opts);
+    },
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+});
+
+test('one-shot extract fails when a selected index is rewritten after its stamp', async () => {
+  await seed();
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => {
+      const result = await noExtract(_engine, opts);
+      await engine.executeRaw("UPDATE pages SET updated_at=links_extracted_at + interval '1 second' WHERE source_id=$1 AND slug='daily-memory/2026-09-30'",
+        [DAILY_MEMORY_SOURCE_ID]);
+      return result;
     },
   })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
 });
@@ -355,13 +372,14 @@ test('today includes its capped record indexes but leaves a human reference unto
   const reference = first.extract_slugs!.find(slug => slug.startsWith('source-records/'))!;
   expect(reference).toBeDefined();
   await engine.putPage(reference, { type: 'note', title: 'Human reference', compiled_truth: 'Human-owned fixture' }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-  const second = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
-  expect(second.extract_slugs).toEqual([second.slug]);
-  const [human] = await engine.executeRaw<{ stamp: unknown }>(
+  const stamp = () => engine.executeRaw<{ stamp: unknown }>(
     'SELECT links_extracted_at AS stamp FROM pages WHERE source_id=$1 AND slug=$2',
     [DAILY_MEMORY_SOURCE_ID, reference],
   );
-  expect(human?.stamp).toBeNull();
+  const before = await stamp();
+  const second = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
+  expect(second.extract_slugs).toEqual([second.slug]);
+  expect(await stamp()).toEqual(before);
   expect((await engine.getPage(reference, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.title).toBe('Human reference');
 });
 

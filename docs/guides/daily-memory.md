@@ -27,7 +27,8 @@ Each scheduled run does three things in order.
    left over from earlier nights.
 
 An explicit date argument, such as `gbrain-daily-memory.sh 2026-10-01`, skips
-the transcript import and rewrites only that day's index. It still runs step 3.
+the transcript import and the lookback, so it writes that day's index plus any
+days already queued by earlier imports. It still runs step 3.
 
 ## Keep the database on the session port
 

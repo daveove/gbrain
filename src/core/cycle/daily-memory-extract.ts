@@ -48,11 +48,9 @@ export async function extractOneShotDailyMemory(
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
       slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
     });
-    // Indexes written during the minutes-long extract setup are not in the
-    // frozen selection; count them so the run does not report success.
-    const selected = new Set(slugs);
-    const late = exact ? 0 : (await dailyMemoryExtractTargets(engine)).filter(slug => !selected.has(slug)).length;
-    remaining = extracted.staleRemaining + late;
+    // Recount globally: indexes written or rewritten during the minutes-long
+    // extract setup are stale outside the frozen selection's final count.
+    remaining = exact ? extracted.staleRemaining : (await dailyMemoryExtractTargets(engine)).length;
   }
   if (remaining > 0) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
 }
