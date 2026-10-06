@@ -11,6 +11,32 @@ mkdir -p "$(dirname "$LOG")" "$STATE"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
+# Scheduled jobs hold one session-mode connection (:5432), never the
+# transaction pooler (:6543): prefer the direct URL, else move :6543 to :5432.
+session_url="$(python3 -c '
+import json, os
+from pathlib import Path
+from urllib.parse import urlsplit
+cfg = {}
+path = Path.home() / ".gbrain" / "config.json"
+if path.is_file():
+    try:
+        cfg = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        cfg = {}
+for url in (os.environ.get("GBRAIN_DIRECT_DATABASE_URL"), cfg.get("direct_database_url"),
+            os.environ.get("GBRAIN_DATABASE_URL"), os.environ.get("DATABASE_URL"), cfg.get("database_url")):
+    if not url:
+        continue
+    parts = urlsplit(url)
+    if parts.port == 6543:
+        url = parts._replace(netloc=parts.netloc.rsplit(":", 1)[0] + ":5432").geturl()
+    print(url, end="")
+    break
+')"
+if [[ -n "$session_url" ]]; then
+  export GBRAIN_DATABASE_URL="$session_url" DATABASE_URL="$session_url"
+fi
 # Launcher calendar zone: explicit setting > brain DB (config set) >
 # file-plane cycle.timezone > TZ from env.sh/host > UTC.
 zone="$(REPO="$REPO" python3 -c '
@@ -59,23 +85,10 @@ fi
 TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 run_command() {
-  local ec url resolver_ec
+  local ec
   set +e
   "$@" > "$TMP" 2>&1
   ec=$?
-  if [[ $ec -ne 0 ]] && grep -q EMAXCONNSESSION "$TMP"; then
-    echo 'session pool full; retrying this command on port 6543' >> "$LOG"
-    url="$(bun -e 'const {loadConfig}=await import(process.argv[1]); const u=new URL(loadConfig().database_url); u.port="6543"; process.stdout.write(u.href)' "$REPO/src/core/config.ts")"
-    resolver_ec=$?
-    if [[ $resolver_ec -ne 0 || -z "$url" ]]; then
-      echo 'could not resolve transaction pooler URL' >> "$LOG"
-      set -e
-      [[ $resolver_ec -ne 0 ]] || resolver_ec=1
-      return "$resolver_ec"
-    fi
-    GBRAIN_DATABASE_URL="$url" "$@" > "$TMP" 2>&1
-    ec=$?
-  fi
   set -e
   sed -E 's#postgres(ql)?://[^[:space:]]+#[redacted-url]#g' "$TMP" >> "$LOG"
   return "$ec"

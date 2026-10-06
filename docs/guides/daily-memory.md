@@ -1,0 +1,73 @@
+# Daily memory
+
+Daily memory writes one index page per day, `daily-memory/YYYY-MM-DD`, in the
+non-federated `dream` source. The page links the brain pages and source records
+that belong to that day. A nightly launcher imports the day's agent sessions
+first, so the index also covers them.
+
+Daily memory replaces the Hermes dream cycle. That job ran
+`dream_cycle_daily_cron.sh` and pushed `dream-cycle/raw/YYYY-MM-DD` pages. It
+stopped on 2026-09-23 after repeated session-pool and missing-key failures and
+is now removed from the Hermes scheduler. No new `dream-cycle/raw` pages are
+written. Existing ones stay in the brain as history.
+
+## Run it nightly
+
+The launcher is `scripts/gbrain-daily-memory.sh`. On macOS a LaunchAgent named
+`com.gbrain.daily-memory` runs an installed copy at 23:40 local time. The
+launcher takes a kernel lock, so a second copy exits instead of racing the
+first.
+
+Each scheduled run does three things in order.
+
+1. It imports the day's Codex sessions with `gbrain transcripts ingest`.
+2. It runs `scripts/write-daily-memory.ts`, which writes today's index, the
+   previous day's index and any days missed since the last run.
+3. It extracts links once for every stale generated index, including indexes
+   left over from earlier nights.
+
+An explicit date argument, such as `gbrain-daily-memory.sh 2026-10-01`, skips
+the transcript import and rewrites only that day's index. It still runs step 3.
+
+## Keep the database on the session port
+
+Every launcher command uses one connection on the Supabase session pooler,
+port 5432. The launcher prefers `GBRAIN_DIRECT_DATABASE_URL` or
+`direct_database_url` from `~/.gbrain/config.json`. When only a port 6543 URL
+is configured, it moves that URL to port 5432. It never retries on the
+transaction pooler. A full session pool fails the run, and the next night
+retries.
+
+## Size the extraction budget
+
+Extraction setup reads every page reference in the brain. On a brain with
+about 150,000 pages that takes a few minutes, so the writer pays it once per
+run. The budget defaults to 30 minutes, including setup. Set
+`GBRAIN_EXTRACT_TIME_BUDGET_MS` to change it.
+
+When the budget runs out with work left, the writer exits non-zero with
+`Daily memory extraction needs retry: N generated daily-index pages remain`.
+The written indexes stay. The next run extracts the remainder first.
+
+## Catch up after an outage
+
+Run the launcher once with a larger budget:
+
+```bash
+GBRAIN_EXTRACT_TIME_BUDGET_MS=7200000 ~/.local/bin/gbrain-daily-memory.sh "$(date +%F)"
+```
+
+Check the backlog afterwards. This count should be 0:
+
+```sql
+SELECT count(*) FROM pages
+WHERE source_id = 'dream' AND deleted_at IS NULL
+  AND frontmatter @> '{"dream_generated": true}'
+  AND (links_extracted_at IS NULL OR updated_at > links_extracted_at);
+```
+
+## Read the logs
+
+The launcher appends to `~/Library/Logs/gbrain-daily-memory.log` and redacts
+database URLs. A healthy run ends with `daily-memory ok`. The LaunchAgent's own
+stdout and stderr go to `~/Library/Logs/gbrain/daily-memory.{out,err}.log`.

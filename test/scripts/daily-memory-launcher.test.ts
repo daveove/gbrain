@@ -24,9 +24,8 @@ function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asi
   writeFileSync(bun, `#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 args = sys.argv[1:]
-kind = 'resolve' if args[0] == '-e' else (
-  'tz' if any('daily-memory-timezone' in a for a in args) else
-  ('ingest' if 'transcripts' in args else 'write'))
+kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
+  'ingest' if 'transcripts' in args else 'write')
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if kind == 'tz':
@@ -36,12 +35,6 @@ if kind == 'tz':
     sys.exit(0)
 with log.open('a') as out:
     out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK')}) + '\\n')
-if kind == 'resolve':
-    if os.environ.get('TEST_RESOLVE_FAIL') == '1':
-        print('fixture config resolver failed', file=sys.stderr)
-        sys.exit(8)
-    print('postgres://example:example@127.0.0.1:6543/example', end='')
-    sys.exit(0)
 if kind == os.environ.get('TEST_FAIL_KIND'):
     attempts = sum(call['kind'] == kind for call in previous)
     if attempts == 0 or os.environ.get('TEST_FAIL_ALWAYS') == '1':
@@ -363,36 +356,35 @@ finally:
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
   });
 
-  for (const kind of ['ingest', 'write']) {
-    it(`retries only the ${kind} command on port 6543 after EMAXCONNSESSION`, () => {
-      const { home, run } = fixture();
-      todayInputs(home);
-      const result = run([], { TEST_FAIL_KIND: kind, TEST_FAIL_MODE: 'session' });
-      expect(result.code).toBe(0);
-      expect(result.calls.map(call => call.kind)).toEqual(kind === 'ingest'
-        ? ['ingest', 'resolve', 'ingest', 'write'] : ['ingest', 'write', 'resolve', 'write']);
-      const attempts = result.calls.filter(call => call.kind === kind);
-      expect(attempts[0].url).toBeNull();
-      expect(new URL(attempts[1].url!).port).toBe('6543');
-      expect(attempts[1].args).toEqual(attempts[0].args);
-      if (kind === 'ingest') expect(result.calls.at(-1)!.url).toBeNull();
-    });
-  }
-
-  it('aborts after a failed transaction-pooler retry', () => {
-    const { home, run } = fixture();
+  it('pins every command to the session port when config and env.sh name the transaction pooler', () => {
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila', database_url: 'postgres://example:example@pooler.example:6543/example' });
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_DATABASE_URL=postgres://example:example@pooler.example:6543/example\n');
     todayInputs(home);
-    const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'session', TEST_FAIL_ALWAYS: '1' });
-    expect(result.code).toBe(7);
-    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'resolve', 'ingest']);
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => [call.kind, call.url])).toEqual([
+      ['ingest', 'postgres://example:example@pooler.example:5432/example'],
+      ['write', 'postgres://example:example@pooler.example:5432/example'],
+    ]);
   });
 
-  it('does not retry on an empty URL when resolving the transaction-pooler URL fails', () => {
+  it('prefers the direct session URL from env.sh', () => {
+    const { home, run } = fixture();
+    writeFileSync(join(home, '.gbrain/env.sh'), [
+      'export GBRAIN_DATABASE_URL=postgres://example:example@pooler.example:6543/example',
+      'export GBRAIN_DIRECT_DATABASE_URL=postgres://example:example@direct.example:5432/example',
+    ].join('\n') + '\n');
+    const result = run(['2026-09-29']);
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@direct.example:5432/example']);
+  });
+
+  it('fails a full session pool without retrying on the transaction pooler', () => {
     const { home, run } = fixture();
     todayInputs(home);
-    const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'session', TEST_RESOLVE_FAIL: '1' });
-    expect(result.code).toBe(8);
-    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'resolve']);
+    const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'session' });
+    expect(result.code).toBe(7);
+    expect(result.calls.map(call => [call.kind, new URL(call.url!).port])).toEqual([['ingest', '5432']]);
   });
 
   it('returns a writer failure without retrying unrelated failures', () => {

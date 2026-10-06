@@ -4,7 +4,6 @@ import type { extractStaleFromDB } from '../../commands/extract.ts';
 import {
   DAILY_MEMORY_SOURCE_ID,
   dailyMemoryExtractTargets,
-  countDailyMemoryExtractTargets,
   isOwnedGeneratedDailyIndex,
   type DailyMemoryWrite,
 } from './daily-memory.ts';
@@ -12,6 +11,8 @@ import {
 /**
  * Restrict extraction to owned generated daily/source-record indexes.
  * Never run a source-wide stale sweep that can rewrite human pages.
+ * One extract call per run: its setup reads every page ref in the brain
+ * (minutes on a large Postgres brain), so batching calls repeats that cost.
  */
 export async function extractOneShotDailyMemory(
   engine: BrainEngine,
@@ -23,8 +24,9 @@ export async function extractOneShotDailyMemory(
   } = {},
 ): Promise<void> {
   if (!result.written && !result.needs_extract) return;
-  const extract = deps.extract ?? (await import('../../commands/extract.ts')).extractStaleFromDB;
-  const budget = deps.timeBudgetMs ?? 60_000;
+  const extractModule = await import('../../commands/extract.ts');
+  const extract = deps.extract ?? extractModule.extractStaleFromDB;
+  const budget = deps.timeBudgetMs ?? extractModule.STALE_TIME_BUDGET_MS;
   const originGuard = async (snapshot: PageSnapshot) => {
     const page = snapshot.page;
     if (page.source_id !== DAILY_MEMORY_SOURCE_ID
@@ -35,28 +37,15 @@ export async function extractOneShotDailyMemory(
       FROM sources WHERE id=$1`, [DAILY_MEMORY_SOURCE_ID]);
     return source?.owned === true;
   };
-  const runTargets = async (slugs: readonly string[], timeBudgetMs: number) => {
-    const extracted = await extract(engine, {
+  deps.signal?.throwIfAborted();
+  const slugs = result.extract_slugs?.length ? result.extract_slugs : await dailyMemoryExtractTargets(engine);
+  deps.signal?.throwIfAborted();
+  if (!slugs.length) return;
+  const remaining = budget > 0
+    ? (await extract(engine, {
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
-      slugs, originGuard, catchUp: false, timeBudgetMs, signal: deps.signal,
-    });
-    if (extracted.staleRemaining > 0) {
-      throw new Error(`Daily memory extraction needs retry: ${extracted.staleRemaining} selected daily-index pages remain`);
-    }
-  };
-  if (result.extract_slugs?.length) return runTargets(result.extract_slugs, budget);
-  // Historical recovery selects only owned generated targets before reading bodies.
-  const deadline = Date.now() + Math.max(0, budget);
-  let after = '';
-  deps.signal?.throwIfAborted();
-  while (Date.now() < deadline) {
-    const slugs = await dailyMemoryExtractTargets(engine, after);
-    deps.signal?.throwIfAborted();
-    if (!slugs.length || Date.now() >= deadline) break;
-    await runTargets(slugs, Math.max(0, deadline - Date.now()));
-    after = slugs.at(-1)!;
-  }
-  deps.signal?.throwIfAborted();
-  const remaining = await countDailyMemoryExtractTargets(engine);
-  if (remaining) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
+      slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
+    })).staleRemaining
+    : slugs.length;
+  if (remaining > 0) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
 }

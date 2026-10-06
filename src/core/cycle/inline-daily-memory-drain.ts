@@ -6,7 +6,7 @@ import { calculateBackoff } from '../minions/backoff.ts';
 import { runDailyMemoryJob, type DailyMemoryAfterWrite } from './daily-memory-followup.ts';
 
 export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
-  signal?: AbortSignal; afterWrite: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
+  signal?: AbortSignal; afterWrite?: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
 }): Promise<number> {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
   const deadline = Date.now() + Math.min(opts.timeBudgetMs ?? 60_000, 60_000);
@@ -43,7 +43,7 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       abort.signal.throwIfAborted();
       const result = await runDailyMemoryJob(engine, { id: job.id, data: job.data, signal: abort.signal }, async daily => {
         abort.signal.throwIfAborted();
-        await opts.afterWrite(daily, abort.signal);
+        await opts.afterWrite?.(daily, abort.signal);
         abort.signal.throwIfAborted();
       });
       stopped = true; clearInterval(timer); await renewal;
