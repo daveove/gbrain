@@ -5,6 +5,12 @@ A Grok Bot routine can write one digest page per day into your brain through
 verify it on loopback, and lists what publishing it beyond your computer would
 take. The publication step is not part of the verified local setup.
 
+**Say to your agent:** *"Give my Grok Bot a daily digest page in my brain"*
+(on the brain host, the agent runs `gbrain mcp grant` with
+`--bound-slug-prefixes digests/grok-bot/`). *"Save today's digest to my
+brain"* (inside the Bot, the agent runs `gbrain put digests/grok-bot/<date>
+--force --request-id <uuid>`).
+
 The contract uses only existing pieces: the `memory-writer` grant profile, a
 `--bound-slug-prefixes` write fence, and the `put_page` operation's
 `request_id` and `force` parameters. No digest-specific server code exists.
@@ -173,10 +179,13 @@ When the Bot uses the installed launcher from the
 /workspace/gbrain/bin/gbrain get digests/grok-bot/2026-10-06
 ```
 
-The launcher authenticates from its stored handoff. When retrying, repeat the
-exact command. Adding or removing `--json` changes the request intent, and the
-server answers `idempotency_conflict`. `gbrain call` is not available in the
-thin client.
+The launcher authenticates from its stored handoff. Do not pass `--json` to
+`put`. The thin client forwards it to the server as a `json` tool argument.
+Under the default `mcp.strict_params` mode, adding or removing it on a retry
+changes the request intent, and the server answers `idempotency_conflict`.
+Under `mcp.strict_params=reject`, every `put --json` fails with
+`invalid_params` before the write is admitted. When retrying, repeat the exact
+command. `gbrain call` is not available in the thin client.
 
 ## Verify locally
 
