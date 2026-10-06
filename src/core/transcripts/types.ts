@@ -106,6 +106,22 @@ export interface TranscriptAdapter {
   parse(path: string, opts?: ParseSessionsOpts): AsyncGenerator<ParsedSession, FileDiagnostics>;
 }
 
+/**
+ * True when a content-block array holds a shape the adapter does not know:
+ * a non-object block, a block type outside `knownTypes`, or a `text` block
+ * whose text is not a string. Such blocks may carry conversation text the
+ * parser would silently drop, so adapters count the row as a skipped line
+ * (drift) instead of letting the file pass as clean or expected-empty.
+ */
+export function hasUnknownBlockShape(blocks: unknown[], knownTypes: readonly string[]): boolean {
+  return blocks.some((block) => {
+    if (typeof block !== 'object' || block === null) return true;
+    const b = block as Record<string, unknown>;
+    if (typeof b.type !== 'string' || !knownTypes.includes(b.type)) return true;
+    return b.type === 'text' && typeof b.text !== 'string';
+  });
+}
+
 // ── Byte caps (format-specific; see adapter headers) ────────────────────────
 
 /** Hard cap for any single session-log file. */

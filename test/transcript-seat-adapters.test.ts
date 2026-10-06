@@ -119,6 +119,26 @@ describe('ompAdapter', () => {
     expect(await diagOf([toolOnly])).toEqual([0, 0, true]);
     expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'user', content: { text: 'drifted' } } }])).toEqual([0, 1, undefined]);
     expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'user', content: [{ type: 'text', text: { value: 'drifted' } }] } }])).toEqual([0, 1, undefined]);
+    expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'assistant', content: [{ type: 'output_text', text: 'new block type' }] } }])).toEqual([0, 1, undefined]);
+  });
+
+  test('a kept turn without a line time uses its epoch time, and without either counts as drift', async () => {
+    const d = tdir();
+    const p = join(d, 'times.jsonl');
+    const header = { type: 'session', version: 3, id: 'omp-times', timestamp: '2026-09-30T00:00:00.000Z', cwd: '/tmp' };
+    const turn = (extra: Record<string, unknown>, message: Record<string, unknown>) =>
+      ({ type: 'message', ...extra, message: { role: 'user', content: [{ type: 'text', text: 'Hello.' }], ...message } });
+    writeFileSync(p, [
+      { type: 'title', v: 1, title: 't' },
+      header,
+      turn({ timestamp: '2026-09-30T00:01:00.000Z' }, {}),
+      turn({}, { timestamp: 1790733720000 }),
+      turn({}, {}),
+      turn({ timestamp: 'not a time' }, {}),
+    ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const { sessions, diag } = await drain(ompAdapter.parse(p));
+    expect(sessions[0].messages.map((m) => m.timestamp)).toEqual(['2026-09-30T00:01:00.000Z', '2026-09-30T02:02:00.000Z', '', '']);
+    expect([diag.sessions, diag.skippedLines]).toEqual([1, 2]);
   });
 });
 
@@ -230,6 +250,11 @@ describe('cursorAdapter', () => {
     writeFileSync(p, [...rows, { role: 'assistant', message: { content: [{ type: 'text', text: { value: 'drifted' } }] } }].map((r) => JSON.stringify(r)).join('\n') + '\n');
     const block = await drain(cursorAdapter.parse(p));
     expect([block.diag.sessions, block.diag.skippedLines, block.diag.expectedEmpty]).toEqual([0, 1, undefined]);
+    for (const content of [[{ type: 'output_text', text: 'new block type' }], ['bare string block']]) {
+      writeFileSync(p, [...rows, { role: 'assistant', message: { content } }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+      const unknown = await drain(cursorAdapter.parse(p));
+      expect([unknown.diag.sessions, unknown.diag.skippedLines, unknown.diag.expectedEmpty]).toEqual([0, 1, undefined]);
+    }
   });
 });
 
@@ -277,6 +302,8 @@ describe('opencodeAdapter', () => {
     expect(await diagOf([reasoningOnly])).toEqual([0, 0, true]);
     expect(await diagOf([reasoningOnly, { info: { role: 'user' }, parts: 'drifted' }])).toEqual([0, 1, undefined]);
     expect(await diagOf([reasoningOnly, { info: { role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: { value: 'drifted' } }] }])).toEqual([0, 1, undefined]);
+    expect(await diagOf([reasoningOnly, { info: { role: 'user', time: { created: 1 } }, parts: [{ type: 'rich-text', text: 'new part type' }] }])).toEqual([0, 1, undefined]);
+    expect(await diagOf([reasoningOnly, { info: { role: 'user', time: { created: 1 } }, parts: ['bare string part'] }])).toEqual([0, 1, undefined]);
   });
 
   test('a text message without a numeric creation time keeps its text but counts as drift', async () => {

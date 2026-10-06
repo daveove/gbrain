@@ -22,7 +22,12 @@ import type {
   TranscriptAdapter,
   TranscriptMessage,
 } from './types.ts';
-import { TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
+import { hasUnknownBlockShape, TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
+
+const OPENCODE_PART_TYPES = [
+  'text', 'reasoning', 'tool', 'file', 'step-start', 'step-finish',
+  'snapshot', 'patch', 'agent', 'retry', 'compaction', 'subtask',
+];
 
 export const OPENCODE_SPEC_TARGET: HostSpecTarget = {
   id: 'opencode-export-2026-10',
@@ -82,10 +87,10 @@ export const opencodeAdapter: TranscriptAdapter = {
         skippedLines++;
         continue;
       }
+      // Part types from opencode's own part union; any other shape may carry
+      // text this filter would drop, so the export reads as drift.
+      if (hasUnknownBlockShape(parts, OPENCODE_PART_TYPES)) skippedLines++;
       const textParts = parts.map(record).filter((p) => p.type === 'text');
-      // A text part whose text is not a string is a changed shape; count it so
-      // the export reads as drift instead of a valid textless session.
-      if (textParts.some((p) => typeof p.text !== 'string')) skippedLines++;
       const text = textParts
         .filter((p) => p.synthetic !== true && typeof p.text === 'string')
         .map((p) => (p.text as string).trim())

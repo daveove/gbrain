@@ -23,7 +23,7 @@ import type {
   TranscriptAdapter,
   TranscriptMessage,
 } from './types.ts';
-import { TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
+import { hasUnknownBlockShape, TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
 import { mapOpenclawLine } from './openclaw.ts';
 import { readJsonlWithinBudget } from './bounded-read.ts';
 
@@ -84,6 +84,7 @@ function firstLineType(sample: Buffer): unknown {
 }
 
 const PI_ROLES = ['user', 'assistant', 'toolResult', 'developer'];
+const PI_BLOCK_TYPES = ['text', 'thinking', 'toolCall', 'image'];
 
 async function* parsePiSession(
   format: PiFormat,
@@ -128,29 +129,31 @@ async function* parsePiSession(
       if (mapped.startedAt) startedAt = mapped.startedAt;
       continue;
     }
-    // A text block whose text is not a string is dropped by the shared mapper;
-    // count it so a changed block shape reads as drift, never expected-empty.
     const e = entry as Record<string, unknown>;
-    const m = e.type === 'message' && typeof e.message === 'object' && e.message !== null
-      ? (e.message as Record<string, unknown>)
-      : null;
-    if (m && Array.isArray(m.content) && m.content.some((b) =>
-      typeof b === 'object' && b !== null && (b as Record<string, unknown>).type === 'text' &&
-      typeof (b as Record<string, unknown>).text !== 'string')) {
-      skippedLines++;
+    if (e.type !== 'message') continue;
+    const m = typeof e.message === 'object' && e.message !== null ? (e.message as Record<string, unknown>) : null;
+    // A message is understood when it has a known role and string or
+    // known-block content. Anything else may hold text the shared mapper
+    // dropped, so it counts as drift and the file can never pass as clean.
+    const knownRole = m !== null && typeof m.role === 'string' && PI_ROLES.includes(m.role);
+    const knownContent = m !== null &&
+      (typeof m.content === 'string' || (Array.isArray(m.content) && !hasUnknownBlockShape(m.content, PI_BLOCK_TYPES)));
+    if (!knownRole || !knownContent) skippedLines++;
+    if (mapped.kind !== 'message') continue;
+    // The line's ISO time is the turn time; the message's own epoch-ms time
+    // is the source-backed fallback. A kept turn with neither cannot be
+    // ordered against `ingest --since`, so it counts as drift.
+    const message = mapped.message;
+    if (Number.isNaN(Date.parse(message.timestamp))) {
+      const epoch = m?.timestamp;
+      const fallback = typeof epoch === 'number' ? new Date(epoch) : null;
+      if (fallback && !Number.isNaN(fallback.getTime())) message.timestamp = fallback.toISOString();
+      else {
+        message.timestamp = '';
+        skippedLines++;
+      }
     }
-    if (mapped.kind === 'message') {
-      messages.push(mapped.message);
-      continue;
-    }
-    // A message line the shared mapper skipped is fine when it is a known
-    // role with block or string content (tool-only turns, tool results,
-    // reminders). Any other message shape is drift and must not let the file
-    // pass as expected-empty.
-    if (e.type === 'message') {
-      const knownRole = m && typeof m.role === 'string' && PI_ROLES.includes(m.role);
-      if (!knownRole || !(typeof m.content === 'string' || Array.isArray(m.content))) skippedLines++;
-    }
+    messages.push(message);
   }
 
   let sessions = 0;

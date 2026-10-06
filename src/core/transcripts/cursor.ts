@@ -27,8 +27,10 @@ import type {
   TranscriptAdapter,
   TranscriptMessage,
 } from './types.ts';
-import { TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
+import { hasUnknownBlockShape, TRANSCRIPT_JSONL_HARD_CAP } from './types.ts';
 import { readJsonlWithinBudget } from './bounded-read.ts';
+
+const CURSOR_BLOCK_TYPES = ['text', 'tool_use'];
 
 export const CURSOR_SPEC_TARGET: HostSpecTarget = {
   id: 'cursor-agent-transcript-2026-10',
@@ -129,13 +131,9 @@ export const cursorAdapter: TranscriptAdapter = {
         skippedLines++;
         continue;
       }
-      // textBlocks drops a text block whose text is not a string; count it so
-      // a changed block shape reads as drift instead of a clean empty row.
-      if (msg.content.some((b) =>
-        typeof b === 'object' && b !== null && (b as Record<string, unknown>).type === 'text' &&
-        typeof (b as Record<string, unknown>).text !== 'string')) {
-        skippedLines++;
-      }
+      // Only the observed block types are understood; anything else may carry
+      // text textBlocks would drop, so the row counts as drift.
+      if (hasUnknownBlockShape(msg.content, CURSOR_BLOCK_TYPES)) skippedLines++;
       const text = textBlocks(msg.content);
       if (e.role === 'user') {
         const timestamp = parseCursorTimestampTag(text) ?? '';
