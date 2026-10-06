@@ -149,7 +149,7 @@ with `error` (the code) and `message`.
 | Transport failure, no response | Outcome unknown | Repeat the identical call with the same `request_id`. A committed write replays its original receipt. |
 | `idempotency_conflict` | This `request_id` was already used with different arguments | A routine bug. Use a new UUID for new content. |
 | `invalid_params` | `request_id` is not a UUID, or both `force` and `expected_revision` were sent | Fix the call |
-| `storage_error`, `writer_busy`, `owner_unavailable`, `queue_capacity` | Host-side trouble | Retry later with the same `request_id`. Report if it persists. |
+| `storage_error`, `writer_busy`, `owner_unavailable`, `queue_capacity` | Host-side trouble | Check the request with `get_write_request`. While its `state` is `queued`, `running` or `recovering`, or the lookup returns `not_found` because nothing was accepted, retry later with the same `request_id`. A `failed` or `conflict` state is terminal: replaying that `request_id` returns the same failure. Report it, and after the host is fixed send the run again with a new `request_id`. |
 | `page_not_found` from `get_page` | No digest exists for that date yet | Expected before the first write |
 
 ### Why `put_page` with `force`
@@ -208,9 +208,9 @@ client: forced re-runs converge on one page, a retry replays its receipt, and
 a reused `request_id` is refused. `test/client-slug-fence.test.ts` and
 `test/e2e/qm-provisioning.test.ts` cover the prefix fence.
 
-## What exposing outside Pollux would take
+## What exposing beyond this computer would take
 
-> **Not done. Waiting for Dave's go-ahead.** Nothing below has been run. The
+> **Not done. Waiting for the owner's go-ahead.** Nothing below has been run. The
 > verified setup listens only on `127.0.0.1`.
 
 Grok Bot runs in xAI's cloud, so it needs a public HTTPS endpoint. The
