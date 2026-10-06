@@ -80,9 +80,12 @@ export const opencodeAdapter: TranscriptAdapter = {
         skippedLines++;
         continue;
       }
-      const text = parts
-        .map(record)
-        .filter((p) => p.type === 'text' && p.synthetic !== true && typeof p.text === 'string')
+      const textParts = parts.map(record).filter((p) => p.type === 'text');
+      // A text part whose text is not a string is a changed shape; count it so
+      // the export reads as drift instead of a valid textless session.
+      if (textParts.some((p) => typeof p.text !== 'string')) skippedLines++;
+      const text = textParts
+        .filter((p) => p.synthetic !== true && typeof p.text === 'string')
         .map((p) => (p.text as string).trim())
         .filter(Boolean)
         .join('\n');

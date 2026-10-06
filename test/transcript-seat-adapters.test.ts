@@ -118,6 +118,7 @@ describe('ompAdapter', () => {
     };
     expect(await diagOf([toolOnly])).toEqual([0, 0, true]);
     expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'user', content: { text: 'drifted' } } }])).toEqual([0, 1, undefined]);
+    expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'user', content: [{ type: 'text', text: { value: 'drifted' } }] } }])).toEqual([0, 1, undefined]);
   });
 });
 
@@ -272,6 +273,7 @@ describe('opencodeAdapter', () => {
     expect(await diagOf([])).toEqual([0, 0, true]);
     expect(await diagOf([reasoningOnly])).toEqual([0, 0, true]);
     expect(await diagOf([reasoningOnly, { info: { role: 'user' }, parts: 'drifted' }])).toEqual([0, 1, undefined]);
+    expect(await diagOf([reasoningOnly, { info: { role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: { value: 'drifted' } }] }])).toEqual([0, 1, undefined]);
   });
 });
 

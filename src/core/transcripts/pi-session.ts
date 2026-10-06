@@ -128,6 +128,17 @@ async function* parsePiSession(
       if (mapped.startedAt) startedAt = mapped.startedAt;
       continue;
     }
+    // A text block whose text is not a string is dropped by the shared mapper;
+    // count it so a changed block shape reads as drift, never expected-empty.
+    const e = entry as Record<string, unknown>;
+    const m = e.type === 'message' && typeof e.message === 'object' && e.message !== null
+      ? (e.message as Record<string, unknown>)
+      : null;
+    if (m && Array.isArray(m.content) && m.content.some((b) =>
+      typeof b === 'object' && b !== null && (b as Record<string, unknown>).type === 'text' &&
+      typeof (b as Record<string, unknown>).text !== 'string')) {
+      skippedLines++;
+    }
     if (mapped.kind === 'message') {
       messages.push(mapped.message);
       continue;
@@ -136,9 +147,7 @@ async function* parsePiSession(
     // role with block or string content (tool-only turns, tool results,
     // reminders). Any other message shape is drift and must not let the file
     // pass as expected-empty.
-    const e = entry as Record<string, unknown>;
     if (e.type === 'message') {
-      const m = typeof e.message === 'object' && e.message !== null ? (e.message as Record<string, unknown>) : null;
       const knownRole = m && typeof m.role === 'string' && PI_ROLES.includes(m.role);
       if (!knownRole || !(typeof m.content === 'string' || Array.isArray(m.content))) skippedLines++;
     }
