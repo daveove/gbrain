@@ -115,7 +115,9 @@ export async function runOneShotDailyMemoryWrite(
   }
 
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
-  await drainInlineDailyMemory(engine, { signal: deps.signal });
+  // The callback defers each day's extraction to the single pass below; without
+  // one, the drained job would queue an extract job no worker here runs.
+  await drainInlineDailyMemory(engine, { signal: deps.signal, afterWrite: async () => {} });
   // Extract once after every write so the whole-brain link setup is paid once
   // and stale generated indexes from earlier nights drain with tonight's.
   await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { ...extractDeps, signal: deps.signal });

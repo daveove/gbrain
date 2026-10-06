@@ -358,26 +358,34 @@ finally:
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
   });
 
-  it('pins every command to the session port when config and env.sh name the transaction pooler', () => {
-    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila', database_url: 'postgres://example:example@pooler.example:6543/example' });
-    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_DATABASE_URL=postgres://example:example@pooler.example:6543/example\n');
+  it('pins every command to the session port when config and env.sh name the Supabase transaction pooler', () => {
+    const pooler = 'postgres://example:example@aws-0-example-1.pooler.supabase.com:6543/example';
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila', database_url: pooler });
+    writeFileSync(join(home, '.gbrain/env.sh'), `export GBRAIN_DATABASE_URL=${pooler}\n`);
     todayInputs(home);
     const result = run();
     expect(result.code).toBe(0);
     expect(result.calls.map(call => [call.kind, call.url])).toEqual([
-      ['ingest', 'postgres://example:example@pooler.example:5432/example'],
-      ['write', 'postgres://example:example@pooler.example:5432/example'],
+      ['ingest', 'postgres://example:example@aws-0-example-1.pooler.supabase.com:5432/example'],
+      ['write', 'postgres://example:example@aws-0-example-1.pooler.supabase.com:5432/example'],
     ]);
+  });
+
+  it('leaves a non-Supabase database on port 6543 unchanged', () => {
+    const { run } = fixture({ database_url: 'postgres://example:example@db.example:6543/example' });
+    const result = run(['2026-09-29']);
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@db.example:6543/example']);
   });
 
   it('resolves the session URL from GBRAIN_HOME, not the default config', () => {
     const { home, run } = fixture();
     const brainHome = join(home, 'other-brain');
     mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
-    writeFileSync(join(brainHome, '.gbrain/config.json'), JSON.stringify({ database_url: 'postgres://example:example@other.example:6543/example' }));
+    writeFileSync(join(brainHome, '.gbrain/config.json'), JSON.stringify({ database_url: 'postgres://example:example@other.pooler.supabase.com:6543/example' }));
     const result = run(['2026-09-29'], { GBRAIN_HOME: brainHome });
     expect(result.code).toBe(0);
-    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@other.example:5432/example']);
+    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@other.pooler.supabase.com:5432/example']);
   });
 
   it('fails a full session pool without retrying on the transaction pooler', () => {

@@ -111,6 +111,7 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
   expect(await engine.executeRaw(
     "SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status NOT IN ('completed','delayed')",
   )).toHaveLength(0);
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
   expect(extracted).toEqual([['daily-memory/2026-09-28', 'daily-memory/2026-09-30']]);
 });
 

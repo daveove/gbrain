@@ -11,9 +11,9 @@ mkdir -p "$(dirname "$LOG")" "$STATE"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
-# Scheduled jobs hold one session-mode connection (:5432), never the
+# Scheduled jobs hold one session-mode connection (:5432), never the Supabase
 # transaction pooler (:6543). loadConfig honors GBRAIN_HOME and env precedence.
-session_url="$(bun -e 'const { loadConfig } = await import(process.argv[1]); const url = loadConfig()?.database_url; if (url) { const u = new URL(url); if (u.port === "6543") u.port = "5432"; process.stdout.write(u.href); }' "$REPO/src/core/config.ts")"
+session_url="$(bun -e 'const { loadConfig } = await import(process.argv[1]); const { deriveSessionPoolerUrl } = await import(process.argv[2]); const url = loadConfig()?.database_url; if (url) process.stdout.write(deriveSessionPoolerUrl(url) ?? url);' "$REPO/src/core/config.ts" "$REPO/src/core/connection-manager.ts")"
 if [[ -n "$session_url" ]]; then
   export GBRAIN_DATABASE_URL="$session_url" DATABASE_URL="$session_url"
 fi

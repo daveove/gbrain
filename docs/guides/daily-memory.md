@@ -33,8 +33,8 @@ the transcript import and rewrites only that day's index. It still runs step 3.
 
 Every launcher command uses one connection on the Supabase session pooler,
 port 5432. The launcher reads the database URL the way every gbrain command
-does: the environment first, then `config.json` under `GBRAIN_HOME`. When that URL uses
-port 6543, it moves it to port 5432. It never retries on the transaction
+does: the environment first, then `config.json` under `GBRAIN_HOME`. When that
+URL is a Supabase pooler URL on port 6543, it moves it to port 5432. It never retries on the transaction
 pooler. A full session pool fails the run, and the next night retries.
 
 ## Size the extraction budget
