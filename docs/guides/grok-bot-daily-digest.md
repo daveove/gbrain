@@ -221,18 +221,20 @@ supported path is Tailscale Funnel:
 gbrain mcp expose --funnel
 gbrain mcp expose --status
 
-# 2. Grant the routine against the public URL.
-gbrain mcp grant grok-bot-digest --harness grok-bot --profile memory-writer --source default \
+# 2. Grant the routine against the public URL. Use a new client name: the
+#    loopback client from "Host setup" still exists, and its handoff is bound
+#    to the loopback URL. Revoke that loopback client once this one verifies.
+gbrain mcp grant grok-bot-digest-public --harness grok-bot --profile memory-writer --source default \
   --bound-slug-prefixes digests/grok-bot/ \
   --url https://your-machine.your-tailnet.ts.net/mcp \
   --admin-token-file ~/.gbrain/serve/admin-token \
-  --credentials-out /private/grok-bot-digest.json --json
+  --credentials-out /private/grok-bot-digest-public.json --json
 
 # 3. Move the handoff file to the Bot's computer privately, then inside the Bot:
 gbrain connect https://your-machine.your-tailnet.ts.net/mcp --harness grok-bot \
-  --credentials-file /private/grok-bot-digest.json --install --root /workspace/gbrain
+  --credentials-file /private/grok-bot-digest-public.json --install --root /workspace/gbrain
 /workspace/gbrain/bin/gbrain mcp verify --client CLIENT_ID --harness grok-bot \
-  --url https://your-machine.your-tailnet.ts.net/mcp --credentials-file /private/grok-bot-digest.json
+  --url https://your-machine.your-tailnet.ts.net/mcp --credentials-file /private/grok-bot-digest-public.json
 ```
 
 To revoke the client or roll back the exposure:
