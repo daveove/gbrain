@@ -2,8 +2,9 @@
  * types.ts — the transcript-adapter seam (cathedral-4).
  *
  * One contract for every dead-log format gbrain can import: coding-harness
- * session logs (Claude Code, Codex, OpenClaw, Hermes, Grok) and consumer chat
- * exports (ChatGPT, Claude.ai). Each adapter is a leaf module in this
+ * session logs (Claude Code, Codex, OpenClaw, Hermes, Grok, omp, pi, opencode,
+ * Cursor) and consumer chat exports (ChatGPT, Claude.ai). Each adapter is a
+ * leaf module in this
  * directory; the registry in detect.ts is the only place formats are
  * enumerated. Every adapter carries a DATED SPEC_TARGET (the
  * bootstrap/host-specs.ts discipline) because these are host formats gbrain
@@ -30,6 +31,10 @@ export type TranscriptFormat =
   | 'openclaw'
   | 'hermes'
   | 'grok'
+  | 'omp'
+  | 'pi'
+  | 'opencode'
+  | 'cursor'
   | 'chatgpt'
   | 'claude-export';
 
@@ -86,8 +91,9 @@ export interface FileDiagnostics {
 export interface ParseSessionsOpts {
   /**
    * Per-format byte budget. Most adapters REJECT a monolithic file over budget
-   * rather than truncating it; codex instead degrades to a bounded head+tail
-   * read, so an over-budget rollout still imports.
+   * rather than truncating it; codex, omp, pi and cursor instead degrade to a
+   * bounded head+tail read (bounded-read.ts), so an over-budget session still
+   * imports.
    */
   maxBytes?: number;
 }
@@ -98,6 +104,22 @@ export interface TranscriptAdapter {
   /** Cheap sniff over the file's head bytes; detect.ts owns ordering. */
   detect(path: string, sample: Buffer): boolean;
   parse(path: string, opts?: ParseSessionsOpts): AsyncGenerator<ParsedSession, FileDiagnostics>;
+}
+
+/**
+ * True when a content-block array holds a shape the adapter does not know:
+ * a non-object block, a block type outside `knownTypes`, or a `text` block
+ * whose text is not a string. Such blocks may carry conversation text the
+ * parser would silently drop, so adapters count the row as a skipped line
+ * (drift) instead of letting the file pass as clean or expected-empty.
+ */
+export function hasUnknownBlockShape(blocks: unknown[], knownTypes: readonly string[]): boolean {
+  return blocks.some((block) => {
+    if (typeof block !== 'object' || block === null) return true;
+    const b = block as Record<string, unknown>;
+    if (typeof b.type !== 'string' || !knownTypes.includes(b.type)) return true;
+    return b.type === 'text' && typeof b.text !== 'string';
+  });
 }
 
 // ── Byte caps (format-specific; see adapter headers) ────────────────────────
@@ -119,6 +141,10 @@ const SLUG_DIRS: Record<TranscriptFormat, string> = {
   openclaw: 'conversations/sessions',
   hermes: 'conversations/sessions',
   grok: 'conversations/sessions',
+  omp: 'conversations/sessions',
+  pi: 'conversations/sessions',
+  opencode: 'conversations/sessions',
+  cursor: 'conversations/sessions',
   chatgpt: 'conversations/chatgpt',
   'claude-export': 'conversations/claude',
 };
@@ -129,6 +155,10 @@ const HARNESS_FORMATS: ReadonlySet<TranscriptFormat> = new Set([
   'openclaw',
   'hermes',
   'grok',
+  'omp',
+  'pi',
+  'opencode',
+  'cursor',
 ]);
 
 /**

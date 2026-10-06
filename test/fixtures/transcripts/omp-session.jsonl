@@ -1,0 +1,15 @@
+{"type":"title","v":1,"title":"Draft widget launch plan","source":"auto","updatedAt":"2026-09-30T02:05:00.000Z","pad":"    "}
+{"type":"session","version":3,"id":"omp-fixture-session-1","timestamp":"2026-09-30T02:00:00.000Z","cwd":"/home/alice-example/acme-example"}
+{"type":"model_change","id":"a1","parentId":null,"timestamp":"2026-09-30T02:00:00.100Z","model":"provider-example/model-a"}
+{"type":"thinking_level_change","id":"a2","parentId":"a1","timestamp":"2026-09-30T02:00:00.200Z","thinkingLevel":"high"}
+{"type":"credential_pin","id":"a3","parentId":"a2","timestamp":"2026-09-30T02:00:00.300Z","provider":"provider-example","hash":"0000"}
+{"type":"message","id":"m1","parentId":"a3","timestamp":"2026-09-30T02:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Outline the acme-example widget launch."}],"timestamp":1790733660000}}
+{"type":"message","id":"m2","parentId":"m1","timestamp":"2026-09-30T02:01:30.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"PRIVATE-THINKING should never render"},{"type":"text","text":"Reading the launch notes first."},{"type":"toolCall","id":"t1","name":"read","arguments":{"path":"notes.md"}}],"timestamp":1790733690000}}
+{"type":"message","id":"m3","parentId":"m2","timestamp":"2026-09-30T02:01:31.000Z","message":{"role":"toolResult","toolCallId":"t1","content":[{"type":"text","text":"TOOL-OUTPUT should never render"}],"timestamp":1790733691000}}
+{"type":"message","id":"m4","parentId":"m3","timestamp":"2026-09-30T02:01:32.000Z","message":{"role":"developer","content":[{"type":"text","text":"<system-reminder>INJECTED-REMINDER</system-reminder>"}],"timestamp":1790733692000}}
+{"type":"custom_message","id":"c1","parentId":"m4","timestamp":"2026-09-30T02:01:33.000Z","customType":"async-result","display":true,"content":"<system-notice>INJECTED-NOTICE</system-notice>","attribution":"system"}
+{"type":"custom","id":"c2","parentId":"c1","timestamp":"2026-09-30T02:01:34.000Z","customType":"todo","data":{"items":["CUSTOM-DATA"]}}
+{"type":"message","id":"broken",
+{"type":"message","id":"m5","parentId":"c2","timestamp":"2026-09-30T02:02:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"PRIVATE-THINKING again"},{"type":"toolCall","id":"t2","name":"bash","arguments":{"command":"ls"}}],"timestamp":1790733720000}}
+{"type":"title_change","id":"tc1","parentId":"m5","timestamp":"2026-09-30T02:02:30.000Z","title":"Widget launch plan","source":"user"}
+{"type":"message","id":"m6","parentId":"tc1","timestamp":"2026-09-30T02:03:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Launch in three phases: beta, partners, general."}],"timestamp":1790733780000}}
