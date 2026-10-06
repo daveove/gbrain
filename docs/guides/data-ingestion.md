@@ -78,16 +78,20 @@ Cursor sessions import by path (opencode reads the JSON that
 `opencode export <id>` prints).
 
 The nightly daily-memory launcher (`scripts/gbrain-daily-memory.sh`) imports the
-day's sessions from every seat on the machine, in this order: Codex
-(`~/.codex/sessions`), omp (`~/.omp/agent/sessions`), Claude Code
-(`~/.claude/projects`), opencode (`~/.local/share/opencode/opencode.db`, read-only),
-pi (`~/.pi/agent/sessions`) and Cursor (`~/.cursor/projects`). A seat whose
+day's Codex sessions (`~/.codex/sessions`). Importing other agents is opt-in:
+list them in `GBRAIN_DAILY_MEMORY_SEATS`, in import order. To import every
+supported agent, set
+`GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"`. That
+covers omp (`~/.omp/agent/sessions`), Claude Code (`~/.claude/projects`),
+opencode (`~/.local/share/opencode/opencode.db`, read-only), pi
+(`~/.pi/agent/sessions`) and Cursor (`~/.cursor/projects`). A listed seat whose
 directory is missing is skipped. Each seat keeps its own watermark
 (`daily-memory-<seat>-mtime` under `GBRAIN_DAILY_MEMORY_STATE`), so a failed or
 partial import holds only that seat back: the other seats and the day note still
 run, and the launcher exits non-zero so the failure shows. Point a seat elsewhere
 with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`, `CLAUDE_CODE`, `OPENCODE`,
-`PI`, `CURSOR`). Subagent runs are not imported.
+`PI`, `CURSOR`). Subagent runs are not imported. Details:
+[daily memory](daily-memory.md#choose-which-agents-to-import).
 
 Or connect the account and skip the manual export entirely. `gbrain connectors`
 syncs your ChatGPT and Claude conversation history live, using your own browser

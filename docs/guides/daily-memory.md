@@ -20,7 +20,8 @@ first.
 
 Each scheduled run does three things in order.
 
-1. It imports the day's Codex sessions with `gbrain transcripts ingest`.
+1. It imports the day's agent sessions with `gbrain transcripts ingest`. By
+   default that is Codex only.
 2. It runs `scripts/write-daily-memory.ts`, which writes today's index, the
    previous day's index and any days missed since the last run.
 3. It extracts links once for every stale generated index, including indexes
@@ -29,6 +30,24 @@ Each scheduled run does three things in order.
 An explicit date argument, such as `gbrain-daily-memory.sh 2026-10-01`, skips
 the transcript import and the lookback, so it writes that day's index plus any
 days already queued by earlier imports. It still runs step 3.
+
+## Choose which agents to import
+
+Importing another agent's sessions is capture, so every seat beyond Codex is
+opt-in. List the seats you want in `GBRAIN_DAILY_MEMORY_SEATS`, in the order to
+import them. To import all six, set this in the LaunchAgent's environment:
+
+```bash
+GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"
+```
+
+Leaving the variable unset imports Codex only. An unknown name is logged and
+skipped. A seat whose directory is missing is skipped too. Each seat keeps its
+own watermark, `daily-memory-<seat>-mtime` under `GBRAIN_DAILY_MEMORY_STATE`.
+When one seat fails, the launcher holds that seat's watermark, imports the
+remaining seats, writes the day, and then exits non-zero. Point a seat at
+another directory with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`,
+`CLAUDE_CODE`, `OPENCODE`, `PI`, `CURSOR`).
 
 ## Keep the database on the session port
 

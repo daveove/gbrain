@@ -107,6 +107,7 @@ function offsetFor(timeZone: string, _day: string): string {
  * One today-session per non-codex seat (plus decoys each selector must skip),
  * mtimes pinned at `at` so day selection is deterministic.
  */
+const ALL_SEATS = 'codex omp claude-code opencode pi cursor';
 function seatSessions(home: string, at: number) {
   const iso = new Date(at).toISOString();
   const write = (file: string, body: string) => {
@@ -496,11 +497,34 @@ finally:
     expect(readFileSync(join(home, 'Library/Logs/gbrain-daily-memory.log'), 'utf8')).toContain(`codex skipped: no root at ${join(home, '.codex/sessions')}`);
   });
 
+  it('ingests only codex by default even when other seat roots exist', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    seatSessions(home, input.start + 12 * 3600_000);
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
+    expect(result.calls[0].args[result.calls[0].args.indexOf('--format') + 1]).toBe('codex');
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-omp-mtime'))).toBe(false);
+  });
+
+  it('ingests exactly the opted-in seats in the listed order and logs unknown names', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    seatSessions(home, input.start + 12 * 3600_000);
+    const result = run([], { GBRAIN_DAILY_MEMORY_SEATS: 'cursor bogus omp' });
+    expect(result.code).toBe(0);
+    expect(result.calls.filter(call => call.kind === 'ingest').map(call => call.args[call.args.indexOf('--format') + 1])).toEqual(['cursor', 'omp']);
+    expect(result.calls.at(-1)!.kind).toBe('write');
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
+    expect(readFileSync(join(home, 'Library/Logs/gbrain-daily-memory.log'), 'utf8')).toContain('bogus skipped: unknown seat in GBRAIN_DAILY_MEMORY_SEATS');
+  });
+
   it('ingests every present seat in order with its own format and watermark', () => {
     const { home, run } = fixture();
     const input = todayInputs(home);
     const seats = seatSessions(home, input.start + 12 * 3600_000);
-    const result = run();
+    const result = run([], { GBRAIN_DAILY_MEMORY_SEATS: ALL_SEATS });
     expect(result.code).toBe(0);
     const ingests = result.calls.filter(call => call.kind === 'ingest');
     expect(ingests.map(call => call.args[call.args.indexOf('--format') + 1])).toEqual(['codex', 'omp', 'claude-code', 'opencode', 'pi', 'cursor']);
@@ -520,7 +544,7 @@ finally:
     const input = todayInputs(home);
     seatSessions(home, input.start + 12 * 3600_000);
     // The fixture fails the first ingest attempt only: codex fails, the rest succeed.
-    const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'error' });
+    const result = run([], { TEST_FAIL_KIND: 'ingest', TEST_FAIL_MODE: 'error', GBRAIN_DAILY_MEMORY_SEATS: ALL_SEATS });
     expect(result.code).toBe(7);
     expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'ingest', 'ingest', 'ingest', 'ingest', 'ingest', 'write']);
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
@@ -535,7 +559,7 @@ finally:
     const ompProject = dirname(seats.omp);
     chmodSync(ompProject, 0o000);
     try {
-      const result = run();
+      const result = run([], { GBRAIN_DAILY_MEMORY_SEATS: ALL_SEATS });
       expect(result.code).toBe(1);
       const formats = result.calls.filter(call => call.kind === 'ingest').map(call => call.args[call.args.indexOf('--format') + 1]);
       expect(formats).toEqual(['codex', 'claude-code', 'opencode', 'pi', 'cursor']);
@@ -554,7 +578,7 @@ finally:
     const file = join(custom, '-proj', 'session.jsonl');
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify({ type: 'session', version: 3, id: 'x', timestamp: new Date(input.start + 3600_000).toISOString() }) + '\n');
-    const result = run([], { GBRAIN_DAILY_MEMORY_OMP_ROOT: custom });
+    const result = run([], { GBRAIN_DAILY_MEMORY_OMP_ROOT: custom, GBRAIN_DAILY_MEMORY_SEATS: 'omp' });
     const omp = result.calls.find(call => call.kind === 'ingest' && call.args.includes('omp'))!;
     expect(omp.args.slice(-1)).toEqual([file]);
   });

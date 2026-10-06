@@ -13,6 +13,7 @@ import { cursorAdapter, parseCursorTimestampTag } from '../src/core/transcripts/
 import { opencodeAdapter } from '../src/core/transcripts/opencode.ts';
 import { ompAdapter, piAdapter } from '../src/core/transcripts/pi-session.ts';
 import { redactSession, renderSessionParts } from '../src/core/transcripts/render.ts';
+import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { transcriptSlugId, type FileDiagnostics, type ParsedSession, type TranscriptFormat } from '../src/core/transcripts/types.ts';
 
 const FIXTURES = join(import.meta.dir, 'fixtures', 'transcripts');
@@ -161,7 +162,31 @@ describe('cursorAdapter', () => {
     const st = statSync(p);
     const expected = new Date(st.birthtimeMs > 0 ? st.birthtimeMs : Date.parse('2026-09-29T10:00:00.000Z')).toISOString();
     expect(sessions[0].meta.startedAt).toBe(expected);
-    expect(sessions[0].messages).toEqual([{ role: 'user', timestamp: '', text: 'Hi' }]);
+    expect(sessions[0].messages).toEqual([{ role: 'user', timestamp: '2026-09-29T10:00:00.000Z', text: 'Hi' }]);
+  });
+
+  test('a reply appended after the watermark re-imports a session whose prompt predates it', async () => {
+    const d = tdir();
+    const p = join(d, 'fresh.jsonl');
+    const row = (role: string, text: string) => JSON.stringify({ role, message: { content: [{ type: 'text', text }] } });
+    writeFileSync(p, [
+      row('user', '<timestamp>Wednesday, Sep 30, 2026, 9:15 AM (UTC+8)</timestamp>\n<user_query>Draft the acme-example memo.</user_query>'),
+      row('assistant', 'Drafting now.'),
+      row('assistant', 'Memo done: three sections.'),
+    ].join('\n') + '\n');
+    const appendedAt = new Date('2026-09-30T15:00:00.000Z');
+    utimesSync(p, appendedAt, appendedAt);
+    const { sessions } = await drain(cursorAdapter.parse(p));
+    expect(sessions[0].messages.at(-1)).toEqual({ role: 'assistant', timestamp: '2026-09-30T15:00:00.000Z', text: 'Memo done: three sections.' });
+    const r = await runTranscriptsIngest({} as never, {
+      paths: [p],
+      format: 'cursor',
+      dryRun: true,
+      sinceIso: '2026-09-30T12:00:00.000Z',
+      sourceId: 'default',
+      userPatternsPath: '/nonexistent',
+    });
+    expect([r.sessionsSeen, r.sessionsFiltered, r.pages.planned]).toEqual([1, 0, 1]);
   });
 
   test('a file of only turn bookkeeping rows is expected-empty, not drift', async () => {

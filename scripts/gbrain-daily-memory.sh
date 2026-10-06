@@ -73,9 +73,12 @@ run_command() {
   sed -E 's#postgres(ql)?://[^[:space:]]+#[redacted-url]#g' "$TMP" >> "$LOG"
   return "$ec"
 }
-# Agent seats ingested on scheduled runs, in this order. Each seat has its own
-# mtime watermark under $STATE; a seat whose root is absent is skipped.
-SEATS=(codex omp claude-code opencode pi cursor)
+# Agent seats ingested on scheduled runs, in the order listed. Reading another
+# harness's sessions is capture, so seats beyond codex are opt-in:
+# GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor".
+# Each seat has its own mtime watermark under $STATE; a seat whose root is
+# absent is skipped.
+read -r -a SEATS <<< "${GBRAIN_DAILY_MEMORY_SEATS:-codex}"
 seat_root() {
   case "$1" in
     codex) printf '%s' "${GBRAIN_DAILY_MEMORY_CODEX_ROOT:-$HOME/.codex/sessions}" ;;
@@ -110,8 +113,12 @@ day, zone_name = sys.argv[1], sys.argv[2]
 start = datetime.combine(datetime.fromisoformat(day).date(), time(), ZoneInfo(zone_name))
 print(start.astimezone(timezone.utc).isoformat())
 ' "$day" "$zone")"
-  for seat in "${SEATS[@]}"; do
+  for seat in ${SEATS[@]+"${SEATS[@]}"}; do
     root="$(seat_root "$seat")"
+    if [[ -z "$root" ]]; then
+      printf '%s skipped: unknown seat in GBRAIN_DAILY_MEMORY_SEATS\n' "$seat" >> "$LOG"
+      continue
+    fi
     if [[ ! -e "$root" ]]; then
       printf '%s skipped: no root at %s\n' "$seat" "$root" >> "$LOG"
       continue

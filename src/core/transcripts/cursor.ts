@@ -5,8 +5,10 @@
  * `subagents/` siblings are delegated runs, not sessions, and are never
  * selected. Lines carry NO per-message timestamps, so times come from the
  * `<timestamp>` tag Cursor prepends to each user row; assistant rows carry the
- * previous message's time forward at render. A session with no tag falls back
- * to the file's birth time (mtime when the filesystem has none).
+ * previous message's time forward at render, except a trailing untagged
+ * message, which takes the file mtime so appended replies count as an update.
+ * A session with no tag starts at the file's birth time (mtime when the
+ * filesystem has none).
  *
  * TURN SELECTION IS STRUCTURAL: a user row is human text only when it carries
  * a `<user_query>` block, and only that block's content is kept. Rows without
@@ -101,6 +103,7 @@ export const cursorAdapter: TranscriptAdapter = {
     const { raw, bytesRead, truncated } = readJsonlWithinBudget(path, budget);
     let skippedLines = 0;
     let firstTagTs = '';
+    let lastTagTs = '';
     let turnRows = 0;
     const messages: TranscriptMessage[] = [];
 
@@ -126,6 +129,7 @@ export const cursorAdapter: TranscriptAdapter = {
       if (e.role === 'user') {
         const timestamp = parseCursorTimestampTag(text) ?? '';
         if (timestamp && !firstTagTs) firstTagTs = timestamp;
+        if (timestamp) lastTagTs = timestamp;
         const query = [...text.matchAll(USER_QUERY_RE)].map((m) => m[1].trim()).filter(Boolean).join('\n\n');
         if (query) messages.push({ role: 'user', timestamp, text: query });
       } else if (e.role === 'assistant') {
@@ -138,11 +142,15 @@ export const cursorAdapter: TranscriptAdapter = {
     if (messages.length > 0) {
       sessions = 1;
       const sessionId = basename(path, '.jsonl');
-      let startedAt = firstTagTs;
-      if (!startedAt) {
-        const st = statSync(path);
-        startedAt = new Date(st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs).toISOString();
-      }
+      const st = statSync(path);
+      const mtimeIso = new Date(st.mtimeMs).toISOString();
+      const startedAt = firstTagTs || new Date(st.birthtimeMs > 0 ? st.birthtimeMs : st.mtimeMs).toISOString();
+      // Rows appended after the last tagged prompt have no time of their own.
+      // Without one, the session's last timestamp stays at that prompt and
+      // `ingest --since <watermark>` filters the updated session out; the file
+      // mtime is the real time those rows were last written.
+      const last = messages[messages.length - 1];
+      if (!last.timestamp && mtimeIso > lastTagTs) last.timestamp = mtimeIso;
       yield {
         meta: {
           harness: 'cursor',
