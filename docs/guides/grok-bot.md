@@ -68,6 +68,9 @@ The Bot's memory now lives on your machine: back it up, inspect it, and
 revoke the Bot's client on the host whenever it should stop. `gbrain mcp
 expose --status` on your computer re-checks the service and the public URL.
 
+For a scheduled routine that writes one digest page per day through the
+published MCP endpoint, follow the [daily digest contract](grok-bot-daily-digest.md).
+
 ## Alternative: install GBrain inside the Bot
 
 Use this when no computer of yours can stay online. Paste this into your Bot:
