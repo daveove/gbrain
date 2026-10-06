@@ -44,7 +44,9 @@ export const OPENCODE_SPEC_TARGET: HostSpecTarget = {
 const EXPORT_HEAD_RE = /^\s*\{\s*"info"\s*:\s*\{\s*"id"\s*:\s*"ses_/;
 
 function epochIso(value: unknown): string {
-  return typeof value === 'number' && Number.isFinite(value) ? new Date(value).toISOString() : '';
+  if (typeof value !== 'number') return '';
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : d.toISOString();
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -89,7 +91,13 @@ export const opencodeAdapter: TranscriptAdapter = {
         .map((p) => (p.text as string).trim())
         .filter(Boolean)
         .join('\n');
-      if (text) messages.push({ role, timestamp: epochIso(record(msgInfo.time).created), text });
+      if (!text) continue;
+      const timestamp = epochIso(record(msgInfo.time).created);
+      // Without its own time, an appended message inherits the previous one's
+      // at render and `ingest --since` can filter the updated session; count
+      // it so the scan stays unclean and the watermark holds.
+      if (!timestamp) skippedLines++;
+      messages.push({ role, timestamp, text });
     }
 
     let sessions = 0;

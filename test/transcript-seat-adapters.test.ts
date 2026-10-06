@@ -227,6 +227,9 @@ describe('cursorAdapter', () => {
     writeFileSync(p, [...rows, { role: 'user', message: { content: 'drifted to a string' } }].map((r) => JSON.stringify(r)).join('\n') + '\n');
     const drift = await drain(cursorAdapter.parse(p));
     expect([drift.diag.sessions, drift.diag.skippedLines, drift.diag.expectedEmpty]).toEqual([0, 1, undefined]);
+    writeFileSync(p, [...rows, { role: 'assistant', message: { content: [{ type: 'text', text: { value: 'drifted' } }] } }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const block = await drain(cursorAdapter.parse(p));
+    expect([block.diag.sessions, block.diag.skippedLines, block.diag.expectedEmpty]).toEqual([0, 1, undefined]);
   });
 });
 
@@ -274,6 +277,23 @@ describe('opencodeAdapter', () => {
     expect(await diagOf([reasoningOnly])).toEqual([0, 0, true]);
     expect(await diagOf([reasoningOnly, { info: { role: 'user' }, parts: 'drifted' }])).toEqual([0, 1, undefined]);
     expect(await diagOf([reasoningOnly, { info: { role: 'user', time: { created: 1 } }, parts: [{ type: 'text', text: { value: 'drifted' } }] }])).toEqual([0, 1, undefined]);
+  });
+
+  test('a text message without a numeric creation time keeps its text but counts as drift', async () => {
+    const d = tdir();
+    const p = join(d, 'untimed.json');
+    const msg = (id: string, created: unknown, text: string) => ({ info: { id, role: 'assistant', time: { created } }, parts: [{ type: 'text', text }] });
+    writeFileSync(p, JSON.stringify({
+      info: { id: 'ses_untimed', time: { created: 1790733600000 } },
+      messages: [msg('m1', 1790733600000, 'First answer.'), msg('m2', undefined, 'Appended answer.'), msg('m3', 8.64e15 + 1, 'Out of range.')],
+    }));
+    const { sessions, diag } = await drain(opencodeAdapter.parse(p));
+    expect(sessions[0].messages.map((m) => [m.timestamp, m.text])).toEqual([
+      ['2026-09-30T02:00:00.000Z', 'First answer.'],
+      ['', 'Appended answer.'],
+      ['', 'Out of range.'],
+    ]);
+    expect([diag.sessions, diag.skippedLines]).toEqual([1, 2]);
   });
 });
 

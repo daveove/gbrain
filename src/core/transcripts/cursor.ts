@@ -129,6 +129,13 @@ export const cursorAdapter: TranscriptAdapter = {
         skippedLines++;
         continue;
       }
+      // textBlocks drops a text block whose text is not a string; count it so
+      // a changed block shape reads as drift instead of a clean empty row.
+      if (msg.content.some((b) =>
+        typeof b === 'object' && b !== null && (b as Record<string, unknown>).type === 'text' &&
+        typeof (b as Record<string, unknown>).text !== 'string')) {
+        skippedLines++;
+      }
       const text = textBlocks(msg.content);
       if (e.role === 'user') {
         const timestamp = parseCursorTimestampTag(text) ?? '';
