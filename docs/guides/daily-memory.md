@@ -32,11 +32,10 @@ the transcript import and rewrites only that day's index. It still runs step 3.
 ## Keep the database on the session port
 
 Every launcher command uses one connection on the Supabase session pooler,
-port 5432. The launcher prefers `GBRAIN_DIRECT_DATABASE_URL` or
-`direct_database_url` from `~/.gbrain/config.json`. When only a port 6543 URL
-is configured, it moves that URL to port 5432. It never retries on the
-transaction pooler. A full session pool fails the run, and the next night
-retries.
+port 5432. The launcher reads the database URL the way every gbrain command
+does: the environment first, then `config.json` under `GBRAIN_HOME`. When that URL uses
+port 6543, it moves it to port 5432. It never retries on the transaction
+pooler. A full session pool fails the run, and the next night retries.
 
 ## Size the extraction budget
 
@@ -47,7 +46,7 @@ run. The budget defaults to 30 minutes, including setup. Set
 
 When the budget runs out with work left, the writer exits non-zero with
 `Daily memory extraction needs retry: N generated daily-index pages remain`.
-The written indexes stay. The next run extracts the remainder first.
+The written indexes stay. The next run extracts the remainder.
 
 ## Catch up after an outage
 
@@ -57,14 +56,9 @@ Run the launcher once with a larger budget:
 GBRAIN_EXTRACT_TIME_BUDGET_MS=7200000 ~/.local/bin/gbrain-daily-memory.sh "$(date +%F)"
 ```
 
-Check the backlog afterwards. This count should be 0:
-
-```sql
-SELECT count(*) FROM pages
-WHERE source_id = 'dream' AND deleted_at IS NULL
-  AND frontmatter @> '{"dream_generated": true}'
-  AND (links_extracted_at IS NULL OR updated_at > links_extracted_at);
-```
+The writer exits 0 only when no stale generated index remains, so a clean exit
+is the backlog check. On the production brain, 263 stale indexes took about
+14 minutes.
 
 ## Read the logs
 

@@ -24,6 +24,8 @@ function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asi
   writeFileSync(bun, `#!/usr/bin/env python3
 import json, os, pathlib, sys, time
 args = sys.argv[1:]
+if args[0] == '-e':
+    os.execv(os.environ['TEST_REAL_BUN'], [os.environ['TEST_REAL_BUN'], *args])
 kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
   'ingest' if 'transcripts' in args else 'write')
 log = pathlib.Path(os.environ['TEST_CALLS'])
@@ -53,7 +55,7 @@ else:
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GBRAIN_') && key !== 'DATABASE_URL'));
   function run(args: string[] = [], extra: Record<string, string> = {}) {
     const result = spawnSync('/bin/bash', [launcher, ...args], {
-      env: { ...env, HOME: home, GBRAIN_REPO_ROOT: repo, TEST_CALLS: calls, ...extra },
+      env: { ...env, HOME: home, GBRAIN_REPO_ROOT: repo, TEST_CALLS: calls, TEST_REAL_BUN: process.execPath, ...extra },
       encoding: 'utf8', timeout: 15_000,
     });
     expect(result.error).toBeUndefined();
@@ -110,9 +112,9 @@ describe('daily memory launcher', () => {
     const ready = join(home, 'ready');
     const probe = spawnSync('python3', ['-c', `
 import os, pathlib, subprocess, sys, time
-launcher, home, repo, calls, ready = sys.argv[1:]
+launcher, home, repo, calls, ready, real_bun = sys.argv[1:]
 env = {k:v for k,v in os.environ.items() if not k.startswith('GBRAIN_') and k != 'DATABASE_URL'}
-env.update(HOME=home, GBRAIN_REPO_ROOT=repo, TEST_CALLS=calls, TEST_HOLD='1', TEST_READY=ready)
+env.update(HOME=home, GBRAIN_REPO_ROOT=repo, TEST_CALLS=calls, TEST_HOLD='1', TEST_READY=ready, TEST_REAL_BUN=real_bun)
 first = subprocess.Popen(['/bin/bash', launcher, '2026-09-29'], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 try:
     deadline = time.monotonic() + 5
@@ -128,7 +130,7 @@ finally:
     if first.poll() is None:
         first.kill()
         first.wait()
-`, launcher, home, repo, calls, ready], { encoding: 'utf8', timeout: 15_000 });
+`, launcher, home, repo, calls, ready, process.execPath], { encoding: 'utf8', timeout: 15_000 });
     expect(probe.error).toBeUndefined();
     expect(probe.status).toBe(0);
     expect(readFileSync(calls, 'utf8').trim().split('\n')).toHaveLength(1);
@@ -368,15 +370,14 @@ finally:
     ]);
   });
 
-  it('prefers the direct session URL from env.sh', () => {
+  it('resolves the session URL from GBRAIN_HOME, not the default config', () => {
     const { home, run } = fixture();
-    writeFileSync(join(home, '.gbrain/env.sh'), [
-      'export GBRAIN_DATABASE_URL=postgres://example:example@pooler.example:6543/example',
-      'export GBRAIN_DIRECT_DATABASE_URL=postgres://example:example@direct.example:5432/example',
-    ].join('\n') + '\n');
-    const result = run(['2026-09-29']);
+    const brainHome = join(home, 'other-brain');
+    mkdirSync(join(brainHome, '.gbrain'), { recursive: true });
+    writeFileSync(join(brainHome, '.gbrain/config.json'), JSON.stringify({ database_url: 'postgres://example:example@other.example:6543/example' }));
+    const result = run(['2026-09-29'], { GBRAIN_HOME: brainHome });
     expect(result.code).toBe(0);
-    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@direct.example:5432/example']);
+    expect(result.calls.map(call => call.url)).toEqual(['postgres://example:example@other.example:5432/example']);
   });
 
   it('fails a full session pool without retrying on the transaction pooler', () => {
