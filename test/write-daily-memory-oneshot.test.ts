@@ -78,6 +78,18 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
+test('one-shot extract fails when a generated index lands during the sweep', async () => {
+  await seed();
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => {
+      await engine.putPage('daily-memory/2026-09-27', {
+        type: 'note', title: 'Late generated index', compiled_truth: '', frontmatter: { dream_generated: true },
+      }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      return noExtract(_engine, opts);
+    },
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+});
+
 test('extractOneShotDailyMemory is a no-op without written or needs_extract', async () => {
   let called = 0;
   await extractOneShotDailyMemory(engine, {

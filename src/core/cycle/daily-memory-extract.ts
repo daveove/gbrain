@@ -38,14 +38,21 @@ export async function extractOneShotDailyMemory(
     return source?.owned === true;
   };
   deps.signal?.throwIfAborted();
-  const slugs = result.extract_slugs?.length ? result.extract_slugs : await dailyMemoryExtractTargets(engine);
+  const exact = Boolean(result.extract_slugs?.length);
+  const slugs = exact ? result.extract_slugs! : await dailyMemoryExtractTargets(engine);
   deps.signal?.throwIfAborted();
   if (!slugs.length) return;
-  const remaining = budget > 0
-    ? (await extract(engine, {
+  let remaining = slugs.length;
+  if (budget > 0) {
+    const extracted = await extract(engine, {
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
       slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
-    })).staleRemaining
-    : slugs.length;
+    });
+    // Indexes written during the minutes-long extract setup are not in the
+    // frozen selection; count them so the run does not report success.
+    const selected = new Set(slugs);
+    const late = exact ? 0 : (await dailyMemoryExtractTargets(engine)).filter(slug => !selected.has(slug)).length;
+    remaining = extracted.staleRemaining + late;
+  }
   if (remaining > 0) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
 }
