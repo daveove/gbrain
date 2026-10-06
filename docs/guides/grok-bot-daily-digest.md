@@ -12,9 +12,9 @@ The contract uses only existing pieces: the `memory-writer` grant profile, a
 ## Host setup (loopback only)
 
 Start the server bound to loopback with an owner credential from a private
-file. On macOS, use the real path (`/private/tmp/...`, not `/tmp/...`). The
-admin token file, the credential handoff, and the server's `GBRAIN_HOME`
-reject symlinked paths.
+file. Give every path its symlink-free real path. On macOS, `/tmp` is a
+symlink to `/private/tmp`. The admin token file, the credential handoff, and
+the server's `GBRAIN_HOME` reject symlinked paths.
 
 ```bash
 umask 077
@@ -184,9 +184,9 @@ Run the steps above against a throwaway brain. Do not use the production
 brain.
 
 ```bash
-export GBRAIN_HOME=$(cd "$(mktemp -d /private/tmp/digest-check.XXXX)" && pwd -P)
-unset GBRAIN_DATABASE_URL DATABASE_URL GBRAIN_DIRECT_DATABASE_URL
-gbrain init --pglite --no-embedding --non-interactive --db-only
+unset GBRAIN_HOME GBRAIN_DATABASE_URL DATABASE_URL GBRAIN_DIRECT_DATABASE_URL
+dir=$(mktemp -d "${TMPDIR:-/tmp}/digest-check.XXXX") && GBRAIN_HOME=$(cd "$dir" && pwd -P) && export GBRAIN_HOME
+[ -n "$GBRAIN_HOME" ] && gbrain init --pglite --no-embedding --non-interactive --db-only
 # start serve --http --bind 127.0.0.1 and run gbrain mcp grant as above
 ```
 
@@ -217,6 +217,9 @@ Grok Bot runs in xAI's cloud, so it needs a public HTTPS endpoint. The
 supported path is Tailscale Funnel:
 
 ```bash
+# 0. Stop the manually started loopback server first. expose installs its own
+#    service on port 3131 and refuses with foreign_listener while anything listens there.
+
 # 1. Publish serve --http as a user service on the machine's MagicDNS name (consent prompt).
 gbrain mcp expose --funnel
 gbrain mcp expose --status
