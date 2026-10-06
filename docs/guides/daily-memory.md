@@ -44,10 +44,13 @@ GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"
 Leaving the variable unset imports Codex only. An unknown name is logged and
 skipped. A seat whose directory is missing is skipped too. Each seat keeps its
 own watermark, `daily-memory-<seat>-mtime` under `GBRAIN_DAILY_MEMORY_STATE`.
-When one seat fails, the launcher holds that seat's watermark, imports the
-remaining seats, writes the day, and then exits non-zero. Point a seat at
-another directory with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`,
-`CLAUDE_CODE`, `OPENCODE`, `PI`, `CURSOR`).
+When one seat fails or imports only part of its sessions (`cleanScan` false),
+the launcher holds that seat's watermark, imports the remaining seats, writes
+the day, and then exits non-zero. Claude Code is read from
+`$CLAUDE_CONFIG_DIR/projects` and OpenCode from
+`$XDG_DATA_HOME/opencode/opencode.db` when those variables are set. Point a seat
+at another directory with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`,
+`CLAUDE_CODE`, `OPENCODE`, `PI`, `CURSOR`); that override always wins.
 
 ## Keep the database on the session port
 

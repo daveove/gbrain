@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -52,7 +52,8 @@ else:
     print('fixture success')
 `);
   chmodSync(bun, 0o755);
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GBRAIN_') && key !== 'DATABASE_URL'));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    !key.startsWith('GBRAIN_') && !['DATABASE_URL', 'CLAUDE_CONFIG_DIR', 'XDG_DATA_HOME'].includes(key)));
   function run(args: string[] = [], extra: Record<string, string> = {}) {
     const result = spawnSync('/bin/bash', [launcher, ...args], {
       env: { ...env, HOME: home, GBRAIN_REPO_ROOT: repo, TEST_CALLS: calls, TEST_REAL_BUN: process.execPath, ...extra },
@@ -280,7 +281,7 @@ finally:
     expect(src).toContain('.tmp');
   });
 
-  it('holds the watermark when ingest reports cleanScan false', () => {
+  it('writes, holds the watermark and exits nonzero when ingest reports cleanScan false', () => {
     const { home, run } = fixture();
     todayInputs(home);
     const mark = join(home, '.local/state/gbrain/daily-memory-codex-mtime');
@@ -288,7 +289,7 @@ finally:
     writeFileSync(mark, '2026-09-28T12:00:00Z\n');
     const before = readFileSync(mark, 'utf8');
     const result = run([], { TEST_CLEAN_SCAN: '0' });
-    expect(result.code).toBe(0);
+    expect(result.code).toBe(1);
     expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
     expect(readFileSync(mark, 'utf8')).toBe(before);
   });
@@ -581,6 +582,36 @@ finally:
     const result = run([], { GBRAIN_DAILY_MEMORY_OMP_ROOT: custom, GBRAIN_DAILY_MEMORY_SEATS: 'omp' });
     const omp = result.calls.find(call => call.kind === 'ingest' && call.args.includes('omp'))!;
     expect(omp.args.slice(-1)).toEqual([file]);
+  });
+
+  it('finds Claude Code and OpenCode under CLAUDE_CONFIG_DIR and XDG_DATA_HOME', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    const seats = seatSessions(home, input.start + 12 * 3600_000);
+    const claudeDir = join(home, 'claude-config');
+    const dataHome = join(home, 'xdg-data');
+    mkdirSync(join(dataHome, 'opencode'), { recursive: true });
+    renameSync(join(home, '.claude'), claudeDir);
+    renameSync(join(home, '.local/share/opencode/opencode.db'), join(dataHome, 'opencode/opencode.db'));
+    const result = run([], { GBRAIN_DAILY_MEMORY_SEATS: 'claude-code opencode', CLAUDE_CONFIG_DIR: claudeDir, XDG_DATA_HOME: dataHome });
+    expect(result.code).toBe(0);
+    const ingests = result.calls.filter(call => call.kind === 'ingest');
+    expect(ingests.map(call => call.args[call.args.indexOf('--format') + 1])).toEqual(['claude-code', 'opencode']);
+    expect(ingests[0].args.slice(-1)).toEqual([seats.claude.replace(join(home, '.claude'), claudeDir)]);
+    expect(ingests[1].args.at(-1)!.endsWith('/ses_today.json')).toBe(true);
+  });
+
+  it('an explicit seat root wins over CLAUDE_CONFIG_DIR', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    const seats = seatSessions(home, input.start + 12 * 3600_000);
+    const result = run([], {
+      GBRAIN_DAILY_MEMORY_SEATS: 'claude-code',
+      CLAUDE_CONFIG_DIR: join(home, 'nowhere'),
+      GBRAIN_DAILY_MEMORY_CLAUDE_CODE_ROOT: join(home, '.claude/projects'),
+    });
+    const ingest = result.calls.find(call => call.kind === 'ingest')!;
+    expect(ingest.args.slice(-1)).toEqual([seats.claude]);
   });
 
   it('selects top-level sessions per seat layout, excluding subagent and self sessions', () => {

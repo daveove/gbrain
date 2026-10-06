@@ -83,8 +83,8 @@ seat_root() {
   case "$1" in
     codex) printf '%s' "${GBRAIN_DAILY_MEMORY_CODEX_ROOT:-$HOME/.codex/sessions}" ;;
     omp) printf '%s' "${GBRAIN_DAILY_MEMORY_OMP_ROOT:-$HOME/.omp/agent/sessions}" ;;
-    claude-code) printf '%s' "${GBRAIN_DAILY_MEMORY_CLAUDE_CODE_ROOT:-$HOME/.claude/projects}" ;;
-    opencode) printf '%s' "${GBRAIN_DAILY_MEMORY_OPENCODE_ROOT:-$HOME/.local/share/opencode/opencode.db}" ;;
+    claude-code) printf '%s' "${GBRAIN_DAILY_MEMORY_CLAUDE_CODE_ROOT:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects}" ;;
+    opencode) printf '%s' "${GBRAIN_DAILY_MEMORY_OPENCODE_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/opencode/opencode.db}" ;;
     pi) printf '%s' "${GBRAIN_DAILY_MEMORY_PI_ROOT:-$HOME/.pi/agent/sessions}" ;;
     cursor) printf '%s' "${GBRAIN_DAILY_MEMORY_CURSOR_ROOT:-$HOME/.cursor/projects}" ;;
   esac
@@ -200,6 +200,7 @@ raise SystemExit(0 if clean is True else 1)
       advance_seats+=("$seat")
     else
       printf '%s ingest unclean (cleanScan!=true); holding its watermark\n' "$seat" >> "$LOG"
+      [[ $seat_failure -ne 0 ]] || seat_failure=1
     fi
   done
   # Pass the same calendar day already used for selector/ingest; zone rides in

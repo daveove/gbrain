@@ -110,6 +110,9 @@ export const opencodeAdapter: TranscriptAdapter = {
       skippedLines,
       truncated: false,
       sessions,
+      // A valid export with no messages, or only reasoning/tool/synthetic
+      // parts, is understood. Malformed messages count in skippedLines.
+      expectedEmpty: sessions === 0 && skippedLines === 0 ? true : undefined,
       zeroSessionsReason: sessions === 0 ? 'no non-synthetic text parts in user/assistant messages' : undefined,
     };
   },

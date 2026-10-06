@@ -83,6 +83,8 @@ function firstLineType(sample: Buffer): unknown {
   }
 }
 
+const PI_ROLES = ['user', 'assistant', 'toolResult', 'developer'];
+
 async function* parsePiSession(
   format: PiFormat,
   path: string,
@@ -126,7 +128,20 @@ async function* parsePiSession(
       if (mapped.startedAt) startedAt = mapped.startedAt;
       continue;
     }
-    if (mapped.kind === 'message') messages.push(mapped.message);
+    if (mapped.kind === 'message') {
+      messages.push(mapped.message);
+      continue;
+    }
+    // A message line the shared mapper skipped is fine when it is a known
+    // role with block or string content (tool-only turns, tool results,
+    // reminders). Any other message shape is drift and must not let the file
+    // pass as expected-empty.
+    const e = entry as Record<string, unknown>;
+    if (e.type === 'message') {
+      const m = typeof e.message === 'object' && e.message !== null ? (e.message as Record<string, unknown>) : null;
+      const knownRole = m && typeof m.role === 'string' && PI_ROLES.includes(m.role);
+      if (!knownRole || !(typeof m.content === 'string' || Array.isArray(m.content))) skippedLines++;
+    }
   }
 
   let sessions = 0;

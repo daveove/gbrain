@@ -105,6 +105,20 @@ describe('ompAdapter', () => {
     expect(sessions).toEqual([]);
     expect(diag.expectedEmpty).toBe(true);
   });
+
+  test('tool-only turns stay expected-empty; a malformed human turn is drift', async () => {
+    const d = tdir();
+    const p = join(d, 'turns.jsonl');
+    const header = { type: 'session', version: 3, id: 'omp-turns', timestamp: '2026-09-30T00:00:00.000Z', cwd: '/tmp' };
+    const toolOnly = { type: 'message', timestamp: '2026-09-30T00:01:00.000Z', message: { role: 'assistant', content: [{ type: 'toolCall', id: 't', name: 'read' }] } };
+    const diagOf = async (rows: unknown[]) => {
+      writeFileSync(p, [{ type: 'title', v: 1, title: 't' }, header, ...rows].map((r) => JSON.stringify(r)).join('\n') + '\n');
+      const { diag } = await drain(ompAdapter.parse(p));
+      return [diag.sessions, diag.skippedLines, diag.expectedEmpty];
+    };
+    expect(await diagOf([toolOnly])).toEqual([0, 0, true]);
+    expect(await diagOf([toolOnly, { type: 'message', timestamp: '2026-09-30T00:02:00.000Z', message: { role: 'user', content: { text: 'drifted' } } }])).toEqual([0, 1, undefined]);
+  });
 });
 
 describe('piAdapter', () => {
@@ -197,6 +211,22 @@ describe('cursorAdapter', () => {
     expect(sessions).toEqual([]);
     expect([diag.sessions, diag.expectedEmpty]).toEqual([0, true]);
   });
+
+  test('injected context and tool-only rows are expected-empty; an unknown row shape is drift', async () => {
+    const d = tdir();
+    const p = join(d, 'quota.jsonl');
+    const rows = [
+      { role: 'user', message: { content: [{ type: 'text', text: '<timestamp>Wednesday, Sep 30, 2026, 9:15 AM (UTC+8)</timestamp>' }] } },
+      { role: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: {} }] } },
+      { type: 'turn_ended', status: 'error', error: 'out of usage' },
+    ];
+    writeFileSync(p, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const ok = await drain(cursorAdapter.parse(p));
+    expect([ok.diag.sessions, ok.diag.skippedLines, ok.diag.expectedEmpty]).toEqual([0, 0, true]);
+    writeFileSync(p, [...rows, { role: 'user', message: { content: 'drifted to a string' } }].map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const drift = await drain(cursorAdapter.parse(p));
+    expect([drift.diag.sessions, drift.diag.skippedLines, drift.diag.expectedEmpty]).toEqual([0, 1, undefined]);
+  });
 });
 
 describe('opencodeAdapter', () => {
@@ -227,6 +257,21 @@ describe('opencodeAdapter', () => {
     const p = join(d, 'other.json');
     writeFileSync(p, '{"info":{}}');
     await expect(drain(opencodeAdapter.parse(p))).rejects.toThrow('not an opencode session export');
+  });
+
+  test('a valid export with no text is expected-empty; a malformed message is drift', async () => {
+    const d = tdir();
+    const p = join(d, 'empty.json');
+    const exportOf = (messages: unknown[]) => JSON.stringify({ info: { id: 'ses_empty', time: { created: 1 } }, messages });
+    const reasoningOnly = { info: { role: 'assistant', time: { created: 1 } }, parts: [{ type: 'reasoning', text: 'x' }, { type: 'tool', tool: 'bash' }] };
+    const diagOf = async (messages: unknown[]) => {
+      writeFileSync(p, exportOf(messages));
+      const { diag } = await drain(opencodeAdapter.parse(p));
+      return [diag.sessions, diag.skippedLines, diag.expectedEmpty];
+    };
+    expect(await diagOf([])).toEqual([0, 0, true]);
+    expect(await diagOf([reasoningOnly])).toEqual([0, 0, true]);
+    expect(await diagOf([reasoningOnly, { info: { role: 'user' }, parts: 'drifted' }])).toEqual([0, 1, undefined]);
   });
 });
 

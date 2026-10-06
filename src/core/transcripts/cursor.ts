@@ -104,7 +104,6 @@ export const cursorAdapter: TranscriptAdapter = {
     let skippedLines = 0;
     let firstTagTs = '';
     let lastTagTs = '';
-    let turnRows = 0;
     const messages: TranscriptMessage[] = [];
 
     for (const line of raw.split('\n')) {
@@ -122,9 +121,14 @@ export const cursorAdapter: TranscriptAdapter = {
         continue;
       }
       const e = entry as Record<string, unknown>;
+      if (e.type === 'turn_ended') continue;
       const msg = typeof e.message === 'object' && e.message !== null ? (e.message as Record<string, unknown>) : null;
-      if (!msg) continue;
-      turnRows++;
+      // A row that is neither bookkeeping nor a role+content-array turn is a
+      // shape this parser does not know: count it so the file reads as drift.
+      if (!msg || (e.role !== 'user' && e.role !== 'assistant') || !Array.isArray(msg.content)) {
+        skippedLines++;
+        continue;
+      }
       const text = textBlocks(msg.content);
       if (e.role === 'user') {
         const timestamp = parseCursorTimestampTag(text) ?? '';
@@ -165,9 +169,9 @@ export const cursorAdapter: TranscriptAdapter = {
         messages,
       };
     }
-    // A file of only {type:'turn_ended'} bookkeeping (a turn that errored
-    // before any message, e.g. out of usage) is understood, not drift.
-    const expectedEmpty = sessions === 0 && turnRows === 0 && skippedLines === 0;
+    // Bookkeeping rows, injected user context and tool-only assistant rows are
+    // understood traffic (e.g. a turn that failed on quota), not drift.
+    const expectedEmpty = sessions === 0 && skippedLines === 0;
     return {
       bytesRead,
       skippedLines,
