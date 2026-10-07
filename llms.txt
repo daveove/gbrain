@@ -15,6 +15,7 @@ Repo: https://github.com/garrytan/gbrain
 - [Connect a hosted brain](https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/hosted-harness-access.md): Getting the HTTPS endpoint (`gbrain mcp expose`, admin token file), host-side grants, private credential handoff, harness installation, profile repair, delegation limits and honest verification.
 - [Harness adapter reference](https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/harness-adapters.md): Registry-generated transport, authentication lifetime and configuration facts.
 - [Harness validation evidence](https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/harness-validation.md): Local lifecycle and HTTP/worker proof, reproducible tests, and the remaining actual-harness acceptance checks.
+- [Grok Bot daily digest](https://raw.githubusercontent.com/daveove/gbrain/main/docs/guides/grok-bot-daily-digest.md): Write contract for a scheduled Grok Bot digest over `gbrain serve --http`: fenced memory-writer grant, one `put_page` per day with force and request_id, receipt checks, failure codes, loopback verification, and the not-yet-approved Funnel exposure steps.
 
 ## Core entry points
 
