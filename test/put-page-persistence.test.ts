@@ -122,6 +122,25 @@ describe('put_page persistence boundary', () => {
     expect(replayed.payload.revision).toBe(noop.payload.revision);
   });
 
+  test('a fenced forced re-run converges on one page, replays its retry, and refuses a reused request_id', async () => {
+    const slug = 'notes/digest-2026-10-06';
+    const run = (n: number, requestId: string) => dispatch('put_page', { slug, content: content(`Run ${n}.`), force: true, request_id: requestId });
+    const firstId = randomUUID();
+    const first = await run(1, firstId);
+    expect(first.payload.state).toBe('committed');
+    expect((await run(1, firstId)).payload.revision).toBe(first.payload.revision);
+    const second = await run(2, randomUUID());
+    expect(second.payload.state).toBe('committed');
+    expect(second.payload.revision).not.toBe(first.payload.revision);
+    const reused = await run(3, firstId);
+    expect(reused.response.isError).toBe(true);
+    expect(reused.payload.error).toBe('idempotency_conflict');
+    expect(await engine.executeRaw('SELECT count(*)::int AS n FROM pages WHERE slug=$1', [slug])).toEqual([{ n: 1 }]);
+    const current = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
+    expect(current.revision).toBe(second.payload.revision);
+    expect(current.page.compiled_truth.trim()).toBe('Run 2.');
+  });
+
   test('scoped Git roots bind scanner-relative paths and preserve an existing recorded target', async () => {
     execFileSync('git', ['init', root], { stdio: 'ignore' });
     const scoped = join(root, 'public'); mkdirSync(scoped);
