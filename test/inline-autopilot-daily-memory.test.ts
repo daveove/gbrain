@@ -111,7 +111,7 @@ test('bounded inline extraction reports remaining work and a later cycle retries
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 1 }),
     onMaintenanceError: error => { observed = error; },
   })).toBe(original);
-  expect((observed as Error).message).toBe('Daily memory extraction needs retry: 1 selected daily-index pages remain');
+  expect((observed as Error).message).toBe('Daily memory extraction needs retry: 1 generated daily-index pages remain');
   expect((await page())?.compiled_truth).toContain('[[default:notes/inline-late]]');
   let retries = 0;
   observed = undefined;

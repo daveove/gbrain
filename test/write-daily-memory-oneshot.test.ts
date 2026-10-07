@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
-import { extractStaleFromDB } from '../src/commands/extract.ts';
+import { extractStaleFromDB, STALE_TIME_BUDGET_MS } from '../src/commands/extract.ts';
 import { extractOneShotDailyMemory, lookbackRecoveryDays, lookbackWatermarkAfter, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -21,9 +21,14 @@ beforeEach(async () => {
   await engine.setConfig('cycle.timezone', 'Asia/Manila');
 });
 
-const noExtract: typeof extractStaleFromDB = async () => ({
-  linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 0,
-});
+/** Extraction that finds no links: it only stamps the selected pages as extracted. */
+const noExtract: typeof extractStaleFromDB = async (stubEngine, opts) => {
+  if (opts?.slugs?.length) {
+    await stubEngine.executeRaw('UPDATE pages SET links_extracted_at=GREATEST(updated_at, now()) WHERE source_id=$1 AND slug=ANY($2::text[])',
+      [opts.sourceIdFilter, [...opts.slugs]]);
+  }
+  return { linksCreated: 0, timelineCreated: 0, pagesProcessed: opts?.slugs?.length ?? 0, staleRemaining: 0 };
+};
 
 const seed = async (day = '2026-09-30', slug = 'notes/oneshot-day') => {
   await engine.putPage(slug, {
@@ -50,7 +55,7 @@ test('one-shot writer runs exact-target extract in-process and queues no Minions
   expect(calls).toHaveLength(1);
   expect(calls[0]).toEqual({
     dryRun: false, jsonMode: true, quiet: true,
-    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], originGuard: expect.any(Function), catchUp: false, timeBudgetMs: 60_000,
+    sourceIdFilter: DAILY_MEMORY_SOURCE_ID, slugs: [result.slug], originGuard: expect.any(Function), catchUp: false, timeBudgetMs: STALE_TIME_BUDGET_MS,
     signal: controller.signal,
   });
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
@@ -72,10 +77,34 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
   await seed();
   await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
     extract: async () => ({ linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 2 }),
-  })).rejects.toThrow('Daily memory extraction needs retry: 2 selected daily-index pages remain');
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
   expect((await engine.getPage('daily-memory/2026-09-30', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
     .toContain('[[default:notes/oneshot-day]]');
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+});
+
+test('one-shot extract fails when a generated index lands during the sweep', async () => {
+  await seed();
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => {
+      await engine.putPage('daily-memory/2026-09-27', {
+        type: 'note', title: 'Late generated index', compiled_truth: '', frontmatter: { dream_generated: true },
+      }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      return noExtract(_engine, opts);
+    },
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+});
+
+test('one-shot extract fails when a selected index is rewritten after its stamp', async () => {
+  await seed();
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => {
+      const result = await noExtract(_engine, opts);
+      await engine.executeRaw("UPDATE pages SET updated_at=links_extracted_at + interval '1 second' WHERE source_id=$1 AND slug='daily-memory/2026-09-30'",
+        [DAILY_MEMORY_SOURCE_ID]);
+      return result;
+    },
+  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
 });
 
 test('extractOneShotDailyMemory is a no-op without written or needs_extract', async () => {
@@ -95,11 +124,10 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
     daily_memory_date: '2026-09-28',
     source_cycle_job_ids: [],
   });
-  const extractedDays: string[] = [];
+  const extracted: Array<readonly string[] | undefined> = [];
   const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
     extract: async (_engine, opts) => {
-      // Capture which daily-memory page extract saw by reading latest dream page state after writes.
-      extractedDays.push('extract');
+      extracted.push(opts.slugs);
       return noExtract(_engine, opts);
     },
   });
@@ -112,8 +140,8 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
   expect(await engine.executeRaw(
     "SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory' AND status NOT IN ('completed','delayed')",
   )).toHaveLength(0);
-  // Current-day write + drained historical day each extract when written.
-  expect(extractedDays.length).toBeGreaterThanOrEqual(2);
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
+  expect(extracted).toEqual([['daily-memory/2026-09-28', 'daily-memory/2026-09-30']]);
 });
 
 test('one-shot writer uses GBRAIN_DAILY_MEMORY_ZONE for instant page filters', async () => {
@@ -146,7 +174,7 @@ test('implicit day uses timezone override not cycle.timezone', async () => {
 });
 
 
-test('today extracts only its targets despite 83 unrelated stale dream pages', async () => {
+test('one run drains 83 stale generated indexes from earlier nights in one extract pass', async () => {
   await ensureDailyMemorySource(engine);
   for (let i = 0; i < 83; i++) {
     const oldDay = new Date(Date.UTC(2026, 8, 29 - i)).toISOString().slice(0, 10);
@@ -156,14 +184,13 @@ test('today extracts only its targets despite 83 unrelated stale dream pages', a
     }, { sourceId: DAILY_MEMORY_SOURCE_ID });
   }
   await seed();
-  const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
+  let calls = 0;
+  const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => { calls++; return extractStaleFromDB(_engine, opts); },
+  });
   expect(result.extract_slugs).toEqual([result.slug]);
-  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(83);
-  const [target] = await engine.executeRaw<{ stamp: unknown }>(
-    'SELECT links_extracted_at AS stamp FROM pages WHERE source_id=$1 AND slug=$2',
-    [DAILY_MEMORY_SOURCE_ID, result.slug],
-  );
-  expect(target?.stamp).not.toBeNull();
+  expect(calls).toBe(1);
+  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
@@ -345,13 +372,14 @@ test('today includes its capped record indexes but leaves a human reference unto
   const reference = first.extract_slugs!.find(slug => slug.startsWith('source-records/'))!;
   expect(reference).toBeDefined();
   await engine.putPage(reference, { type: 'note', title: 'Human reference', compiled_truth: 'Human-owned fixture' }, { sourceId: DAILY_MEMORY_SOURCE_ID });
-  const second = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
-  expect(second.extract_slugs).toEqual([second.slug]);
-  const [human] = await engine.executeRaw<{ stamp: unknown }>(
+  const stamp = () => engine.executeRaw<{ stamp: unknown }>(
     'SELECT links_extracted_at AS stamp FROM pages WHERE source_id=$1 AND slug=$2',
     [DAILY_MEMORY_SOURCE_ID, reference],
   );
-  expect(human?.stamp).toBeNull();
+  const before = await stamp();
+  const second = await runOneShotDailyMemoryWrite(engine, '2026-09-30');
+  expect(second.extract_slugs).toEqual([second.slug]);
+  expect(await stamp()).toEqual(before);
   expect((await engine.getPage(reference, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.title).toBe('Human reference');
 });
 

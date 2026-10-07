@@ -61,6 +61,10 @@ const FORMATS: readonly TranscriptFormat[] = [
   'openclaw',
   'hermes',
   'grok',
+  'omp',
+  'pi',
+  'opencode',
+  'cursor',
   'chatgpt',
   'claude-export',
 ];
@@ -218,8 +222,9 @@ skip). Embedding is OFF by default; run the embed backfill later or opt in.
   --include-self    Also discover gbrain's OWN claude-cli subprocess sessions
                     (recorded by Claude Code for the provider's scratch cwds;
                     excluded by default to avoid a self-ingestion loop)
-  --format F        claude-code | codex | openclaw | hermes | grok |
-                    chatgpt | claude-export (auto-detected when omitted)
+  --format F        claude-code | codex | openclaw | hermes | grok | omp |
+                    pi | opencode | cursor | chatgpt | claude-export
+                    (auto-detected when omitted)
   --dry-run         Parse + redact + report; writes nothing
   --limit N         Max sessions this run
   --since T         Only sessions newer than ISO time T; the word "last"
@@ -236,8 +241,9 @@ skip). Embedding is OFF by default; run the embed backfill later or opt in.
                     format's native safety default. Changing it starts a
                     fresh --since last scope (caps are part of the
                     checkpoint fingerprint). Adapters differ over budget:
-                    codex degrades to a bounded head+tail read, while
-                    claude-code, openclaw, hermes and grok reject the file
+                    codex, omp, pi and cursor degrade to a bounded
+                    head+tail read, while claude-code, openclaw, hermes,
+                    grok and opencode reject the file
                     outright — so LOWERING this can drop those formats
   --json            Machine-readable result
   --quiet           Suppress the human summary

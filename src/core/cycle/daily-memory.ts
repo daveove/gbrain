@@ -273,19 +273,12 @@ async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
   return historical.needed;
 }
 
-/** Metadata-only keyset for stale generated indexes, excluding human pages. */
-export async function dailyMemoryExtractTargets(engine: BrainEngine, after = ''): Promise<string[]> {
+/** Metadata-only list of stale generated indexes, excluding human pages. */
+export async function dailyMemoryExtractTargets(engine: BrainEngine): Promise<string[]> {
   const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug ${GENERATED_STALE_INDEXES} AND slug>$3 ORDER BY slug LIMIT 25`,
-    [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS, after]);
-  return rows.map(row => row.slug);
-}
-
-export async function countDailyMemoryExtractTargets(engine: BrainEngine): Promise<number> {
-  const [row] = await engine.executeRaw<{ remaining: number | string }>(
-    `SELECT COUNT(*) AS remaining ${GENERATED_STALE_INDEXES}`,
+    `SELECT slug ${GENERATED_STALE_INDEXES} ORDER BY slug`,
     [DAILY_MEMORY_SOURCE_ID, LINK_EXTRACTOR_VERSION_TS]);
-  return Number(row.remaining);
+  return rows.map(row => row.slug);
 }
 
 /**

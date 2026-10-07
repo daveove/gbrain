@@ -89,10 +89,6 @@ export async function runOneShotDailyMemoryWrite(
   const lookback = day === undefined || process.env.GBRAIN_DAILY_MEMORY_LOOKBACK === '1';
   const { now, ...extractDeps } = deps;
 
-  const afterWrite = async (daily: DailyMemoryWrite, signal = deps.signal) => {
-    await extractOneShotDailyMemory(engine, daily, { ...extractDeps, signal });
-  };
-
   let result: DailyMemoryWrite;
   if (!lookback) {
     result = await writeDailyMemoryFromSources(engine, {
@@ -100,7 +96,6 @@ export async function runOneShotDailyMemoryWrite(
       ...(selected ? { timezone: selected } : {}),
       ...(now ? { now } : {}),
     });
-    await afterWrite(result);
   } else {
     // Prefer the launcher-pinned day when present so a mid-run midnight cannot
     // drift the primary write away from the day already used for ingest.
@@ -112,7 +107,6 @@ export async function runOneShotDailyMemoryWrite(
     for (const date of lookbackRecoveryDays(selectedDay, watermark)) {
       const daily = await writeDailyMemoryFromSources(engine, { date, timezone, ...(now ? { now } : {}) });
       if (daily.reason === 'error') throw new Error(`Daily memory write failed for ${date}`);
-      await afterWrite(daily);
       if (date === selectedDay) primary = daily;
     }
     if (!primary) throw new Error(`Daily memory write missed selected day ${selectedDay}`);
@@ -121,10 +115,12 @@ export async function runOneShotDailyMemoryWrite(
   }
 
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
-  await drainInlineDailyMemory(engine, {
-    signal: deps.signal,
-    afterWrite,
-  });
+  // The callback defers each day's extraction to the single pass below; without
+  // one, the drained job would queue an extract job no worker here runs.
+  await drainInlineDailyMemory(engine, { signal: deps.signal, afterWrite: async () => {} });
+  // Extract once after every write so the whole-brain link setup is paid once
+  // and stale generated indexes from earlier nights drain with tonight's.
+  await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { ...extractDeps, signal: deps.signal });
   return result;
 }
 

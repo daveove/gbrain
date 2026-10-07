@@ -48,7 +48,8 @@ Setup + troubleshooting: [`docs/guides/google-connect.md`](google-connect.md).
 How the open-loop engine decides who's waiting: [`docs/guides/open-loops.md`](open-loops.md).
 
 Your other agents' histories import in one command. `gbrain transcripts ingest`
-parses agent session logs (Claude Code, Codex, OpenClaw, Hermes, Grok Build) and extracted
+parses agent session logs (Claude Code, Codex, OpenClaw, Hermes, Grok Build, omp, pi,
+opencode session exports, Cursor agent transcripts) and extracted
 consumer chat exports (ChatGPT / Claude.ai `conversations.json`) into readable
 conversation pages with provenance back to the exact session file. Pattern-based redaction runs over message bodies, titles, speakers, and session
 metadata before anything is written — vendor key prefixes, JWTs, cloud/API key
@@ -64,10 +65,33 @@ gbrain transcripts ingest                    # discover importable session logs
 gbrain transcripts ingest --all              # import everything discovered
 gbrain transcripts ingest ~/Downloads/conversations.json  # consumer export (unzip first)
 gbrain transcripts ingest --max-bytes 4gb <store>          # oversized store; omit to keep per-format caps
+gbrain transcripts ingest --format omp ~/.omp/agent/sessions/<dir>/<session>.jsonl  # one omp session
 gbrain transcripts status                    # found vs imported, per harness
 ```
 
 **Say to your agent:** *"Import my conversations from my chatgpt export at ~/Downloads/conversations.json"* — *"Archive my session transcripts"* — and later, *"When did I first discuss agent memory?"* (the archive answers origin questions with dated quotes).
+
+The omp, pi, opencode and Cursor imports keep only what you and the agent said
+to each other: thinking, tool calls, tool output and injected system text are dropped. `--all` discovery
+covers Claude Code, Codex, OpenClaw, Hermes and Grok; omp, pi, opencode and
+Cursor sessions import by path (opencode reads the JSON that
+`opencode export <id>` prints).
+
+The nightly daily-memory launcher (`scripts/gbrain-daily-memory.sh`) imports the
+day's Codex sessions (`~/.codex/sessions`). Importing other agents is opt-in:
+list them in `GBRAIN_DAILY_MEMORY_SEATS`, in import order. To import every
+supported agent, set
+`GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"`. That
+covers omp (`~/.omp/agent/sessions`), Claude Code (`~/.claude/projects`),
+opencode (`~/.local/share/opencode/opencode.db`, read-only), pi
+(`~/.pi/agent/sessions`) and Cursor (`~/.cursor/projects`). A listed seat whose
+directory is missing is skipped. Each seat keeps its own watermark
+(`daily-memory-<seat>-mtime` under `GBRAIN_DAILY_MEMORY_STATE`), so a failed or
+partial import holds only that seat back: the other seats and the day note still
+run, and the launcher exits non-zero so the failure shows. Point a seat elsewhere
+with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`, `CLAUDE_CODE`, `OPENCODE`,
+`PI`, `CURSOR`). Subagent runs are not imported. Details:
+[daily memory](daily-memory.md#choose-which-agents-to-import).
 
 Or connect the account and skip the manual export entirely. `gbrain connectors`
 syncs your ChatGPT and Claude conversation history live, using your own browser
