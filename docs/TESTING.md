@@ -765,3 +765,60 @@ permission to run them — see the "run without asking" rule above.
 
 Never leave `gbrain-test-pg` running. If you find a stale one from a previous run,
 stop and remove it before starting a new one.
+
+## Tana derived-display dry-runs
+
+`scripts/display-projection-dry-run.ts` previews source-aware `caption` and
+`display_body` values without replacing canonical titles, `compiled_truth`, slugs
+or search chunks. It has no apply path. `--apply` is rejected before connecting.
+There is no production cutover, `pages UPDATE`, import, reindex, migration, schema
+change or retrieval change.
+
+Run `bun scripts/display-projection-dry-run.ts --help` for sample and full-source
+arguments. Database access requires an explicit `GBRAIN_DATABASE_URL` pointing to
+a Supabase pooler on port 6543. The runner uses one repeatable-read read-only
+transaction, `prepare:false`, `max:1` and a 30-second local statement timeout.
+Exact page and chunk snapshots are compared inside that transaction; this does
+not rule out concurrent writes by another session.
+
+An optional original export must match its supplied SHA256 and every selected
+node's stored source hash. A later application cache is not a replacement.
+Rendering preserves tuple keys/values, literal authored dates/timezones and
+inline labels. Source/ownership and Readwise exclusions bound resolution.
+Unknown, empty, malformed, cyclic and traversal-limited projections are held
+for review; changed previews are not safe-to-apply counts.
+
+`scripts/display-projection-retrieval-dry-run.ts` accepts private hash-pinned
+query, native-result snapshot and original-source files. It runs offline: no
+database, configuration, provider, embedding or reindex path. Optional original
+seal verification authenticates producer hashes, not a complete reviewed packet.
+Keyword and optional keyless hybrid result identities, native ranks, text and
+scores must remain identical, including excluded rows. Distinct native chunks
+from the same page are retained. Readwise rows are excluded from eligible evidence.
+
+**Retrieval is `NOT_SCORED` because a sealed reviewed query+groundtruth packet is
+absent.** Recovered producer literals, a raw capture, historical manual scores and
+exact before/after compatibility do not establish a new retrieval grade or
+semantic improvement. The human prerequisite is access to the authentic reviewed
+capture and semantic-review output matching their original seal, plus the
+complete packet for semantic scoring. Do not invent groundtruth or reseal a
+reconstruction. Preserve verified scan receipts rather than rerunning the full
+corpus merely to confirm counts.
+
+Receipts are exclusive private `0600` files under `out/`, with prose and unrelated
+identifiers redacted. Never commit or attach exports, recovered-source directories,
+raw transcripts, credentials or private `out/` contents to a public PR. Publish
+only sanitized counts, hashes and relative artifact paths.
+
+Focused behavioral coverage:
+
+```bash
+env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test \
+  test/display-projection.test.ts \
+  test/display-projection-source.test.ts \
+  test/display-projection-retrieval-dry-run.test.ts
+```
+
+These tests use synthetic isolated fixtures; they are not a live-corpus rerun or
+a semantic retrieval benchmark. Help and apply-refusal smoke checks need no
+database credentials. Neither command authorizes production activation.
