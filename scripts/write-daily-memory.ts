@@ -116,18 +116,32 @@ export async function runOneShotDailyMemoryWrite(
 
   // Transcript ingest can enqueue non-current dates; no Minions worker here, so drain.
   // The callback defers each day's extraction to the single pass below; without
-  // one, the drained job would queue an extract job no worker here runs.
-  await drainInlineDailyMemory(engine, { signal: deps.signal, afterWrite: async () => {} });
+  // one, the drained job would queue an extract job no worker here runs. A day
+  // write takes over a minute on a large brain, so the nightly run drains under
+  // its own budget instead of the inline autopilot's 60 seconds.
+  let drainError: unknown;
+  try {
+    await drainInlineDailyMemory(engine, {
+      signal: deps.signal, afterWrite: async () => {}, maxJobs: Number.MAX_SAFE_INTEGER,
+      timeBudgetMs: Number(process.env.GBRAIN_DAILY_MEMORY_DRAIN_MS) || 30 * 60_000,
+    });
+  } catch (error) {
+    if (deps.signal?.aborted) throw error;
+    drainError = error;
+  }
   // Extract once after every write so the whole-brain link setup is paid once
-  // and stale generated indexes from earlier nights drain with tonight's.
+  // and stale generated indexes from earlier nights drain with tonight's. A
+  // failed or timed-out drain still extracts what was written, then fails.
   await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { ...extractDeps, signal: deps.signal });
+  if (drainError) throw drainError;
   return result;
 }
 
 async function main(): Promise<void> {
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
-  const engineConfig = { ...toEngineConfig(config), poolSize: 1 };
+  // putPage can need a second connection inside its transaction; one deadlocks.
+  const engineConfig = { ...toEngineConfig(config), poolSize: 2 };
   const engine = await createEngine(engineConfig);
   try {
     await engine.connect(engineConfig);

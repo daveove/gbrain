@@ -6710,6 +6710,20 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
     sql: FACT_WITHDRAWAL_SUBJECT_SQL,
   },
   { version: 170, name: 'modern_graph_source_mutation_generation', idempotent: true, sql: GRAPH_SOURCE_MUTATION_SCHEMA_SQL },
+  {
+    // Daily-memory jobs were enqueued with a 60 s timeout, which a busy day's
+    // first write on a hosted database exceeds. add() returns an existing
+    // idempotent row unchanged and claim() reads the stored timeout, so queued
+    // rows need the new 10 minute timeout here or they abort on every run.
+    version: 171,
+    name: 'daily_memory_job_timeout',
+    idempotent: true,
+    sql: `
+      UPDATE minion_jobs SET timeout_ms = 600000
+       WHERE name = 'autopilot-daily-memory' AND timeout_ms = 60000
+         AND status IN ('waiting', 'delayed', 'active', 'waiting-children', 'paused');
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

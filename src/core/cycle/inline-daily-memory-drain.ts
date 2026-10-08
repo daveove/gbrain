@@ -9,13 +9,13 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
   signal?: AbortSignal; afterWrite: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
 }): Promise<number> {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
-  const deadline = Date.now() + Math.min(opts.timeBudgetMs ?? 60_000, 60_000);
+  const deadline = Date.now() + (opts.timeBudgetMs ?? 60_000);
   let processed = 0;
   // Claim only when the shared window still has enough budget for meaningful
   // work. Jobs lock for 60s; claiming with a few ms left forces a deadline
   // abort that must not burn attempts (see catch path below).
   const minClaimBudgetMs = 1_000;
-  while (processed < Math.min(opts.maxJobs ?? 20, 20) && Date.now() < deadline) {
+  while (processed < (opts.maxJobs ?? 20) && Date.now() < deadline) {
     opts.signal?.throwIfAborted();
     if (deadline - Date.now() < minClaimBudgetMs) break;
     await queue.handleStalled(undefined, { registeredNames: names, queue: 'default' });
@@ -27,8 +27,12 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
     opts.signal?.addEventListener('abort', forward, { once: true });
     if (opts.signal?.aborted) forward();
     const lease = job.lock_duration_ms ?? 60_000;
-    const remaining = Math.min(deadline - Date.now(), job.timeout_at ? job.timeout_at.getTime() - Date.now() : 60_000);
-    const timeout = setTimeout(() => abort.abort(new Error('Inline daily memory deadline exceeded')), Math.max(0, remaining));
+    const drainLeft = deadline - Date.now();
+    const jobLeft = job.timeout_at ? job.timeout_at.getTime() - Date.now() : 60_000;
+    // Only the shared drain window is infrastructure; a job outliving its own
+    // timeout fails through failJob like any worker-run timeout.
+    const reason = jobLeft < drainLeft ? 'Inline daily memory job timed out' : 'Inline daily memory deadline exceeded';
+    const timeout = setTimeout(() => abort.abort(new Error(reason)), Math.max(0, Math.min(jobLeft, drainLeft)));
     let stopped = false, renewal: Promise<void> | undefined;
     const timer = setInterval(() => {
       if (stopped || renewal) return;

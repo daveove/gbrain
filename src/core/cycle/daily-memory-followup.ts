@@ -10,6 +10,9 @@ import { writeDailyMemoryFromSources, queueDailyMemoryExtract, isCalendarEffecti
 export type DailyJob = { id: number; data: Record<string, unknown>; signal?: AbortSignal };
 const TERMINAL = new Set(['completed', 'failed', 'dead', 'cancelled']);
 const PENDING = new Set(['waiting', 'active', 'delayed', 'waiting-children', 'paused']);
+// A first write of a busy day is many round trips to a remote database (about
+// a minute on a hosted Postgres), so 60 seconds timed out every attempt.
+const DAILY_MEMORY_JOB_TIMEOUT_MS = 10 * 60_000;
 function isDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)
     && Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0,10) === day;
@@ -60,7 +63,7 @@ export async function queueFanoutDailyMemory(queue: Pick<MinionQueue, 'add'>,
   const dependencies = createHash('sha256').update(JSON.stringify([data.source_cycle_job_ids, data.daily_memory_timezone ?? null])).digest('hex').slice(0, 20);
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily:${opts.day}:${opts.key}:${dependencies}`, delay: opts.delay ?? 0,
-    max_attempts: 2, timeout_ms: 60_000,
+    max_attempts: 2, timeout_ms: DAILY_MEMORY_JOB_TIMEOUT_MS,
   });
   if (!job || !['waiting', 'delayed', 'active', 'completed'].includes(job.status)
     || !Object.entries(data).every(([key, value]) => JSON.stringify(job.data[key]) === JSON.stringify(value))) {
@@ -257,7 +260,7 @@ async function queueDailyDateBatch(queue: Pick<MinionQueue, 'add'>, days: string
   if (timezone !== undefined) data.daily_memory_timezone = pinnedDailyMemoryTimezone({ daily_memory_timezone: timezone });
   const job = await queue.add('autopilot-daily-memory', data, {
     idempotency_key: `autopilot-daily-batch:${sourceJobId}:${hash}:${cursor}`,
-    max_attempts: 2, timeout_ms: 60_000, delay,
+    max_attempts: 2, timeout_ms: DAILY_MEMORY_JOB_TIMEOUT_MS, delay,
   });
   if (!job || !['waiting','delayed','active','completed'].includes(job.status)
     || !Object.entries(data).every(([key,value]) => JSON.stringify(job.data[key]) === JSON.stringify(value))) {

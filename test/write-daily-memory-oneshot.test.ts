@@ -144,6 +144,19 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
   expect(extracted).toEqual([['daily-memory/2026-09-28', 'daily-memory/2026-09-30']]);
 });
 
+test('a failed queued day still extracts tonight\'s writes, then fails the run', async () => {
+  await seed();
+  await new MinionQueue(engine).add('autopilot-daily-memory', {
+    daily_memory_only: true, daily_memory_date: 20260928, source_cycle_job_ids: [],
+  });
+  const extracted: Array<readonly string[] | undefined> = [];
+  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+    extract: async (_engine, opts) => { extracted.push(opts.slugs); return noExtract(_engine, opts); },
+  })).rejects.toThrow('Invalid daily memory fanout date');
+  expect(extracted).toEqual([['daily-memory/2026-09-30']]);
+  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(0);
+});
+
 test('one-shot writer uses GBRAIN_DAILY_MEMORY_ZONE for instant page filters', async () => {
   await engine.setConfig('cycle.timezone', 'UTC');
   // 06:00Z on 2026-09-30 is still 2026-09-29 evening in America/Los_Angeles.
