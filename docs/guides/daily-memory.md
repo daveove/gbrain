@@ -54,11 +54,21 @@ at another directory with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`,
 
 ## Keep the database on the session port
 
-Every launcher command uses one connection on the Supabase session pooler,
-port 5432. The launcher reads the database URL the way every gbrain command
-does: the environment first, then `config.json` under `GBRAIN_HOME`. When that
-URL is a Supabase pooler URL on port 6543, it moves it to port 5432. It never retries on the transaction
-pooler. A full session pool fails the run, and the next night retries.
+Every launcher command uses a pool of two connections on the Supabase session
+pooler, port 5432. One connection deadlocks: a page write can need a second
+connection inside its transaction. The launcher reads the database URL the way
+every gbrain command does: the environment first, then `config.json` under
+`GBRAIN_HOME`. When that URL is a Supabase pooler URL on port 6543, it moves it
+to port 5432. It never retries on the transaction pooler. A full session pool
+fails the run, and the next night retries.
+
+## Drain queued days
+
+Transcript imports queue rewrites of earlier days. The nightly writer works
+through that queue for up to 30 minutes. Set `GBRAIN_DAILY_MEMORY_DRAIN_MS` to
+change the budget. Each queued day has 10 minutes; a busy day's first write
+takes about a minute on a hosted database. Days left when the budget ends stay
+queued for the next run, and the run still extracts what it wrote.
 
 ## Size the extraction budget
 
