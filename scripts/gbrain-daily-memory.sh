@@ -171,8 +171,10 @@ print(raw)
     printf '%s ingest day=%s zone=%s files=%s\n' "$seat" "$day" "$zone" "${#files[@]}" >> "$LOG"
     # --json so the launcher can gate the watermark on cleanScan; partial
     # file errors leave the process exit 0 (allFailed-only) and must not advance.
+    # The 50 MB default read cap truncates long agent sessions, and a truncated
+    # file holds its seat's watermark on every run; read normal sessions whole.
     ec=0
-    run_command bun "$REPO/src/cli.ts" transcripts ingest --json --format "$seat" --since "$since" --source-id default --date-zone "$zone" "${files[@]}" || ec=$?
+    run_command bun "$REPO/src/cli.ts" transcripts ingest --json --format "$seat" --since "$since" --source-id default --date-zone "$zone" --max-bytes "${GBRAIN_DAILY_MEMORY_MAX_BYTES:-512mb}" "${files[@]}" || ec=$?
     if [[ $ec -ne 0 ]]; then
       printf '%s ingest failed (exit %s); holding its watermark\n' "$seat" "$ec" >> "$LOG"
       [[ $seat_failure -ne 0 ]] || seat_failure=$ec

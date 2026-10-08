@@ -52,6 +52,11 @@ the day, and then exits non-zero. Claude Code is read from
 at another directory with `GBRAIN_DAILY_MEMORY_<SEAT>_ROOT` (`CODEX`, `OMP`,
 `CLAUDE_CODE`, `OPENCODE`, `PI`, `CURSOR`); that override always wins.
 
+The launcher reads each session file whole up to 512 MB
+(`GBRAIN_DAILY_MEMORY_MAX_BYTES`, any `--max-bytes` size such as `1gb`). A
+larger file is read head and tail only, and a partly read file holds its seat's
+watermark until a later run reads it whole.
+
 ## Keep the database on the session port
 
 Every launcher command uses a pool of two connections on the Supabase session
