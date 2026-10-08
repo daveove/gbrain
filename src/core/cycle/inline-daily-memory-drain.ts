@@ -27,8 +27,12 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
     opts.signal?.addEventListener('abort', forward, { once: true });
     if (opts.signal?.aborted) forward();
     const lease = job.lock_duration_ms ?? 60_000;
-    const remaining = Math.min(deadline - Date.now(), job.timeout_at ? job.timeout_at.getTime() - Date.now() : 60_000);
-    const timeout = setTimeout(() => abort.abort(new Error('Inline daily memory deadline exceeded')), Math.max(0, remaining));
+    const drainLeft = deadline - Date.now();
+    const jobLeft = job.timeout_at ? job.timeout_at.getTime() - Date.now() : 60_000;
+    // Only the shared drain window is infrastructure; a job outliving its own
+    // timeout fails through failJob like any worker-run timeout.
+    const reason = jobLeft < drainLeft ? 'Inline daily memory job timed out' : 'Inline daily memory deadline exceeded';
+    const timeout = setTimeout(() => abort.abort(new Error(reason)), Math.max(0, Math.min(jobLeft, drainLeft)));
     let stopped = false, renewal: Promise<void> | undefined;
     const timer = setInterval(() => {
       if (stopped || renewal) return;
