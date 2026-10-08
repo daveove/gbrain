@@ -9,13 +9,13 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
   signal?: AbortSignal; afterWrite: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
 }): Promise<number> {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
-  const deadline = Date.now() + Math.min(opts.timeBudgetMs ?? 60_000, 60_000);
+  const deadline = Date.now() + (opts.timeBudgetMs ?? 60_000);
   let processed = 0;
   // Claim only when the shared window still has enough budget for meaningful
   // work. Jobs lock for 60s; claiming with a few ms left forces a deadline
   // abort that must not burn attempts (see catch path below).
   const minClaimBudgetMs = 1_000;
-  while (processed < Math.min(opts.maxJobs ?? 20, 20) && Date.now() < deadline) {
+  while (processed < (opts.maxJobs ?? 20) && Date.now() < deadline) {
     opts.signal?.throwIfAborted();
     if (deadline - Date.now() < minClaimBudgetMs) break;
     await queue.handleStalled(undefined, { registeredNames: names, queue: 'default' });

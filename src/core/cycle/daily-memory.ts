@@ -72,6 +72,7 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
   const parsed = parseSourceConfig(row.config);
   if (isOwnedDailyMemorySource(parsed, row.name)) {
     if (row.archived) throw new Error(`System index '${DAILY_MEMORY_SOURCE_ID}' is archived; restore it before daily memory can write.`);
+    if (parsed?.system_index === true && parsed.federated === false && row.name === DAILY_MEMORY_SOURCE_NAME) return;
     // Keep trusted-index markers sticky for our owned dream index.
     await engine.executeRaw(
       `UPDATE sources
@@ -360,6 +361,10 @@ export async function writeDailyMemoryFromSources(
            WHERE deleted_at IS NULL
              AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
              AND NOT (source_id = $4 AND slug = $3)
+             -- Index range (pages_coalesce_date_idx) wide enough for any zone;
+             -- the exact day test below still decides membership.
+             AND COALESCE(effective_date, updated_at) >= $2::date - 2
+             AND COALESCE(effective_date, updated_at) < $2::date + 3
              AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
                OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
              AND (source_id, slug) > ($5, $6)
@@ -509,7 +514,6 @@ async function putSourceRecordIndex(
   sourceType: string,
   record: SourceRecordLink,
 ): Promise<{ available: boolean; wrote: boolean }> {
-  await ensureDailyMemorySource(engine);
   const updatedAt = new Date(record.updated_at).toISOString();
   const title = `${escapeMdMeta(sourceType)} ${escapeMdMeta(record.entity_type)} record`;
   const compiled_truth = [
