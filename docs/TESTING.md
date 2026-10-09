@@ -765,3 +765,88 @@ permission to run them — see the "run without asking" rule above.
 
 Never leave `gbrain-test-pg` running. If you find a stale one from a previous run,
 stop and remove it before starting a new one.
+
+## Tana derived-display dry-runs
+
+`scripts/display-projection-dry-run.ts` previews source-aware `caption` and
+`display_body` values without replacing canonical titles, `compiled_truth`, slugs
+or search chunks. It has no apply path. `--apply` is rejected before connecting.
+There is no production cutover, `pages UPDATE`, import, reindex, migration, schema
+change or retrieval change.
+
+Run `bun scripts/display-projection-dry-run.ts --help` for sample and full-source
+arguments. Database access requires an explicit `GBRAIN_DATABASE_URL` pointing to
+a Supabase pooler on port 6543. The runner uses one repeatable-read read-only
+transaction, `prepare:false`, `max:1` and a 30-second local statement timeout.
+Exact page and chunk snapshots are compared inside that transaction; this does
+not rule out concurrent writes by another session.
+
+An optional original export must match its supplied SHA256 and every selected
+node's stored source hash. A later application cache is not a replacement.
+Rendering preserves tuple keys/values, literal authored dates/timezones and
+inline labels. Source/ownership and Readwise exclusions bound resolution.
+Unknown, empty, malformed, cyclic and traversal-limited projections are held
+for review; changed previews are not safe-to-apply counts.
+
+`scripts/display-projection-retrieval-dry-run.ts` accepts private hash-pinned
+query, native-result snapshot and original-source files. It runs offline: no
+database, configuration, provider, embedding or reindex path. Optional original
+seal verification authenticates producer hashes, not a complete reviewed packet.
+Keyword and optional keyless hybrid result identities, native ranks, text and
+scores must remain identical, including excluded rows. Distinct native chunks
+from the same page are retained. Readwise rows are excluded from eligible evidence.
+
+**Retrieval remains `NOT_SCORED`.** Recovered producer literals, raw captures,
+historical manual scores and exact before/after compatibility do not establish
+a new grade or semantic improvement. A complete authentic reviewed packet would
+be required only for a separately authorized semantic-scoring task; do not invent
+groundtruth, reconstruct/reseal it or continue hunting for it under D13.
+
+### D13: offline cleaned-source acceptance
+
+DAV-6908 D13 B accepts the narrower goal of a cleaned source-data version,
+superseding the reviewed-packet prerequisite for display/export acceptance.
+Use the already-captured native page snapshots and hash-pinned original source
+export, not a production connection or a new corpus scan. Verify selected page
+identities, original text fingerprints and source-node hashes against existing
+receipts before calling `projectPage` with the historical source bundle.
+
+The private delivery consists of `cleaned-source.jsonl`, `held-for-review.jsonl`
+and a sanitized `manifest.json`. Complete projections go in the cleaned file;
+held projections remain separate partial previews, with normalization reasons
+and counted warning codes. Preserve source/page/record identity, slug, imported
+source hash and original/derived text fingerprints on every row. The manifest
+pins the input/output byte hashes, published head and renderer dependencies.
+The original source files remain the authority and are not rewritten.
+Escape literal U+2028/U+2029 in JSONL bytes so line readers do not split a JSON
+string; JSON-decoded source text and its fingerprints must remain identical.
+
+Missing/excluded references, ownership/Readwise boundaries, malformed or
+unsupported content, empty output, cycles and traversal limits are review
+reasons, not instructions to drop source records or guess missing values.
+`complete` means the renderer raised no hold; it is not semantic correctness,
+safe-to-apply approval, a retrieval score or permission to import the export.
+
+Keep the previously observed 28,138 selected / 23,873 complete / 4,265 held
+receipt attached to its original transform. Report any newly generated offline
+export counts separately. D13 acceptance does not waive full-suite/CI failures,
+authorize their unrelated repair or make an unmerged PR merge-ready.
+
+Receipts and exports are exclusive private `0600` files under `out/` in a `0700`
+directory. Public receipts contain only sanitized counts, hashes and relative
+paths. Cleaned/held exports contain private source prose and identifiers: never
+commit or attach them, recovered-source directories, transcripts, credentials
+or any private `out/` contents to a public PR.
+
+Focused behavioral coverage:
+
+```bash
+env -u DATABASE_URL -u GBRAIN_DATABASE_URL bun test \
+  test/display-projection.test.ts \
+  test/display-projection-source.test.ts \
+  test/display-projection-retrieval-dry-run.test.ts
+```
+
+These tests use synthetic isolated fixtures; they are not a live-corpus rerun or
+a semantic retrieval benchmark. Help and apply-refusal smoke checks need no
+database credentials. Neither command authorizes production activation.

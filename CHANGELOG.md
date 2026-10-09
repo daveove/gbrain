@@ -2,6 +2,18 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [Unreleased]
+
+Added source-aware Tana display previews with separate `caption` and `display_body` fields. Tuple labels and values, authored dates and timezones, and inline node labels survive rendering. Canonical titles, bodies, slugs and search indexes remain unchanged. Missing, excluded, unknown and traversal-limited content is held for review, not counted as safe to apply.
+
+`scripts/display-projection-dry-run.ts` supports full-source validation and a hash-pinned original export. It verifies each imported node against its stored source hash, reads the Supabase pooler in a read-only transaction, and writes a private, redacted receipt under `out/`.
+
+`scripts/display-projection-retrieval-dry-run.ts` checks hash-pinned native before/after snapshots offline, including optional keyless hybrid results. Exact result preservation is a compatibility check, not retrieval grading. Retrieval remains `NOT_SCORED` because a sealed reviewed query+groundtruth packet is absent; historical manual scores are not new grades or evidence of semantic improvement.
+
+DAV-6908 D13 accepts offline cleaned-source/display-export validation without further recovery of the original reviewed retrieval packet. Complete projections and held partial previews are delivered separately with source identity, original/derived fingerprints, input/output hashes and held warning codes. This narrower acceptance does not establish semantic improvement, waive full-suite/CI failures or authorize production application.
+
+Run either script with `--help` for arguments and limits. Dry-run is the only mode. `--apply` is refused; there is no production cutover, page update, import, reindex, migration or schema/retrieval change.
+
 ## [0.48.2.0] - 2026-09-02
 
 **Your search reranker now runs on Voyage, and every surface tells you whether it is actually running.**
