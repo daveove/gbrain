@@ -818,6 +818,8 @@ and counted warning codes. Preserve source/page/record identity, slug, imported
 source hash and original/derived text fingerprints on every row. The manifest
 pins the input/output byte hashes, published head and renderer dependencies.
 The original source files remain the authority and are not rewritten.
+Escape literal U+2028/U+2029 in JSONL bytes so line readers do not split a JSON
+string; JSON-decoded source text and its fingerprints must remain identical.
 
 Missing/excluded references, ownership/Readwise boundaries, malformed or
 unsupported content, empty output, cycles and traversal limits are review
