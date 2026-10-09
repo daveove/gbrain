@@ -796,19 +796,45 @@ Keyword and optional keyless hybrid result identities, native ranks, text and
 scores must remain identical, including excluded rows. Distinct native chunks
 from the same page are retained. Readwise rows are excluded from eligible evidence.
 
-**Retrieval is `NOT_SCORED` because a sealed reviewed query+groundtruth packet is
-absent.** Recovered producer literals, a raw capture, historical manual scores and
-exact before/after compatibility do not establish a new retrieval grade or
-semantic improvement. The human prerequisite is access to the authentic reviewed
-capture and semantic-review output matching their original seal, plus the
-complete packet for semantic scoring. Do not invent groundtruth or reseal a
-reconstruction. Preserve verified scan receipts rather than rerunning the full
-corpus merely to confirm counts.
+**Retrieval remains `NOT_SCORED`.** Recovered producer literals, raw captures,
+historical manual scores and exact before/after compatibility do not establish
+a new grade or semantic improvement. A complete authentic reviewed packet would
+be required only for a separately authorized semantic-scoring task; do not invent
+groundtruth, reconstruct/reseal it or continue hunting for it under D13.
 
-Receipts are exclusive private `0600` files under `out/`, with prose and unrelated
-identifiers redacted. Never commit or attach exports, recovered-source directories,
-raw transcripts, credentials or private `out/` contents to a public PR. Publish
-only sanitized counts, hashes and relative artifact paths.
+### D13: offline cleaned-source acceptance
+
+DAV-6908 D13 B accepts the narrower goal of a cleaned source-data version,
+superseding the reviewed-packet prerequisite for display/export acceptance.
+Use the already-captured native page snapshots and hash-pinned original source
+export, not a production connection or a new corpus scan. Verify selected page
+identities, original text fingerprints and source-node hashes against existing
+receipts before calling `projectPage` with the historical source bundle.
+
+The private delivery consists of `cleaned-source.jsonl`, `held-for-review.jsonl`
+and a sanitized `manifest.json`. Complete projections go in the cleaned file;
+held projections remain separate partial previews, with normalization reasons
+and counted warning codes. Preserve source/page/record identity, slug, imported
+source hash and original/derived text fingerprints on every row. The manifest
+pins the input/output byte hashes, published head and renderer dependencies.
+The original source files remain the authority and are not rewritten.
+
+Missing/excluded references, ownership/Readwise boundaries, malformed or
+unsupported content, empty output, cycles and traversal limits are review
+reasons, not instructions to drop source records or guess missing values.
+`complete` means the renderer raised no hold; it is not semantic correctness,
+safe-to-apply approval, a retrieval score or permission to import the export.
+
+Keep the previously observed 28,138 selected / 23,873 complete / 4,265 held
+receipt attached to its original transform. Report any newly generated offline
+export counts separately. D13 acceptance does not waive full-suite/CI failures,
+authorize their unrelated repair or make an unmerged PR merge-ready.
+
+Receipts and exports are exclusive private `0600` files under `out/` in a `0700`
+directory. Public receipts contain only sanitized counts, hashes and relative
+paths. Cleaned/held exports contain private source prose and identifiers: never
+commit or attach them, recovered-source directories, transcripts, credentials
+or any private `out/` contents to a public PR.
 
 Focused behavioral coverage:
 

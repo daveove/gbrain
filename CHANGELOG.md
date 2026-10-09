@@ -10,6 +10,8 @@ Added source-aware Tana display previews with separate `caption` and `display_bo
 
 `scripts/display-projection-retrieval-dry-run.ts` checks hash-pinned native before/after snapshots offline, including optional keyless hybrid results. Exact result preservation is a compatibility check, not retrieval grading. Retrieval remains `NOT_SCORED` because a sealed reviewed query+groundtruth packet is absent; historical manual scores are not new grades or evidence of semantic improvement.
 
+DAV-6908 D13 accepts offline cleaned-source/display-export validation without further recovery of the original reviewed retrieval packet. Complete projections and held partial previews are delivered separately with source identity, original/derived fingerprints, input/output hashes and held warning codes. This narrower acceptance does not establish semantic improvement, waive full-suite/CI failures or authorize production application.
+
 Run either script with `--help` for arguments and limits. Dry-run is the only mode. `--apply` is refused; there is no production cutover, page update, import, reindex, migration or schema/retrieval change.
 
 ## [0.48.2.0] - 2026-09-02
