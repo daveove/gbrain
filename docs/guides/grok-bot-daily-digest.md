@@ -271,8 +271,8 @@ Risks to weigh before saying go:
   from the internet. Bearer auth and grants are the only gate.
 - **Reads are source-wide.** The fence limits writes to `digests/grok-bot/`,
   but a `--source default` grant can read the whole `default` source. A
-  dedicated source confines reads too. Create it with
-  `gbrain sources add grok-digests --path <empty dir> --no-federated --force`, then
+  dedicated database-only source confines reads too. Create it with
+  `gbrain sources add grok-digests --no-federated` (no `--path`), then
   grant with `--source grok-digests --federated-read grok-digests`. On a
   loopback test brain that grant wrote the digest into `grok-digests` and
   could not see a `default` page through `get_page`, `search`, `query` or
