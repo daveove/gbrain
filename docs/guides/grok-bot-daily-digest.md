@@ -270,9 +270,16 @@ Risks to weigh before saying go:
 - **Public endpoint.** Funnel makes `/mcp`, `/token`, and `/admin` reachable
   from the internet. Bearer auth and grants are the only gate.
 - **Reads are source-wide.** The fence limits writes to `digests/grok-bot/`,
-  but the grant can read the whole `default` source. A dedicated source
-  (`--source grok-digests --federated-read grok-digests`) would also confine
-  reads. This variant is untested.
+  but a `--source default` grant can read the whole `default` source. A
+  dedicated database-only source confines reads too. Create it with
+  `gbrain sources add grok-digests --federated` (no `--path`; federated so
+  your own unqualified searches still include the digests), then grant with
+  `--source grok-digests --federated-read grok-digests`. The grant's read
+  list, not the source's federation, is what confines the Bot. On a
+  loopback test brain that grant wrote the digest into `grok-digests` and
+  could not see a `default` page through `get_page`, `search`, `query` or
+  `list_pages`, or write into `default`; the `--source default` grant saw it
+  through all four.
 - **Shared Bot computer.** Grok documents one account-wide computer. Every
   Bot and routine on that account can use the handoff file and launcher.
 - **Broad tool surface.** `memory-writer` for the `grok-bot` adapter
