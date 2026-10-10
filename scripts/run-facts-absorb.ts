@@ -22,6 +22,7 @@ import { refreshGatewayForJob, registerBuiltinHandlers } from '../src/commands/j
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
 import { managedPersistenceEnabled } from '../src/core/persistence/ownership.ts';
+import { resolveManagedFactsEmbedding } from '../src/core/persistence/facts-maintenance.ts';
 import { configureGateway, getEmbeddingModel, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
 import {
@@ -67,19 +68,15 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   ) + Buffer.byteLength(appendix ?? '') + 2;
   const inputPerCall = systemBytes + 4 * MAX_TURN_TEXT_CHARS + 200;
   const outputTokens = maxTokens + 2 * (2 * maxTokens);
-  // Extraction embeds with the gateway model, or with the brain's DB model under
-  // managed persistence; price the costlier. Unresolvable counts as unpriced.
-  let embed: number | null = 0;
+  // Price the model extraction embeds with: the gateway's, or under managed
+  // persistence the brain's own policy (which may disable embedding). A model
+  // that cannot be resolved counts as unpriced.
+  let embed: number | null;
   try {
-    const models = [getEmbeddingModel()];
-    if (await managedPersistenceEnabled(engine)) {
-      const managed = await engine.getConfig('embedding_model');
-      if (managed) models.push(managed);
-    }
-    for (const model of models) {
-      const cost = reservationCostUsd(model, 'embed', 25 * 4 * 500, 0, overrides);
-      embed = cost === null || embed === null ? null : Math.max(embed, cost);
-    }
+    const model = await managedPersistenceEnabled(engine)
+      ? (await resolveManagedFactsEmbedding(engine, loadConfig() ?? { engine: engine.kind }))?.model ?? null
+      : getEmbeddingModel();
+    embed = model ? reservationCostUsd(model, 'embed', 25 * 4 * 500, 0, overrides) : 0;
   } catch {
     embed = null;
   }

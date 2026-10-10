@@ -167,3 +167,11 @@ test('under managed persistence an unpriced brain embedding model stops the run 
   });
   expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'delayed', attempts_made: 0 }]);
 });
+
+test('under managed persistence a disabled brain embedding policy is priced at zero', async () => {
+  await engine.executeRaw('UPDATE persistence_brain SET enabled = true WHERE singleton = 1');
+  await engine.setConfig('embedding_disabled', 'true');
+  await withEnv(KEYLESS, async () => {
+    expect((await factsJobWorstCase(engine)).embedUsd).toBe(0);
+  });
+});
