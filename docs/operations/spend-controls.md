@@ -74,6 +74,25 @@ What authorizes paid work, and the cap it runs under:
   [Registering a model price](#registering-a-model-price)), then retry the
   same command.
 
+### Foreground embedding backfills
+
+`gbrain embed` retains the paid authorization and meters its startup and
+foreground provider calls with `BudgetTracker`. Each request reserves against
+the remaining cap before reaching the provider; provider-reported token usage
+settles the reservation. A stop preserves installed vectors and leaves pending
+chunks for the next authorized run. It exits 1 rather than reporting completion.
+
+Under `--json`, `budget` reports measured spend, the cap and model usage.
+`budget_exhausted` reports the cap and spend when admission stops the run.
+The cap applies to one invocation: if splitting a large corpus with `--source`,
+subtract every invocation's spend from the original approval before starting
+the next. `--catch-up` removes the wall-clock bound, not the spending cap.
+
+Provider usage can exceed its pre-request estimate; that usage is recorded,
+then further requests stop. This is a provider-admission cap, not a guarantee
+that a provider cannot report an overage on a completed request.
+
+
 ## Queued paid work
 
 Paid commands that queue jobs carry the approval onto the jobs, and the

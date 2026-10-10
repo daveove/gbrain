@@ -41,6 +41,7 @@ import {
 import { tryAcquireDbLock, type DbLockHandle } from '../core/db-lock.ts';
 import { embedBackfillLockId } from '../core/embed-backfill-lock.ts';
 import { AITransientError } from '../core/ai/errors.ts';
+import { getCurrentBudgetTracker } from '../core/ai/gateway.ts';
 import { resolveEmbedConcurrency } from '../core/embed-concurrency.ts';
 export { resolveEmbedConcurrency, _resetEmbedConcurrencyClampWarningForTest } from '../core/embed-concurrency.ts';
 import { isEmbeddingZeroNormError } from '../core/ai/embedding-guard.ts';
@@ -533,16 +534,12 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       }
     }
 
-    // Lock heartbeat (round-2 C3/#5): the TTL is 60 minutes and million-chunk
-    // drains run longer, so without refresh another process could steal the
-    // lock mid-drain and mutual exclusion silently ends. Refresh every 5
-    // minutes; a refresh that returns false (fenced predicate matched 0 rows
-    // = stolen/released) or that keeps THROWING (3 consecutive transient
-    // errors) aborts the drain — continuing without the lock is the one
-    // thing this machinery exists to prevent. Covers both our own sfLocks
-    // and caller-held locks (the migration's).
+    // Stop on loss of a single-flight lock or the approved cost cap.
+    // Both our own and caller-held locks have a 60-minute TTL, so refresh
+    // every five minutes. A fenced refresh or three transient errors aborts.
     const activeLocks: DbLockHandle[] = callerHeld ? [...(opts.heldLocks ?? [])] : sfLocks;
     const lockAbort = new AbortController();
+    getCurrentBudgetTracker()?.onExhausted(() => lockAbort.abort());
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let heartbeatTickAbort: AbortController | undefined;
     let stoppingHeartbeat = false;
