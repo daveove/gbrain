@@ -180,7 +180,8 @@ test('a deadline already passed when the first job is claimed spends nothing', a
   await page();
   await addFacts();
   await withEnv(KEYLESS, async () => {
-    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 60_000, maxMinutes: 0.0001 });
+    // A deadline already behind us; a long poll keeps the monitor from noticing first.
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 60_000, maxMinutes: -1 });
     expect([run.stopped, run.completed, run.remaining]).toEqual(['time', 0, 1]);
   });
   expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'delayed', attempts_made: 0 }]);
