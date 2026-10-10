@@ -6724,6 +6724,37 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
          AND status IN ('waiting', 'delayed', 'active', 'waiting-children', 'paused');
     `,
   },
+  {
+    // Entity resolution filters pages by lower(title) % $2, slug ILIKE and
+    // slug LIKE patterns, none of which idx_pages_trgm (raw title) serves, so
+    // each resolve read every page in the source; on a large source over a
+    // throttled disk that outlasted the facts-absorb job timeout.
+    version: 172,
+    name: 'entity_resolver_trigram_indexes',
+    idempotent: true,
+    transaction: false,
+    sql: '',
+    handler: async engine => {
+      for (const [name, expr] of [['idx_pages_title_lower_trgm', 'lower(title)'], ['idx_pages_slug_trgm', 'slug']]) {
+        if (engine.kind !== 'postgres') {
+          await engine.runMigration(172, `CREATE INDEX IF NOT EXISTS ${name} ON pages USING GIN(${expr} gin_trgm_ops);`);
+          continue;
+        }
+        await dropInvalidConcurrentIndex(engine, 172, name);
+        // Supabase enforces a ~2 min statement_timeout; a concurrent build on a
+        // large pages table can need longer. Session scope on a reserved
+        // connection, reset before the connection returns to the pool.
+        await engine.withReservedConnection(async conn => {
+          await conn.executeRaw("SET statement_timeout = '1800000'");
+          try {
+            await conn.executeRaw(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON pages USING GIN(${expr} gin_trgm_ops)`);
+          } finally {
+            await conn.executeRaw('RESET statement_timeout');
+          }
+        });
+      }
+    },
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
