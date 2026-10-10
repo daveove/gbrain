@@ -2,6 +2,29 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.48.3.0] - 2026-10-10
+
+**Private exports stay local, and repository secret checks no longer disappear behind cached tests.**
+
+Local source exports and retrieval snapshots are excluded from ordinary Git staging.
+The existing secret check scans source, documentation, skills and tests, including
+changes that reuse a successful test result. Fixed dummy credentials remain valid
+test fixtures without exempting entire directories from scanning.
+
+No database migration, credential rotation or new background service is required.
+The changes protect repository publication; they do not alter brain access or runtime
+search behavior.
+
+### Itemized changes
+
+### For contributors
+
+- Ignore root `/out/` exports in every clone.
+- Enable Gitleaks' built-in detectors and replace broad path exclusions with exact,
+  scoped exceptions for synthetic fixtures and structural identifiers.
+- Run the existing secret check independently of test caching, reject invalid Git
+  commit ranges, and require scan success before aggregate CI status can pass.
+
 ## [0.48.2.0] - 2026-09-02
 
 **Your search reranker now runs on Voyage, and every surface tells you whether it is actually running.**

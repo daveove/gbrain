@@ -1,11 +1,66 @@
 title = "GBrain gitleaks config"
 
-[allowlist]
-  paths = [
-    '''.env\.testing\.example''',
-    '''.env\.example''',
-    '''test/''',
-    '''skills/''',
-    '''.claude/skills/''',
-    '''GBRAIN_SKILLPACK\.md''',
-  ]
+[extend]
+useDefault = true
+
+# Exact synthetic/structural matches only; source, skills and tests remain scanned.
+[[allowlists]]
+description = "Fixed synthetic credentials in auth and redaction test fixtures"
+condition = "AND"
+regexTarget = "match"
+paths = [
+  "^test/auth-register-client-output-pin\\.test\\.ts$",
+  "^test/config-get-plane\\.test\\.ts$",
+  "^test/creds-vault\\.serial\\.test\\.ts$",
+  "^test/claw-test-cli\\.test\\.ts$",
+  "^test/config\\.test\\.ts$",
+  "^test/google-access\\.test\\.ts$",
+  "^test/google-auth\\.test\\.ts$",
+  "^test/mcp-registration-blocks\\.test\\.ts$",
+  "^test/secret-scan\\.test\\.ts$",
+  "^test/session-receipts\\.test\\.ts$",
+  "^test/tty-harness\\.test\\.ts$",
+]
+regexes = [
+  "^clientSecret: 'gbrain_cs_secret456'$",
+  "^github_token: 'ghp-test3943-db-secret'$",
+  "^client_secret: 'GOCSPX-test1234567890'$",
+  "^process\\.env\\.OPENROUTER_API_KEY = 'or-sentinel-91c4'$",
+  "^admin_token', 'eyJhbGciOiJIUzI1NiJ9'$",
+  "^token: 'tok-abcdef123'$",
+  "^token\":\"tok-abcdef123\"$",
+  "^CLIENT_SECRET = 'GOCSPX-test1234567890'$",
+  "^client_secret: 'GOCSPX-abc123'$",
+  "^clientSecret: 'sekret_xyz789'$",
+  "^password=aB3xK9mQ2pR7'$",
+  "^DB_PASSWORD=\"K9fjq2LmX0pQ7rTz\"$",
+  "^SMTP_PASSWORD=Ab3xK9mQ2pR7sT1vW4yZ8bC5dE6f'$",
+  "^api_key: Ab3xK9mQ2pR7sT1vW4yZ8bC5dE6f'$",
+  "^secret = 'straddling-secret-99'$",
+]
+
+[[allowlists]]
+description = "SQL column names and documented key-normalization identifiers"
+condition = "AND"
+regexTarget = "match"
+paths = [
+  "^src/core/pglite-schema\\.ts$",
+  "^src/core/link-extraction\\.ts$",
+  "^src/core/schema-embedded\\.generated\\.ts$",
+  "^src/schema\\.sql$",
+]
+regexes = [
+  "^KEY,\\n  receipt_sha8_corpus $",
+  "^Keys: raw/lower/slugified $",
+]
+
+[[allowlists]]
+description = "Instructional bearer-token placeholder in generated admin curl examples"
+condition = "AND"
+regexTarget = "secret"
+paths = [
+  "^admin/dist/assets/index-[^/]+\\.js$",
+]
+regexes = [
+  "^PASTE_TOKEN_FROM_ABOVE$",
+]

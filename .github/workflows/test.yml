@@ -29,7 +29,7 @@ jobs:
   # file EXCEPT the deny-list (CHANGELOG.md, README.md, docs/**/*.md, etc.
   # — see scripts/ci-cache-hash.sh for the full list). Looks up
   # `ci-pass-<hash>` in actions/cache; if hit, the test matrix + verify
-  # + serial jobs all skip and test-status reports green immediately.
+  # + serial jobs skip. Secret scanning still runs before CI can turn green.
   # If miss, the full suite runs and cache-write seals it on success.
   #
   # Hit rate covers re-pushes (same SHA twice), branch rebases that
@@ -79,8 +79,6 @@ jobs:
           fi
 
   gitleaks:
-    needs: cache-check
-    if: needs.cache-check.outputs.hit != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -123,6 +121,8 @@ jobs:
               *) RANGE="${BEFORE}..${{ github.sha }}" ;;
             esac
           fi
+          # Gitleaks can return zero after a Git range error; fail before scanning.
+          git rev-list "$RANGE" -- > /dev/null
           echo "Scanning commit range: $RANGE"
           gitleaks detect --redact --no-banner --log-opts "$RANGE"
 
@@ -587,8 +587,8 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # test-status: the single user-visible "did CI pass?" check.
-  # Runs always (if: always()), succeeds when EITHER cache-check.hit==true
-  # OR all gated jobs (gitleaks, verify, serial-tests, test) succeeded.
+  # Runs always (if: always()), requires successful secret scanning, and
+  # accepts either a test-cache hit or success from every gated test job.
   # Branch protection (when configured) gates on this single job name.
   # ──────────────────────────────────────────────────────────────────────
   test-status:
@@ -610,6 +610,11 @@ jobs:
           TEST="${{ needs.test.result }}"
           echo "cache-check.hit=$HIT"
           echo "gitleaks=$GITLEAKS  verify=$VERIFY  serial-tests=$SERIAL  slow-eval-longmemeval=$SLOW_EVAL  slow-entity-resolve-perf=$SLOW_PERF  slow-brainbench-e2e=$SLOW_BRAINBENCH  brainbench=$BRAINBENCH  test=$TEST"
+          # A test-cache hit never substitutes for scanning this commit range.
+          if [ "$GITLEAKS" != "success" ]; then
+            echo "✗ secret scan did not succeed (got $GITLEAKS) — CI fail"
+            exit 1
+          fi
           if [ "$HIT" = "true" ]; then
             echo "✓ cache HIT for hash ${{ needs.cache-check.outputs.hash }} — CI green"
             exit 0
