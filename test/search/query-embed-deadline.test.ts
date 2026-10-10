@@ -12,13 +12,17 @@
  * insufficient against a wedged provider), and that a shared/elapsed deadline
  * makes a second embed fail FAST (worst case ~one timeout, not two).
  */
-import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
 import {
   configureGateway,
   resetGateway,
   __setEmbedTransportForTests,
 } from '../../src/core/ai/gateway.ts';
-import { embedQueryBounded, makeQueryEmbedDeadline } from '../../src/core/search/hybrid.ts';
+import { embedQueryBounded, makeQueryEmbedDeadline, hybridSearchCached } from '../../src/core/search/hybrid.ts';
+import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import type { HybridSearchMeta } from '../../src/core/types.ts';
+import { LEGACY_EMBEDDING_CONFIG } from '../helpers/legacy-embedding-config.ts';
+import { installFixtureChunks } from '../helpers/page-projection.ts';
 
 describe('embedQueryBounded — query-embed deadline', () => {
   beforeEach(() => {
@@ -123,4 +127,67 @@ describe('embedQueryBounded — query-embed deadline', () => {
       name: 'AITransientError', message: expect.stringContaining('synthetic provider failure'),
     });
   });
+});
+
+describe('hybridSearchCached — provider budget', () => {
+  let engine: PGLiteEngine;
+  const vector = [1, ...Array(LEGACY_EMBEDDING_CONFIG.embedding_dimensions - 1).fill(0)];
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: { OPENAI_API_KEY: 'fixture-key' } });
+    await engine.connect({});
+    await engine.initSchema();
+    await engine.setConfig('search.reranker.enabled', 'false');
+    const body = 'Quartz cargo uses the relay station.';
+    await engine.putPage('notes/relay-station', { type: 'note', title: 'Relay station', compiled_truth: body });
+    await installFixtureChunks(engine, 'notes/relay-station', [{
+      chunk_index: 0, chunk_text: body, chunk_source: 'compiled_truth', embedding: new Float32Array(vector),
+    }]);
+  });
+
+  afterAll(async () => {
+    __setEmbedTransportForTests(null);
+    resetGateway();
+    await engine.disconnect();
+  });
+
+  test('slow lexical reads do not consume a healthy provider’s embedding budget', async () => {
+    let now = Date.now();
+    const timers: Array<{ at: number; controller: AbortController }> = [];
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    const timeout = spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const controller = new AbortController();
+      timers.push({ at: now + ms, controller });
+      return controller.signal;
+    });
+    const searchKeyword = engine.searchKeyword.bind(engine);
+    const lexical = spyOn(engine, 'searchKeyword').mockImplementation(async (...args) => {
+      now += 7_000;
+      return searchKeyword(...args);
+    });
+    __setEmbedTransportForTests(async opts => {
+      now += 3_000;
+      for (const timer of timers) {
+        if (timer.at <= now) timer.controller.abort(new DOMException('fixture provider deadline', 'TimeoutError'));
+      }
+      if (opts.abortSignal?.aborted) throw opts.abortSignal.reason;
+      return { embeddings: [vector], usage: { tokens: 1 } } as never;
+    });
+    try {
+      let meta: HybridSearchMeta | undefined;
+      const rows = await hybridSearchCached(engine, 'unmatched semantic lookup', {
+        limit: 1, expansion: false, relationalRetrieval: false,
+        onMeta: value => { meta = value; },
+      });
+      expect(rows.map(row => row.slug)).toEqual(['notes/relay-station']);
+      expect(rows[0].cosine).toBeGreaterThan(0.99);
+      expect(meta?.vector_enabled).toBe(true);
+      expect(meta?.degraded ?? []).not.toContainEqual({ stage: 'embed_timeout', reason: 'timeout' });
+    } finally {
+      lexical.mockRestore();
+      timeout.mockRestore();
+      clock.mockRestore();
+    }
+  }, 120_000);
 });

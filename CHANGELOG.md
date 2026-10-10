@@ -10,6 +10,13 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+### Fixed
+
+- Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. A cache embedding still shares its deadline with the vector arm.
+- Foreground projection drains try a still-queued superseded job once per run. A conflicting or malformed legacy identity remains queued and is reported in `remaining`, rather than causing an unbounded retry loop.
+
 ## [0.60.138.0] - 2026-10-09
 
 **A query that quotes a passage verbatim now returns a clean read. Pasted text with a long dash rule no longer breaks keyword search, an inferred image query on a text-only brain keeps its keyword arm and expansion, and the query confidence block always reports the reranker score.**

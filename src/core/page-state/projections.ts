@@ -382,6 +382,7 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
   let superseded = 0;
   for (const [index, job] of jobs.entries()) {
     if (opts.deadlineMs !== undefined && index > 0 && now() - startedAt >= opts.deadlineMs) break;
+    let supersededJob = false;
     try {
       const prepared = await engine.transaction(async tx => {
         await tx.lockPageKeys([{ sourceId: job.source_id, slug: job.slug }]);
@@ -390,7 +391,11 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
         if (!pending.length) return null;
         return readGuardedProjectionSnapshot(tx, job.slug, job.source_id, { allowUnsealed: true });
       });
-      if (!prepared || prepared.snapshot.sourceIncarnation !== job.source_incarnation || prepared.snapshot.revision !== job.revision) { superseded++; continue; }
+      if (!prepared || prepared.snapshot.sourceIncarnation !== job.source_incarnation || prepared.snapshot.revision !== job.revision) {
+        superseded++;
+        supersededJob = true;
+        continue;
+      }
       const projection = await preparePageProjection(prepared);
       await installPageProjection(engine, prepared, projection.chunks, { seal: true, preserveEmbeddings: true, code: projection.code });
       rebuilt++;
@@ -403,6 +408,16 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
         continue;
       }
       superseded++;
+      supersededJob = true;
+    } finally {
+      // A conflict can leave the same row queued. The foreground drain tries
+      // each job once; keep the obligation but exclude it from this run.
+      if (supersededJob && opts.notAfter !== undefined) {
+        await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=now()
+          WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid
+            AND updated_at<=$4::text::timestamptz`,
+        [job.source_incarnation, job.slug, job.revision, opts.notAfter]);
+      }
     }
   }
   if (rebuilt > 0) {

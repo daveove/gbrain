@@ -1210,13 +1210,10 @@ export async function hybridSearchCached(
   // attempt it when the cache is enabled AND the gateway has an embedding
   // provider configured.
   let queryEmbedding: Float32Array | null = null;
-  // v0.42.20.0 (Fix 3, #1775) — ONE shared query-embed deadline for the
-  // cache-lookup embed below AND the inner hybridSearch embed (threaded via
-  // opts._queryEmbedDeadline). On a stalled provider the cache-lookup embed
-  // times out (→ cacheStatus 'disabled', fall through), then the inner embed
-  // sees the already-elapsed budget and fails fast → keyword fallback. Worst
-  // case ~one timeout (~6s), comfortably under the CLI 10s force-exit.
-  const queryEmbedDl = makeQueryEmbedDeadline();
+  // Start the provider budget when an embedding is requested, not before
+  // expansion and lexical reads. A cache embed, when enabled, shares its
+  // deadline with the vector arm so a stalled provider gets no second budget.
+  let queryEmbedDl = opts?._queryEmbedDeadline;
   if (semanticCache && !skipCache) {
     try {
       const { isAvailable } = await import('../ai/gateway.ts');
@@ -1230,6 +1227,7 @@ export async function hybridSearchCached(
         // v0.42.20.0 (Fix 3) — bounded by the shared deadline; on timeout this
         // throws → caught below → cacheStatus 'disabled' → falls through to the
         // inner hybridSearch (which reuses the same elapsed deadline).
+        queryEmbedDl ??= makeQueryEmbedDeadline();
         queryEmbedding = await embedQueryBounded(query, queryPrefix ? { queryPrefix } : undefined, queryEmbedDl);
       } else {
         cacheStatus = 'disabled';

@@ -260,6 +260,29 @@ process gets there first. On PGLite a resident process holds the datastore, so
 the drain refuses before opening it (also for a mounted PGLite brain selected
 with `--brain`).
 
+A superseded attempt can leave its job queued when a stored identity or
+projection conflicts. The foreground drain tries that job once per run and
+reports the remaining work. Stored slugs must be lowercase. Repair a legacy
+identity under the canonical page guards, preserving its content, references,
+and an alias for its old name. Do not clear the job or stamp its projection
+current without rebuilding the chunks.
+
+On a large Postgres brain, `vector_candidates_incomplete` can also come from
+the eligibility census scanning the whole chunk heap when most stored vectors
+belong to deleted pages. Confirm that with `EXPLAIN (ANALYZE, BUFFERS)` before
+changing the database. A brain administrator can add this narrow lookup index
+without changing vector, revision, freshness, or visibility checks:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunks_embedded_text_model
+  ON content_chunks (model, page_id)
+  WHERE embedding IS NOT NULL AND modality = 'text';
+```
+
+Verify that the census uses the index and that ordinary `search` and `query`
+complete without the incomplete-candidate warning. This does not backfill
+missing embeddings or enable a background owner.
+
 Verify: `gbrain doctor` shows `text_projection_readiness` ok.
 
 <a id="embedding-key-source"></a>
