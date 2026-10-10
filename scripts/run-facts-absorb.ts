@@ -5,15 +5,19 @@
  * Usage: bun scripts/run-facts-absorb.ts --max-usd N [--concurrency C] [--max-minutes M]
  *
  * Only `facts-absorb` is registered, so no other job kind is claimed. The cap
- * is enforced before work starts, not by failing a call: the facts pipeline
- * turns a refused model call into an empty completed job, which would lose
- * that page's facts. The runner stops claiming once the spend so far plus a
- * worst-case cost for every job that could still start would pass the cap.
+ * is enforced at each claim, not by failing a call: the facts pipeline turns
+ * a refused model call into an empty completed job, which would lose that
+ * page's facts. Before a claimed job runs, its own model is priced at the
+ * worst case; if spend plus every in-flight job's worst case plus this one
+ * would pass the cap, the job goes back to the queue without using an
+ * attempt and the run stops.
  */
 import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
+import { RateLeaseUnavailableError } from '../src/core/minions/rate-leases.ts';
+import type { MinionHandler } from '../src/core/minions/types.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
@@ -42,28 +46,26 @@ export interface FactsAbsorbRun {
  * and a malformed-output retry at twice the output cap. Input is counted at
  * one token per two characters (real tokenizers average about four), with the
  * operator prompt appendix and a fixed allowance for the wrapper and entity
- * hints. Every model a queued job names is priced (a job's `data.model` wins
- * over the brain default), plus up to 25 fact embeddings. Any unpriced model
- * makes the run unbounded: null.
+ * hints, plus up to 25 fact embeddings. Returns the brain default model and a
+ * pricer for any model; the pricer returns null for an unpriced model.
  */
-export async function worstCaseFactsJobUsd(engine: BrainEngine, overrides?: PricingOverrides): Promise<number | null> {
+export async function factsJobWorstCase(engine: BrainEngine, overrides?: PricingOverrides): Promise<{
+  defaultModel: string;
+  usd: (model: string) => number | null;
+}> {
   const maxTokens = await getFactsExtractionMaxTokens(engine);
   const appendix = await getFactsExtractionPromptAppendix(engine);
   const systemChars = Math.max(buildExtractorSystem(true).length, buildExtractorSystem(false).length) + (appendix?.length ?? 0) + 2;
   const inputPerCall = Math.ceil((systemChars + MAX_TURN_TEXT_CHARS) / 2) + 1_000;
-  const queued = await engine.executeRaw<{ model: string | null }>(
-    `SELECT DISTINCT data->>'model' AS model FROM minion_jobs
-      WHERE name='facts-absorb' AND queue='default' AND status IN ('waiting', 'delayed')`);
-  const models = new Set([await getFactsExtractionModel(engine), ...queued.flatMap(row => row.model ? [row.model] : [])]);
-  let chat = 0;
-  for (const model of models) {
-    const cost = reservationCostUsd(model, 'chat', 3 * inputPerCall, 5 * maxTokens, overrides);
-    if (cost === null) return null;
-    chat = Math.max(chat, cost);
-  }
   const embedModel = await engine.getConfig('embedding_model');
   const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 500, 0, overrides) : 0;
-  return embed === null ? null : chat + embed;
+  return {
+    defaultModel: await getFactsExtractionModel(engine),
+    usd: model => {
+      const chat = reservationCostUsd(model, 'chat', 3 * inputPerCall, 5 * maxTokens, overrides);
+      return chat === null || embed === null ? null : chat + embed;
+    },
+  };
 }
 
 async function countJobs(engine: BrainEngine, status: string, since?: Date): Promise<number> {
@@ -110,7 +112,8 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   const startedAt = new Date();
   const deadline = Date.now() + (opts.maxMinutes ?? 60) * 60_000;
   const pricingOverrides = await loadPricingOverrides(engine);
-  const worstCaseJobUsd = await worstCaseFactsJobUsd(engine, pricingOverrides);
+  const pricing = await factsJobWorstCase(engine, pricingOverrides);
+  const worstCaseJobUsd = pricing.usd(pricing.defaultModel);
   const result = async (stopped: FactsAbsorbRun['stopped'], spentUsd: number): Promise<FactsAbsorbRun> => ({
     stopped,
     completed: await countJobs(engine, 'completed', startedAt),
@@ -121,9 +124,7 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   });
   if (opts.signal?.aborted) return result('signal', 0);
   if (worstCaseJobUsd === null) return result('unpriced', 0);
-  // Between two polls up to `concurrency` jobs can finish and as many start.
-  const reserve = 2 * concurrency * worstCaseJobUsd;
-  if (opts.maxUsd < reserve) return result('budget', 0);
+  if (opts.maxUsd < worstCaseJobUsd) return result('budget', 0);
 
   const tracker = new BudgetTracker({ label: 'facts:run-facts-absorb', maxCostUsd: opts.maxUsd, pricingOverrides });
   const builtins = new MinionWorker(engine);
@@ -133,22 +134,38 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   const worker = new MinionWorker(engine, {
     queue: 'default', concurrency, pollInterval: 1_000, healthCheckInterval: 0,
   });
-  worker.register('facts-absorb', handler);
 
   let stopped: FactsAbsorbRun['stopped'] | null = null;
   const stop = (why: FactsAbsorbRun['stopped']) => { if (!stopped) { stopped = why; worker.stop(); } };
   opts.signal?.addEventListener('abort', () => stop('signal'), { once: true });
-  const pollMs = opts.pollMs ?? 500;
   // The tracker and chat_usage_log price the same calls slightly differently
-  // (about 4% apart on production); the cap uses whichever is higher.
+  // (about 4% apart on production); spend is whichever is higher.
   let loggedUsd = 0;
   const spent = () => Math.max(tracker.snapshot().cumulativeCostUsd, loggedUsd);
+  // Worst case of every job now running, released when the job ends; its real
+  // spend is in the tracker by then.
+  let inFlightUsd = 0;
+  const gated: MinionHandler = async job => {
+    const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : pricing.defaultModel;
+    const cost = pricing.usd(model);
+    if (stopped || cost === null || spent() + inFlightUsd + cost > opts.maxUsd) {
+      stop(cost === null ? 'unpriced' : 'budget');
+      // Lease-full requeue: back to the queue without using an attempt.
+      throw new RateLeaseUnavailableError('facts-absorb-run-budget', 1, 1);
+    }
+    inFlightUsd += cost;
+    try {
+      return await handler(job);
+    } finally {
+      inFlightUsd -= cost;
+    }
+  };
+  worker.register('facts-absorb', gated);
+  const pollMs = opts.pollMs ?? 500;
   const monitor = setInterval(async () => {
-    if (spent() + reserve > opts.maxUsd) return stop('budget');
     if (Date.now() > deadline) return stop('time');
     try {
       loggedUsd = await loggedFactsUsd(engine, startedAt);
-      if (spent() + reserve > opts.maxUsd) return stop('budget');
       // A setup fault fails every job in seconds; stop before it reaches more of the queue.
       const errored = await countErroredAttempts(engine, startedAt);
       if (errored >= 3 && errored > await countJobs(engine, 'completed', startedAt)) return stop('failing');

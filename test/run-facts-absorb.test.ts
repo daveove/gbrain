@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
-import { runFactsAbsorb, worstCaseFactsJobUsd } from '../scripts/run-facts-absorb.ts';
+import { factsJobWorstCase, runFactsAbsorb } from '../scripts/run-facts-absorb.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { _resetLlmHaltCooldownsForTests } from '../src/core/minions/llm-halt-cooldown.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -38,9 +38,10 @@ test('a cap below one job\'s worst case claims nothing', async () => {
   await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
   await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
   await withEnv(KEYLESS, async () => {
-    const worst = await worstCaseFactsJobUsd(engine);
+    const pricing = await factsJobWorstCase(engine);
+    const worst = pricing.usd(pricing.defaultModel);
     expect(worst).toBeGreaterThan(0);
-    const run = await runFactsAbsorb(engine, { maxUsd: worst! * 1.5, pollMs: 50 });
+    const run = await runFactsAbsorb(engine, { maxUsd: worst! * 0.5, pollMs: 50 });
     expect(run).toEqual({ stopped: 'budget', completed: 0, failed: 0, spentUsd: 0, worstCaseJobUsd: worst, remaining: 1 });
   });
   expect(await statuses()).toEqual({ 'facts-absorb': 'waiting' });
@@ -63,17 +64,18 @@ test('a setup fault that fails every job stops the run after a few jobs', async 
   });
 }, 60_000);
 
-test('a queued job naming an unpriced model claims nothing until pricing.overrides prices it', async () => {
+test('a job naming an unpriced model is put back unspent and stops the run until pricing.overrides prices it', async () => {
   await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', model: 'acme-example:custom-model' });
+  const job = await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', model: 'acme-example:custom-model' });
   await withEnv(KEYLESS, async () => {
     const blocked = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50 });
-    expect([blocked.stopped, blocked.worstCaseJobUsd, blocked.spentUsd, blocked.remaining]).toEqual(['unpriced', null, 0, 1]);
+    expect([blocked.stopped, blocked.completed, blocked.spentUsd, blocked.remaining]).toEqual(['unpriced', 0, 0, 1]);
+    expect((await new MinionQueue(engine).getJob(job.id))?.attempts_made).toBe(0);
     await engine.setConfig('pricing.overrides', JSON.stringify({ 'acme-example:custom-model': { input: 1, output: 2 } }));
     const priced = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
     expect([priced.stopped, priced.completed, priced.remaining]).toEqual(['queue_empty', 1, 0]);
   });
-});
+}, 60_000);
 
 test('a delayed retry that comes due before the deadline is run, not left behind', async () => {
   await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
