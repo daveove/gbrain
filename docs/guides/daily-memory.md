@@ -123,6 +123,11 @@ To clear a large backlog once, run the same script by hand with a larger cap:
 bun scripts/run-facts-absorb.ts --max-usd 70 --concurrency 4 --max-minutes 720
 ```
 
+The cap covers the calls the facts pipeline makes. A retry the AI SDK makes on
+its own after a timeout or lost response is not reserved separately; the
+per-job reservation (about $0.57 with the default model) is far above a typical
+job's measured cost (about $0.004), which absorbs it in practice.
+
 It prints one JSON line with the stop reason, jobs completed and failed, the
 measured spend and the jobs still queued, including delayed retries.
 
