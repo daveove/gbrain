@@ -29,6 +29,7 @@ import {
   getFactsExtractionMaxTokens,
   getFactsExtractionModel,
   getFactsExtractionPromptAppendix,
+  type ExtractFailureReason,
 } from '../src/core/facts/extract.ts';
 
 export interface FactsAbsorbRun {
@@ -91,13 +92,26 @@ async function countClaimableBy(engine: BrainEngine, dueBy: Date): Promise<numbe
   return Number(rows[0]?.n ?? 0);
 }
 
-/** Jobs whose attempt in this run ended in an error: now retrying or terminally failed. */
-async function countErroredAttempts(engine: BrainEngine, since: Date): Promise<number> {
-  const rows = await engine.executeRaw<{ n: number | string }>(
-    `SELECT count(*) AS n FROM minion_jobs WHERE name='facts-absorb' AND queue='default'
-       AND status IN ('delayed', 'failed', 'dead') AND updated_at >= $1::timestamptz`, [since.toISOString()]);
-  return Number(rows[0]?.n ?? 0);
+/**
+ * Bad and good outcomes since `since`. Bad: attempts now retrying or failed,
+ * plus completions whose extraction failed (the pipeline completes those
+ * with no facts, e.g. a model that keeps returning malformed output). Good:
+ * every other completion, including deterministic skips like a missing page.
+ */
+async function countOutcomes(engine: BrainEngine, since: Date): Promise<{ bad: number; good: number }> {
+  const [row] = await engine.executeRaw<{ bad: number | string; good: number | string }>(
+    `SELECT count(*) FILTER (WHERE status IN ('delayed', 'failed', 'dead')
+                              OR (status='completed' AND result->>'skipped_reason' = ANY($2::text[]))) AS bad,
+            count(*) FILTER (WHERE status='completed'
+                              AND (result->>'skipped_reason' IS NULL OR NOT result->>'skipped_reason' = ANY($2::text[]))) AS good
+       FROM minion_jobs WHERE name='facts-absorb' AND queue='default' AND updated_at >= $1::timestamptz`,
+    [since.toISOString(), EXTRACTION_FAILURES]);
+  return { bad: Number(row?.bad ?? 0), good: Number(row?.good ?? 0) };
 }
+
+const EXTRACTION_FAILURES = [
+  'chat_unavailable', 'provider_error', 'refusal', 'content_filter', 'non_terminal_stop', 'malformed_output', 'truncated_output',
+] satisfies ExtractFailureReason[];
 
 /** Chat spend recorded for facts-absorb jobs since `since`, from chat_usage_log. */
 async function loggedFactsUsd(engine: BrainEngine, since: Date): Promise<number> {
@@ -184,15 +198,21 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   const running = new Set<Promise<unknown>>();
   worker.register('facts-absorb', gated);
   const pollMs = opts.pollMs ?? 500;
+  let ticking = false;
   const monitor = setInterval(async () => {
     if (Date.now() > deadline) return stop('time');
+    // A slow database must not stack overlapping passes on the small pool.
+    if (ticking) return;
+    ticking = true;
     try {
       loggedUsd = await loggedFactsUsd(engine, startedAt);
-      // A setup fault fails every job in seconds; stop before it reaches more of the queue.
-      const errored = await countErroredAttempts(engine, startedAt);
-      if (errored >= 3 && errored > await countJobs(engine, 'completed', startedAt)) return stop('failing');
+      // A systematic fault fails (or empties) every job in seconds; stop before it reaches more of the queue.
+      const { bad, good } = await countOutcomes(engine, startedAt);
+      if (bad >= 3 && bad > good) return stop('failing');
       if (await countClaimableBy(engine, new Date(deadline)) === 0) stop('queue_empty');
-    } catch { /* the next tick retries; the worker keeps its own health checks */ }
+    } catch { /* the next tick retries; the worker keeps its own health checks */ } finally {
+      ticking = false;
+    }
   }, pollMs);
   try {
     await withBudgetTracker(tracker, () => worker.start());

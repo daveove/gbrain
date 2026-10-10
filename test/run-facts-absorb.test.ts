@@ -125,3 +125,15 @@ test('an unpriced brain default does not block jobs that name a priced model', a
     expect([run.stopped, run.completed, run.worstCaseJobUsd, run.remaining]).toEqual(['queue_empty', 1, null, 0]);
   });
 }, 60_000);
+
+test('a servable model that keeps failing extraction stops the run after a few jobs', async () => {
+  const body = 'alice-example decided to move the acme-example pilot to Thursday and asked for a revised budget. '.repeat(12);
+  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: body });
+  __setChatTransportForTests(async () => ({ ...(await noFactsChat()), text: 'not json' }));
+  for (let i = 0; i < 20; i++) await addFacts({ n: i });
+  await withEnv(KEYLESS, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
+    expect(run.stopped).toBe('failing');
+    expect(run.remaining).toBeGreaterThanOrEqual(10);
+  });
+}, 60_000);
