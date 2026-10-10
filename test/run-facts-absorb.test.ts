@@ -1,42 +1,66 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
+import { __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
+import { _resetLlmHaltCooldownsForTests } from '../src/core/minions/llm-halt-cooldown.ts';
 import { factsJobWorstCase, runFactsAbsorb } from '../scripts/run-facts-absorb.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { _resetLlmHaltCooldownsForTests } from '../src/core/minions/llm-halt-cooldown.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const KEYLESS = { ANTHROPIC_API_KEY: undefined, OPENAI_API_KEY: undefined, OPENROUTER_API_KEY: undefined };
+/** A servable chat model that extracts no facts. */
+const noFactsChat = async (): Promise<ChatResult> => ({
+  text: '{"facts":[]}', blocks: [], stopReason: 'end', model: 'anthropic:claude-sonnet-4-6', providerId: 'anthropic',
+  usage: { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_creation_tokens: 0 },
+});
 let engine: PGLiteEngine, version: string | null;
 beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); version = await engine.getConfig('version'); }, 60_000);
-afterAll(async () => { await engine.disconnect(); });
+afterAll(async () => { __setChatTransportForTests(null); await engine.disconnect(); });
 beforeEach(async () => {
   await resetPgliteState(engine);
   if (version) await engine.setConfig('version', version);
-  // The fault test trips the in-process provider-halt cooldown, which would defer later jobs.
   _resetLlmHaltCooldownsForTests();
+  __setChatTransportForTests(noFactsChat);
 });
 
-const statuses = async () => Object.fromEntries((await engine.executeRaw<{ name: string; status: string }>(
-  'SELECT name, status FROM minion_jobs ORDER BY id')).map(row => [row.name, row.status]));
+const page = () => engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
+const addFacts = (data: Record<string, unknown> = {}) =>
+  new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', ...data });
+const rows = () => engine.executeRaw<{ name: string; status: string; attempts_made: number }>(
+  'SELECT name, status, attempts_made FROM minion_jobs ORDER BY id');
 
 test('claims only facts-absorb jobs and leaves other queued work alone', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  const queue = new MinionQueue(engine);
-  await queue.add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
-  await queue.add('extract', { unrelated: true });
+  await page();
+  await addFacts();
+  await new MinionQueue(engine).add('extract', { unrelated: true });
   await withEnv(KEYLESS, async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
-    expect(run.stopped).toBe('queue_empty');
-    expect(run.completed).toBe(1);
-    expect(run.remaining).toBe(0);
+    expect([run.stopped, run.completed, run.remaining]).toEqual(['queue_empty', 1, 0]);
   });
-  expect(await statuses()).toEqual({ 'facts-absorb': 'completed', extract: 'waiting' });
+  expect(await rows()).toEqual([
+    { name: 'facts-absorb', status: 'completed', attempts_made: 0 },
+    { name: 'extract', status: 'waiting', attempts_made: 0 },
+  ]);
+}, 60_000);
+
+test('no servable chat model puts jobs back unspent instead of completing them empty', async () => {
+  __setChatTransportForTests(null);
+  await page();
+  await addFacts();
+  await addFacts({ n: 2 });
+  // Keyless, and also a key without a configured gateway (the 2026-10-10 incident).
+  for (const env of [KEYLESS, { ...KEYLESS, ANTHROPIC_API_KEY: 'test-not-a-key' }]) {
+    await withEnv(env, async () => {
+      const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
+      expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 2]);
+    });
+    expect((await rows()).map(row => row.attempts_made)).toEqual([0, 0]);
+  }
 }, 60_000);
 
 test('a cap below one job\'s worst case spends nothing and keeps the attempt', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
+  await page();
+  await addFacts();
   await withEnv(KEYLESS, async () => {
     const pricing = await factsJobWorstCase(engine);
     const worst = pricing.usd(pricing.defaultModel);
@@ -44,30 +68,25 @@ test('a cap below one job\'s worst case spends nothing and keeps the attempt', a
     const run = await runFactsAbsorb(engine, { maxUsd: worst! * 0.5, pollMs: 50 });
     expect(run).toEqual({ stopped: 'budget', completed: 0, failed: 0, spentUsd: 0, worstCaseJobUsd: worst, remaining: 1 });
   });
-  // Claimed, then put back by the gate without using an attempt.
-  expect(await engine.executeRaw('SELECT status, attempts_made FROM minion_jobs')).toEqual([{ status: 'delayed', attempts_made: 0 }]);
+  expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'delayed', attempts_made: 0 }]);
 });
 
-test('a setup fault that fails every job stops the run after a few jobs', async () => {
-  const body = 'alice-example decided to move the acme-example pilot to Thursday and asked for a revised budget. '.repeat(12);
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: body });
+test('a handler that fails every job stops the run after a few jobs', async () => {
   const queue = new MinionQueue(engine);
   for (let i = 0; i < 20; i++) {
-    await queue.add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', n: i },
-      { backoff_type: 'fixed', backoff_delay: 60_000, backoff_jitter: 0 });
+    await queue.add('facts-absorb', { slug: '', n: i }, { backoff_type: 'fixed', backoff_delay: 60_000, backoff_jitter: 0 });
   }
-  // A key without a configured gateway fails every extraction, as on 2026-10-10.
-  await withEnv({ ...KEYLESS, ANTHROPIC_API_KEY: 'test-not-a-key' }, async () => {
+  await withEnv(KEYLESS, async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
     expect(run.stopped).toBe('failing');
     expect(run.completed).toBe(0);
-    expect(run.remaining).toBeGreaterThanOrEqual(10);
+    expect(run.remaining).toBe(20);
   });
 }, 60_000);
 
 test('a job naming an unpriced model is put back unspent and stops the run until pricing.overrides prices it', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  const job = await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', model: 'acme-example:custom-model' });
+  await page();
+  const job = await addFacts({ model: 'acme-example:custom-model' });
   await withEnv(KEYLESS, async () => {
     const blocked = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50 });
     expect([blocked.stopped, blocked.completed, blocked.spentUsd, blocked.remaining]).toEqual(['unpriced', 0, 0, 1]);
@@ -79,8 +98,8 @@ test('a job naming an unpriced model is put back unspent and stops the run until
 }, 60_000);
 
 test('a delayed retry that comes due before the deadline is run, not left behind', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  const job = await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
+  await page();
+  const job = await addFacts();
   await engine.executeRaw("UPDATE minion_jobs SET status='delayed', delay_until=now() + interval '2 seconds' WHERE id=$1", [job.id]);
   await withEnv(KEYLESS, async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 0.5 });
@@ -89,21 +108,21 @@ test('a delayed retry that comes due before the deadline is run, not left behind
 }, 60_000);
 
 test('a signal that arrives before the run starts claims nothing', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
-  await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
+  await page();
+  await addFacts();
   const abort = new AbortController();
   abort.abort();
   await withEnv(KEYLESS, async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, signal: abort.signal });
     expect([run.stopped, run.completed, run.remaining]).toEqual(['signal', 0, 1]);
   });
-  expect(await statuses()).toEqual({ 'facts-absorb': 'waiting' });
+  expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'waiting', attempts_made: 0 }]);
 });
 
 test('an unpriced brain default does not block jobs that name a priced model', async () => {
-  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
+  await page();
   await engine.setConfig('facts.extraction_model', 'acme-example:unpriced-default');
-  await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', model: 'anthropic:claude-sonnet-4-6' });
+  await addFacts({ model: 'anthropic:claude-sonnet-4-6' });
   await withEnv(KEYLESS, async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
     expect([run.stopped, run.completed, run.worstCaseJobUsd, run.remaining]).toEqual(['queue_empty', 1, null, 0]);

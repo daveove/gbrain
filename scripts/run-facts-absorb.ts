@@ -21,7 +21,7 @@ import type { MinionHandler } from '../src/core/minions/types.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
-import { configureGateway, withBudgetTracker } from '../src/core/ai/gateway.ts';
+import { configureGateway, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
 import {
   MAX_TURN_TEXT_CHARS,
@@ -32,7 +32,7 @@ import {
 } from '../src/core/facts/extract.ts';
 
 export interface FactsAbsorbRun {
-  stopped: 'queue_empty' | 'budget' | 'time' | 'unpriced' | 'signal' | 'failing';
+  stopped: 'queue_empty' | 'budget' | 'time' | 'unpriced' | 'unavailable' | 'signal' | 'failing';
   completed: number;
   failed: number;
   spentUsd: number;
@@ -159,8 +159,11 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
     const cost = now.usd(model);
     // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.
-    if (stopped || cost === null || spent() + inFlightUsd + cost > opts.maxUsd) {
-      stop(cost === null ? 'unpriced' : 'budget');
+    // The handler completes a job as a calm skip when no chat model is servable
+    // (keyless installs), which would consume the queue without facts.
+    const servable = cost !== null && isAvailable('chat', model);
+    if (stopped || cost === null || !servable || spent() + inFlightUsd + cost > opts.maxUsd) {
+      stop(cost === null ? 'unpriced' : !servable ? 'unavailable' : 'budget');
       // Lease-full requeue: back to the queue without using an attempt.
       throw new RateLeaseUnavailableError('facts-absorb-run-budget', 1, 1);
     }
@@ -231,7 +234,7 @@ async function main(): Promise<void> {
     await engine.connect(engineConfig);
     const run = await runFactsAbsorb(engine, { maxUsd, concurrency, maxMinutes, signal: abort.signal });
     console.log(JSON.stringify({ action: 'facts_absorb_run', ...run }));
-    if (run.stopped === 'unpriced' || run.stopped === 'failing') process.exitCode = 1;
+    if (run.stopped === 'unpriced' || run.stopped === 'unavailable' || run.stopped === 'failing') process.exitCode = 1;
   } finally {
     await engine.disconnect();
   }

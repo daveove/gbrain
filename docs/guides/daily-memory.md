@@ -112,7 +112,8 @@ GBRAIN_DAILY_MEMORY_FACTS_MAX_USD=1
 The step runs `scripts/run-facts-absorb.ts`, which claims only `facts-absorb`
 jobs. Before each job runs, it prices that job's model at its worst case; a job
 that would push spend plus the jobs already running past the cap goes back to
-the queue unspent and the run stops. It also stops after
+the queue unspent and the run stops. So does a job whose model is not usable
+(no API key, or an unpriced model); the night then exits non-zero. It also stops after
 `GBRAIN_DAILY_MEMORY_FACTS_MAX_MINUTES` (default 30). A full cap or a leftover backlog is normal; only a runner error
 fails the night. Explicit-date runs skip this step.
 
