@@ -197,8 +197,15 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     // The handler completes a job as a calm skip when no chat model is servable
     // (keyless installs), which would consume the queue without facts.
     const servable = cost !== null && isAvailable('chat', model);
-    if (stopped || cost === null || !servable || spent() + inFlightUsd + cost > opts.maxUsd) {
-      stop(cost === null ? 'unpriced' : !servable ? 'unavailable' : 'budget');
+    // A signal or the deadline can pass during setup, before the monitor's first tick.
+    const halt: FactsAbsorbRun['stopped'] | null = opts.signal?.aborted ? 'signal'
+      : Date.now() > deadline ? 'time'
+      : cost === null ? 'unpriced'
+      : !servable ? 'unavailable'
+      : spent() + inFlightUsd + cost > opts.maxUsd ? 'budget'
+      : null;
+    if (stopped || halt || cost === null) {
+      stop(halt ?? 'budget');
       // Lease-full requeue: back to the queue without using an attempt.
       throw new RateLeaseUnavailableError('facts-absorb-run-budget', 1, 1);
     }

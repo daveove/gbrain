@@ -175,3 +175,13 @@ test('under managed persistence a disabled brain embedding policy is priced at z
     expect((await factsJobWorstCase(engine)).embedUsd).toBe(0);
   });
 });
+
+test('a deadline already passed when the first job is claimed spends nothing', async () => {
+  await page();
+  await addFacts();
+  await withEnv(KEYLESS, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 60_000, maxMinutes: 0.0001 });
+    expect([run.stopped, run.completed, run.remaining]).toEqual(['time', 0, 1]);
+  });
+  expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'delayed', attempts_made: 0 }]);
+});
