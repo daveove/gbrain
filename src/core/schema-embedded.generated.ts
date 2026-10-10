@@ -262,12 +262,6 @@ CREATE TRIGGER bump_page_generation_clock_trg
 CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
 CREATE INDEX IF NOT EXISTS idx_pages_frontmatter ON pages USING GIN(frontmatter);
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING GIN(title gin_trgm_ops);
--- Entity resolution (src/core/entities/resolve.ts) filters pages by
--- lower(title) % \$2, slug ILIKE '%…%' and slug LIKE '<dir>/<token>-%'.
--- idx_pages_trgm indexes raw title, so without these every resolve read the
--- whole source's pages.
-CREATE INDEX IF NOT EXISTS idx_pages_title_lower_trgm ON pages USING GIN(lower(title) gin_trgm_ops);
-CREATE INDEX IF NOT EXISTS idx_pages_slug_trgm ON pages USING GIN(slug gin_trgm_ops);
 -- v0.13.1 #170: avoids 14.6s seqscan on large brains when listing pages newest-first.
 CREATE INDEX IF NOT EXISTS idx_pages_updated_at_desc ON pages (updated_at DESC);
 -- v0.18.0: source-scoped scans (per /plan-eng-review Section 4).

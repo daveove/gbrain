@@ -6728,7 +6728,10 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
     // Entity resolution filters pages by lower(title) % $2, slug ILIKE and
     // slug LIKE patterns, none of which idx_pages_trgm (raw title) serves, so
     // each resolve read every page in the source; on a large source over a
-    // throttled disk that outlasted the facts-absorb job timeout.
+    // throttled disk that outlasted the facts-absorb job timeout. Not in the
+    // replayed schema files: initSchema replays them on existing brains before
+    // migrating, which would build these with a plain, write-blocking CREATE
+    // INDEX. Fresh brains start at version 1 and reach this migration too.
     version: 172,
     name: 'entity_resolver_trigram_indexes',
     idempotent: true,
