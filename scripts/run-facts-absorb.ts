@@ -15,10 +15,10 @@ import { createEngine } from '../src/core/engine-factory.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
-import { BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
+import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
 import { configureGateway, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
-import { estimateChatCostUsd } from '../src/core/ai/chat-usage.ts';
 import {
   MAX_TURN_TEXT_CHARS,
   buildExtractorSystem,
@@ -39,15 +39,27 @@ export interface FactsAbsorbRun {
  * One claim is one attempt: the first extractor call plus a truncation retry
  * and a malformed-output retry at twice the output cap. Input is counted at
  * one token per two characters (real tokenizers average about four), with a
- * fixed allowance for the wrapper, entity hints and embeddings.
+ * fixed allowance for the wrapper and entity hints. Every model a queued job
+ * names is priced (a job's `data.model` wins over the brain default), plus up
+ * to 25 fact embeddings. Any unpriced model makes the run unbounded: null.
  */
-export async function worstCaseFactsJobUsd(engine: BrainEngine): Promise<number | null> {
-  const model = await getFactsExtractionModel(engine);
+export async function worstCaseFactsJobUsd(engine: BrainEngine, overrides?: PricingOverrides): Promise<number | null> {
   const maxTokens = await getFactsExtractionMaxTokens(engine);
   const systemChars = Math.max(buildExtractorSystem(true).length, buildExtractorSystem(false).length);
   const inputPerCall = Math.ceil((systemChars + MAX_TURN_TEXT_CHARS) / 2) + 1_000;
-  const chat = estimateChatCostUsd(model, { input_tokens: 3 * inputPerCall, output_tokens: 5 * maxTokens });
-  return chat === null ? null : chat + 0.001;
+  const queued = await engine.executeRaw<{ model: string | null }>(
+    `SELECT DISTINCT data->>'model' AS model FROM minion_jobs
+      WHERE name='facts-absorb' AND queue='default' AND status IN ('waiting', 'delayed')`);
+  const models = new Set([await getFactsExtractionModel(engine), ...queued.flatMap(row => row.model ? [row.model] : [])]);
+  let chat = 0;
+  for (const model of models) {
+    const cost = reservationCostUsd(model, 'chat', 3 * inputPerCall, 5 * maxTokens, overrides);
+    if (cost === null) return null;
+    chat = Math.max(chat, cost);
+  }
+  const embedModel = await engine.getConfig('embedding_model');
+  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 500, 0, overrides) : 0;
+  return embed === null ? null : chat + embed;
 }
 
 async function countJobs(engine: BrainEngine, status: string, since?: Date): Promise<number> {
@@ -84,7 +96,8 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   const concurrency = Math.max(1, Math.floor(opts.concurrency ?? 1));
   const startedAt = new Date();
   const deadline = Date.now() + (opts.maxMinutes ?? 60) * 60_000;
-  const worstCaseJobUsd = await worstCaseFactsJobUsd(engine);
+  const pricingOverrides = await loadPricingOverrides(engine);
+  const worstCaseJobUsd = await worstCaseFactsJobUsd(engine, pricingOverrides);
   const result = async (stopped: FactsAbsorbRun['stopped'], spentUsd: number): Promise<FactsAbsorbRun> => ({
     stopped,
     completed: await countJobs(engine, 'completed', startedAt),
@@ -98,7 +111,7 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   const reserve = 2 * concurrency * worstCaseJobUsd;
   if (opts.maxUsd < reserve) return result('budget', 0);
 
-  const tracker = new BudgetTracker({ label: 'facts:run-facts-absorb', maxCostUsd: opts.maxUsd });
+  const tracker = new BudgetTracker({ label: 'facts:run-facts-absorb', maxCostUsd: opts.maxUsd, pricingOverrides });
   const builtins = new MinionWorker(engine);
   await registerBuiltinHandlers(builtins, engine, { quiet: true });
   const handler = builtins.getHandler('facts-absorb');
