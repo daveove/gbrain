@@ -21,7 +21,7 @@ import type { MinionHandler } from '../src/core/minions/types.ts';
 import { refreshGatewayForJob, registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
-import { configureGateway, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
+import { configureGateway, getEmbeddingModel, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
 import {
   MAX_TURN_TEXT_CHARS,
@@ -66,8 +66,9 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   ) + Buffer.byteLength(appendix ?? '') + 2;
   const inputPerCall = systemBytes + 4 * MAX_TURN_TEXT_CHARS + 200;
   const outputTokens = maxTokens + 2 * (2 * maxTokens);
-  const embedModel = await engine.getConfig('embedding_model');
-  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 4 * 500, 0, overrides) : 0;
+  // The model fact extraction actually embeds with; unresolvable counts as unpriced.
+  let embed: number | null;
+  try { embed = reservationCostUsd(getEmbeddingModel(), 'embed', 25 * 4 * 500, 0, overrides); } catch { embed = null; }
   return {
     defaultModel: await getFactsExtractionModel(engine),
     embedUsd: embed,
@@ -176,9 +177,9 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     // Model and config are fresh per claim, as the handler re-resolves them per
     // job. Overrides stay the startup map the tracker debits with; a change
     // takes effect on the next run.
-    const now = await factsJobWorstCase(engine, pricingOverrides);
-    // The handler refreshes provider credentials before it runs; check the same state it will see.
+    // The handler refreshes provider config before it runs; price and check the same state it will see.
     await refreshGatewayForJob(engine);
+    const now = await factsJobWorstCase(engine, pricingOverrides);
     const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
     const cost = now.usd(model);
     // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.

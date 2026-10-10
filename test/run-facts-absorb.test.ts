@@ -140,7 +140,8 @@ test('a servable model that keeps failing extraction stops the run after a few j
 
 test('each finished job keeps its embedding ceiling as spent', async () => {
   await page();
-  await engine.setConfig('embedding_model', 'openai:text-embedding-3-large');
+  // A stale DB row must not change pricing: extraction embeds with the gateway's model.
+  await engine.setConfig('embedding_model', 'acme-example:stale-embed');
   await addFacts();
   await addFacts({ n: 2 });
   await withEnv(KEYLESS, async () => {
