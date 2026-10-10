@@ -98,6 +98,32 @@ The writer exits 0 only when no stale generated index remains, so a clean exit
 is the backlog check. On the production brain, 263 stale indexes took about
 14 minutes.
 
+## Process queued fact jobs
+
+Page writes queue `facts-absorb` jobs, which extract facts with a paid model.
+Nothing processes them unless a worker runs. Set
+`GBRAIN_DAILY_MEMORY_FACTS_MAX_USD` in the LaunchAgent's environment to let the
+nightly run work through them after the day is written:
+
+```bash
+GBRAIN_DAILY_MEMORY_FACTS_MAX_USD=1
+```
+
+The step runs `scripts/run-facts-absorb.ts`, which claims only `facts-absorb`
+jobs. It stops before its spend plus a worst-case cost for every job that could
+still start would pass the cap, or after `GBRAIN_DAILY_MEMORY_FACTS_MAX_MINUTES`
+(default 30). A full cap or a leftover backlog is normal; only a runner error
+fails the night. Explicit-date runs skip this step.
+
+To clear a large backlog once, run the same script by hand with a larger cap:
+
+```bash
+bun scripts/run-facts-absorb.ts --max-usd 70 --concurrency 4 --max-minutes 720
+```
+
+It prints one JSON line with the stop reason, jobs completed and failed, the
+measured spend and the jobs still waiting.
+
 ## Read the logs
 
 The launcher appends to `~/Library/Logs/gbrain-daily-memory.log` and redacts
