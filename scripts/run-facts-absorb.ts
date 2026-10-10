@@ -128,8 +128,6 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     remaining: await countJobs(engine, 'waiting') + await countJobs(engine, 'delayed'),
   });
   if (opts.signal?.aborted) return result('signal', 0);
-  if (worstCaseJobUsd === null) return result('unpriced', 0);
-  if (opts.maxUsd < worstCaseJobUsd) return result('budget', 0);
 
   const tracker = new BudgetTracker({ label: 'facts:run-facts-absorb', maxCostUsd: opts.maxUsd, pricingOverrides });
   const builtins = new MinionWorker(engine);
@@ -162,12 +160,17 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
       throw new RateLeaseUnavailableError('facts-absorb-run-budget', 1, 1);
     }
     inFlightUsd += cost;
+    const run = handler(job);
+    running.set(job.id, run);
     try {
-      return await handler(job);
+      return await run;
     } finally {
       inFlightUsd -= cost;
+      running.delete(job.id);
     }
   };
+  // Handlers still running when the worker gives up waiting on stop.
+  const running = new Map<number, Promise<unknown>>();
   worker.register('facts-absorb', gated);
   const pollMs = opts.pollMs ?? 500;
   const monitor = setInterval(async () => {
@@ -182,6 +185,17 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   }, pollMs);
   try {
     await withBudgetTracker(tracker, () => worker.start());
+    // start() returns 30 s after stop even if a job is mid-request. Wait for
+    // every handler, then for the worker to write each job's outcome, before
+    // reporting, so the caller never disconnects under a paid call.
+    const unsettled = [...running.keys()];
+    await Promise.allSettled([...running.values()]);
+    for (let i = 0; unsettled.length && i < 120; i++) {
+      const [row] = await engine.executeRaw<{ n: number | string }>(
+        `SELECT count(*) AS n FROM minion_jobs WHERE id = ANY($1::bigint[]) AND status='active'`, [unsettled]);
+      if (Number(row?.n ?? 0) === 0) break;
+      await Bun.sleep(500);
+    }
   } finally {
     clearInterval(monitor);
   }

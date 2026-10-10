@@ -34,7 +34,7 @@ test('claims only facts-absorb jobs and leaves other queued work alone', async (
   expect(await statuses()).toEqual({ 'facts-absorb': 'completed', extract: 'waiting' });
 }, 60_000);
 
-test('a cap below one job\'s worst case claims nothing', async () => {
+test('a cap below one job\'s worst case spends nothing and keeps the attempt', async () => {
   await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
   await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page' });
   await withEnv(KEYLESS, async () => {
@@ -44,7 +44,8 @@ test('a cap below one job\'s worst case claims nothing', async () => {
     const run = await runFactsAbsorb(engine, { maxUsd: worst! * 0.5, pollMs: 50 });
     expect(run).toEqual({ stopped: 'budget', completed: 0, failed: 0, spentUsd: 0, worstCaseJobUsd: worst, remaining: 1 });
   });
-  expect(await statuses()).toEqual({ 'facts-absorb': 'waiting' });
+  // Claimed, then put back by the gate without using an attempt.
+  expect(await engine.executeRaw('SELECT status, attempts_made FROM minion_jobs')).toEqual([{ status: 'delayed', attempts_made: 0 }]);
 });
 
 test('a setup fault that fails every job stops the run after a few jobs', async () => {
@@ -98,3 +99,13 @@ test('a signal that arrives before the run starts claims nothing', async () => {
   });
   expect(await statuses()).toEqual({ 'facts-absorb': 'waiting' });
 });
+
+test('an unpriced brain default does not block jobs that name a priced model', async () => {
+  await engine.putPage('notes/facts-runner', { type: 'note', title: 'Runner fixture', compiled_truth: 'Synthetic fixture text.' });
+  await engine.setConfig('facts.extraction_model', 'acme-example:unpriced-default');
+  await new MinionQueue(engine).add('facts-absorb', { slug: 'notes/facts-runner', sourceId: 'default', source: 'mcp:put_page', model: 'anthropic:claude-sonnet-4-6' });
+  await withEnv(KEYLESS, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
+    expect([run.stopped, run.completed, run.worstCaseJobUsd, run.remaining]).toEqual(['queue_empty', 1, null, 0]);
+  });
+}, 60_000);
