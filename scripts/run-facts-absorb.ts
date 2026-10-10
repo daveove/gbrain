@@ -24,6 +24,7 @@ import {
   buildExtractorSystem,
   getFactsExtractionMaxTokens,
   getFactsExtractionModel,
+  getFactsExtractionPromptAppendix,
 } from '../src/core/facts/extract.ts';
 
 export interface FactsAbsorbRun {
@@ -32,20 +33,23 @@ export interface FactsAbsorbRun {
   failed: number;
   spentUsd: number;
   worstCaseJobUsd: number | null;
-  remainingWaiting: number;
+  /** Jobs still queued: waiting plus delayed retries. */
+  remaining: number;
 }
 
 /**
  * One claim is one attempt: the first extractor call plus a truncation retry
  * and a malformed-output retry at twice the output cap. Input is counted at
- * one token per two characters (real tokenizers average about four), with a
- * fixed allowance for the wrapper and entity hints. Every model a queued job
- * names is priced (a job's `data.model` wins over the brain default), plus up
- * to 25 fact embeddings. Any unpriced model makes the run unbounded: null.
+ * one token per two characters (real tokenizers average about four), with the
+ * operator prompt appendix and a fixed allowance for the wrapper and entity
+ * hints. Every model a queued job names is priced (a job's `data.model` wins
+ * over the brain default), plus up to 25 fact embeddings. Any unpriced model
+ * makes the run unbounded: null.
  */
 export async function worstCaseFactsJobUsd(engine: BrainEngine, overrides?: PricingOverrides): Promise<number | null> {
   const maxTokens = await getFactsExtractionMaxTokens(engine);
-  const systemChars = Math.max(buildExtractorSystem(true).length, buildExtractorSystem(false).length);
+  const appendix = await getFactsExtractionPromptAppendix(engine);
+  const systemChars = Math.max(buildExtractorSystem(true).length, buildExtractorSystem(false).length) + (appendix?.length ?? 0) + 2;
   const inputPerCall = Math.ceil((systemChars + MAX_TURN_TEXT_CHARS) / 2) + 1_000;
   const queued = await engine.executeRaw<{ model: string | null }>(
     `SELECT DISTINCT data->>'model' AS model FROM minion_jobs
@@ -67,6 +71,15 @@ async function countJobs(engine: BrainEngine, status: string, since?: Date): Pro
     `SELECT count(*) AS n FROM minion_jobs WHERE name='facts-absorb' AND queue='default' AND status=$1
        AND ($2::timestamptz IS NULL OR finished_at >= $2::timestamptz)`,
     [status, since?.toISOString() ?? null]);
+  return Number(rows[0]?.n ?? 0);
+}
+
+/** Waiting and active jobs, plus delayed retries that come due before `dueBy`. */
+async function countClaimableBy(engine: BrainEngine, dueBy: Date): Promise<number> {
+  const rows = await engine.executeRaw<{ n: number | string }>(
+    `SELECT count(*) AS n FROM minion_jobs WHERE name='facts-absorb' AND queue='default'
+       AND (status IN ('waiting', 'active') OR (status='delayed' AND delay_until <= $1::timestamptz))`,
+    [dueBy.toISOString()]);
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -104,8 +117,9 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     failed: await countJobs(engine, 'failed', startedAt) + await countJobs(engine, 'dead', startedAt),
     spentUsd,
     worstCaseJobUsd,
-    remainingWaiting: await countJobs(engine, 'waiting'),
+    remaining: await countJobs(engine, 'waiting') + await countJobs(engine, 'delayed'),
   });
+  if (opts.signal?.aborted) return result('signal', 0);
   if (worstCaseJobUsd === null) return result('unpriced', 0);
   // Between two polls up to `concurrency` jobs can finish and as many start.
   const reserve = 2 * concurrency * worstCaseJobUsd;
@@ -138,7 +152,7 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
       // A setup fault fails every job in seconds; stop before it reaches more of the queue.
       const errored = await countErroredAttempts(engine, startedAt);
       if (errored >= 3 && errored > await countJobs(engine, 'completed', startedAt)) return stop('failing');
-      if (await countJobs(engine, 'waiting') === 0 && await countJobs(engine, 'active') === 0) stop('queue_empty');
+      if (await countClaimableBy(engine, new Date(deadline)) === 0) stop('queue_empty');
     } catch { /* the next tick retries; the worker keeps its own health checks */ }
   }, pollMs);
   try {
@@ -159,7 +173,9 @@ async function main(): Promise<void> {
   const maxUsd = Number(flag('--max-usd'));
   if (!Number.isFinite(maxUsd) || maxUsd <= 0) throw new Error('--max-usd must be a positive number');
   const concurrency = Number(flag('--concurrency') ?? 1);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16) throw new Error('--concurrency must be an integer from 1 to 16');
   const maxMinutes = Number(flag('--max-minutes') ?? 60);
+  if (!Number.isFinite(maxMinutes) || maxMinutes <= 0) throw new Error('--max-minutes must be a positive number');
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
   configureGateway(buildGatewayConfig(config));

@@ -122,7 +122,7 @@ bun scripts/run-facts-absorb.ts --max-usd 70 --concurrency 4 --max-minutes 720
 ```
 
 It prints one JSON line with the stop reason, jobs completed and failed, the
-measured spend and the jobs still waiting.
+measured spend and the jobs still queued, including delayed retries.
 
 ## Read the logs
 
