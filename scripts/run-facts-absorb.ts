@@ -42,12 +42,14 @@ export interface FactsAbsorbRun {
 }
 
 /**
- * One claim is one attempt: the first extractor call plus a truncation retry
- * and a malformed-output retry at twice the output cap. Input is counted at
- * one token per two characters (real tokenizers average about four), with the
- * operator prompt appendix and a fixed allowance for the wrapper and entity
- * hints, plus up to 25 fact embeddings. Returns the brain default model and a
- * pricer for any model; the pricer returns null for an unpriced model.
+ * Worst case of one claim, which is one attempt: the first extractor call plus
+ * a truncation retry and a malformed-output retry at twice the output cap.
+ * Input is bounded in bytes, a true ceiling because a BPE token covers at
+ * least one byte: the system prompt and operator appendix, 4 bytes for each
+ * of the 8,000 turn characters, and 200 tokens of message framing. Fact
+ * embeddings are bounded by the output tokens they come from. Everything is
+ * read fresh so a model or config change mid-run is priced as the handler
+ * will see it. The pricer returns null for an unpriced model.
  */
 export async function factsJobWorstCase(engine: BrainEngine, overrides?: PricingOverrides): Promise<{
   defaultModel: string;
@@ -55,14 +57,17 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
 }> {
   const maxTokens = await getFactsExtractionMaxTokens(engine);
   const appendix = await getFactsExtractionPromptAppendix(engine);
-  const systemChars = Math.max(buildExtractorSystem(true).length, buildExtractorSystem(false).length) + (appendix?.length ?? 0) + 2;
-  const inputPerCall = Math.ceil((systemChars + MAX_TURN_TEXT_CHARS) / 2) + 1_000;
+  const systemBytes = Math.max(
+    Buffer.byteLength(buildExtractorSystem(true)), Buffer.byteLength(buildExtractorSystem(false)),
+  ) + Buffer.byteLength(appendix ?? '') + 2;
+  const inputPerCall = systemBytes + 4 * MAX_TURN_TEXT_CHARS + 200;
+  const outputTokens = maxTokens + 2 * (2 * maxTokens);
   const embedModel = await engine.getConfig('embedding_model');
-  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 500, 0, overrides) : 0;
+  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', outputTokens, 0, overrides) : 0;
   return {
     defaultModel: await getFactsExtractionModel(engine),
     usd: model => {
-      const chat = reservationCostUsd(model, 'chat', 3 * inputPerCall, 5 * maxTokens, overrides);
+      const chat = reservationCostUsd(model, 'chat', 3 * inputPerCall, outputTokens, overrides);
       return chat === null || embed === null ? null : chat + embed;
     },
   };
@@ -146,8 +151,11 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   // spend is in the tracker by then.
   let inFlightUsd = 0;
   const gated: MinionHandler = async job => {
-    const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : pricing.defaultModel;
-    const cost = pricing.usd(model);
+    // Fresh per claim: the handler re-resolves the model and config per job too.
+    const now = await factsJobWorstCase(engine, await loadPricingOverrides(engine));
+    const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
+    const cost = now.usd(model);
+    // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.
     if (stopped || cost === null || spent() + inFlightUsd + cost > opts.maxUsd) {
       stop(cost === null ? 'unpriced' : 'budget');
       // Lease-full requeue: back to the queue without using an attempt.
