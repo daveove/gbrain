@@ -55,6 +55,8 @@ export interface FactsAbsorbRun {
  */
 export async function factsJobWorstCase(engine: BrainEngine, overrides?: PricingOverrides): Promise<{
   defaultModel: string;
+  /** Embedding share of the worst case (null when unpriced). */
+  embedUsd: number | null;
   usd: (model: string) => number | null;
 }> {
   const maxTokens = await getFactsExtractionMaxTokens(engine);
@@ -68,6 +70,7 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 4 * 500, 0, overrides) : 0;
   return {
     defaultModel: await getFactsExtractionModel(engine),
+    embedUsd: embed,
     usd: model => {
       const chat = reservationCostUsd(model, 'chat', 3 * inputPerCall, outputTokens, overrides);
       return chat === null || embed === null ? null : chat + embed;
@@ -159,7 +162,11 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   // The tracker and chat_usage_log price the same calls slightly differently
   // (about 4% apart on production); spend is whichever is higher.
   let loggedUsd = 0;
-  const spent = () => Math.max(tracker.snapshot().cumulativeCostUsd, loggedUsd);
+  // Embeddings are missing from chat_usage_log and the tracker prices them by a
+  // characters-per-token guess, so each finished job keeps its embedding ceiling
+  // as spent. This overstates spend slightly; it can never understate it.
+  let embedCeilingUsd = 0;
+  const spent = () => Math.max(tracker.snapshot().cumulativeCostUsd, loggedUsd) + embedCeilingUsd;
   // Worst case of every job now running, released when the job ends; its real
   // spend is in the tracker by then.
   let inFlightUsd = 0;
@@ -190,6 +197,7 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
       return await run;
     } finally {
       inFlightUsd -= cost;
+      embedCeilingUsd += now.embedUsd ?? 0;
       running.delete(run);
     }
   };

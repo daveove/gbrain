@@ -137,3 +137,19 @@ test('a servable model that keeps failing extraction stops the run after a few j
     expect(run.remaining).toBeGreaterThanOrEqual(10);
   });
 }, 60_000);
+
+test('each finished job keeps its embedding ceiling as spent', async () => {
+  await page();
+  await engine.setConfig('embedding_model', 'openai:text-embedding-3-large');
+  await addFacts();
+  await addFacts({ n: 2 });
+  await withEnv(KEYLESS, async () => {
+    const pricing = await factsJobWorstCase(engine);
+    expect(pricing.embedUsd).toBeGreaterThan(0);
+    // Room for one job's worst case plus less than one embedding ceiling.
+    const cap = pricing.usd(pricing.defaultModel)! + pricing.embedUsd! / 2;
+    const run = await runFactsAbsorb(engine, { maxUsd: cap, pollMs: 50, maxMinutes: 1 });
+    expect([run.stopped, run.completed, run.remaining]).toEqual(['budget', 1, 1]);
+    expect(run.spentUsd).toBeCloseTo(pricing.embedUsd!, 10);
+  });
+}, 60_000);
