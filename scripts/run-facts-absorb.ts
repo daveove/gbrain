@@ -149,8 +149,10 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   // spend is in the tracker by then.
   let inFlightUsd = 0;
   const gated: MinionHandler = async job => {
-    // Fresh per claim: the handler re-resolves the model and config per job too.
-    const now = await factsJobWorstCase(engine, await loadPricingOverrides(engine));
+    // Model and config are fresh per claim, as the handler re-resolves them per
+    // job. Overrides stay the startup map the tracker debits with; a change
+    // takes effect on the next run.
+    const now = await factsJobWorstCase(engine, pricingOverrides);
     const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
     const cost = now.usd(model);
     // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.
