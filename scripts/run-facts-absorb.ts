@@ -47,7 +47,8 @@ export interface FactsAbsorbRun {
  * Input is bounded in bytes, a true ceiling because a BPE token covers at
  * least one byte: the system prompt and operator appendix, 4 bytes for each
  * of the 8,000 turn characters, and 200 tokens of message framing. Fact
- * embeddings are bounded by the output tokens they come from. Everything is
+ * embeddings are bounded the same way: at most 25 facts of at most 500
+ * characters each, 4 bytes per character. Everything is
  * read fresh so a model or config change mid-run is priced as the handler
  * will see it. The pricer returns null for an unpriced model.
  */
@@ -63,7 +64,7 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   const inputPerCall = systemBytes + 4 * MAX_TURN_TEXT_CHARS + 200;
   const outputTokens = maxTokens + 2 * (2 * maxTokens);
   const embedModel = await engine.getConfig('embedding_model');
-  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', outputTokens, 0, overrides) : 0;
+  const embed = embedModel ? reservationCostUsd(embedModel, 'embed', 25 * 4 * 500, 0, overrides) : 0;
   return {
     defaultModel: await getFactsExtractionModel(engine),
     usd: model => {
@@ -163,16 +164,18 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     }
     inFlightUsd += cost;
     const run = handler(job);
-    running.set(job.id, run);
+    running.add(run);
+    started.push(job.id);
     try {
       return await run;
     } finally {
       inFlightUsd -= cost;
-      running.delete(job.id);
+      running.delete(run);
     }
   };
-  // Handlers still running when the worker gives up waiting on stop.
-  const running = new Map<number, Promise<unknown>>();
+  // Every job this run started; the worker writes its outcome after the handler returns.
+  const started: number[] = [];
+  const running = new Set<Promise<unknown>>();
   worker.register('facts-absorb', gated);
   const pollMs = opts.pollMs ?? 500;
   const monitor = setInterval(async () => {
@@ -190,11 +193,10 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     // start() returns 30 s after stop even if a job is mid-request. Wait for
     // every handler, then for the worker to write each job's outcome, before
     // reporting, so the caller never disconnects under a paid call.
-    const unsettled = [...running.keys()];
-    await Promise.allSettled([...running.values()]);
-    for (let i = 0; unsettled.length && i < 120; i++) {
+    await Promise.allSettled([...running]);
+    for (let i = 0; started.length && i < 120; i++) {
       const [row] = await engine.executeRaw<{ n: number | string }>(
-        `SELECT count(*) AS n FROM minion_jobs WHERE id = ANY($1::bigint[]) AND status='active'`, [unsettled]);
+        `SELECT count(*) AS n FROM minion_jobs WHERE id = ANY($1::bigint[]) AND status='active'`, [started]);
       if (Number(row?.n ?? 0) === 0) break;
       await Bun.sleep(500);
     }
