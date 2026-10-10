@@ -150,6 +150,8 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
   // spend is in the tracker by then.
   let inFlightUsd = 0;
   const gated: MinionHandler = async job => {
+    // Recorded before admission: a rejected claim's requeue is an outcome write too.
+    started.push(job.id);
     // Model and config are fresh per claim, as the handler re-resolves them per
     // job. Overrides stay the startup map the tracker debits with; a change
     // takes effect on the next run.
@@ -165,7 +167,6 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     inFlightUsd += cost;
     const run = handler(job);
     running.add(run);
-    started.push(job.id);
     try {
       return await run;
     } finally {
@@ -173,7 +174,7 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
       running.delete(run);
     }
   };
-  // Every job this run started; the worker writes its outcome after the handler returns.
+  // Every job this run claimed; the worker writes its outcome after the handler returns or throws.
   const started: number[] = [];
   const running = new Set<Promise<unknown>>();
   worker.register('facts-absorb', gated);
