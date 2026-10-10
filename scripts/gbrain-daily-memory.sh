@@ -226,8 +226,17 @@ if [[ "$scheduled_run" -eq 1 && -n "$scan_started" ]]; then
     python3 -c 'import os, pathlib, sys; p=pathlib.Path(sys.argv[1]); t=p.with_name(p.name+".tmp"); t.write_text(sys.argv[2]+"\n"); os.replace(t, p)' "$STATE/daily-memory-$seat-mtime" "$scan_started"
   done
 fi
+# Opt-in: work through queued facts-absorb jobs under a nightly spend cap. A
+# cap reached or a backlog left over is normal; only a runner error fails.
+facts_failure=0
+if [[ "$scheduled_run" -eq 1 && -n "${GBRAIN_DAILY_MEMORY_FACTS_MAX_USD:-}" ]]; then
+  printf 'facts-absorb start max_usd=%s\n' "$GBRAIN_DAILY_MEMORY_FACTS_MAX_USD" >> "$LOG"
+  run_command bun "$REPO/scripts/run-facts-absorb.ts" --max-usd "$GBRAIN_DAILY_MEMORY_FACTS_MAX_USD" --concurrency 1 --max-minutes "${GBRAIN_DAILY_MEMORY_FACTS_MAX_MINUTES:-30}" || facts_failure=$?
+  [[ $facts_failure -eq 0 ]] || printf 'facts-absorb failed (exit %s)\n' "$facts_failure" >> "$LOG"
+fi
 if [[ $seat_failure -ne 0 ]]; then
   printf 'daily-memory wrote the day with seat failures; exit %s\n' "$seat_failure" >> "$LOG"
   exit "$seat_failure"
 fi
+[[ $facts_failure -eq 0 ]] || exit "$facts_failure"
 echo 'daily-memory ok' >> "$LOG"

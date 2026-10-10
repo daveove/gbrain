@@ -27,7 +27,8 @@ args = sys.argv[1:]
 if args[0] == '-e':
     os.execv(os.environ['TEST_REAL_BUN'], [os.environ['TEST_REAL_BUN'], *args])
 kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
-  'ingest' if 'transcripts' in args else 'write')
+  'facts' if any('run-facts-absorb' in a for a in args) else (
+  'ingest' if 'transcripts' in args else 'write'))
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if kind == 'tz':
@@ -387,6 +388,25 @@ finally:
     expect(result.calls[0].lookback).toBeFalsy();
     // Backfill must not advance the Codex mtime watermark.
     expect(readFileSync(mark, 'utf8')).toBe(before);
+  });
+
+  it('runs the opt-in facts step after a scheduled write, never on an explicit date', () => {
+    const { run } = fixture();
+    expect(run().calls.map(call => call.kind)).toEqual(['write']);
+    const scheduled = run([], { GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1' });
+    expect(scheduled.code).toBe(0);
+    expect(scheduled.calls.slice(1).map(call => call.kind)).toEqual(['write', 'facts']);
+    expect(scheduled.calls.at(-1)!.args).toEqual([join(repo, 'scripts/run-facts-absorb.ts'), '--max-usd', '1', '--concurrency', '1', '--max-minutes', '30']);
+    const explicit = run(['2026-09-29'], { GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1' });
+    expect(explicit.calls.slice(3).map(call => call.kind)).toEqual(['write']);
+  });
+
+  it('a failed facts step still writes the day and exits with its code', () => {
+    const { home, run } = fixture();
+    const result = run([], { GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1', TEST_FAIL_KIND: 'facts', TEST_FAIL_MODE: 'error' });
+    expect(result.code).toBe(7);
+    expect(result.calls.map(call => call.kind)).toEqual(['write', 'facts']);
+    expect(readFileSync(join(home, 'Library/Logs/gbrain-daily-memory.log'), 'utf8')).toContain('facts-absorb failed (exit 7)');
   });
 
   it('writes when the current day has no Codex files', () => {
