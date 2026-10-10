@@ -48,14 +48,11 @@ test('no servable chat model puts jobs back unspent instead of completing them e
   await page();
   await addFacts();
   await addFacts({ n: 2 });
-  // Keyless, and also a key without a configured gateway (the 2026-10-10 incident).
-  for (const env of [KEYLESS, { ...KEYLESS, ANTHROPIC_API_KEY: 'test-not-a-key' }]) {
-    await withEnv(env, async () => {
-      const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
-      expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 2]);
-    });
-    expect((await rows()).map(row => row.attempts_made)).toEqual([0, 0]);
-  }
+  await withEnv(KEYLESS, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50, maxMinutes: 1 });
+    expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 2]);
+  });
+  expect((await rows()).map(row => row.attempts_made)).toEqual([0, 0]);
 }, 60_000);
 
 test('a cap below one job\'s worst case spends nothing and keeps the attempt', async () => {

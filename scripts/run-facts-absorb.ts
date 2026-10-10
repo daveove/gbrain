@@ -18,7 +18,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { RateLeaseUnavailableError } from '../src/core/minions/rate-leases.ts';
 import type { MinionHandler } from '../src/core/minions/types.ts';
-import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
+import { refreshGatewayForJob, registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
 import { configureGateway, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
@@ -156,6 +156,8 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     // job. Overrides stay the startup map the tracker debits with; a change
     // takes effect on the next run.
     const now = await factsJobWorstCase(engine, pricingOverrides);
+    // The handler refreshes provider credentials before it runs; check the same state it will see.
+    await refreshGatewayForJob(engine);
     const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
     const cost = now.usd(model);
     // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.
