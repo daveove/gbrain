@@ -162,11 +162,16 @@ test('a conflicting queued identity is tried once per foreground run and remains
     const bound = '2000-01-01 00:00:00+00';
     await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=$1::text::timestamptz
       WHERE source_incarnation=(SELECT incarnation FROM sources WHERE id=$2)`, [bound, sourceId]);
-    expect(await rebuildPendingPageProjections(engine, 100, { notAfter: bound })).toEqual({ rebuilt: 0, superseded: 1 });
+    const failures: Array<{ source_id: string; slug: string }> = [];
+    expect(await rebuildPendingPageProjections(engine, 100, { notAfter: bound, onFailure: failure => failures.push(failure) })).toEqual({ rebuilt: 0, superseded: 0 });
+    expect(failures.map(({ source_id, slug }) => ({ source_id, slug }))).toEqual([{ source_id: sourceId, slug: 'notes/LEGACY' }]);
     expect(await rebuildPendingPageProjections(engine, 100, { notAfter: bound })).toEqual({ rebuilt: 0, superseded: 0 });
     expect(await engine.executeRaw(`SELECT slug,reason FROM page_projection_jobs
       WHERE source_incarnation=(SELECT incarnation FROM sources WHERE id=$1)`, [sourceId]))
       .toEqual([{ slug: 'notes/LEGACY', reason: 'canonical_change' }]);
+    const unresolved = await drainProjections(engine);
+    expect(unresolved).toMatchObject({ rebuilt: 0, superseded: 0, remaining: 1, limited: false });
+    expect(unresolved.failed.map(failure => failure.slug)).toEqual(['notes/LEGACY']);
     await engine.executeRaw('UPDATE pages SET slug=lower(slug) WHERE source_id=$1', [sourceId]);
     expect(await drainProjections(engine)).toEqual({ rebuilt: 1, superseded: 0, failed: [], remaining: 0, limited: false });
     expect((await engine.getPage('notes/legacy', { sourceId }))?.compiled_truth)

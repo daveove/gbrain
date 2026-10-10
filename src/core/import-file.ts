@@ -35,6 +35,7 @@ import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
 // precedent as embed-stale.ts.
 import { embedBatchKeepingUsable, embedBatchWithBackoff } from './embed-retry.ts';
 import { isEmbeddingZeroNormError, type EmbeddingZeroNormError } from './ai/embedding-guard.ts';
+import { BudgetExhausted } from './budget/budget-tracker.ts';
 import { slugifyPath, slugifyCodePath, isCodeFilePath, hasMalformedPathSegment } from './sync.ts';
 import type { ChunkInput, Page, PageInput, PageType } from './types.ts';
 import type { PageSnapshot } from './page-state/types.ts';
@@ -1932,6 +1933,7 @@ async function maybeOcrGated(
     onSuccess?.();
     return text;
   } catch (err) {
+    if (err instanceof BudgetExhausted) throw err;
     if (!_ocrWarnedThisSession) {
       console.warn(`[gbrain] OCR call failed (continuing without OCR text): ${err instanceof Error ? err.message : String(err)}`);
       _ocrWarnedThisSession = true;
@@ -2072,6 +2074,7 @@ export async function importImageFile(
       ]);
       embedding = vec;
     } catch (err) {
+      if (err instanceof BudgetExhausted) throw err;
       return {
         slug: imageSlug,
         status: 'error',

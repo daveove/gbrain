@@ -4,14 +4,20 @@
 // path including D12 dim validation.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { configureGateway, embedMultimodal, resetGateway } from '../src/core/ai/gateway.ts';
+import { configureGateway, embedMultimodal, embedMultimodalSafe, resetGateway, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { AIConfigError, AITransientError } from '../src/core/ai/errors.ts';
+import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 type FetchHandler = (url: string, init: RequestInit) => Promise<Response>;
 let fetchHandler: FetchHandler | null = null;
 const origFetch = globalThis.fetch;
+let auditDir: string;
 
 beforeEach(() => {
+  auditDir = mkdtempSync(join(tmpdir(), 'gbrain-compat-budget-'));
   fetchHandler = null;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     if (!fetchHandler) {
@@ -24,6 +30,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = origFetch;
   resetGateway();
+  rmSync(auditDir, { recursive: true, force: true });
 });
 
 function configureLitellm(env: Record<string, string | undefined> = {}, dims = 1024) {
@@ -244,5 +251,83 @@ describe('embedMultimodal — openai-compat routing (#875)', () => {
 
     await embedMultimodal([{ kind: 'image_base64', data: 'x', mime: 'image/png' }]);
     expect(capturedUrl).toContain('/multimodalembeddings');
+  });
+});
+
+describe('openai-compatible multimodal ambient budget', () => {
+  const image = { kind: 'image_base64' as const, data: 'c3ludGhldGlj', mime: 'image/png' };
+  const pricingOverrides = { 'litellm:gpt-4o-multimodal': { input: 1, output: 1 } };
+
+  test('unpriced paid model preserves no_pricing reason and fix through the safe path', async () => {
+    configureLitellm();
+    let calls = 0;
+    fetchHandler = async () => { calls++; return okResponse(1024); };
+    const tracker = new BudgetTracker({
+      label: 'compat-no-pricing', maxCostUsd: 1, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    const error = await withBudgetTracker(tracker, () => embedMultimodalSafe([image, image])).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe('no_pricing');
+    expect(error.modelId).toBe('litellm:gpt-4o-multimodal');
+    expect(error.fix).toBeDefined();
+    expect(error.pricing).toBeDefined();
+    expect(calls).toBe(0);
+    expect(tracker.snapshot().callsRecorded).toBe(0);
+  });
+
+  test('checks each individual request against measured spend and operator pricing', async () => {
+    configureLitellm();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      return Response.json({ ...await okResponse(1024).json(), usage: { prompt_tokens: 1000, total_tokens: 1000 } });
+    };
+    const tracker = new BudgetTracker({
+      label: 'compat-cap', maxCostUsd: 0.00160001, pricingOverrides, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    const error = await withBudgetTracker(tracker, () => embedMultimodal([image, image])).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe('cost');
+    expect(calls).toBe(1);
+    expect(tracker.totalSpent).toBeCloseTo(0.001, 9);
+    expect(tracker.snapshot().models[0]).toMatchObject({
+      touchpoint: 'embedding', input_tokens: 1000, output_tokens: 0, attempts: 1, cost_basis: 'measured',
+    });
+  });
+
+  test('settling a smaller measured usage frees the outstanding projection', async () => {
+    configureLitellm();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      return Response.json({ ...await okResponse(1024).json(), usage: { prompt_tokens: 100 } });
+    };
+    const tracker = new BudgetTracker({
+      label: 'compat-release', maxCostUsd: 0.00171, pricingOverrides, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    await withBudgetTracker(tracker, () => embedMultimodal([image, image]));
+    expect(calls).toBe(2);
+    expect(tracker.snapshot().models[0]).toMatchObject({ input_tokens: 200, attempts: 2, cost_basis: 'measured' });
+  });
+
+  test.each([true, false])('paid error usage measured=%s settles before refusing another attempt', async (measured) => {
+    configureLitellm();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      return Response.json({ error: 'synthetic overload', ...(measured ? { usage: { prompt_tokens: 2000 } } : {}) }, { status: 503 });
+    };
+    const tokens = measured ? 2000 : 1600;
+    const tracker = new BudgetTracker({
+      label: 'compat-failure', maxCostUsd: tokens / 1_000_000 + 0.00000001,
+      pricingOverrides, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    await expect(withBudgetTracker(tracker, () => embedMultimodal([image]))).rejects.toBeInstanceOf(AITransientError);
+    const error = await withBudgetTracker(tracker, () => embedMultimodalSafe([image, image])).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(calls).toBe(1);
+    expect(tracker.snapshot().models[0]).toMatchObject({
+      ...(measured ? { input_tokens: tokens } : {}), output_tokens: 0, failed_calls: 1, cost_basis: measured ? 'measured' : 'estimated',
+    });
   });
 });

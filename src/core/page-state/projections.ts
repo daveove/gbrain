@@ -413,10 +413,16 @@ export async function rebuildPendingPageProjections(engine: BrainEngine, limit =
       // A conflict can leave the same row queued. The foreground drain tries
       // each job once; keep the obligation but exclude it from this run.
       if (supersededJob && opts.notAfter !== undefined) {
-        await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=now()
+        const deferred = await engine.executeRaw(`UPDATE page_projection_jobs SET updated_at=now()
           WHERE source_incarnation=$1::uuid AND slug=$2 AND revision=$3::uuid
-            AND updated_at<=$4::text::timestamptz`,
+            AND updated_at<=$4::text::timestamptz RETURNING slug`,
         [job.source_incarnation, job.slug, job.revision, opts.notAfter]);
+        if (deferred.length) {
+          superseded--;
+          const failure = { source_id: job.source_id, slug: job.slug, reason: 'Projection conflict remains queued: the canonical identity or revision must be repaired before retrying.' };
+          if (opts.onFailure) opts.onFailure(failure);
+          else process.stderr.write(`[gbrain] ${failure.reason}\n`);
+        }
       }
     }
   }

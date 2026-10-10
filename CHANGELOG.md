@@ -15,8 +15,8 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Fixed
 
 - Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. Cache embeddings and low-to-high detail recovery retain the original shared deadline and its existing minimum floor.
-- Foreground projection drains try a still-queued superseded job once per run. A conflicting or malformed legacy identity remains queued and is reported in `remaining`, rather than causing an unbounded retry loop.
-- Foreground `embed` now enforces its approved spending cap at provider admission instead of discarding the authorization after the estimate check. Budget stops bank installed vectors, leave pending work resumable and exit non-zero; JSON reports measured spend and cap exhaustion.
+- Foreground projection drains try a still-queued superseded job once per run. An unchanged conflicting or malformed legacy identity stays queued, appears in `failed` and exits non-zero with repair guidance; a genuinely replaced job remains `superseded`.
+- Foreground `embed` enforces its approved spending cap at provider admission, including multimodal HTTP requests and OCR. Budget stops bank installed vectors, leave pending work resumable and exit non-zero. JSON reports measured spend and the original refusal, including `no_pricing` and its pricing remedy. A capped partial text drain still refreshes bounded chunk planner statistics unless its lease was lost or the caller cancelled it.
 
 ## [0.60.138.0] - 2026-10-09
 

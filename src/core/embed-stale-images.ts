@@ -18,6 +18,8 @@ import type { BrainEngine } from './engine.ts';
 import { importImageFile } from './import-file.ts';
 import { safeChunksFilter } from './search/safe-chunks.ts';
 import { serr } from './console-prefix.ts';
+import { getCurrentBudgetTracker } from './ai/gateway.ts';
+import { BudgetExhausted } from './budget/budget-tracker.ts';
 
 export interface StaleImageSweepResult {
   candidates: number;
@@ -27,6 +29,8 @@ export interface StaleImageSweepResult {
   missingFile: number;
   failures: number;
   failure_samples: string[];
+  /** The originating admission/settlement refusal, separate from image failures. */
+  budget_exhausted?: BudgetExhausted;
 }
 
 export async function embedStaleImages(
@@ -50,21 +54,30 @@ export async function embedStaleImages(
     if (result.failure_samples.length < 5) result.failure_samples.push(`${row.source_id}:${row.slug}: ${error}`);
   };
   if (opts.dryRun) return result;
+  let budgetExhausted: BudgetExhausted | undefined;
+  getCurrentBudgetTracker()?.onExhausted(error => { budgetExhausted ??= error; });
   const repoPath = await engine.getConfig('sync.repo_path').catch(() => null);
   const gitRoots = new Map<string, string | null>();
   for (const row of rows) {
+    if (budgetExhausted) break;
     const root = row.local_path ?? (row.source_id === 'default' ? repoPath : null);
     const file = root && row.source_path ? locateSourceFile(root, row.source_path, gitRoots) : null;
     if (!file) { result.missingFile++; continue; }
     try {
       const imported = await importImageFile(engine, file, row.source_path!, { sourceId: row.source_id });
       if (imported.status === 'imported') result.rebuilt++;
-      else if (imported.status === 'error') fail(row, imported.error ?? 'import failed');
-      else result.skipped++;
+      // Settlement can exhaust the cap after a paid attempt. Preserve an
+      // installed result without treating the stop as an image failure.
+      else if (!budgetExhausted) {
+        if (imported.status === 'error') fail(row, imported.error ?? 'import failed');
+        else result.skipped++;
+      }
     } catch (e) {
-      fail(row, e instanceof Error ? e.message : String(e));
+      if (e instanceof BudgetExhausted) budgetExhausted ??= e;
+      else if (!budgetExhausted) fail(row, e instanceof Error ? e.message : String(e));
     }
   }
+  if (budgetExhausted) result.budget_exhausted = budgetExhausted;
   return result;
 }
 

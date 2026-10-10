@@ -539,7 +539,10 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     // every five minutes. A fenced refresh or three transient errors aborts.
     const activeLocks: DbLockHandle[] = callerHeld ? [...(opts.heldLocks ?? [])] : sfLocks;
     const lockAbort = new AbortController();
-    getCurrentBudgetTracker()?.onExhausted(() => lockAbort.abort());
+    let budgetStopped = false;
+    getCurrentBudgetTracker()?.onExhausted(() => {
+      budgetStopped = true; lockAbort.abort();
+    });
     let heartbeat: ReturnType<typeof setInterval> | undefined;
     let heartbeatTickAbort: AbortController | undefined;
     let stoppingHeartbeat = false;
@@ -713,7 +716,8 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
     let drainError: { err: unknown } | undefined;
     const drain = (async () => {
       try {
-        await withChunkStatisticsRefresh(engine, () => !opts.dryRun && result.embedded > 0 && !isAborted(drainSignal), () => embedAll(engine, !!opts.stale, !!opts.dryRun, result, opts.onProgress, opts.sourceId, {
+        await withChunkStatisticsRefresh(engine, () => !opts.dryRun && result.embedded > 0 && !result.lock_lost
+          && (!isAborted(drainSignal) || (budgetStopped && !isAborted(opts.signal))), () => embedAll(engine, !!opts.stale, !!opts.dryRun, result, opts.onProgress, opts.sourceId, {
           batchSize: opts.batchSize,
           priority: opts.priority,
           catchUp: opts.catchUp,

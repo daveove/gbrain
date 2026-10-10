@@ -272,7 +272,7 @@ export class BudgetTracker {
   private readonly ledger = new ModelLedger();
   private readonly startedAt: number;
   private readonly auditPath: string;
-  private readonly onExhaustedCbs: Array<() => void> = [];
+  private readonly onExhaustedCbs: Array<(error: BudgetExhausted) => void> = [];
   private exhaustedFired = false;
 
   constructor(private readonly opts: BudgetTrackerOpts) {
@@ -303,12 +303,12 @@ export class BudgetTracker {
 
   /**
    * Register a synchronous callback to fire the first time the tracker
-   * throws BudgetExhausted (from reserve OR record). Fires once. Useful for
-   * persisting checkpoint state before the throw propagates. The callback
+   * throws BudgetExhausted (from reserve OR record), with that original error.
+   * Fires once, before propagation, so callers can checkpoint or report its cause.
    * MUST be synchronous; async work (fs writes are fine via writeFileSync)
    * goes inside the callback body.
    */
-  onExhausted(cb: () => void): void {
+  onExhausted(cb: (error: BudgetExhausted) => void): void {
     this.onExhaustedCbs.push(cb);
   }
 
@@ -361,8 +361,7 @@ export class BudgetTracker {
           max_cost_usd: this.opts.maxCostUsd,
           reason: 'no_pricing',
         });
-        this.fireExhausted();
-        throw new BudgetExhausted(msg, {
+        const error = new BudgetExhausted(msg, {
           reason: 'no_pricing',
           spent: this.cumulativeUsd,
           cap: this.opts.maxCostUsd,
@@ -371,6 +370,8 @@ export class BudgetTracker {
           capSource: 'user',
           fix: noPricingFix(pricing, this.opts.transport),
         });
+        this.fireExhausted(error);
+        throw error;
       }
       // Warn-once path — cap unset, or a derived/default cap (A4: new models must run).
       const memoKey = `${estimate.modelId}:${estimate.kind}`;
@@ -601,29 +602,31 @@ export class BudgetTracker {
         max_runtime_ms: this.opts.maxRuntimeMs,
         model: modelId,
       });
-      this.fireExhausted();
-      throw new BudgetExhausted(
+      const error = new BudgetExhausted(
         `${this.opts.label}: wall-clock ${(elapsed / 1000).toFixed(1)}s exceeded --max-runtime ${(this.opts.maxRuntimeMs / 1000).toFixed(1)}s`,
         { reason: 'runtime', spent: elapsed, cap: this.opts.maxRuntimeMs, modelId },
       );
+      this.fireExhausted(error);
+      throw error;
     }
   }
 
   /** The cost-cap BudgetExhausted; a derived cap's exhaustion is logged to E11 (A4). */
   private costExhausted(message: string, cap: number, modelId: string): BudgetExhausted {
-    this.fireExhausted();
+    const error = new BudgetExhausted(message, { reason: 'cost', spent: this.cumulativeUsd, cap, modelId, capSource: this.capSource });
+    this.fireExhausted(error);
     if (this.capSource === 'derived') {
       recordAgentContractEvent({ command: this.opts.label, transport: this.opts.transport ?? 'cli', code: 'derived_cap_exhausted', effects: ['paid'], outcome: 'stopped' });
     }
-    return new BudgetExhausted(message, { reason: 'cost', spent: this.cumulativeUsd, cap, modelId, capSource: this.capSource });
+    return error;
   }
 
-  private fireExhausted(): void {
+  private fireExhausted(error: BudgetExhausted): void {
     if (this.exhaustedFired) return;
     this.exhaustedFired = true;
     for (const cb of this.onExhaustedCbs) {
       try {
-        cb();
+        cb(error);
       } catch (err) {
         process.stderr.write(`[budget] onExhausted callback threw: ${String(err)}\n`);
       }

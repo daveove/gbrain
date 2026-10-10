@@ -82,6 +82,9 @@ export async function drainProjections(engine: BrainEngine, opts: { limit?: numb
 
 /** The next step for one failed page, from the preparation error it reported. */
 export function projectionFailureNextAction(failure: ProjectionRebuildFailure): string {
+  if (failure.reason.startsWith('Projection conflict remains queued')) {
+    return `re-import the canonical page from source "${failure.source_id}" with \`gbrain sync --source ${failure.source_id}\`, then verify with \`gbrain projections drain --json\``;
+  }
   if (failure.reason.startsWith('Code projection requires a recorded source path')) {
     return `restore frontmatter.file or source_path on ${failure.slug}, then run \`gbrain projections drain\` again`;
   }

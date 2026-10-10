@@ -20,9 +20,11 @@ import {
   _resetOcrRunBudgetForTests,
   _getOcrRunBudgetForTests,
 } from '../src/core/import-file.ts';
-import { configureGateway, resetGateway, __setGenerateTextTransportForTests } from '../src/core/ai/gateway.ts';
+import { configureGateway, resetGateway, generateOcrText, withBudgetTracker, __setGenerateTextTransportForTests } from '../src/core/ai/gateway.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const OCR_TEXT = 'Synthetic whiteboard text';
@@ -204,12 +206,115 @@ describe('per-run OCR budget gate (#3973)', () => {
   });
 });
 
-describe('doctor ocr_health surfaces the budget-skip counter (#3973)', () => {
-  test('doctor source reads ocr_skipped_budget and names the raise-cap fix', async () => {
-    const { doctorSource } = await import('./helpers/doctor-source.ts');
-    const src = doctorSource();
-    expect(src).toContain("ocr_skipped_budget");
-    expect(src).toContain('embedding_image_ocr_max_images');
-    expect(src).toContain('embedding_image_ocr_max_usd');
+
+describe('OCR ambient spending admission through the gateway', () => {
+  test.each([
+    { maxCostUsd: 0, reason: 'cost' },
+    { maxRuntimeMs: -1, reason: 'runtime' },
+  ])('denies $reason before the OCR provider is called', async ({ reason, ...cap }) => {
+    const tracker = new BudgetTracker({ label: 'ocr-denied', auditPath: join(dir, 'budget.jsonl'), ...cap });
+    const error = await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png')).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe(reason);
+    expect(ocrCalls).toBe(0);
+    expect(embedCalls).toBe(0);
+    expect(tracker.snapshot().callsRecorded).toBe(0);
+  });
+
+  test('an unpriced configured OCR model preserves the refusal and pricing fix', async () => {
+    configureGateway({
+      embedding_model: 'voyage:voyage-multimodal-3',
+      expansion_model: 'anthropic:claude-haiku-4-5',
+      embedding_image_ocr_model: 'litellm:synthetic-unknown-ocr',
+      env: { LITELLM_API_KEY: 'test-key', LITELLM_BASE_URL: 'http://localhost:4000' },
+      base_urls: { litellm: 'http://localhost:4000' },
+    });
+    const tracker = new BudgetTracker({ label: 'ocr-no-pricing', maxCostUsd: 1, auditPath: join(dir, 'budget.jsonl') });
+    const error = await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png')).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe('no_pricing');
+    expect(error.modelId).toBe('litellm:synthetic-unknown-ocr');
+    expect(error.fix).toBeDefined();
+    expect(error.pricing).toBeDefined();
+    expect(ocrCalls).toBe(0);
+    expect(embedCalls).toBe(0);
+  });
+
+  test('successful measured usage settles each OCR hold rather than leaking the projection', async () => {
+    const tracker = new BudgetTracker({ label: 'ocr-settled', maxCostUsd: 0.03, auditPath: join(dir, 'budget.jsonl') });
+    await withBudgetTracker(tracker, async () => {
+      expect(await generateOcrText(PNG, 'image/png')).toBe(OCR_TEXT);
+      expect(await generateOcrText(PNG, 'image/png')).toBe(OCR_TEXT);
+    });
+    expect(ocrCalls).toBe(2);
+    expect(tracker.totalSpent).toBeCloseTo(0.00007, 9);
+    expect(tracker.snapshot().models[0]).toMatchObject({
+      touchpoint: 'ocr', input_tokens: 20, output_tokens: 10, attempts: 2, failed_calls: 0, cost_basis: 'measured',
+    });
+  });
+
+  test('cached OCR input remains billed input when admitting the next paid request', async () => {
+    __setGenerateTextTransportForTests((async () => {
+      ocrCalls++;
+      return { text: OCR_TEXT, usage: {
+        inputTokens: 1200, outputTokens: 100,
+        inputTokenDetails: { noCacheTokens: 200, cacheReadTokens: 700, cacheWriteTokens: 300 },
+      } };
+    }) as never);
+    const tracker = new BudgetTracker({ label: 'ocr-cached', maxCostUsd: 0.023, auditPath: join(dir, 'budget.jsonl') });
+    expect(await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png'))).toBe(OCR_TEXT);
+    expect(tracker.totalSpent).toBeCloseTo(0.0017, 12);
+    const error = await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png')).catch(error => error);
+    expect(error).toMatchObject({ reason: 'cost' });
+    expect(ocrCalls).toBe(1);
+  });
+
+  test.each([true, false])('failed OCR usage measured=%s settles and blocks later paid work', async (measured) => {
+    const failure = Object.assign(new Error('synthetic OCR failure'),
+      measured ? { usage: { inputTokens: 2000, outputTokens: 4096 } } : {});
+    __setGenerateTextTransportForTests((async () => { ocrCalls++; throw failure; }) as never);
+    const tracker = new BudgetTracker({ label: 'ocr-failed', maxCostUsd: 0.03, auditPath: join(dir, 'budget.jsonl') });
+    await expect(withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png'))).rejects.toBe(failure);
+    const row = tracker.snapshot().models[0];
+    expect(row.touchpoint).toBe('ocr');
+    expect(row.failed_calls).toBe(1);
+    if (measured) {
+      expect(row.input_tokens).toBe(2000);
+      expect(row.output_tokens).toBe(4096);
+    }
+    expect(row.cost_basis).toBe(measured ? 'measured' : 'estimated');
+    const error = await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png')).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe('cost');
+    expect(ocrCalls).toBe(1);
+  });
+
+  test('the actual SDK transport cannot spend on hidden retries under an ambient cap', async () => {
+    __setGenerateTextTransportForTests(null);
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts++;
+      return Response.json({ type: 'error', error: { type: 'rate_limit_error', message: 'synthetic throttling' } }, { status: 429 });
+    }) as unknown as typeof fetch;
+    const tracker = new BudgetTracker({ label: 'ocr-sdk-retry', maxCostUsd: 0.03, auditPath: join(dir, 'budget.jsonl') });
+    await expect(withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png'))).rejects.toThrow();
+    expect(attempts).toBe(1);
+    expect(tracker.snapshot().models[0]).toMatchObject({ failed_calls: 1, attempts: 1, cost_basis: 'estimated' });
+    const error = await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png')).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(attempts).toBe(1);
+  });
+});
+
+describe('OCR reservation cleanup on unpaid refusal', () => {
+  test('policy denial preserves its error and releases admission for the next attempt', async () => {
+    const tracker = new BudgetTracker({ label: 'ocr-policy', maxCostUsd: 0.03, auditPath: join(dir, 'budget.jsonl') });
+    const refusal = new Error('synthetic OCR policy refusal');
+    await expect(withBudgetTracker(tracker, () => withAIInvocationGuard(async () => { throw refusal; },
+      () => generateOcrText(PNG, 'image/png')))).rejects.toBe(refusal);
+    expect(ocrCalls).toBe(0);
+    expect(tracker.snapshot().callsRecorded).toBe(0);
+    expect(await withBudgetTracker(tracker, () => generateOcrText(PNG, 'image/png'))).toBe(OCR_TEXT);
+    expect(ocrCalls).toBe(1);
   });
 });

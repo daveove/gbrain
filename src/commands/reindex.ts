@@ -395,8 +395,7 @@ export async function runReindex(engine: BrainEngine, args: string[], runOpts: R
     if (typeof capUsd === 'number' && Number.isFinite(capUsd) && capUsd > 0) {
       cap = new BudgetTracker({ maxCostUsd: capUsd, label: 'reindex', capSource: gate!.auth.cap_source ?? undefined });
       // An import swallows a refused embedding (its chunks wait for `embed --stale`), so the run stops at the next page.
-      const tracker = cap;
-      tracker.onExhausted(() => { capHit = new BudgetExhausted(`reindex reached its $${capUsd.toFixed(2)} cost cap`, { reason: 'cost', spent: tracker.totalSpent, cap: capUsd }); });
+      cap.onExhausted(error => { capHit = error; });
     }
   }
   const metered = <T>(fn: () => Promise<T>): Promise<T> => (cap ? withBudgetTracker(cap, fn) : fn());

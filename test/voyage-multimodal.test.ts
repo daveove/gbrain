@@ -5,17 +5,24 @@
 // (n=0, n=1, n=32, n=33, n=64) flagged by Eng-3A.
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { configureGateway, embedMultimodal, resetGateway } from '../src/core/ai/gateway.ts';
+import { configureGateway, embedMultimodal, embedMultimodalSafe, resetGateway, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { getRecipe } from '../src/core/ai/recipes/index.ts';
 import { AIConfigError, AITransientError } from '../src/core/ai/errors.ts';
+import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracker.ts';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
 
 // Capture all fetch calls. Each test installs a fresh handler and asserts
 // the request shape AND returns a plausible Voyage payload.
 type FetchHandler = (url: string, init: RequestInit) => Promise<Response>;
 let fetchHandler: FetchHandler | null = null;
 const origFetch = globalThis.fetch;
+let auditDir: string;
 
 beforeEach(() => {
+  auditDir = mkdtempSync(join(tmpdir(), 'gbrain-multimodal-budget-'));
   fetchHandler = null;
   globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
     if (!fetchHandler) {
@@ -28,6 +35,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = origFetch;
   resetGateway();
+  rmSync(auditDir, { recursive: true, force: true });
 });
 
 function configureVoyageMultimodal(env: Record<string, string | undefined> = {}) {
@@ -353,5 +361,108 @@ describe('gateway.embedMultimodal — multimodal_model override + model-level va
     expect(err).toBeInstanceOf(AIConfigError);
     expect((err as AIConfigError).message).toMatch(/voyage-3-large.*not.*multimodal/i);
     expect((err as AIConfigError).fix ?? '').toMatch(/voyage:voyage-multimodal-3/);
+  });
+});
+
+describe('multimodal ambient budget admission and settlement', () => {
+  test.each([
+    { maxCostUsd: 0, reason: 'cost' },
+    { maxRuntimeMs: -1, reason: 'runtime' },
+  ])('denies $reason before transport, including the safe split path', async ({ reason, ...cap }) => {
+    configureVoyageMultimodal();
+    let calls = 0;
+    fetchHandler = async () => { calls++; return fakeVoyageResponse(1); };
+    const tracker = new BudgetTracker({ label: 'visual-denied', auditPath: join(auditDir, 'budget.jsonl'), ...cap });
+    const error = await withBudgetTracker(tracker, () => embedMultimodalSafe([makeImage(), makeImage()])).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe(reason);
+    expect(calls).toBe(0);
+    expect(tracker.snapshot().callsRecorded).toBe(0);
+  });
+
+  test('settles measured first batch and denies the next batch without splitting', async () => {
+    configureVoyageMultimodal();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      const response = await fakeVoyageResponse(32).json();
+      return Response.json({ ...response, usage: { total_tokens: 60_000 } });
+    };
+    const tracker = new BudgetTracker({
+      label: 'visual-batches', maxCostUsd: 0.00720001, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    const error = await withBudgetTracker(tracker, () => embedMultimodalSafe(Array.from({ length: 33 }, () => makeImage()))).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(error.reason).toBe('cost');
+    expect(calls).toBe(1);
+    expect(tracker.totalSpent).toBeCloseTo(0.0072, 9);
+    expect(tracker.snapshot().models[0]).toMatchObject({
+      touchpoint: 'embedding', input_tokens: 60_000, output_tokens: 0, cost_basis: 'measured', attempts: 1,
+    });
+  });
+
+  test('measured settlement frees the projection for the following paid attempt', async () => {
+    configureVoyageMultimodal();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      const response = await fakeVoyageResponse(1).json();
+      return Response.json({ ...response, usage: { tokens: 100 } });
+    };
+    const tracker = new BudgetTracker({
+      label: 'visual-settled', maxCostUsd: 0.00021, auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    await withBudgetTracker(tracker, async () => {
+      await embedMultimodal([makeImage()]);
+      await embedMultimodal([makeImage()]);
+    });
+    expect(calls).toBe(2);
+    expect(tracker.snapshot().models[0]).toMatchObject({ input_tokens: 200, attempts: 2, cost_basis: 'measured' });
+  });
+
+  test.each([true, false])('records a paid HTTP failure with measured usage=%s and stops retries at the cap', async (measured) => {
+    configureVoyageMultimodal();
+    let calls = 0;
+    fetchHandler = async () => {
+      calls++;
+      return Response.json({ error: 'synthetic overload', ...(measured ? { usage: { total_tokens: 2000 } } : {}) }, { status: 503 });
+    };
+    const tokens = measured ? 2000 : 1600;
+    const tracker = new BudgetTracker({
+      label: 'visual-failed', maxCostUsd: tokens * 0.12 / 1_000_000 + 0.00000001,
+      auditPath: join(auditDir, 'budget.jsonl'),
+    });
+    await expect(withBudgetTracker(tracker, () => embedMultimodal([makeImage()]))).rejects.toBeInstanceOf(AITransientError);
+    const error = await withBudgetTracker(tracker, () => embedMultimodalSafe([makeImage(), makeImage()])).catch(error => error);
+    expect(error).toBeInstanceOf(BudgetExhausted);
+    expect(calls).toBe(1);
+    expect(tracker.snapshot().models[0]).toMatchObject({
+      ...(measured ? { input_tokens: tokens } : {}), failed_calls: 1, cost_basis: measured ? 'measured' : 'estimated',
+    });
+  });
+
+  test('records transport-reported failed usage before normalizing the provider error', async () => {
+    configureVoyageMultimodal();
+    fetchHandler = async () => { throw Object.assign(new Error('synthetic transport failure'), { usage: { inputTokens: 137, outputTokens: 0 } }); };
+    const tracker = new BudgetTracker({ label: 'visual-error-usage', auditPath: join(auditDir, 'budget.jsonl') });
+    await expect(withBudgetTracker(tracker, () => embedMultimodal([makeImage()]))).rejects.toBeInstanceOf(AITransientError);
+    expect(tracker.snapshot().models[0]).toMatchObject({ input_tokens: 137, failed_calls: 1, cost_basis: 'measured' });
+  });
+});
+
+describe('multimodal reservation cleanup on unpaid refusal', () => {
+  test('an invocation-policy refusal releases its hold and preserves the original error', async () => {
+    configureVoyageMultimodal();
+    let calls = 0;
+    fetchHandler = async () => { calls++; return fakeVoyageResponse(1); };
+    const tracker = new BudgetTracker({ label: 'visual-policy', maxCostUsd: 0.00019201, auditPath: join(auditDir, 'budget.jsonl') });
+    const refusal = new Error('synthetic policy refusal');
+    await expect(withBudgetTracker(tracker, () => withAIInvocationGuard(async () => { throw refusal; },
+      () => embedMultimodalSafe([makeImage()])))).rejects.toBe(refusal);
+    expect(calls).toBe(0);
+    expect(tracker.snapshot().callsRecorded).toBe(0);
+    await withBudgetTracker(tracker, () => embedMultimodal([makeImage()]));
+    expect(calls).toBe(1);
+    expect(tracker.snapshot().models[0]).toMatchObject({ attempts: 1, cost_basis: 'estimated' });
   });
 });

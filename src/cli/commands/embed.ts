@@ -10,7 +10,7 @@ import { BUDGET_STOP_EXIT_CODE } from '../../core/exit-codes.ts';
 import type { BrainEngine } from '../../core/engine.ts';
 import type { CliDispatchContext } from '../command-table.ts';
 import type { Authorization } from '../../core/consent.ts';
-import { BudgetTracker, parsePricingOverrides } from '../../core/budget/budget-tracker.ts';
+import { BudgetTracker, parsePricingOverrides, type BudgetExhausted } from '../../core/budget/budget-tracker.ts';
 import { withBudgetTracker } from '../../core/ai/gateway.ts';
 import { runEmbed } from '../../commands/embed.ts';
 
@@ -31,8 +31,8 @@ export async function run(engine: BrainEngine, args: string[], ctx: CliDispatchC
       label: 'embed',
       pricingOverrides: parsePricingOverrides(await engine.getConfig('pricing.overrides')),
     }) : null;
-  let budgetExhausted = false;
-  tracker?.onExhausted(() => { budgetExhausted = true; });
+  let exhaustion: BudgetExhausted | null = null;
+  tracker?.onExhausted(error => { exhaustion ??= error; });
   // #3037: mirror the `import` case above — the CLI was discarding the
   // result, so a run where every chunk failed to embed still exited 0
   // and cron/CI/health gates read total silence as success. Surface
@@ -43,6 +43,7 @@ export async function run(engine: BrainEngine, args: string[], ctx: CliDispatchC
   };
   const embedResult = await (tracker ? withBudgetTracker(tracker, body) : body());
   const budget = tracker?.snapshot();
+  const budgetStop = exhaustion as BudgetExhausted | null;
   // D2: under --json the result is the one document (a budget stop carries
   // remaining_stale + resume_command and exits 11; --background names its job).
   if (jsonRequested(args)) {
@@ -51,11 +52,17 @@ export async function run(engine: BrainEngine, args: string[], ctx: CliDispatchC
     await writeStdoutFinal(`${JSON.stringify({
       ...output,
       ...(budget ? { budget } : {}),
-      ...(budgetExhausted ? { budget_exhausted: { cap_usd: capUsd, spent_usd: tracker!.totalSpent } } : {}),
+      ...(budgetStop ? {
+        code: budgetStop.reason === 'no_pricing' ? 'no_pricing' : 'budget_exhausted',
+        why: budgetStop.message,
+        ...(budgetStop.fix ? { fix: budgetStop.fix } : {}),
+        ...(budgetStop.pricing ? { pricing: budgetStop.pricing } : {}),
+        budget_exhausted: { reason: budgetStop.reason, cap_usd: capUsd, spent_usd: tracker!.totalSpent, model: budgetStop.modelId },
+      } : {}),
     }, null, 2)}\n`);
   }
-  if (budgetExhausted) {
-    process.stderr.write(`[embed] stopped at its $${capUsd} cost cap; spent $${tracker!.totalSpent}. Remaining work is pending.\n`);
+  if (budgetStop) {
+    process.stderr.write(`[embed] ${budgetStop.message} Remaining work is pending.\n`);
     setCliExitVerdict(1);
   } else if (embedResult && embedResult.failures > 0) {
     setCliExitVerdict(1);

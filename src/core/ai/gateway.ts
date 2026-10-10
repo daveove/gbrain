@@ -34,7 +34,7 @@ import { z } from 'zod';
 
 import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
 export { splitByTokenBudget, capBatchItems, NO_BATCH_CAP_SUB_BATCH_ITEMS } from './embed-batch-plan.ts';
-import { BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
+import { BudgetExhausted, BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
 import { failedCallUsage, recordOnTracker } from './budget-record.ts';
 import { chatWithFallback, normalizeChatFallbackChain } from './chat-fallback.ts';
 import { applyThinkingOff, thinkingOffMaxOutputTokens } from './thinking-off.ts';
@@ -71,7 +71,7 @@ import { redactProviderKeys } from './key-redact.ts';
 import { applyVoyageOutputDimension, embeddingDimMismatchError } from './voyage-gateway.ts';
 import { reportEmbeddingAuthFailure } from './key-warnings.ts';
 import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gateway-config.ts';
-import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError } from './invocation-guard.ts';
+import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError, type AIInvocationUsage } from './invocation-guard.ts';
 import { installAICallLogFromEnv } from './call-log.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
 installAiSdkWarningWriter();
@@ -1815,6 +1815,9 @@ export async function embedQuery(
 const MULTIMODAL_BATCH_SIZE = 32;
 /** Voyage caps each image at 20MB; the caller enforces, this is documentation. */
 const MULTIMODAL_MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+// Reuse OCR's per-image estimate; image bytes/base64 length are not token counts.
+// Pricing remains the existing embedding token policy (including operator overrides).
+const IMAGE_INPUT_TOKEN_ESTIMATE = 1600;
 
 /**
  * v0.27.1: embed multimodal inputs (images today; video keyframes once
@@ -1908,6 +1911,8 @@ export async function embedMultimodal(
   // Batch in groups of 32 (Voyage's published max). Each batch is one HTTP
   // call; results concatenate in input order.
   const allEmbeddings: Float32Array[] = [];
+  const tracker = getCurrentBudgetTracker();
+  const modelId = `${recipe.id}:${parsed.modelId}`;
   for (let i = 0; i < inputs.length; i += MULTIMODAL_BATCH_SIZE) {
     const batch = inputs.slice(i, i + MULTIMODAL_BATCH_SIZE);
     const body = {
@@ -1927,9 +1932,15 @@ export async function embedMultimodal(
       input_type: inputType,
     };
 
-    let res: Response;
+    const estimatedInputTokens = tracker ? batch.reduce((sum, input) => sum + (input.kind === 'text'
+      ? Math.ceil(input.text.length / Math.max(touchpoint.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN, 1))
+      : IMAGE_INPUT_TOKEN_ESTIMATE), 0) : 0;
+    const reservation = tracker?.reserve({
+      modelId, estimatedInputTokens, maxOutputTokens: 0, kind: 'embed', label: 'gateway.embed.multimodal',
+    });
+    let measuredUsage: AIInvocationUsage | null = null;
     try {
-      res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}` }, () => fetch(`${baseUrl}/multimodalembeddings`, {
+      const res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${parsed.modelId}` }, () => fetch(`${baseUrl}/multimodalembeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1940,49 +1951,71 @@ export async function embedMultimodal(
         // bypasses the SDK abortSignal).
         signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
       }), responseInvocationUsage);
+
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        if (tracker) {
+          try {
+            const payload = JSON.parse(bodyText) as { usage?: Record<string, unknown> };
+            measuredUsage = sdkInvocationUsage({ usage: { ...payload.usage, outputTokens: 0 } });
+          } catch { /* absent usage is settled conservatively below */ }
+        }
+        const text = redactKeys(bodyText);
+        if (res.status === 401 || res.status === 403) {
+          reportEmbeddingAuthFailure(recipe, { status: res.status });
+          throw new AIConfigError(
+            `Voyage multimodal returned ${res.status}: ${text || 'auth failed'}.`,
+            `Re-export ${recipe.auth_env?.required[0]} or rotate the key at ${recipe.auth_env?.setup_url}.`,
+          );
+        }
+        // 429 / 5xx are transient; let the caller retry.
+        throw new AITransientError(
+          `Voyage multimodal returned ${res.status}: ${text || 'transient error'}.`,
+        );
+      }
+
+      let parsedBody: { data?: Array<{ embedding: number[] }>; usage?: Record<string, unknown> };
+      try {
+        parsedBody = (await res.json()) as typeof parsedBody;
+      } catch (err) {
+        throw new AITransientError(
+          `Voyage multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
+        );
+      }
+      if (tracker) measuredUsage = sdkInvocationUsage({ usage: { ...parsedBody.usage, outputTokens: 0 } });
+      if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length !== batch.length) {
+        throw new AITransientError(
+          `Voyage multimodal returned unexpected payload shape (expected ${batch.length} embeddings).`,
+        );
+      }
+
+      for (const row of parsedBody.data) {
+        if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
+          throw new AIConfigError(
+            `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
+            `Voyage multimodal-3 is fixed at 1024 dims. Brain primary embedding dim is ${expected} ` +
+            `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
+          );
+        }
+        allEmbeddings.push(new Float32Array(row.embedding));
+      }
+      if (tracker) recordOnTracker(tracker, {
+        modelId, reservation, requestedModelId: modelStr, kind: 'embed', label: 'gateway.embed.multimodal',
+        inputTokens: measuredUsage?.inputTokens ?? estimatedInputTokens,
+        outputTokens: 0, embeddingDims: targetDims, estimated: measuredUsage === null,
+      });
     } catch (err) {
-      if (isAIInvocationPolicyError(err)) throw err;
+      if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
+      if (tracker) {
+        const failedUsage = measuredUsage ?? sdkInvocationUsage(err);
+        recordOnTracker(tracker, {
+          modelId, reservation, requestedModelId: modelStr, kind: 'embed', label: 'gateway.embed.multimodal.failed',
+          ...failedCallUsage(failedUsage ? { usage: failedUsage } : err, { inputTokens: estimatedInputTokens, outputTokens: 0 }),
+        });
+      }
       throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${parsed.modelId})`, redactKeys);
-    }
-
-    if (!res.ok) {
-      const text = redactKeys(await res.text().catch(() => ''));
-      if (res.status === 401 || res.status === 403) {
-        reportEmbeddingAuthFailure(recipe, { status: res.status });
-        throw new AIConfigError(
-          `Voyage multimodal returned ${res.status}: ${text || 'auth failed'}.`,
-          `Re-export ${recipe.auth_env?.required[0]} or rotate the key at ${recipe.auth_env?.setup_url}.`,
-        );
-      }
-      // 429 / 5xx are transient; let the caller retry.
-      throw new AITransientError(
-        `Voyage multimodal returned ${res.status}: ${text || 'transient error'}.`,
-      );
-    }
-
-    let parsedBody: { data?: Array<{ embedding: number[] }> };
-    try {
-      parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
-    } catch (err) {
-      throw new AITransientError(
-        `Voyage multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
-      );
-    }
-    if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length !== batch.length) {
-      throw new AITransientError(
-        `Voyage multimodal returned unexpected payload shape (expected ${batch.length} embeddings).`,
-      );
-    }
-
-    for (const row of parsedBody.data) {
-      if (!Array.isArray(row.embedding) || row.embedding.length !== targetDims) {
-        throw new AIConfigError(
-          `Voyage multimodal returned ${row.embedding?.length ?? 0}-dim vector; expected ${targetDims}.`,
-          `Voyage multimodal-3 is fixed at 1024 dims. Brain primary embedding dim is ${expected} ` +
-          `(used by the text path). Image vectors land in content_chunks.embedding_image (1024).`,
-        );
-      }
-      allEmbeddings.push(new Float32Array(row.embedding));
+    } finally {
+      tracker?.release(reservation);
     }
   }
 
@@ -2058,6 +2091,8 @@ async function embedMultimodalOpenAICompat(
   const inputType = opts.inputType ?? 'document';
 
   const allEmbeddings: Float32Array[] = [];
+  const tracker = getCurrentBudgetTracker();
+  const servedModelId = `${recipe.id}:${modelId}`;
   for (const input of inputs) {
     const body: Record<string, unknown> = {
       model: modelId,
@@ -2075,9 +2110,15 @@ async function embedMultimodalOpenAICompat(
       input_type: inputType,
     };
 
-    let res: Response;
+    const estimatedInputTokens = tracker ? (input.kind === 'text'
+      ? Math.ceil(input.text.length / Math.max(recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN, 1))
+      : IMAGE_INPUT_TOKEN_ESTIMATE) : 0;
+    const reservation = tracker?.reserve({
+      modelId: servedModelId, estimatedInputTokens, maxOutputTokens: 0, kind: 'embed', label: 'gateway.embed.multimodal',
+    });
+    let measuredUsage: AIInvocationUsage | null = null;
     try {
-      res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${modelId}` }, () => fetch(`${baseUrl}/embeddings`, {
+      const res = await invokeAI({ operation: 'gateway.multimodal', kind: 'multimodal', model: `${recipe.id}:${modelId}` }, () => fetch(`${baseUrl}/embeddings`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2087,65 +2128,87 @@ async function embedMultimodalOpenAICompat(
         // v0.42.20.0 (codex #4) — per-request multimodal timeout (direct fetch).
         signal: AbortSignal.timeout(AI_MULTIMODAL_TIMEOUT_MS),
       }), responseInvocationUsage);
-    } catch (err) {
-      if (isAIInvocationPolicyError(err)) throw err;
-      throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${modelId})`, redactKeys);
-    }
 
-    if (!res.ok) {
-      const text = redactKeys(await res.text().catch(() => ''));
-      if (res.status === 401 || res.status === 403) {
-        reportEmbeddingAuthFailure(recipe, { status: res.status });
-        const requiredKey = recipe.auth_env?.required[0];
-        throw new AIConfigError(
-          `${recipe.name} multimodal returned ${res.status}: ${text || 'auth failed'}.`,
-          requiredKey
-            ? `Re-export ${requiredKey} or rotate the key at ${recipe.auth_env?.setup_url ?? recipe.setup_hint}.`
-            : recipe.setup_hint,
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        if (tracker) {
+          try {
+            const payload = JSON.parse(bodyText) as { usage?: Record<string, unknown> };
+            measuredUsage = sdkInvocationUsage({ usage: { ...payload.usage, outputTokens: 0 } });
+          } catch { /* absent usage is settled conservatively below */ }
+        }
+        const text = redactKeys(bodyText);
+        if (res.status === 401 || res.status === 403) {
+          reportEmbeddingAuthFailure(recipe, { status: res.status });
+          const requiredKey = recipe.auth_env?.required[0];
+          throw new AIConfigError(
+            `${recipe.name} multimodal returned ${res.status}: ${text || 'auth failed'}.`,
+            requiredKey
+              ? `Re-export ${requiredKey} or rotate the key at ${recipe.auth_env?.setup_url ?? recipe.setup_hint}.`
+              : recipe.setup_hint,
+          );
+        }
+        // Surface the upstream error verbatim — 400s here usually mean the
+        // proxied model doesn't support multimodal input. The error text is
+        // the user's best signal for picking a different model id.
+        throw new AITransientError(
+          `${recipe.name} multimodal returned ${res.status}: ${text || 'transient error'}.`,
         );
       }
-      // Surface the upstream error verbatim — 400s here usually mean the
-      // proxied model doesn't support multimodal input. The error text is
-      // the user's best signal for picking a different model id.
-      throw new AITransientError(
-        `${recipe.name} multimodal returned ${res.status}: ${text || 'transient error'}.`,
-      );
-    }
 
-    let parsedBody: { data?: Array<{ embedding: number[] }> };
-    try {
-      parsedBody = (await res.json()) as { data?: Array<{ embedding: number[] }> };
+      let parsedBody: { data?: Array<{ embedding: number[] }>; usage?: Record<string, unknown> };
+      try {
+        parsedBody = (await res.json()) as typeof parsedBody;
+      } catch (err) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
+        );
+      }
+      if (tracker) measuredUsage = sdkInvocationUsage({ usage: { ...parsedBody.usage, outputTokens: 0 } });
+      if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length < 1) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned no embeddings (expected 1).`,
+        );
+      }
+
+      const row = parsedBody.data[0];
+      if (!Array.isArray(row.embedding)) {
+        throw new AITransientError(
+          `${recipe.name} multimodal returned non-array embedding payload.`,
+        );
+      }
+      // D12 — dim validation. Throw EmbedDimensionMismatchError-shape error
+      // (AIConfigError with model id + observed + expected so the operator
+      // can diagnose and pick a compatible model OR adjust the brain's
+      // embedding_dimensions config). Skip the check when expectedDims=0
+      // (no recipe declaration AND no config override).
+      if (expectedDims > 0 && row.embedding.length !== expectedDims) {
+        throw new AIConfigError(
+          `${recipe.id}:${modelId} returned ${row.embedding.length}-dim vector; expected ${expectedDims}.`,
+          `The brain's embedding column is fixed at ${expectedDims} dims; this model is incompatible. ` +
+          `Either pick a model that returns ${expectedDims} dims, OR set --embedding-dimensions ${row.embedding.length} ` +
+          `and reinitialize the embedding column at the new width.`,
+        );
+      }
+      allEmbeddings.push(new Float32Array(row.embedding));
+      if (tracker) recordOnTracker(tracker, {
+        modelId: servedModelId, reservation, kind: 'embed', label: 'gateway.embed.multimodal',
+        inputTokens: measuredUsage?.inputTokens ?? estimatedInputTokens,
+        outputTokens: 0, embeddingDims: row.embedding.length, estimated: measuredUsage === null,
+      });
     } catch (err) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned malformed JSON: ${err instanceof Error ? err.message : String(err)}.`,
-      );
+      if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
+      if (tracker) {
+        const failedUsage = measuredUsage ?? sdkInvocationUsage(err);
+        recordOnTracker(tracker, {
+          modelId: servedModelId, reservation, kind: 'embed', label: 'gateway.embed.multimodal.failed',
+          ...failedCallUsage(failedUsage ? { usage: failedUsage } : err, { inputTokens: estimatedInputTokens, outputTokens: 0 }),
+        });
+      }
+      throw normalizeAIError(err, `embedMultimodal(${recipe.id}:${modelId})`, redactKeys);
+    } finally {
+      tracker?.release(reservation);
     }
-    if (!parsedBody.data || !Array.isArray(parsedBody.data) || parsedBody.data.length < 1) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned no embeddings (expected 1).`,
-      );
-    }
-
-    const row = parsedBody.data[0];
-    if (!Array.isArray(row.embedding)) {
-      throw new AITransientError(
-        `${recipe.name} multimodal returned non-array embedding payload.`,
-      );
-    }
-    // D12 — dim validation. Throw EmbedDimensionMismatchError-shape error
-    // (AIConfigError with model id + observed + expected so the operator
-    // can diagnose and pick a compatible model OR adjust the brain's
-    // embedding_dimensions config). Skip the check when expectedDims=0
-    // (no recipe declaration AND no config override).
-    if (expectedDims > 0 && row.embedding.length !== expectedDims) {
-      throw new AIConfigError(
-        `${recipe.id}:${modelId} returned ${row.embedding.length}-dim vector; expected ${expectedDims}.`,
-        `The brain's embedding column is fixed at ${expectedDims} dims; this model is incompatible. ` +
-        `Either pick a model that returns ${expectedDims} dims, OR set --embedding-dimensions ${row.embedding.length} ` +
-        `and reinitialize the embedding column at the new width.`,
-      );
-    }
-    allEmbeddings.push(new Float32Array(row.embedding));
   }
 
   return screenAlignedEmbeddings(allEmbeddings, `${recipe.id}:${modelId}`);
@@ -2216,6 +2279,7 @@ export async function embedQueryMultimodalImage(
  *   3. On AITransientError or other thrown error, split-and-retry
  *      via binary search. Single-input attempts that fail are recorded
  *      in `failedIndices` and skipped.
+ *   Budget/invocation-policy refusals propagate unchanged without split retries.
  *
  * Returns `MultimodalBatchResult` with parallel-indexed `embeddings`
  * (undefined for failed slots) and a `failedIndices` array.
@@ -2241,7 +2305,7 @@ export async function embedMultimodalSafe(
       }
       return;
     } catch (err) {
-      if (isAIInvocationPolicyError(err)) throw err;
+      if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
       lastError = err instanceof Error ? err : new Error(String(err));
       if (isEmbeddingZeroNormError(err)) {
         err.vectors.forEach((v, i) => { if (v) embeddings[startIdx + i] = v; else failedIndices.push(startIdx + i); });
@@ -2352,7 +2416,6 @@ export function parseExpansionResponse(text: string): string[] | null {
 // Expansion returns a 3-4 item JSON array; OCR of a single image is bounded
 // by the image token cost, NOT its base64 length (bytes are not tokens).
 const EXPANSION_FAILED_PESSIMISTIC_OUTPUT_TOKENS = 512;
-const OCR_IMAGE_INPUT_TOKEN_ESTIMATE = 1600;
 
 /**
  * #4121 — the v6/legacy AI-SDK usage shapes (`inputTokens|promptTokens`,
@@ -2603,22 +2666,26 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
     'Return raw extracted text only. If there is no text, return an empty string.',
     'Do NOT add commentary, captions, or descriptions of the image.',
   ].join(' ');
-  // #4121: OCR was the last uninstrumented gateway spend path. Record every
-  // outcome on the ambient tracker with chat's exact modelId shape. Input
-  // estimate = prompt TEXT + a documented per-image constant — never the
-  // base64 length (bytes are not tokens; chars/4 of base64 would spuriously
-  // deny OCR under any cap).
+  // Input estimate = prompt text plus the existing per-image heuristic,
+  // never base64 length. Reserve before the paid attempt and settle its usage.
   const tracker = getCurrentBudgetTracker();
   const ocrModelId = `${recipe.id}:${modelId}`;
   const estimatedOcrInputTokens =
     estimateChatInputTokens({ system: systemPrompt, messages: [{ content: 'Extract visible text only.' }] }) +
-    OCR_IMAGE_INPUT_TOKEN_ESTIMATE;
-  const recordOcr = (label: 'gateway.ocr' | 'gateway.ocr.failed', usage: { inputTokens: number; outputTokens: number }): void =>
-    recordOnTracker(tracker, { modelId: ocrModelId, requestedModelId: ocrModel, label, ...usage });
+    IMAGE_INPUT_TOKEN_ESTIMATE;
+  const reservation = tracker?.reserve({
+    modelId: ocrModelId, estimatedInputTokens: estimatedOcrInputTokens,
+    maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS, kind: 'chat', label: 'gateway.ocr',
+  });
+  const recordOcr = (label: 'gateway.ocr' | 'gateway.ocr.failed', usage: { inputTokens: number; outputTokens: number; estimated?: boolean }): void =>
+    recordOnTracker(tracker, { modelId: ocrModelId, reservation, requestedModelId: ocrModel, label, ...usage });
   let result: Awaited<ReturnType<GenerateTextFn>>;
   try {
     result = await guardedGeneration(ocrModelId, _generateTextTransport, {
       model,
+      // Ambient admission covers one paid attempt, never hidden SDK retries.
+      // Leave the untracked transport options unchanged.
+      ...(tracker ? { maxRetries: 0, maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS } : {}),
       // v0.42.20.0 (codex) — OCR is a 5th unbounded generateText entry point.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
       messages: [
@@ -2638,18 +2705,24 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
         },
       ],
     });
+    const usage = sdkInvocationUsage(result);
+    recordOcr('gateway.ocr', {
+      inputTokens: usage ? usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) : estimatedOcrInputTokens,
+      outputTokens: usage?.outputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      estimated: usage === null,
+    });
+    return (result.text ?? '').trim();
   } catch (err) {
-    if (isAIInvocationPolicyError(err)) throw err;
+    if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
     recordOcr('gateway.ocr.failed', failedCallUsage(err, {
       inputTokens: estimatedOcrInputTokens,
       outputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
     }));
-    // Throw-to-caller contract unchanged: importImageFile routes this to
-    // ocr_failed_other. A cap breach surfaces there as a real import failure.
+    // Non-budget OCR errors retain importImageFile's ocr_failed_other classification.
     throw err;
+  } finally {
+    tracker?.release(reservation);
   }
-  recordOcr('gateway.ocr', normalizeSdkUsage(result.usage));
-  return (result.text ?? '').trim();
 }
 
 // ---- BudgetTracker scope (TX5) ----
