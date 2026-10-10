@@ -377,7 +377,7 @@ export async function runVectorArms(
     // threaded from hybridSearchCached (so the cache-lookup embed + this one
     // share one ~6s budget); direct callers get a fresh deadline. On timeout
     // the embed rejects → salvage below (or keyword-only when all reject).
-    const embedDl = opts?._queryEmbedDeadline ?? makeQueryEmbedDeadline();
+    const embedDl = req.queryEmbedDeadline ??= makeQueryEmbedDeadline();
     // Hermetic eval canaries/CI: queryEmbedFn (non-semantic deterministic
     // embeddings) replaces the gateway query-embed for the text vector arm.
     // No deadline needed — it's a synchronous-ish local computation with no

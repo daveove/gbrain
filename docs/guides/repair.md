@@ -273,6 +273,28 @@ belong to deleted pages. Confirm that with `EXPLAIN (ANALYZE, BUFFERS)` before
 changing the database. A brain administrator can add this narrow lookup index
 without changing vector, revision, freshness, or visibility checks:
 
+First inspect any existing index and active build:
+
+```sql
+SELECT i.indisvalid, i.indisready, pg_get_indexdef(i.indexrelid)
+  FROM pg_index i
+  WHERE i.indexrelid = to_regclass('idx_chunks_embedded_text_model');
+SELECT pid, phase
+  FROM pg_stat_progress_create_index
+  WHERE index_relid = to_regclass('idx_chunks_embedded_text_model');
+```
+
+Wait for an active build to finish. If a prior interrupted build left exactly
+this lookup index invalid and no build is active, drop that invalid index in a
+standalone statement, outside a transaction, before recreating it:
+
+```sql
+DROP INDEX CONCURRENTLY IF EXISTS idx_chunks_embedded_text_model;
+```
+
+Do not drop a valid index. `IF NOT EXISTS` alone does not repair an invalid
+leftover. The creation statement must also run outside a transaction:
+
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_chunks_embedded_text_model
   ON content_chunks (model, page_id)

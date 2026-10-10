@@ -1149,7 +1149,7 @@ export async function hybridSearch(
   // call's onMeta fires with the escalated detail_resolved; do NOT also
   // fire here (would double-emit and capture stale meta).
   if (deduped.length === 0 && opts?.detail === 'low') {
-    return hybridSearch(engine, query, { ...opts, detail: 'high' });
+    return hybridSearch(engine, query, { ...opts, detail: 'high', _queryEmbedDeadline: req.queryEmbedDeadline });
   }
 
   const { rerankPinned, relationalRerankPin } = await rerankAndPin(req, deduped, relationalList, effectiveModality);

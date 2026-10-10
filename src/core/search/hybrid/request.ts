@@ -8,7 +8,7 @@ import type { BrainEngine } from '../../engine.ts';
 import { perArmPoolLimit } from '../eval-pool-depth.ts';
 import type { DegradedStageEntry, HybridSearchMeta, SearchOpts, SearchResult } from '../../types.ts';
 import { type GBrainConfig, loadConfigWithEngine } from '../../config.ts';
-import { type HybridSearchOpts, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
+import { type HybridSearchOpts, type QueryEmbedDeadline, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
 import type { IdentityTierOpts } from '../alias-hop.ts';
 import { type IntentWeights, applyAliasMentionBoost, applyExactMatchBoost, applyTitleMentionBoost, weightsForIntent } from '../intent-weights.ts';
 import { type QuerySuggestions, classifyQueryWithBrainPatterns } from '../query-intent.ts';
@@ -55,6 +55,8 @@ export interface HybridRequest {
   aliasHopOpts: IdentityTierOpts & { tokenHop: boolean };
   /** WP2/T3 degradation stamp, appended by every stage. */
   degraded: DegradedStageEntry[];
+  /** Shared text-provider budget, created at the first embedding request. */
+  queryEmbedDeadline?: QueryEmbedDeadline;
   /** v0.46.15: max-escalations searchVector exhaustion event, accumulated across vector calls. */
   vectorPoolUnderfill: HybridSearchMeta['vector_pool_underfilled'];
   /** #5989: the last bounded CJK keyword arm outcome. */
@@ -297,6 +299,7 @@ export async function resolveHybridRequest(
     engine, query, opts, modeInput, resolvedMode, cfgForColumn, resolvedCol, limit, offset,
     suggestions, intentWeightingOn, intentWeights, detail, detailResolved, ctBoost,
     searchOpts, identityTierOpts, aliasHopOpts, degraded,
+    queryEmbedDeadline: opts?._queryEmbedDeadline,
     vectorPoolUnderfill: undefined,
     expansionApplied: false,
     lastResultsCount: 0,

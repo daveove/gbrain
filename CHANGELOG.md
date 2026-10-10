@@ -14,7 +14,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ### Fixed
 
-- Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. A cache embedding still shares its deadline with the vector arm.
+- Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. Cache embeddings and low-to-high detail recovery retain the original shared deadline and its existing minimum floor.
 - Foreground projection drains try a still-queued superseded job once per run. A conflicting or malformed legacy identity remains queued and is reported in `remaining`, rather than causing an unbounded retry loop.
 
 ## [0.60.138.0] - 2026-10-09

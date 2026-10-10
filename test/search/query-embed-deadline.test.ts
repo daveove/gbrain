@@ -139,6 +139,7 @@ describe('hybridSearchCached — provider budget', () => {
     await engine.connect({});
     await engine.initSchema();
     await engine.setConfig('search.reranker.enabled', 'false');
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', ['provider-budget-empty']);
     const body = 'Quartz cargo uses the relay station.';
     await engine.putPage('notes/relay-station', { type: 'note', title: 'Relay station', compiled_truth: body });
     await installFixtureChunks(engine, 'notes/relay-station', [{
@@ -186,6 +187,39 @@ describe('hybridSearchCached — provider budget', () => {
       expect(meta?.degraded ?? []).not.toContainEqual({ stage: 'embed_timeout', reason: 'timeout' });
     } finally {
       lexical.mockRestore();
+      timeout.mockRestore();
+      clock.mockRestore();
+    }
+  }, 120_000);
+
+  test('empty low-detail recovery keeps the original provider deadline', async () => {
+    let now = Date.now();
+    let requests = 0;
+    const timers: Array<{ at: number; controller: AbortController }> = [];
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    const timeout = spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const controller = new AbortController();
+      timers.push({ at: now + ms, controller });
+      return controller.signal;
+    });
+    __setEmbedTransportForTests(async opts => {
+      now += ++requests === 1 ? 5_000 : 3_000;
+      for (const timer of timers) {
+        if (timer.at <= now) timer.controller.abort(new DOMException('fixture provider deadline', 'TimeoutError'));
+      }
+      if (opts.abortSignal?.aborted) throw opts.abortSignal.reason;
+      return { embeddings: [vector], usage: { tokens: 1 } } as never;
+    });
+    try {
+      let meta: HybridSearchMeta | undefined;
+      await hybridSearchCached(engine, 'unmatched semantic lookup', {
+        limit: 1, detail: 'low', sourceId: 'provider-budget-empty',
+        expansion: false, relationalRetrieval: false,
+        onMeta: value => { meta = value; },
+      });
+      expect(meta?.detail_resolved).toBe('high');
+      expect(meta?.degraded).toContainEqual({ stage: 'embed_timeout', reason: 'timeout' });
+    } finally {
       timeout.mockRestore();
       clock.mockRestore();
     }
