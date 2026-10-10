@@ -21,6 +21,7 @@ import type { MinionHandler } from '../src/core/minions/types.ts';
 import { refreshGatewayForJob, registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { BudgetTracker, loadPricingOverrides, type PricingOverrides } from '../src/core/budget/budget-tracker.ts';
 import { reservationCostUsd } from '../src/core/budget/reservation-cost.ts';
+import { managedPersistenceEnabled } from '../src/core/persistence/ownership.ts';
 import { configureGateway, getEmbeddingModel, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
 import {
@@ -66,9 +67,22 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   ) + Buffer.byteLength(appendix ?? '') + 2;
   const inputPerCall = systemBytes + 4 * MAX_TURN_TEXT_CHARS + 200;
   const outputTokens = maxTokens + 2 * (2 * maxTokens);
-  // The model fact extraction actually embeds with; unresolvable counts as unpriced.
-  let embed: number | null;
-  try { embed = reservationCostUsd(getEmbeddingModel(), 'embed', 25 * 4 * 500, 0, overrides); } catch { embed = null; }
+  // Extraction embeds with the gateway model, or with the brain's DB model under
+  // managed persistence; price the costlier. Unresolvable counts as unpriced.
+  let embed: number | null = 0;
+  try {
+    const models = [getEmbeddingModel()];
+    if (await managedPersistenceEnabled(engine)) {
+      const managed = await engine.getConfig('embedding_model');
+      if (managed) models.push(managed);
+    }
+    for (const model of models) {
+      const cost = reservationCostUsd(model, 'embed', 25 * 4 * 500, 0, overrides);
+      embed = cost === null || embed === null ? null : Math.max(embed, cost);
+    }
+  } catch {
+    embed = null;
+  }
   return {
     defaultModel: await getFactsExtractionModel(engine),
     embedUsd: embed,

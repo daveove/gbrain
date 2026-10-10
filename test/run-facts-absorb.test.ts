@@ -154,3 +154,16 @@ test('each finished job keeps its embedding ceiling as spent', async () => {
     expect(run.spentUsd).toBeCloseTo(pricing.embedUsd!, 10);
   });
 }, 60_000);
+
+test('under managed persistence an unpriced brain embedding model stops the run before any claim spends', async () => {
+  await page();
+  await addFacts();
+  await engine.executeRaw('UPDATE persistence_brain SET enabled = true WHERE singleton = 1');
+  await engine.setConfig('embedding_model', 'acme-example:managed-embed');
+  await withEnv(KEYLESS, async () => {
+    expect((await factsJobWorstCase(engine)).embedUsd).toBeNull();
+    const run = await runFactsAbsorb(engine, { maxUsd: 10, pollMs: 50 });
+    expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unpriced', 0, 0, 1]);
+  });
+  expect(await rows()).toEqual([{ name: 'facts-absorb', status: 'delayed', attempts_made: 0 }]);
+});
