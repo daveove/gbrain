@@ -31,6 +31,8 @@ test/.cache/
 
 .claude/
 export/
+# Private source exports and retrieval snapshots are local data, never source.
+/out/
 
 # Conductor workspace-local agent artifacts: plans, todos, run-unit-parallel
 # failure logs and per-shard test output. v0.26.4 (run-unit-parallel.sh)
