@@ -22,8 +22,8 @@ search behavior.
 - Ignore root `/out/` exports in every clone.
 - Enable Gitleaks' built-in detectors and replace broad path exclusions with exact,
   scoped exceptions for synthetic fixtures and structural identifiers.
-- Run the existing secret check independently of test caching, and require its
-  success before aggregate CI status can pass.
+- Run the existing secret check independently of test caching, reject invalid Git
+  commit ranges, and require scan success before aggregate CI status can pass.
 
 ## [0.48.2.0] - 2026-09-02
 

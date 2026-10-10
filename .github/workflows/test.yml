@@ -121,6 +121,8 @@ jobs:
               *) RANGE="${BEFORE}..${{ github.sha }}" ;;
             esac
           fi
+          # Gitleaks can return zero after a Git range error; fail before scanning.
+          git rev-list "$RANGE" -- > /dev/null
           echo "Scanning commit range: $RANGE"
           gitleaks detect --redact --no-banner --log-opts "$RANGE"
 
