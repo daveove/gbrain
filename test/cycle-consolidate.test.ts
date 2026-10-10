@@ -129,6 +129,52 @@ describe('runPhaseConsolidate', () => {
     }
   });
 
+  test('one pass writes a take for every source that has a ready cluster', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name) VALUES ('notes', 'notes') ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, type, title, source_id) VALUES ('companies/widget-co', 'company', 'Widget Co', 'notes')
+       ON CONFLICT (source_id, slug) DO NOTHING`,
+    );
+    await seedPage('people/alice-example');
+    const clusters: Array<[string, string, string]> = [
+      ['default', 'people/alice-example', 'alice-example prefers morning reviews'],
+      ['notes', 'companies/widget-co', 'widget-co ships weekly'],
+    ];
+    for (const [sourceId, slug, claim] of clusters) {
+      await engine.executeRaw(
+        `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at, embedding_model, embedded_text_hash)
+         VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.95, $5::vector, $4::timestamptz, 'openai:text-embedding-3-large', md5($3))`,
+        [sourceId, slug, claim, oldDate(), unitVec()],
+      );
+      for (let i = 0; i < 3; i++) {
+        const support = `${claim} support ${i}`;
+        await engine.executeRaw(
+          `INSERT INTO facts (source_id, entity_slug, fact, kind, source, valid_from, confidence, embedding, embedded_at, embedding_model, embedded_text_hash)
+           VALUES ($1, $2, $3, 'fact', 'test', $4::timestamptz, 0.5, $5::vector, $4::timestamptz, 'openai:text-embedding-3-large', md5($3))`,
+          [sourceId, slug, support, oldDate(), unitVec()],
+        );
+      }
+    }
+
+    const r = await runPhaseConsolidate(engine, {});
+    expect(r.status).toBe('ok');
+    expect(r.details.takes_written).toBe(2);
+    expect(r.details.facts_consolidated).toBe(8);
+
+    const takes = await engine.executeRaw<{ source_id: string; slug: string; claim: string }>(
+      `SELECT p.source_id, p.slug, t.claim
+         FROM takes t
+         JOIN pages p ON p.id = t.page_id
+        ORDER BY p.source_id, p.slug`,
+    );
+    expect(takes).toEqual([
+      { source_id: 'default', slug: 'people/alice-example', claim: 'alice-example prefers morning reviews' },
+      { source_id: 'notes', slug: 'companies/widget-co', claim: 'widget-co ships weekly' },
+    ]);
+  });
+
   test('dryRun honored: counters tick but no rows written', async () => {
     await seedPage('cons-dryrun');
     for (let i = 0; i < 3; i++) {

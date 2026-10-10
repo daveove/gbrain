@@ -81,7 +81,7 @@ export interface RunThinkOpts {
   /** When set, MCP-bound calls forward this to the gather phase (server-side filter). */
   takesHoldersAllowList?: string[];
   /** Resolved operation-layer page visibility policy. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Inject an LLM client (for tests). Defaults to a fresh Anthropic SDK client. */
   client?: ThinkLLMClient;
   /** Inject a question-embedding function. When omitted, vector takes search is skipped. */

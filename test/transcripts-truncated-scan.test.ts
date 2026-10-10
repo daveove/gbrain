@@ -6,7 +6,8 @@
  * print a one-line summary note.
  */
 
-import { describe, test, expect, afterEach } from 'bun:test';
+import { describe, test, expect, afterEach, beforeAll, afterAll } from 'bun:test';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { fmtSummary } from '../src/commands/transcripts.ts';
 import type { TranscriptAdapter } from '../src/core/transcripts/types.ts';
@@ -26,6 +27,10 @@ function stubAdapter(truncated: boolean): TranscriptAdapter {
   };
 }
 
+let engine: PGLiteEngine;
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 120_000);
+afterAll(async () => { await engine.disconnect(); });
+
 const scratch: string[] = [];
 afterEach(() => {
   for (const d of scratch.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -36,7 +41,7 @@ async function run(truncated: boolean) {
   scratch.push(dir);
   const f = join(dir, 'rollout.jsonl');
   writeFileSync(f, '{"x":1}\n');
-  return runTranscriptsIngest({} as never, {
+  return runTranscriptsIngest(engine, {
     paths: [f],
     sourceId: 'default',
     adapters: [stubAdapter(truncated)],

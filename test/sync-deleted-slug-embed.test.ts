@@ -20,12 +20,14 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null = null;
 let repoPath: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -35,6 +37,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-del-embed-'));
   execSync('git init', { cwd: repoPath, stdio: 'pipe' });
   execSync('git config user.email "test@test.com"', { cwd: repoPath, stdio: 'pipe' });

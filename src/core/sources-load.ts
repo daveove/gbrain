@@ -203,6 +203,16 @@ export function isSourceFederated(config: unknown): boolean {
 }
 
 /**
+ * Trusted system indexes (e.g. daily-memory `dream`) stay out of federated
+ * read grants (`federated: false`) but may emit outbound cross-source edges
+ * during link extraction so brain-wide indexes remain graph-connected.
+ */
+export function sourceAllowsOutboundCrossSourceLinks(config: unknown): boolean {
+  const parsed = parseSourceConfig(config);
+  return parsed.federated === true || parsed.system_index === true;
+}
+
+/**
  * Three-way federation state for display (CLI `sources list`, etc.).
  *
  * `isSourceFederated` collapses to a boolean for the inclusion check (does

@@ -21,7 +21,7 @@ import { isSearchMode } from '../search/mode.ts';
 import { stampEvidence } from '../search/evidence.ts';
 import { captureEvalCandidate, isEvalCaptureEnabled, isEvalScrubEnabled } from '../eval-capture.ts';
 import type { SearchResult, HybridSearchMeta, PageReadScope, PageReadPolicy } from '../types.ts';
-import { resolveExcludePrivatePages, isPrivatePage } from '../search/private-visibility.ts';
+import { resolveExcludePrivatePages, isPageHidden, isOwnerAggregate, isReservedOwnerAggregateIdentity } from '../search/private-visibility.ts';
 
 // --- Upload validators (Fix 1 / B5 / H5 / M4) ---
 
@@ -777,13 +777,18 @@ export async function requireWritablePage(
     includeDeleted: true,
   });
   if (writable) {
-    if (ctx.viaSubagent === true && ctx.auth && isPrivatePage(writable.frontmatter)
-      && await resolveExcludePrivatePages(ctx.engine, ctx.remote)) {
+    if (ctx.remote !== false && isOwnerAggregate(writable)) throw new OperationError('page_not_found', 'Page not found.');
+    if (ctx.viaSubagent === true && ctx.auth && isPageHidden(writable, await resolveExcludePrivatePages(ctx.engine, ctx.remote))) {
       throw new OperationError('permission_denied', `${operation}: this page is outside your write visibility.`);
     }
     return;
   }
-  if (allowCreate) return;
+  if (allowCreate) {
+    if (ctx.remote !== false && isReservedOwnerAggregateIdentity(writeSource, slug)) {
+      throw new OperationError('page_not_found', 'Page not found.');
+    }
+    return;
+  }
 
   const visibleScope = federatedSearchScope(ctx);
   const spansAnotherSource =

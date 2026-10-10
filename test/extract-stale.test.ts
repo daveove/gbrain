@@ -35,6 +35,7 @@ async function truncateAll() {
   for (const t of ['content_chunks', 'links', 'tags', 'raw_data', 'timeline_entries', 'page_versions', 'ingest_log', 'pages']) {
     await (engine as any).db.exec(`DELETE FROM ${t}`);
   }
+  await engine.executeRaw("DELETE FROM config WHERE key LIKE 'internal.pending-links.%'");
 }
 beforeEach(truncateAll);
 

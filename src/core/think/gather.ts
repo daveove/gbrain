@@ -39,7 +39,7 @@ export interface ThinkGatherOpts {
   window?: TemporalWindow;
   /** When set, MCP-bound calls forward this allow-list to takes_search. Local CLI leaves unset. */
   takesHoldersAllowList?: string[];
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   remote?: boolean;
   /** Source scope inherited from the caller. Federated array wins over scalar. */
   sourceId?: string;

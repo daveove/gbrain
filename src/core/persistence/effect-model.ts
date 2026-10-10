@@ -36,4 +36,4 @@ export interface PersistenceEffect {
   recovery_bytes: string | number;
   outcome: Record<string, unknown> | null;
 }
-export type EffectRequest = Pick<WriteRequest, 'id' | 'source_id' | 'source_incarnation' | 'slug' | 'worktree_id'>;
+export type EffectRequest = Pick<WriteRequest, 'id' | 'operation' | 'source_id' | 'source_incarnation' | 'slug' | 'worktree_id'>;

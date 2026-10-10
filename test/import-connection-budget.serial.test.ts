@@ -87,6 +87,8 @@ function fakeEngine(kind: 'postgres' | 'pglite'): BrainEngine {
   return {
     kind,
     executeRaw: async () => [],
+    // Empty imports still create and retire their daily-memory live checkpoint.
+    executeRawDirect: async () => [],
     getConfig: async () => null,
   } as unknown as BrainEngine;
 }

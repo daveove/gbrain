@@ -183,7 +183,7 @@ export function buildVisibilityClause(
      * (search/private-visibility.ts). Off by default — trusted local reads
      * are unchanged.
      */
-    excludePrivate?: boolean;
+    excludePrivate?: boolean | 'owner-only';
     requireSafeChunks?: boolean;
   },
 ): string {
@@ -193,7 +193,7 @@ export function buildVisibilityClause(
   // #4352 remediation: the predicate text lives ONCE in private-visibility.ts
   // (shared with listPages + the relational-arm hydrate) so it cannot drift.
   const privateClause = opts?.excludePrivate
-    ? ` AND ${privatePagesFilterFragment(pageAlias)}`
+    ? ` AND ${privatePagesFilterFragment(pageAlias, opts?.excludePrivate)}`
     : '';
   const chunksClause = requiresSafeChunks(opts) ? ` AND ${safeChunksFilter(pageAlias)}` : '';
   return `AND ${pageAlias}.deleted_at IS NULL AND ${currentTextProjectionFilter(pageAlias)} AND NOT ${sourceAlias}.archived AND ${quarantine}${privateClause}${chunksClause}`;

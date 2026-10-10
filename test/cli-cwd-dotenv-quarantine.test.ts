@@ -225,6 +225,30 @@ const GIT_BIN = Bun.which('git');
 // util-linux `script` gives the wrapper a real pty so process.stdin.isTTY is
 // true — the only way to exercise the tty (ignore-only) SIGINT branch faithfully.
 const SCRIPT_BIN = Bun.which('script');
+function scriptArgs(command: string): string[] {
+  return process.platform === 'darwin'
+    ? ['-q', '/dev/null', '/bin/sh', '-c', command]
+    : ['-qec', command, '/dev/null'];
+}
+// Darwin script rejects socketpair stdin from Bun/libuv; Python supplies a real pipe.
+function ptyArgs(command: string): string[] {
+  const args = [SCRIPT_BIN!, ...scriptArgs(command)];
+  if (process.platform !== 'darwin') return args;
+  const python = Bun.which('python3');
+  if (!python) throw new Error('Darwin PTY fixtures require python3');
+  const bridge = `import os, signal, subprocess, sys, threading
+child = subprocess.Popen(sys.argv[1:], stdin=subprocess.PIPE)
+def forward():
+    while chunk := os.read(0, 4096):
+        child.stdin.write(chunk)
+        child.stdin.flush()
+    child.stdin.close()
+threading.Thread(target=forward, daemon=True).start()
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, lambda sig, frame: child.send_signal(sig))
+raise SystemExit(child.wait())`;
+  return [python, '-c', bridge, ...args];
+}
 /**
  * The command line handed to `script -c`. `script` runs it through `$SHELL`
  * (falling back to /bin/sh — hermeticEnv sets no SHELL), and the pty delivers
@@ -445,7 +469,7 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
       ].join('\n'),
     });
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`); // exec'd: see ptyCommand
-    const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
+    const proc = Bun.spawn(ptyArgs(cmd), {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
     const drain = (async () => { for await (const _ of proc.stdout) { /* mux pty output */ } })();
@@ -512,7 +536,7 @@ describe('a cwd .env cannot reach the programs gbrain spawns (sanitized re-run)'
     const out = join(dir, 'wrapper.out');
     const err = join(dir, 'wrapper.err');
     const cmd = ptyCommand(`${process.execPath} ${entry} --preflight`, ` </dev/null >${out} 2>${err}`); // exec'd: see ptyCommand
-    const proc = Bun.spawn([SCRIPT_BIN!, '-qec', cmd, '/dev/null'], {
+    const proc = Bun.spawn(ptyArgs(cmd), {
       cwd: dir, env: hermeticEnv(dir), stdin: 'pipe', stdout: 'pipe', stderr: 'pipe',
     });
     const drain = (async () => { for await (const _ of proc.stdout) { /* mux pty output */ } })();

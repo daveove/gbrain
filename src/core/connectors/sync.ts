@@ -339,6 +339,8 @@ export async function runConnectorSync(
           sourceId,
           format: spoolFormat,
           embed: opts.embed ?? false,
+          // Spool paths are timestamped and deleted after each batch; keep debt source-scoped.
+          dailyMemoryRunKey: `connector:${opts.provider}:${sourceId}`,
         });
         importedTotal += r.pages.imported;
         skippedTotal += r.pages.skipped;

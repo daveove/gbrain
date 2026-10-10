@@ -3,13 +3,13 @@
 > GBrain is a personal knowledge brain and GStack mod for agent platforms. Pluggable engines (PGLite default, Postgres+pgvector for scale), contract-first operations, 26 fat-markdown skills. Teaches agents brain ops, ingestion, enrichment, scheduling, identity, and access control.
 
 This file concatenates core GBrain documentation for single-fetch ingestion.
-For the link-only index, see `llms.txt`. Source of truth: https://github.com/garrytan/gbrain.
+For the link-only index, see `llms.txt`. Source of truth: https://github.com/daveove/gbrain.
 
 # Choose your agent setup
 
 ## docs/guides/remote-mcp.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/remote-mcp.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/remote-mcp.md
 
 # Use your brain from anywhere over MCP
 
@@ -515,7 +515,7 @@ pre-mint before the service runs and pass `--token <value>`, or use the scoped
 
 ## docs/guides/grok-bot.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/grok-bot.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/grok-bot.md
 
 # GBrain for Grok Bot
 
@@ -586,6 +586,9 @@ tell me which native steps remain unverified.
 The Bot's memory now lives on your machine: back it up, inspect it, and
 revoke the Bot's client on the host whenever it should stop. `gbrain mcp
 expose --status` on your computer re-checks the service and the public URL.
+
+For a scheduled routine that writes one digest page per day through the
+published MCP endpoint, follow the [daily digest contract](grok-bot-daily-digest.md).
 
 ## Alternative: install GBrain inside the Bot
 
@@ -722,7 +725,7 @@ network and OAuth failures belong to the
 
 ## docs/guides/muse.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/muse.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/muse.md
 
 # GBrain for Muse
 
@@ -953,7 +956,7 @@ old path. More errors and fixes are in the
 
 ## docs/guides/in-agent-setup.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/in-agent-setup.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/in-agent-setup.md
 
 # Install GBrain inside a personal agent
 
@@ -1289,7 +1292,7 @@ policies. Those remain app-level acceptance checks in the product guides.
 
 ## docs/guides/hosted-harness-access.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/hosted-harness-access.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/hosted-harness-access.md
 
 # Connect your agent to an existing hosted GBrain
 
@@ -1626,7 +1629,7 @@ As of **2026-09-09**, repository tests exercise private configuration writers, c
 
 ## AGENTS.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/AGENTS.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/AGENTS.md
 
 # Agents working on GBrain
 
@@ -1817,7 +1820,7 @@ publishing: `LLMS_REPO_BASE=https://raw.githubusercontent.com/your-org/your-fork
 
 ## CLAUDE.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/CLAUDE.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/CLAUDE.md
 
 # CLAUDE.md
 
@@ -2354,7 +2357,7 @@ installation is not proof of native use. Read
 
 ## INSTALL_FOR_AGENTS.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/INSTALL_FOR_AGENTS.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/INSTALL_FOR_AGENTS.md
 
 # GBrain Installation Guide for AI Agents
 
@@ -2981,7 +2984,7 @@ Init + upgrade banners auto-skip in non-TTY too.
 
 ## skills/RESOLVER.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/skills/RESOLVER.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/skills/RESOLVER.md
 
 # GBrain Skill Resolver
 
@@ -3173,7 +3176,7 @@ These apply to ALL brain-writing skills:
 
 ## README.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/README.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/README.md
 
 # GBrain
 
@@ -3637,7 +3640,7 @@ Community PR contributors are credited in `CHANGELOG.md` per release. Attributio
 
 ## docs/ENGINES.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/ENGINES.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/ENGINES.md
 
 # Pluggable Engine Architecture
 
@@ -4168,7 +4171,7 @@ Note: there is no SQLite engine. PGLite uses the same SQL as Postgres, so no sep
 
 ## docs/what-schemas-unlock.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/what-schemas-unlock.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/what-schemas-unlock.md
 
 # What schemas unlock
 
@@ -4348,7 +4351,7 @@ That's what we built. Try it on a corpus you actually have and the numbers go up
 
 ## docs/schema-author-tutorial.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/schema-author-tutorial.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/schema-author-tutorial.md
 
 # Tutorial: Build your first schema pack
 
@@ -4577,7 +4580,7 @@ gbrain schema lint --with-db
 
 ## docs/guides/live-sync.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/live-sync.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/live-sync.md
 
 # Live Sync: Keep the Index Current
 
@@ -4839,7 +4842,7 @@ vars — incident-time escape hatches, not everyday knobs.
 
 ## docs/guides/cron-schedule.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/cron-schedule.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/cron-schedule.md
 
 # Reference Cron Schedule
 
@@ -5203,7 +5206,7 @@ echo "Dream cycle complete at $(date)"
 
 ## docs/guides/quiet-hours.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/quiet-hours.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/quiet-hours.md
 
 # Quiet Hours and Timezone-Aware Delivery
 
@@ -5406,7 +5409,7 @@ Set `enabled: false` to disable quiet hours entirely (e.g., for 24/7 monitoring)
 
 ## docs/guides/scaling-skills.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/scaling-skills.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/scaling-skills.md
 
 # Scaling skills past 300 without drowning the context window
 
@@ -5749,7 +5752,7 @@ the bundled resolver lives at [`skills/RESOLVER.md`](../../skills/RESOLVER.md).
 
 ## docs/guides/push-context.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/push-context.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/push-context.md
 
 # Push-based context
 
@@ -5904,7 +5907,7 @@ never reach a prompt regardless of caller trust.
 
 ## docs/guides/github-source.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/github-source.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/github-source.md
 
 # GitHub source kind: issues and PRs live in the brain
 
@@ -6070,7 +6073,7 @@ gbrain sources remove gh --confirm-destructive
 
 ## docs/mcp/DEPLOY.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/mcp/DEPLOY.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/mcp/DEPLOY.md
 
 # Deploy GBrain Remote MCP Server
 
@@ -6828,7 +6831,7 @@ built-in server is the recommended path.
 
 ## docs/protocol/MEMORY_VERBS_v1.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/protocol/MEMORY_VERBS_v1.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/protocol/MEMORY_VERBS_v1.md
 
 # MEMORY_VERBS v1 — the memory wire protocol
 
@@ -7397,7 +7400,7 @@ dominates (~minutes); the measured calls report p50/p99 + the ratio guard.
 
 ## docs/GBRAIN_VERIFY.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/GBRAIN_VERIFY.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/GBRAIN_VERIFY.md
 
 # GBrain Installation Verification Runbook
 
@@ -7753,7 +7756,7 @@ end-to-end sync test (4c), push a real change and verify it appears in search.
 
 ## docs/guides/minions-fix.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/guides/minions-fix.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/guides/minions-fix.md
 
 # Minions fix: repairing a blocked worker or half-migrated install
 
@@ -8303,7 +8306,7 @@ Each phase is idempotent. Re-running is safe. Common failure modes:
 
 ## docs/integrations/reliability-repair.md
 
-Source: https://raw.githubusercontent.com/garrytan/gbrain/master/docs/integrations/reliability-repair.md
+Source: https://raw.githubusercontent.com/daveove/gbrain/master/docs/integrations/reliability-repair.md
 
 # Reliability repair
 

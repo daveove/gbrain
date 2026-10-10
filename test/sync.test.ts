@@ -407,6 +407,7 @@ describe('buildSyncManifest — C-style-quoted paths', () => {
 
 describe('performSync dry-run never writes', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null = null;
   let repoPath: string;
 
   // One PGLite per file — beforeEach wipes data only. Each test still gets a
@@ -415,6 +416,7 @@ describe('performSync dry-run never writes', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
 
   afterAll(async () => {
@@ -423,6 +425,7 @@ describe('performSync dry-run never writes', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-dryrun-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
     execSync('git config user.email "test@test.com"', { cwd: repoPath, stdio: 'pipe' });

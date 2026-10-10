@@ -208,3 +208,23 @@ describe('withScopedReadTransaction / flag on', () => {
     });
   });
 });
+
+test('selected stale reads retain source binding and bound exact target arrays', async () => {
+  await withEnv({ GBRAIN_RLS_SCOPE_BINDING: '1' }, async () => {
+    const fake = makeFakeSql();
+    fake.tx.unsafe = async (text: string, params: unknown[]) => {
+      fake.queries.push({ text, params, lane: 'transaction' });
+      return text.includes('count(*)') ? [{ count: 0 }] : [];
+    };
+    const engine = makeEngine(fake) as unknown as PostgresEngine;
+    expect(await engine.countStalePagesForExtraction({ sourceId: 'selected-source', slugs: ['notes/only'] })).toBe(0);
+    expect(await engine.listStalePagesForExtraction({ batchSize: 2, sourceId: 'selected-source', slugs: [] })).toEqual([]);
+    expect(fake.beginCalls()).toBe(2);
+    const reads = fake.queries.filter(query => query.text.includes('FROM pages'));
+    expect(reads).toHaveLength(2);
+    expect(reads.every(query => query.lane === 'transaction' && query.text.includes('slug = ANY('))).toBe(true);
+    expect(reads[0].params).toEqual(['selected-source', ['notes/only']]);
+    expect(reads[1].params).toEqual(['selected-source', [], 2]);
+    expect(setConfigQueries(fake.queries).map(query => query.params[0])).toEqual(['selected-source', 'outside', 'selected-source', 'outside']);
+  });
+});

@@ -105,6 +105,32 @@ describe("classify", () => {
 
 describe("selectTests", () => {
   test.each([
+    "src/core/graph-usefulness/schema.ts",
+    "src/core/graph-usefulness/fingerprint.ts",
+    "src/core/graph-usefulness/paged-runner.ts",
+    "src/core/graph-usefulness/retrieval-proof.ts",
+  ])("graph epoch changes select their native commit-order proof: %s", (path) => {
+    expect(selectTests({
+      changedFiles: [path],
+      allE2ETests: ["test/e2e/graph-mutation-commit-postgres.test.ts", "test/e2e/sync.test.ts"],
+      map: E2E_TEST_MAP,
+    })).toEqual(["test/e2e/graph-mutation-commit-postgres.test.ts"]);
+  });
+
+  test("PGLite schema selection keeps drift coverage alongside graph commit order", () => {
+    expect(selectTests({
+      changedFiles: ["src/core/pglite-schema.ts"],
+      allE2ETests: ["test/e2e/schema-drift.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts", "test/e2e/sync.test.ts"],
+      map: E2E_TEST_MAP,
+    })).toEqual(["test/e2e/graph-mutation-commit-postgres.test.ts", "test/e2e/schema-drift.test.ts"]);
+  });
+
+  test.each(["src/schema.sql", "src/core/migrate.ts"])("graph mapping preserves the schema escape hatch: %s", (path) => {
+    const allE2ETests = ["test/e2e/sync.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts"];
+    expect(selectTests({ changedFiles: [path], allE2ETests, map: E2E_TEST_MAP })).toEqual(allE2ETests.slice().sort());
+  });
+
+  test.each([
     "src/core/attendance-repair.ts",
     "src/commands/extract-attendance-repair.ts",
   ])("attendance repair changes select their PostgreSQL parity entry: %s", (path) => {

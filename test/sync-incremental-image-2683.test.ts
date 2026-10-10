@@ -26,6 +26,7 @@ import { performSync } from '../src/commands/sync.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null = null;
 let repo: string;
 
 function git(cmd: string) {
@@ -36,6 +37,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -44,6 +46,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   repo = mkdtempSync(join(tmpdir(), 'gbrain-2683-'));
   git('git init');
   git('git config user.email "t@t.com"');

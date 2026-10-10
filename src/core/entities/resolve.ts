@@ -334,6 +334,9 @@ export async function findPrefixCandidates(
     patterns.push(`${dir}/${token}`);
     patterns.push(`${dir}/${token}-%`);
   }
+  // One LIKE per pattern (joined from unnest) rather than LIKE ANY: a GIN
+  // trigram index serves a parameterized LIKE but not ANY(array). The
+  // patterns are disjoint, so the join yields each page at most once.
   try {
     const rows = await engine.executeRaw<{
       slug: string;
@@ -344,10 +347,10 @@ export async function findPrefixCandidates(
                + (SELECT COUNT(*)::int FROM links WHERE from_page_id = p.id)
                + (SELECT COUNT(*)::int FROM content_chunks WHERE page_id = p.id))
                 AS connection_count
-       FROM pages p
+       FROM unnest($2::text[]) AS pattern(value)
+       JOIN pages p ON p.slug LIKE pattern.value
        WHERE p.source_id = $1
          AND p.deleted_at IS NULL
-         AND p.slug LIKE ANY($2::text[])
        ORDER BY connection_count DESC, p.slug ASC
        LIMIT 10`,
       [source_id, patterns],

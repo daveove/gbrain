@@ -4,7 +4,7 @@
  * coverage lives in test/e2e/sources-remote-mcp.test.ts.
  */
 
-import { test, expect, describe, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { test, expect, describe, beforeAll, afterAll, beforeEach, spyOn } from 'bun:test';
 import {
   mkdirSync,
   writeFileSync,
@@ -16,6 +16,7 @@ import {
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import {
   addSource,
@@ -37,6 +38,7 @@ import { withEnv } from './helpers/with-env.ts';
 // Tier 3: every PGLite spinup path needs the snapshot env unset (test
 // infrastructure detail; matches bootstrap.test.ts pattern).
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const FAKE_GIT_DIR = join(tmpdir(), `gbrain-sources-ops-test-${process.pid}`);
 const GBRAIN_HOME = join(FAKE_GIT_DIR, 'gbrain-home');
 // gbrainPath() appends `.gbrain` to GBRAIN_HOME, so the actual clone root the
@@ -104,6 +106,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -116,6 +119,7 @@ beforeEach(async () => {
   // v0.17 row get it from there; a second ON CONFLICT DO NOTHING insert here
   // was always a no-op).
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // Reset GBRAIN_HOME fixtures between tests
   rmSync(GBRAIN_HOME, { recursive: true, force: true });
   mkdirSync(GBRAIN_HOME, { recursive: true });
@@ -301,6 +305,43 @@ describe('listSources', () => {
 // ---------------------------------------------------------------------------
 
 describe('removeSource — clone-cleanup', () => {
+  test('guard database errors propagate while genuine system indexes use protected_id', async () => {
+    const error = Object.assign(new Error('synthetic database outage'), { code: 'ECONNRESET' });
+    const read = spyOn(engine, 'executeRaw').mockRejectedValue(error);
+    try { await expect(removeSource(engine, { id: 'db-error', confirmDestructive: true })).rejects.toBe(error); }
+    finally { read.mockRestore(); }
+    await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES('owned-index','Fixture','{\"system_index\":true}'::jsonb)");
+    await expect(removeSource(engine, { id: 'owned-index', confirmDestructive: true })).rejects.toMatchObject({ code: 'protected_id' });
+  });
+
+  test('a rejected settlement leaves the owned clone and source intact; cleanup follows commit', async () => {
+    await withEnv2(async () => {
+      const row = await addSource(engine, { id: 'cleanup-rollback', remoteUrl: 'https://github.com/example/fixture.git' });
+      const clone = row.local_path!;
+      await engine.putPage('notes/day', { type: 'note', title: 'Fixture', compiled_truth: 'Synthetic', frontmatter: { date: '2026-09-30' } }, { sourceId: row.id });
+      await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30'::date,effective_date_source='date' WHERE source_id=$1", [row.id]);
+      const original = MinionQueue.prototype.add;
+      let calls = 0;
+      const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
+        expect(existsSync(clone)).toBe(true);
+        if (++calls === 2) throw new Error('synthetic settlement failure');
+        return original.call(this, ...args);
+      });
+      try { await expect(removeSource(engine, { id: row.id, confirmDestructive: true })).rejects.toThrow('synthetic settlement failure'); }
+      finally { add.mockRestore(); }
+      expect(calls).toBe(2);
+      expect(existsSync(clone)).toBe(true);
+      expect(await engine.getPage('notes/day', { sourceId: row.id })).not.toBeNull();
+      expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [row.id])).toHaveLength(1);
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+      const result = await removeSource(engine, { id: row.id, confirmDestructive: true });
+      expect(result.clone_removed).toBe(true);
+      expect(existsSync(clone)).toBe(false);
+      expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [row.id])).toHaveLength(0);
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(2);
+    });
+  });
+
   test('counts soft-deleted pages for destructive removal while list/status show active pages', async () => {
     await withEnv2(async () => {
       await addSource(engine, { id: 'soft-only', localPath: '/tmp/soft-only-fixture' });
@@ -436,6 +477,40 @@ describe('removeSource — clone-cleanup', () => {
       ).toBe(true);
       rmSync(linkPath, { force: true });
       rmSync(join(CLONE_ROOT, 'real-target'), { recursive: true, force: true });
+    });
+  });
+
+  test('post-commit in-root symlink swap reports partial success without throwing', async () => {
+    await withEnv2(async () => {
+      const row = await addSource(engine, {
+        id: 'post-commit-symlink',
+        remoteUrl: 'https://github.com/example/post-commit.git',
+      });
+      const clonePath = row.local_path!;
+      const target = join(CLONE_ROOT, 'post-commit-real');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, 'sentinel'), 'do-not-touch');
+      const original = engine.transaction.bind(engine);
+      const tx = spyOn(engine, 'transaction').mockImplementation(async (fn) => {
+        const result = await original(fn);
+        rmSync(clonePath, { recursive: true, force: true });
+        symlinkSync(target, clonePath);
+        return result;
+      });
+      try {
+        const result = await removeSource(engine, {
+          id: 'post-commit-symlink',
+          confirmDestructive: true,
+        });
+        expect(result.clone_removed).toBe(false);
+        expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [row.id])).toHaveLength(0);
+        expect(existsSync(join(target, 'sentinel'))).toBe(true);
+        expect(existsSync(clonePath)).toBe(true);
+      } finally {
+        tx.mockRestore();
+        rmSync(clonePath, { force: true });
+        rmSync(target, { recursive: true, force: true });
+      }
     });
   });
 

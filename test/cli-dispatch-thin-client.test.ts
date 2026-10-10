@@ -137,6 +137,32 @@ describe('thin-client dispatch guard refuses DB-bound commands', () => {
   }
 });
 
+describe('graph usefulness refuses thin-client execution before engine connection', () => {
+  useFreshHome();
+
+  for (const subcommand of ['measure', 'stats', 'relations', 'retrieval-proof']) {
+    test(`graph ${subcommand} names the host and refuses local execution`, async () => {
+      seedThinClientConfig(tmp);
+      const result = await run(['graph', subcommand]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(`gbrain graph ${subcommand}`);
+      expect(result.stderr).toContain('thin client of https://brain-host.example/mcp');
+      expect(result.stderr).toContain('Run it on the host');
+      expect(existsSync(join(tmp, 'brain.pglite'))).toBe(false);
+    });
+  }
+
+  test('graph measure help works with the same thin-client configuration', async () => {
+    seedThinClientConfig(tmp);
+    const result = await run(['graph', 'measure', '--help']);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('Usage: gbrain graph');
+    expect(result.stdout).toContain('measure [--json] --source <id> --cursor <id> --checkpoint <path>');
+    expect(result.stderr).not.toContain('Run it on the host');
+    expect(existsSync(join(tmp, 'brain.pglite'))).toBe(false);
+  });
+});
+
 describe('thin-client dispatch guard does NOT refuse safe commands', () => {
   useFreshHome();
 

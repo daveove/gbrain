@@ -162,13 +162,13 @@ export async function unlinkEntityIdentity(
  */
 export async function listEntityIdentities(
   engine: BrainEngine,
-  opts: { entityId?: string; slug?: string; slugSourceId?: string; sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean } = {},
+  opts: { entityId?: string; slug?: string; slugSourceId?: string; sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean | 'owner-only' } = {},
 ): Promise<EntityIdentityMember[]> {
   const where: string[] = [];
   const params: unknown[] = [];
   const allowedSources = opts.allowedSources?.length ? opts.allowedSources
     : opts.sourceId ? [opts.sourceId] : undefined;
-  if (opts.excludePrivate) where.push(privatePagesFilterFragment('p'));
+  if (opts.excludePrivate) where.push(privatePagesFilterFragment('p', opts?.excludePrivate));
   if (opts.entityId) {
     params.push(validateEntityId(opts.entityId));
     where.push(`ei.entity_id = $${params.length}`);
@@ -192,7 +192,7 @@ export async function listEntityIdentities(
       });
       seedScope += ` AND ei2.source_id IN (${ph.join(', ')})`;
     }
-    if (opts.excludePrivate) seedScope += ` AND ${privatePagesFilterFragment('p2')}`;
+    if (opts.excludePrivate) seedScope += ` AND ${privatePagesFilterFragment('p2', opts?.excludePrivate)}`;
     where.push(`ei.entity_id IN (
       SELECT ei2.entity_id FROM entity_identities ei2
       JOIN pages p2 ON p2.id = ei2.page_id AND p2.source_id = ei2.source_id
@@ -274,7 +274,7 @@ export async function unionLinksAcrossIdentity(
   slug: string,
   links: Link[],
   direction: 'out' | 'in',
-  opts: { sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean } = {},
+  opts: { sourceId?: string; allowedSources?: string[]; excludePrivate?: boolean | 'owner-only' } = {},
 ): Promise<Link[]> {
   if (!(await isIdentityUnionEnabled(engine))) return links;
   let members: EntityIdentityMember[];

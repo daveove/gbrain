@@ -33,7 +33,7 @@ export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: Pa
     where.push(`p.source_id=$${params.length}`);
   }
   if (!opts?.includeDeleted) where.push('p.deleted_at IS NULL');
-  if (opts?.excludePrivate) where.push(privatePagesFilterFragment('p'));
+  if (opts?.excludePrivate) where.push(privatePagesFilterFragment('p', opts?.excludePrivate));
   if (opts?.requireLiveSource) where.push('EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived)');
   params.push(opts?.sourceIds?.[0] ?? 'default');
   const rows = await query<Record<string, unknown>>(`WITH chosen AS (
@@ -45,7 +45,7 @@ export async function readPageSnapshot(query: ReadQuery, slug: string, opts?: Pa
     COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at)
       ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at
         FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug)
-        ${opts?.excludePrivate ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals,
+        ${opts?.excludePrivate === true ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) w), '[]'::jsonb) AS snapshot_withdrawals,
     (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord)
       FROM unnest(string_to_array(p.compiled_truth,chr(10))) WITH ORDINALITY AS lines(line,ord)) AS fingerprint_body,
     (SELECT string_agg(regexp_replace(lower(line), '[[:space:]]+', ' ', 'g'), chr(10) ORDER BY ord)

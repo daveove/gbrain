@@ -222,6 +222,23 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     await engine.disconnect();
   });
 
+  test('owned and legacy system sources reject archive and survive expiry', async () => {
+    for (const [id, name, config] of [
+      ['system-fixture', 'System fixture', { system_index: true }],
+      ['dream', 'Dream cycle indexes', { federated: false }],
+    ] as const) {
+      await engine.executeRaw('INSERT INTO sources(id,name,config) VALUES($1,$2,$3::jsonb)', [id, name, JSON.stringify(config)]);
+      await engine.putPage('notes/system-history', { type: 'note', title: 'History', compiled_truth: 'Synthetic fixture' }, { sourceId: id });
+      await expect(softDeleteSource(engine, id)).rejects.toThrow('system index');
+      await engine.executeRaw("UPDATE sources SET archived=true,archive_expires_at=now()-interval '1 hour' WHERE id=$1", [id]);
+      const purged = await purgeExpiredSources(engine);
+      expect(purged.purged).not.toContain(id);
+      expect(purged.blocked.some(row => row.id === id && row.reason.includes('system index'))).toBe(true);
+      expect(await engine.getPage('notes/system-history', { sourceId: id, includeDeleted: true })).not.toBeNull();
+      await engine.executeRaw('DELETE FROM sources WHERE id=$1', [id]);
+    }
+  });
+
   test('softDeleteSource flips column shape + sets TTL', async () => {
     const id = 'sd-flips';
     await seedSource(engine, id, { withPages: 2 });
@@ -444,8 +461,12 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a NON-FK error re-raises instead of reading as blocked (review gap G8)', async () => {
     const stub = {
-      async executeRaw(sql: string): Promise<Array<{ id: string }>> {
-        if (sql.trimStart().startsWith('SELECT')) return [{ id: 'boom' }];
+      getConfig: async () => null,
+      async executeRaw(sql: string): Promise<Array<{ id: string } | { protected: boolean }>> {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) return [{ id: 'boom' }];
         const err = new Error('canceling statement due to statement timeout') as Error & { code: string };
         err.code = '57014'; // query_canceled — NOT the FK class
         throw err;
@@ -456,8 +477,12 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a source restored between SELECT and DELETE is neither purged nor blocked (review gap G8)', async () => {
     const stub = {
-      async executeRaw(sql: string): Promise<Array<{ id: string }>> {
-        if (sql.trimStart().startsWith('SELECT')) return [{ id: 'restored-mid-sweep' }];
+      getConfig: async () => null,
+      async executeRaw(sql: string): Promise<Array<{ id: string } | { protected: boolean }>> {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) return [{ id: 'restored-mid-sweep' }];
         return []; // per-id DELETE re-checks the expiry predicate → 0 rows
       },
     } as never;
@@ -758,14 +783,25 @@ describe('formatters (display helpers)', () => {
 
 describe('purgeExpiredSources — clone cleanup containment', () => {
   function purgeStubFor(id: string, localPath: string) {
-    return {
+    type PurgeStub = {
+      getConfig(): Promise<null>;
+      executeRaw(sql: string): Promise<Record<string, unknown>[]>;
+      transaction<T>(fn: (tx: PurgeStub) => Promise<T>): Promise<T>;
+    };
+    const stub: PurgeStub = {
+      getConfig: async () => null,
       executeRaw: async (sql: string) => {
-        if (sql.trimStart().startsWith('SELECT')) {
+        const q = sql.trimStart();
+        if (q.includes('system_index') || q.includes('AS protected')) return [{ protected: false }];
+        if (q.includes('SELECT slug FROM pages')) return [];
+        if (q.startsWith('SELECT')) {
           return [{ id, config: { kind: 'github', gh_managed: true }, local_path: localPath }];
         }
         return [{ id }];
       },
-    } as never;
+      transaction: async <T>(fn: (tx: PurgeStub) => Promise<T>) => fn(stub),
+    };
+    return stub as never;
   }
 
   test('a corrupt row whose local_path IS the clone root never deletes sibling mirrors; the pinned shape still cleans up', async () => {

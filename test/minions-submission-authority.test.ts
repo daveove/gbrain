@@ -360,6 +360,7 @@ describe('generic remote job authority', () => {
     expect(await engine.getPage('example', { sourceId: 'default' })).toBeNull();
     const names = (await queue.getJobs()).map(job => job.name).sort();
     expect(names).toEqual(['import', 'lint', 'lint-fix', 'sync']);
+    expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op IN ('import-daily-memory', 'sync-daily-memory')")).toEqual([]);
     await engine.executeRaw("UPDATE oauth_clients SET source_id = 'default' WHERE client_id = 'client-a'");
     await engine.executeRaw('DELETE FROM sources WHERE id = $1', [source]);
   }));

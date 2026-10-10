@@ -28,6 +28,14 @@ describe('validateSlug', () => {
 });
 
 describe('contentHash', () => {
+  test('date representation provenance leaves content identity stable but date edits do not', () => {
+    const iso = '2026-09-30T00:00:00.000Z';
+    const page = { title: 'Fixture', type: 'concept' as const, compiled_truth: 'same body', frontmatter: { date: new Date(iso) } };
+    expect(contentHash(page)).toBe(contentHash({ ...page, frontmatter: {
+      date: iso, _gbrain_date_instants: { date: iso },
+    } }));
+    expect(contentHash(page)).not.toBe(contentHash({ ...page, frontmatter: { date: '2026-10-01' } }));
+  });
   test('returns deterministic hash', () => {
     const page = { title: 'Test', type: 'concept' as const, compiled_truth: 'hello', timeline: 'world' };
     const h1 = contentHash(page);

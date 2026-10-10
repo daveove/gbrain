@@ -25,6 +25,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string;
 let repoPath: string;
 
 function gitInit(repo: string): void {
@@ -38,6 +39,7 @@ describe('#1433 — re-sync preserves previously-indexed metafile pages', () => 
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = (await engine.getConfig('version'))!;
   }, 60_000);
 
   afterAll(async () => {
@@ -46,6 +48,7 @@ describe('#1433 — re-sync preserves previously-indexed metafile pages', () => 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-metafile-'));
     gitInit(repoPath);
     // Seed a non-metafile page that DOES get synced — this exercises the

@@ -1082,11 +1082,12 @@ deferred M-effort issues above are NOT repeated here.
 
 - [ ] **P2 — automatic background lane for `SOURCE_BACKGROUND_PHASES`.**
   **What:** a per-source scheduled lane for the LLM-backed/unbounded source
-  phases (extract_atoms, consolidate, propose_takes, enrich_thin,
-  schema-suggest, conversation_facts_backfill) that the v0.46.20.0 freshness
-  split removed from automatic scheduling on multi-source brains. **Why:**
-  today those phases run only on explicit `gbrain dream --source X --phase …`
-  invocation; backlogs (atoms, consolidation) grow silently between manual
+  phases that still have no automatic lane (`extract_atoms`, `propose_takes`,
+  `schema-suggest`). `consolidate`, `conversation_facts_backfill`, and
+  `enrich_thin` already walk every source inside one call and now run once
+  on the daily maintenance job (`PHASE_SCOPE=mixed`). **Why:** the remaining
+  phases run only on explicit `gbrain dream --source X --phase …`
+  invocation; atom and proposal backlogs grow silently between manual
   runs. **Design constraints (verified against code during the #4250
   review):** MUST be per-source jobs — background phases scope to ONE source
   per cycle (`cycle.ts` extract_atoms uses `cycleSourceId ?? 'default'`), and
@@ -8654,7 +8655,7 @@ covers DEAD logs; go-forward capture beyond Claude Code is deliberately absent.
 - [ ] **Codex go-forward capture (notify sweeper).** `docs/designs/AGENT_BOOTSTRAP_PLAN.md` FF2 names the design (notify sweeper over `~/.codex/sessions`); the rollout parser now ships in `src/core/transcripts/codex.ts`, so the sweeper is pure wiring: on codex notify, run `gbrain transcripts ingest <rollout> --quiet`. Needs the same consent posture as capture. Priority: P2.
 - [ ] **Scheduled re-import cycle phase.** `transcripts ingest --since last --all` as an opt-in cycle phase so dead-log import self-refreshes. REQUIRES its own consent-line design first: reading harness dirs on a schedule is capture-adjacent (the "Autonomous transcript watchers" decision above rules the spirit); the clean-scan watermark + status gap table already make manual re-runs cheap. Priority: P3.
 - [ ] **PII auto-detection redaction pass for imports.** The native lane redacts secrets (secret-scan) + user patterns (`harvest-private-patterns.txt`, emails included) and counts imperatives; broad PII detection (names, phones, addresses) is its own subsystem — the conversation-archive skill keeps the human scrub step for sensitive corpora meanwhile. Priority: P2.
-- [ ] **More harness adapters: Cursor / Gemini CLI / Copilot CLI.** Leaf modules on the `TranscriptAdapter` seam (~1h each with an agent): dated SPEC_TARGET + scrubbed fixture + drift alarm, per the shipped six. Formats unverified locally — verify a real sample first (the hermes gate pattern). Priority: P3.
+- [ ] **More harness adapters: Gemini CLI / Copilot CLI.** Leaf modules on the `TranscriptAdapter` seam (~1h each with an agent): dated SPEC_TARGET + scrubbed fixture + drift alarm, per the shipped adapters (Cursor, omp, pi and opencode landed with the nightly multi-seat ingest). Formats unverified locally — verify a real sample first (the hermes gate pattern). Priority: P3.
 - [ ] **ChatGPT/Claude.ai export zip unwrapping.** v1 requires the EXTRACTED `conversations.json` ("unzip first" is documented + error-hinted). Add zip handling without a heavy dependency (Bun has no built-in zip; evaluate a minimal vendored inflate or shelling to `unzip` with confinement). Priority: P3.
 - [ ] **BrainBench raw-format fixture schema (sibling repo).** The in-repo pin (`test/e2e/transcripts-writeback-fidelity.test.ts`) grades raw files through the adapters with the gold extractor, but the BrainBench corpus schema (gbrain-evals) still rejects unknown keys and its corpus hash doesn't cover raw sidecars. Needs: versioned raw-fixture sidecar type + loader + hash coverage + baseline re-cut in gbrain-evals, then a `write_back_fidelity_raw` suite row here. Priority: P2.
 - [ ] **Hermes SPEC_TARGET verification against a populated store.** The schema came from the installed hermes-agent v0.20.0 source (`SCHEMA_SQL`), but no populated `state.db` existed on the dev machine — the fixture is synthetic-by-declaration. Verify against a real store after some Hermes sessions accrue, then flip `status: 'provisional'` → `'verified'` and pin the `active`/`compacted` semantics the adapter currently ignores. Priority: P3.

@@ -49,40 +49,43 @@ function formatDateInTimeZone(instant: Date, timeZone: string): string {
   return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
+/** Calendar YYYY-MM-DD for an instant in an IANA zone (same projection as cycle SQL). */
+export function calendarDateInTimeZone(instant: Date, timeZone: string): string {
+  return formatDateInTimeZone(instant, timeZone);
+}
+
+/**
+ * Time zone that owns one dream-cycle run. Same ladder as
+ * `resolveCycleDate` (configured `cycle.timezone`, then the host zone, then
+ * UTC) so a SQL day filter and the summary date cannot disagree.
+ */
+export async function resolveCycleTimeZone(
+  engine: Pick<BrainEngine, 'getConfig'>,
+  opts: ResolveCycleDateOpts = {},
+): Promise<string> {
+  const configured = (await engine.getConfig('cycle.timezone'))?.trim();
+  const systemTimeZone = opts.systemTimeZone?.()
+    || Intl.DateTimeFormat().resolvedOptions().timeZone
+    || 'UTC';
+
+  if (configured) {
+    if (isValidTimeZone(configured)) return configured;
+    const fallback = isValidTimeZone(systemTimeZone) ? systemTimeZone : 'UTC';
+    (opts.warn ?? (message => process.stderr.write(`${message}\n`)))(
+      `[dream] invalid cycle.timezone "${configured}"; using ${fallback}`,
+    );
+    return fallback;
+  }
+
+  return isValidTimeZone(systemTimeZone) ? systemTimeZone : 'UTC';
+}
+
 /** Resolve the calendar date that owns one dream-cycle run. */
 export async function resolveCycleDate(
   engine: Pick<BrainEngine, 'getConfig'>,
   opts: ResolveCycleDateOpts = {},
 ): Promise<string> {
   if (opts.explicitDate) return opts.explicitDate;
-  const configured = (await engine.getConfig('cycle.timezone'))?.trim();
-  const instant = opts.now?.() ?? new Date();
-  const systemTimeZone = opts.systemTimeZone?.()
-    || Intl.DateTimeFormat().resolvedOptions().timeZone
-    || 'UTC';
-
-  if (configured) {
-    try {
-      return formatDateInTimeZone(instant, configured);
-    } catch {
-      const fallback = (() => {
-        try {
-          formatDateInTimeZone(instant, systemTimeZone);
-          return systemTimeZone;
-        } catch {
-          return 'UTC';
-        }
-      })();
-      (opts.warn ?? (message => process.stderr.write(`${message}\n`)))(
-        `[dream] invalid cycle.timezone "${configured}"; using ${fallback}`,
-      );
-      return formatDateInTimeZone(instant, fallback);
-    }
-  }
-
-  try {
-    return formatDateInTimeZone(instant, systemTimeZone);
-  } catch {
-    return formatDateInTimeZone(instant, 'UTC');
-  }
+  const zone = await resolveCycleTimeZone(engine, opts);
+  return formatDateInTimeZone(opts.now?.() ?? new Date(), zone);
 }

@@ -21,10 +21,6 @@
  *   gbrain sources push [<id>|--path <dir>] — scan-gated add→commit→pull→push
  *                               (agent-bootstrap; core in src/core/workspace-push.ts)
  *
- * NOT in scope for Step 6 (deferred per plan):
- *   - import-from-github (needs SSRF + clone integration)
- *   - prune (retention/TTL deferred to v0.18)
- *   - MCP tool-def regen for full source-scoping of all ops (part of Step 2+5)
  */
 
 import { writeFileSync, unlinkSync, existsSync } from 'fs';
@@ -68,7 +64,6 @@ import {
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { preflightOauthClientColumns } from './auth.ts';
 
-// ── Validation ──────────────────────────────────────────────
 
 // Shared with source-resolver.ts — canonical shape.
 const SOURCE_ID_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/;
@@ -81,7 +76,6 @@ function validateSourceId(id: string): void {
   }
 }
 
-// ── Types ───────────────────────────────────────────────────
 
 interface SourceRow {
   id: string;
@@ -102,7 +96,6 @@ interface SourceListEntry {
   last_sync_at: string | null;
 }
 
-// ── Helpers ─────────────────────────────────────────────────
 
 // v0.40 (D7): shared helpers — re-exported as local names for back-compat
 // with existing call sites that import `parseConfig`/`isFederated` by intent.
@@ -126,7 +119,6 @@ async function countPages(engine: BrainEngine, sourceId: string): Promise<number
   return rows[0]?.n ?? 0;
 }
 
-// ── Subcommand: add ─────────────────────────────────────────
 
 async function runAdd(engine: BrainEngine, args: string[]): Promise<void> {
   const id = args[0];
@@ -585,7 +577,6 @@ function deriveBrainId(created: OpsSourceRow, localPath: string): string {
   return `path:${createHash('sha256').update(localPath).digest('hex').slice(0, 16)}`;
 }
 
-// ── Subcommand: push (agent-bootstrap D6/G6/G8/G14) ─────────
 //
 // `gbrain sources push [<id>|--path <dir>]` — scan-gated add→commit→pull→push
 // of a workspace repo. The heavy lifting (single-flight lock, deny-glob
@@ -766,10 +757,16 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   const _keepStorage = args.includes('--keep-storage');
   void _keepStorage;
 
+  // Keep default hard-reserved. Ordinary id=dream without ownership markers must
+  // be removable so ensureDailyMemorySource conflict recovery can proceed; owned
+  // system-index dream rows stay blocked by assertSourceNotSystemIndex below.
   if (id === 'default') {
-    console.error('Error: cannot remove the "default" source (it backs the pre-v0.17 brain).');
+    console.error(`Error: cannot remove the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   const src = await fetchSource(engine, id);
   if (!src) {
@@ -808,15 +805,8 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(5);
   }
 
-  // cathedral-6 (F1): the row DELETE commits FIRST — atomically with an in-tx
-  // referents re-check — and external teardown (unharden: git scaffolding /
-  // cron / credential) runs only AFTER the commit. Pre-fix the teardown ran
-  // before the DELETE, so a registration racing between the pre-check and the
-  // DELETE failed the FK AFTER scaffolding was already destroyed. The in-tx
-  // re-check uses a column-preflighted statement shape (25P02: no
-  // catch-and-retry degrade inside a tx; missing table ⇒ empty column set ⇒
-  // no FK ⇒ skip); the FK constraint itself is the backstop for a
-  // registration committing between the re-check and the DELETE.
+  // Commit deletion and refresh jobs together; external teardown follows commit.
+  // Recheck physical OAuth referents in the transaction; its FK is the backstop.
   class SourceReferencedError extends Error {}
   try {
     await engine.transaction(async (tx) => {
@@ -829,6 +819,10 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
         );
         if (Number(rows[0]?.n ?? 0) > 0) throw new SourceReferencedError();
       }
+      // Discover + enqueue inside the delete TX so workers cannot finish a refresh
+      // against the still-live source before DELETE commits (managed path does the same).
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
       await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
     });
   } catch (e) {
@@ -932,10 +926,14 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
     process.exit(2);
   }
 
+  // default hard-reserved; ordinary id=dream allowed (owned dream blocked below).
   if (id === 'default') {
-    console.error('Error: cannot archive the "default" source.');
+    console.error(`Error: cannot archive the "${id}" source.`);
     process.exit(3);
   }
+  const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+  try { await assertSourceNotSystemIndex(engine, id); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
 
   // Show impact preview
   const impact = await assessDestructiveImpact(engine, id);
@@ -1041,7 +1039,16 @@ async function runPurge(engine: BrainEngine, args: string[]): Promise<void> {
       process.exit(5);
     }
 
-    await engine.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
+    try { await assertSourceNotSystemIndex(engine, id); }
+    catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
+
+    // Force-purge can target an active source; refresh historical indexes with the delete.
+    await engine.transaction(async (tx) => {
+      const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../core/cycle/daily-memory-followup.ts');
+      await refreshDailyMemoryAfterSourceArchiveChange(tx, id);
+      await tx.executeRaw(`DELETE FROM sources WHERE id = $1`, [id]);
+    });
     console.log(`Permanently deleted source "${id}" (${impact.pageCount} pages cascaded).`);
     return;
   }

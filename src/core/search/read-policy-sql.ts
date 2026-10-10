@@ -22,7 +22,7 @@ export function pageReadFilter(
     params.push(scope.sourceId);
     clauses.push(`${alias}.source_id = $${params.length}`);
   }
-  if (scope?.excludePrivate) clauses.push(privatePagesFilterFragment(alias));
+  if (scope?.excludePrivate) clauses.push(privatePagesFilterFragment(alias, scope?.excludePrivate));
   if (live) clauses.push(
     `${alias}.deleted_at IS NULL`,
     quarantineFilterFragment(alias),

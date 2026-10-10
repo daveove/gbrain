@@ -1,5 +1,5 @@
 /**
- * Tier 2 e2e: spawn REAL openclaw, install our plugin from a built bundle of
+ * Tier 2 e2e: spawn REAL openclaw, install a TypeScript entry that re-exports
  * `src/openclaw-context-engine.ts`, and assert the OpenClaw runtime actually
  * loads it, registers our default-export metadata, accepts it as the
  * `contextEngine` slot, and runs `plugins doctor` with zero error-level
@@ -14,8 +14,8 @@
  *   accepts the registration. This test closes that gap.
  *
  * What this exercises end-to-end:
- *   1. `bun build` our entry → JS bundle (the same build the release would
- *      ship to ClawHub).
+ *   1. Re-export the production TypeScript entry, matching the source-loading
+ *      path declared in package.json without bundling unrelated runtime modules.
  *   2. `openclaw plugins install --link` against an isolated `--profile`
  *      directory.
  *   3. `openclaw plugins inspect <id> --json` (with `--runtime` on older
@@ -140,38 +140,13 @@ describe('openclaw-plugin-load-real (Tier 2 e2e)', () => {
       readFileSync(join(fixtureTemplate, 'openclaw.plugin.json.template'), 'utf8'),
     );
 
-    // Build our real entry into the fixture dir. This is the same source
-    // (`src/openclaw-context-engine.ts`) that the release ships; only the
-    // packaging layer (test fixture's package.json) is test-specific.
-    //
-    // `--outdir` (not `--outfile`): since the Retrieval Reflex ladder
-    // (v0.42.39.0, 8f45624e5 #2019) the entry's import chain reaches
-    // engine-factory → pglite-engine → @electric-sql/pglite, whose WASM/
-    // data assets become sibling build outputs — and `bun build` refuses
-    // `--outfile` when a build produces multiple output files. The fixed
-    // `--entry-naming` keeps the bundle at `entry.js`, matching the
-    // fixture package.json's `openclaw.extensions` entry; the assets land
-    // alongside it in the same directory, where the bundle's relative
-    // references resolve.
-    const buildResult = spawnSync(
-      'bun',
-      [
-        'build',
-        join(repoRoot, 'src', 'openclaw-context-engine.ts'),
-        '--target=bun',
-        '--outdir',
-        fixtureDir,
-        '--entry-naming',
-        '[dir]/entry.[ext]',
-      ],
-      { encoding: 'utf8', timeout: 60_000 },
+    // The published package loads this TypeScript source through OpenClaw's
+    // native loader. A Bun bundle pulls unrelated dynamic engine imports into
+    // Node's plugin-load path and tests a different packaging contract.
+    writeFileSync(
+      join(fixtureDir, 'entry.ts'),
+      `export { default } from ${JSON.stringify(join(repoRoot, 'src', 'openclaw-context-engine.ts'))};\n`,
     );
-    if (buildResult.status !== 0) {
-      throw new Error(`bun build failed (exit ${buildResult.status}): ${buildResult.stderr}`);
-    }
-    if (!existsSync(join(fixtureDir, 'entry.js'))) {
-      throw new Error('bun build did not produce entry.js');
-    }
 
     // Install via openclaw plugins install --link into the isolated profile.
     // `--dangerously-force-unsafe-install` is required because openclaw's
@@ -204,7 +179,7 @@ describe('openclaw-plugin-load-real (Tier 2 e2e)', () => {
 
       const inspect = JSON.parse(r.stdout);
       expect(inspect.plugin).toBeDefined();
-      // status=loaded means: openclaw imported the entry.js module, read the
+      // status=loaded means: openclaw imported the entry module, read the
       // default export, and called register(api) without throwing.
       expect(inspect.plugin.status).toBe('loaded');
       expect(inspect.plugin.imported).toBe(true);
@@ -218,6 +193,11 @@ describe('openclaw-plugin-load-real (Tier 2 e2e)', () => {
       const r = inspectRuntime(PLUGIN_ID);
       expect(r.exitCode).toBe(0);
       const inspect = JSON.parse(r.stdout);
+
+      // The fixture manifest and loaded export have separate metadata.
+      const manifest = JSON.parse(readFileSync(join(fixtureDir, 'openclaw.plugin.json'), 'utf8'));
+      expect(manifest.id).toBe(PLUGIN_ID);
+      expect(manifest.name).toBe('GBrain Context Engine (real e2e fixture)');
 
       // Openclaw reads these directly from the default export of our entry.
       // If we rename a field in src/openclaw-context-engine.ts, this fails.

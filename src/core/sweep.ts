@@ -412,9 +412,9 @@ async function runLinksTimelinePass(
     // isolated source must not push cross-source edges. Single-row fetchSource
     // (not loadAllSources) keeps the sweep's bounded-cost discipline; a missing
     // sources row fails closed to isolated.
-    const { fetchSource, isSourceFederated } = await import('./sources-load.ts');
+    const { fetchSource, sourceAllowsOutboundCrossSourceLinks } = await import('./sources-load.ts');
     const sourceRow = await fetchSource(engine, sourceId);
-    const allowCrossSource = sourceRow !== null && isSourceFederated(sourceRow.config);
+    const allowCrossSource = sourceRow !== null && sourceAllowsOutboundCrossSourceLinks(sourceRow.config);
     // #3757: thread the same `link_resolution.cross_source` opt-in (#2589) and
     // configured default source (#4611) the CLI extract lanes pass. Without
     // them the sweep dropped every edge into a non-default source AND its

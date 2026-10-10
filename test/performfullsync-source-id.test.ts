@@ -37,6 +37,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
 let repoPath: string;
+let schemaVersion: string | null = null;
 
 async function pageCountBySource(): Promise<Record<string, number>> {
   const rows = await engine.executeRaw<{ source_id: string; n: number }>(
@@ -52,6 +53,7 @@ describe('performFullSync threads sourceId end-to-end', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
     await runSources(engine, ['add', 'testsrc-pfs', '--no-federated']);
   }, 60_000);
 
@@ -61,6 +63,8 @@ describe('performFullSync threads sourceId end-to-end', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    // The queue's schema gate uses config.version, which the reset clears.
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     // resetPgliteState clears pages but doesn't drop the source row; re-add only if missing
     const sources = await engine.executeRaw<{ id: string }>(`SELECT id FROM sources WHERE id = 'testsrc-pfs'`);
     if (sources.length === 0) {

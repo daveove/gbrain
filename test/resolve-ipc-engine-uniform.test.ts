@@ -33,7 +33,7 @@ const URL_B = 'postgresql://user:hunter2@db.example.com:5432/brain_b';
 let tmp: string;
 
 beforeEach(() => {
-  tmp = mkdtempSync(join(tmpdir(), 'gbrain-ipc-uniform-'));
+  tmp = mkdtempSync(join(process.platform === "darwin" ? "/tmp" : tmpdir(), 'gbrain-ipc-uniform-'));
 });
 
 afterEach(() => {

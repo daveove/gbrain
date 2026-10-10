@@ -10,6 +10,33 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [0.59.19.0] - 2026-10-02
+
+You can now inspect how your notes connect, apply a declared set of relationships with checks and a receipt, and test whether search finds the pages you expect. Graph reports show page and link counts, disconnected pages, degree summaries and sample junk slugs. Interrupted reports resume from a checkpoint; relevant changes to the source make an old checkpoint refuse to continue instead of mixing two versions of your notes.
+
+Relationship changes start as a dry run. Applying them rechecks each row's sources, endpoints and guards. A retrieval proof runs the question pack against live search and rejects a result when the corpus changed during the run, including a write that was later reversed. These optional commands run on the brain's host; thin clients continue to support ordinary graph traversal.
+
+Daily memory notes now include counts of source records updated that day and up to eight links per source, alongside the existing page links. The linked reference pages contain source metadata without message text. Existing human day notes remain unchanged. The daily launcher imports only the current Manila day's Codex sessions before writing the note; unchanged transcripts keep the content-hash skip.
+
+Stored page dates and explicit daily-memory dates retain their calendar day across timezones. Large imports queue link extraction, and a failed link sweep fails the import.
+
+### To take advantage of v0.59.19.0
+
+Update the checkout, then apply migration 170 without installing background services:
+
+```bash
+gbrain apply-migrations --yes --no-autopilot-install
+gbrain graph measure --source <source-id> --cursor 0 --checkpoint <new-checkpoint.json>
+```
+
+Use a new checkpoint path after upgrading: format 6 rejects older partial and completed checkpoints. Keep `scripts/gbrain-daily-memory.sh` in the existing daily job.
+
+### Itemized changes
+
+- `graph measure` and `graph stats` scan one active source. Deterministic endpoint ownership counts incident links without storing every link ID in the checkpoint; a single page with many incident links can still return a large link batch.
+- `graph relations verify` checks a manifest; `graph relations apply --apply --yes` writes rows that pass, records before/after fingerprints and compensates owned writes if receipt acceptance fails.
+- `graph retrieval-proof run` uses pinned search settings and live retrieval. Migration 170 adds committed source mutation tracking so page, link, alias, take and selected search-setting changes can invalidate reports and proofs.
+
 ## [0.59.18.0] - 2026-09-29
 
 **Dream no longer keeps made-up quotes, wrong-speaker quotes or invented numbers as memory, and `gbrain eval compare` computes the statistics it claims.**

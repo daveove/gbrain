@@ -2,6 +2,7 @@ import { dataFrontmatter as matter, FrontmatterLanguageError } from './data-fron
 import { safeLoad as yamlSafeLoad } from 'js-yaml';
 import type { Page, PageType } from './types.ts';
 import { slugifyPath } from './sync.ts';
+import { withDateInstantProvenance } from './effective-date.ts';
 
 export type ParseValidationCode =
   | 'MISSING_OPEN'
@@ -313,7 +314,7 @@ export function parseMarkdown(
   const tags = extractTags(frontmatter);
   const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
 
-  const cleanFrontmatter = { ...frontmatter };
+  const cleanFrontmatter = { ...withDateInstantProvenance(frontmatter, true) };
   delete cleanFrontmatter.type;
   delete cleanFrontmatter.title;
   delete cleanFrontmatter.tags;

@@ -29,7 +29,7 @@ export function bodyWriteChunkVersion(compiledTruth: string, timeline: string): 
 }
 
 export function requiresSafeChunks(scope?: PageReadScope): boolean {
-  return scope?.requireSafeChunks ?? scope?.excludePrivate ?? false;
+  return scope?.requireSafeChunks ?? !!scope?.excludePrivate;
 }
 
 /** Every user sees projections only from the current canonical revision. */

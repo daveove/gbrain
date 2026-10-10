@@ -85,16 +85,44 @@ describe('resetPgliteState', () => {
       await resetPgliteState(engine);
       const tables = await engine.executeRaw<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname='public'");
       for (const { tablename } of tables) {
-        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources'].includes(tablename)) continue;
+        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources', 'config', 'source_mutation_generation', 'graph_search_mutation_generation'].includes(tablename)) continue;
         const rows = await engine.executeRaw(`SELECT count(*)::int AS n FROM public."${tablename.replaceAll('"', '""')}"`);
         expect(rows).toEqual([{ n: 0 }]);
       }
+      expect(await engine.executeRaw('SELECT source_id,generation::text AS generation FROM source_mutation_generation')).toEqual([{ source_id: 'default', generation: '1' }]);
+      expect(await engine.executeRaw('SELECT singleton,generation::text AS generation FROM graph_search_mutation_generation')).toEqual([{ singleton: 1, generation: '0' }]);
+      expect(await engine.executeRaw('SELECT key FROM config ORDER BY key')).toEqual([{ key: 'version' }]);
       expect(await engine.executeRaw('SELECT id, name, config, local_path FROM sources')).toEqual([
         { id: 'default', name: 'default', config: { federated: true }, local_path: null },
       ]);
     } finally {
       await engine.executeRaw('ALTER TABLE reset_fixture_parent DROP COLUMN child_id');
     }
+  });
+
+  test('restores graph singleton tracking so config updates remain visible after reset', async () => {
+    const generation = async () => (await engine.executeRaw<{ generation: string }>('SELECT generation::text AS generation FROM graph_search_mutation_generation WHERE singleton=1'))[0]?.generation;
+    await engine.setConfig('search.mode', 'keyword');
+    expect(await generation()).toBe('1');
+    await engine.setConfig('search.mode', 'semantic');
+    expect(await generation()).toBe('2');
+    await resetPgliteState(engine);
+    expect(await generation()).toBe('0');
+    await engine.setConfig('search.mode', 'keyword');
+    expect(await generation()).toBe('1');
+    await engine.setConfig('search.mode', 'semantic');
+    expect(await generation()).toBe('2');
+    expect(await engine.executeRaw('SELECT id FROM source_mutation_pending')).toEqual([]);
+  });
+
+  test('restores initialized queue schema admission without retaining test config edits', async () => {
+    const initializedVersion = await engine.getConfig('version');
+    expect(Number(initializedVersion)).toBeGreaterThanOrEqual(7);
+    await engine.setConfig('version', '1');
+    await engine.setConfig('reset-fixture', 'discard');
+    await resetPgliteState(engine);
+    expect(await engine.getConfig('version')).toBe(initializedVersion);
+    expect(await engine.getConfig('reset-fixture')).toBeNull();
   });
 
   test('preserves schema and generation infrastructure but rotates the logical brain identity', async () => {

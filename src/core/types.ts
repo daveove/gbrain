@@ -375,7 +375,7 @@ export interface PageFilters {
    * local listing is unchanged. Predicate matches privatePagesFilterFragment
    * (search/private-visibility.ts) in BOTH engines.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
 }
 
 /** v0.26.5 — opts for getPage / softDeletePage / restorePage. */
@@ -383,7 +383,7 @@ export interface PageReadScope {
   sourceId?: string;
   sourceIds?: string[];
   /** Resolved by the trusted operation layer, never from MCP parameters. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Untrusted chunk reads require a verified protected-body index, even with visibility opt-outs. */
   requireSafeChunks?: boolean;
 }
@@ -1300,9 +1300,9 @@ export interface SearchOpts extends PageReadPolicy {
    * visibility clause. Callers resolve trust + the config gate via
    * `resolveExcludePrivatePages` (search/private-visibility.ts):
    * ctx.remote !== false → true unless the operator opted out. Omitted /
-   * false = pre-fix behavior (trusted local reads see everything).
+   * false = trusted local reads; owner-only = operator opt-out retaining mandatory aggregate protection.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * v0.32.x (search-lite): enable/disable the semantic query cache for this
    * call. When undefined, the cache decision falls back to global config

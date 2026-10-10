@@ -62,3 +62,30 @@ test('queued import rejects malformed frontmatter, preserves progress, and succe
   await expect(handler(job)).resolves.toEqual({ imported: true });
   expect(await engine.getPage('rejected', { sourceId: 'default' })).not.toBeNull();
 }));
+
+test('a thrown link sweep fails the import job', () => isolated(async () => {
+  const dir = join(home, 'sweep-fail');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'note.md'), '---\ntype: note\ntitle: Sweep fixture\n---\n\nA sweep fixture body.\n');
+  const original = engine.countStalePagesForExtraction.bind(engine);
+  engine.countStalePagesForExtraction = async () => { throw new Error('sweep blew up'); };
+  const job: MinionJobContext = {
+    id: 2,
+    name: 'import',
+    data: { dir, sourceId: 'default', noEmbed: true },
+    attempts_made: 0,
+    signal: new AbortController().signal,
+    deadlineAtMs: null,
+    shutdownSignal: new AbortController().signal,
+    updateProgress: async () => {},
+    updateTokens: async () => {},
+    log: async () => {},
+    isActive: async () => true,
+    readInbox: async () => [],
+  };
+  try {
+    await expect(handler(job)).rejects.toThrow('Import link extraction failed: sweep blew up');
+  } finally {
+    engine.countStalePagesForExtraction = original;
+  }
+}));

@@ -2263,7 +2263,7 @@ export async function registerBuiltinHandlers(
     let result;
     try {
       result = await performSync(engine, {
-        repoPath, sourceId, noPull, noEmbed, noExtract, signal: job.signal,
+        repoPath, sourceId, noPull, noEmbed, noExtract, signal: job.signal, dailyMemoryFollowup: true,
         concurrency: concurrencyOverride,
         ...(githubItem ? { githubItem } : {}),
       });
@@ -2544,6 +2544,8 @@ export async function registerBuiltinHandlers(
     if (job.data.dir) importArgs.push(String(job.data.dir));
     if (job.data.noEmbed) importArgs.push('--no-embed');
     const result = await runImport(engine, importArgs, { signal: job.signal, sourceId: typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined });
+    const linkFailure = result.linkExtractionError ?? result.failures.find((f) => f.path === '<link-extraction>')?.error;
+    if (linkFailure) throw new Error(`Import link extraction failed: ${linkFailure}`);
     if (result.errors > 0) {
       throw new Error(`Import failed for ${result.errors} file(s); fix rejected documents and retry the job.`);
     }
@@ -2561,30 +2563,41 @@ export async function registerBuiltinHandlers(
     // overlapping submissions converge.
     if (job.data.stale === true) {
       const sourceIdFilter = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      if (!job.data.dryRun && job.data.reason === 'daily_memory_write' && sourceIdFilter === 'dream') {
+        const { extractOneShotDailyMemory } = await import('../core/cycle/daily-memory-extract.ts');
+        await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { signal: job.signal, timeBudgetMs: STALE_TIME_BUDGET_MS });
+        return { stale: true, source_id: sourceIdFilter, daily_memory_extracted: true };
+      }
       const r = await extractStaleFromDB(engine, {
         dryRun: !!job.data.dryRun,
         jsonMode: false,
         sourceIdFilter,
         catchUp: false,
+        pendingAfter: typeof job.data.pending_after === 'string' ? job.data.pending_after : undefined,
+        pendingScanComplete: job.data.pending_scan_complete === true,
+        signal: job.signal,
       });
-      // Internal 30-min budget hit with work remaining → chain a
-      // continuation job so a very large deferred backlog converges without
-      // waiting for the next sync. Forward-progress guard (pagesProcessed >
-      // 0) prevents an infinite chain if the sweep can't advance.
-      if (!job.data.dryRun && r.staleRemaining > 0 && r.pagesProcessed > 0) {
-        try {
-          const queue = new MinionQueue(engine);
-          // NO maxWaiting: with an unscoped (NULL-sourceId) payload the
-          // coalesce filter matches ANY waiting 'extract' job and would
-          // swallow the continuation. Each completed sweep chains at most
-          // one continuation and the sweep is an idempotent watermark scan,
-          // so there is no pile-up to guard against.
-          await queue.add(
-            'extract',
-            { ...job.data, continuation_of: job.id },
-            { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
-          );
-        } catch { /* best-effort: next sync/manual sweep picks up the rest */ }
+      // Incomplete pending scan with no cursor progress still needs a durable
+      // retry. Do not succeed and suppress the successor; fail so the worker
+      // retries this job instead of spawning an endless same-cursor chain.
+      if (!job.data.dryRun && r.pendingScanIncomplete
+        && r.pendingScanAfter === (job.data.pending_after ?? '')) {
+        throw new Error(
+          'Pending link reference scan incomplete without cursor progress; retrying',
+        );
+      }
+      // Continue only after page/readiness progress; resume the pending keyset.
+      if (!job.data.dryRun && ((r.staleRemaining > 0 && r.pagesProcessed > 0)
+        || (r.pendingScanIncomplete && r.pendingScanAfter !== (job.data.pending_after ?? '')))) {
+        const queue = new MinionQueue(engine);
+        // Unscoped coalescing would swallow this continuation. Throw on
+        // enqueue failure so worker retry keeps the durable pending/stale work.
+        await queue.add(
+          'extract',
+          { ...job.data, continuation_of: job.id, pending_after: r.pendingScanIncomplete ? r.pendingScanAfter : undefined,
+            pending_scan_complete: !r.pendingScanIncomplete },
+          { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
+        );
       }
       return { stale: true, source_id: sourceIdFilter ?? null, ...r };
     }
@@ -2841,7 +2854,19 @@ export async function registerBuiltinHandlers(
         await new Promise<void>(r => setImmediate(r));
       },
     });
-
+    // Legacy autopilot-cycle jobs omit source_id; sync still resolves a checkout
+    // source and banks debt under it. Prefer the job source, else the cycle
+    // report, else resolve from the same brainDir sync used.
+    const handoffSourceId = sourceId
+      ?? report.source_id
+      ?? (effectiveBrainDir
+        ? await (await import('../core/cycle.ts')).resolveSourceForDir(engine, effectiveBrainDir)
+        : undefined)
+      // An unregistered filesystem sync writes to default; DB-only and skipped
+      // sync phases must not adopt that source's retained debt.
+      ?? (effectiveBrainDir && report.phases.some(phase => phase.phase === 'sync' && phase.status !== 'skipped')
+        ? 'default' : undefined);
+    await (await import('../core/cycle/daily-memory-followup.ts')).refreshDailyMemoryAfterSourceSync(engine, job, handoffSourceId, report);
     return {
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,
@@ -2855,11 +2880,11 @@ export async function registerBuiltinHandlers(
     };
   });
 
-  // Brain-wide maintenance. Runs mixed + global phases ONCE per window instead
-  // of repeating cross-source transcript/reflection reads in every source.
-  // No source_id → uses the legacy global cycle lock; stamps autopilot.last_global_at
-  // on success so the dispatch gate backs off.
+  // Separate the pinned daily barrier from brain-wide mixed/global maintenance.
+  worker.register('autopilot-daily-memory', job => import('../core/cycle/daily-memory-followup.ts').then(m => m.runDailyMemoryJob(engine, job)));
   worker.register('autopilot-global-maintenance', async (job) => {
+    const { pinDailyMemoryJob, finishFanoutDailyMemory } = await import('../core/cycle/daily-memory-followup.ts');
+    const dailyJob = await pinDailyMemoryJob(engine, job);
     const { runCycle, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = await import('../core/cycle.ts');
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
@@ -2874,7 +2899,6 @@ export async function registerBuiltinHandlers(
       ? (job.data.phases as string[]).filter((p) => maintenanceSet.has(p))
       : MAINTENANCE_PHASES;
     const phases = (requested.length > 0 ? requested : MAINTENANCE_PHASES) as typeof MAINTENANCE_PHASES;
-
     const report = await runCycle(engine, {
       brainDir: repoPath,
       pull: false, // brain-wide DB/maintenance work never git-pulls
@@ -2889,6 +2913,9 @@ export async function registerBuiltinHandlers(
       forceGlobalOrphans: true,
       yieldBetweenPhases: async () => { await new Promise<void>((r) => setImmediate(r)); },
     });
+    // The durable daily barrier retries independently of global maintenance.
+    try { await finishFanoutDailyMemory(engine, dailyJob); }
+    catch (e) { console.warn(`[autopilot-global-maintenance] daily-memory finish failed (not retrying global cycle): ${e instanceof Error ? e.message : String(e)}`); }
 
     if ((report.status === 'ok' || report.status === 'clean' || report.status === 'partial')
       && !report.phases.some(phase => {

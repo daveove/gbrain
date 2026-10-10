@@ -236,6 +236,24 @@ export async function appendCompleted(
  * the whole delta (no chunking, no retry) so it banks what it can inside the
  * shutdown window. Best-effort: returns false (logged) on failure.
  */
+/**
+ * Append checkpoint paths on the caller's connection so the write can share
+ * an open `engine.transaction()`. Unlike `appendCompleted`, this uses
+ * `executeRaw` (no direct-pool retry) and throws on failure so the surrounding
+ * transaction rolls back with the caller.
+ */
+export async function appendCompletedInTransaction(
+  engine: BrainEngine,
+  key: OpCheckpointKey,
+  deltaKeys: string[],
+): Promise<void> {
+  if (deltaKeys.length === 0) return;
+  for (let i = 0; i < deltaKeys.length; i += APPEND_CHUNK) {
+    const chunk = deltaKeys.slice(i, i + APPEND_CHUNK);
+    await engine.executeRaw(APPEND_PATHS_SQL, [key.op, key.fingerprint, chunk]);
+  }
+}
+
 export async function appendCompletedOnce(
   engine: BrainEngine,
   key: OpCheckpointKey,

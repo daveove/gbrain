@@ -8,6 +8,7 @@ import { describe, test, expect } from 'bun:test';
 import { safeLoad } from 'js-yaml';
 
 import {
+  calendarDayInZone,
   escapeAnchorLines,
   MESSAGE_ANCHOR_RE,
   MESSAGE_CHAR_CAP,
@@ -439,5 +440,20 @@ describe('redactSession — the echo dictionary spans every field of the session
     expect(red.session.meta.raw!.note).toBe('<REDACTED:high_entropy_assignment>');
     expect(red.session.meta.raw!.count).toBe(2);
     expect(renderSessionParts(red).parts[0].content).not.toContain(SEEDED_ENTROPIC);
+  });
+
+  test('a Manila date zone projects the calendar date and leaves the UTC slug', () => {
+    const early = session(
+      [{ role: 'user', timestamp: '2026-09-29T16:30:00.000Z', text: 'started after midnight in Manila' }],
+      { startedAt: '2026-09-29T16:30:00.000Z', sessionId: 'manila-early' },
+    );
+    expect(calendarDayInZone('2026-09-29T16:30:00.000Z', 'Asia/Manila')).toBe('2026-09-30');
+    const rendered = renderSessionParts(redactSession(early, { userPatternsPath: '/nonexistent' }), {
+      sourcePath: 'session.jsonl',
+      dateZone: 'Asia/Manila',
+    });
+    expect(frontmatter(rendered.parts[0].content).date).toBe('2026-09-30');
+    expect(rendered.baseSlug).toContain('2026-09-29');
+    expect(rendered.baseSlug).not.toContain('2026-09-30');
   });
 });

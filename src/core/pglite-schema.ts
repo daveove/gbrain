@@ -1,3 +1,4 @@
+import { GRAPH_SOURCE_MUTATION_SCHEMA_SQL } from './graph-usefulness/schema.ts';
 import { SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL } from './company-brain/receipt-schema.ts';
 import { PERSISTENCE_SCHEMA_STATEMENTS } from './persistence/schema.ts';
 import { PERSISTENCE_TOPOLOGY_SCHEMA_SQL } from './persistence/topology-schema.ts';
@@ -1287,6 +1288,8 @@ CREATE TABLE IF NOT EXISTS dream_synthesis_completions (
   completed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (source_id, idempotency_key)
 );
+
+${GRAPH_SOURCE_MUTATION_SCHEMA_SQL}
 
 `;
 

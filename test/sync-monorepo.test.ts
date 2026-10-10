@@ -47,12 +47,14 @@ function gitCommit(dir: string, msg = 'initial'): void {
 
 describe('sync monorepo subdir-source support (#753/#774)', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null = null;
   let repoPath: string;
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -61,6 +63,7 @@ describe('sync monorepo subdir-source support (#753/#774)', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-monorepo-'));
     gitInit(repoPath);
     mkdirSync(join(repoPath, 'wiki'), { recursive: true });
@@ -179,6 +182,7 @@ describe('sync monorepo subdir-source support (#753/#774)', () => {
 
     // Reset only page state, keep the engine connected for second sync
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
 
     const memResult = await performSync(engine, {
       repoPath,

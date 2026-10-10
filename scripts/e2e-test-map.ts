@@ -165,7 +165,8 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/embedding-readiness.ts": ["test/e2e/embedding-recovery-parity.test.ts"],
   "src/core/facts/embedding-identity.ts": ["test/e2e/embedding-recovery-parity.test.ts", "test/e2e/fact-embedding-backfill-parity.test.ts"],
   "src/core/stored-embedding-identity.ts": ["test/e2e/unsupported-embedding-identity-postgres.test.ts"],
-  "src/commands/extract.ts": ["test/e2e/multi-source-bug-class.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/extract-timeline-attendance-postgres.test.ts"],
+  "src/core/pending-link-references.ts": ["test/e2e/pending-link-references-postgres.test.ts"],
+  "src/commands/extract.ts": ["test/e2e/pending-link-references-postgres.test.ts", "test/e2e/multi-source-bug-class.test.ts", "test/e2e/attendance-retrieval-postgres.test.ts", "test/e2e/extract-timeline-attendance-postgres.test.ts"],
   "src/commands/extract-attendance-repair.ts": ["test/e2e/attendance-repair-postgres.test.ts"],
   "src/commands/migrate-engine.ts": [
     "test/e2e/multi-source-bug-class.test.ts",
@@ -328,10 +329,16 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/ontology-merge-parity.test.ts",
     "test/e2e/chronicle-event-projection-parity.test.ts",
   ],
+  // Graph commit epochs need native transaction ordering, including late ABA commits.
+  "src/core/graph-usefulness/schema.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/fingerprint.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/paged-runner.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/graph-usefulness/retrieval-proof.ts": ["test/e2e/graph-mutation-commit-postgres.test.ts"],
   // Schema source of truth: any change must pass the cross-engine drift gate.
-  "src/schema.sql": ["test/e2e/schema-drift.test.ts"],
-  "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts"],
+  "src/schema.sql": ["test/e2e/schema-drift.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts"],
+  "src/core/pglite-schema.ts": ["test/e2e/schema-drift.test.ts", "test/e2e/graph-mutation-commit-postgres.test.ts"],
   "src/core/migrate.ts": [
+    "test/e2e/graph-mutation-commit-postgres.test.ts",
     "test/e2e/migration-vector-replay-postgres.test.ts",
     "test/e2e/schema-drift.test.ts",
     "test/e2e/migrate-chain.test.ts",

@@ -1,10 +1,13 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { isPhysicalRootMetadata } from '../src/core/persistence/physical-root.ts';
 import { tmpdir } from 'node:os';
+import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
+import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -25,19 +28,23 @@ import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 const databaseUrl=process.env.DATABASE_URL;
 for(const flavor of ['pglite',...(databaseUrl?['postgres']:[])] as const)describe(`managed source lifecycle (${flavor})`,()=>{
 let engine:BrainEngine;
+let observer:PostgresEngine|undefined;
+let schemaVersion: string | null;
 let closePostgres:(()=>Promise<void>)|undefined;
 beforeAll(async()=>{
   if(flavor==='postgres'){
     const fixture=await isolatedPersistencePostgres(databaseUrl!);engine=fixture.engine;closePostgres=fixture.close;
+    observer=new PostgresEngine();await observer.connect({database_url:fixture.databaseUrl,poolSize:1});
   }else{
     engine=new PGLiteEngine();await engine.connect({});await engine.initSchema();
   }
+  schemaVersion=await engine.getConfig('version');
 },120_000);
-afterAll(async()=>{if(!engine)return;await disposePersistenceConsumer(engine);if(closePostgres)await closePostgres();else await engine.disconnect();});
+afterAll(async()=>{if(!engine)return;await disposePersistenceConsumer(engine);await observer?.disconnect();if(closePostgres)await closePostgres();else await engine.disconnect();});
 async function fixture(run:(home:string,source:string,root:string)=>Promise<void>){
   const home=mkdtempSync(join(tmpdir(),'gbrain-topology-'));
   try{await withEnv({GBRAIN_HOME:home,DATABASE_URL:undefined,GBRAIN_DATABASE_URL:undefined},async()=>{
-    await resetPgliteState(engine as PGLiteEngine);await registerLocalWriter(engine,'cli');
+    await resetPgliteState(engine as PGLiteEngine);if(schemaVersion)await engine.setConfig('version',schemaVersion);await registerLocalWriter(engine,'cli');
     const source='lifecycle-source',root=join(home,'canonical');mkdirSync(root);
     writeFileSync(join(root,'example.md'),'---\ntitle: Example\ntype: note\n---\n\nCanonical\n');
     await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)',[source,root]);
@@ -54,6 +61,29 @@ async function queued(source:string,requestId=randomUUID()){
     worktreeId:binding.worktree_id,topologyGeneration:binding.topology_generation});
 }
 
+test('managed lifecycle rejects archive of an owned system source before topology changes',()=>fixture(async(_home,source)=>{
+  await engine.executeRaw("UPDATE sources SET config=config || '{\"system_index\":true}'::jsonb WHERE id=$1",[source]);
+  const before=await getWorktreeBinding(engine,source);
+  await expect(runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source})).rejects.toThrow('system index');
+  await expect(runManagedSourceLifecycle(engine,{operation:'remove',sourceId:source,confirmDestructive:true})).rejects.toThrow('system index');
+  expect(await getWorktreeBinding(engine,source)).toEqual(before);
+  expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
+}),60_000);
+
+test('managed archive/restore enqueue daily-memory refresh for admin surface',()=>fixture(async(_home,source)=>{
+  await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
+    {type:'note',title:'Archive refresh',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-26'}},{sourceId:source})));
+  await engine.executeRaw("UPDATE pages SET effective_date='2026-09-26'::date::timestamptz,effective_date_source='date' WHERE source_id=$1",[source]);
+  await runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source});
+  const archived=await engine.executeRaw<{data:Record<string,unknown>}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+  expect(archived.some(j=>j.data.daily_memory_date==='2026-09-26')).toBe(true);
+  const beforeRestore=archived.length;
+  await runManagedSourceLifecycle(engine,{operation:'restore',sourceId:source});
+  const restored=await engine.executeRaw<{data:Record<string,unknown>}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+  expect(restored.length).toBeGreaterThan(beforeRestore);
+  expect(restored.some(j=>j.data.daily_memory_date==='2026-09-26')).toBe(true);
+}),60_000);
+
 test('archive/restore advance topology and permanently invalidate accepted old bindings',()=>fixture(async(_home,source)=>{
   const old=(await getWorktreeBinding(engine,source))!;const accepted=await queued(source);
   const requestId=randomUUID();
@@ -65,6 +95,71 @@ test('archive/restore advance topology and permanently invalidate accepted old b
   await expect(runManagedSourceLifecycle(engine,{operation:'restore',sourceId:source,requestId})).rejects.toMatchObject({code:'idempotency_conflict'});
   await runManagedSourceLifecycle(engine,{operation:'restore',sourceId:source});
   expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(false);
+}),60_000);
+
+test('managed remove keeps source, binding, and accepted jobs atomic on queue failure',()=>fixture(async(_home,source)=>{
+  await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
+    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+  const before=await getWorktreeBinding(engine,source);
+  const original=MinionQueue.prototype.add;let calls=0;
+  const add=spyOn(MinionQueue.prototype,'add').mockImplementation(async function(this:MinionQueue,...args:Parameters<MinionQueue['add']>){
+    const tx=(this as unknown as {engine:BrainEngine}).engine;
+    expect(tx).not.toBe(engine);
+    expect(await tx.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(1);
+    if(++calls===2)throw new Error('synthetic managed settlement outage');
+    const result=await original.call(this,...args);
+    if(observer){
+      expect(await observer.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(1);
+      expect(await observer.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+    }
+    return result;
+  });
+  try{await expect(runManagedSourceLifecycle(engine,{operation:'remove',sourceId:source,confirmDestructive:true})).rejects.toThrow('synthetic managed settlement outage');}
+  finally{add.mockRestore();}
+  expect(calls).toBe(2);
+  expect(await getWorktreeBinding(engine,source)).toEqual(before);
+  expect(await engine.getPage('notes/day',{sourceId:source})).not.toBeNull();
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
+  await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:source,confirmDestructive:true});
+  expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(0);
+  expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(2);
+  if(observer){
+    expect(await observer.executeRaw('SELECT id FROM sources WHERE id=$1',[source])).toHaveLength(0);
+    expect(await observer.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(2);
+  }
+}),60_000);
+
+test('direct managed archive/restore accepts historical dates atomically with topology',()=>fixture(async(_home,source)=>{
+  await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
+    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+  await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug='notes/day'",[source]);
+  for(const operation of ['archive','restore'] as const){
+    const before=await getWorktreeBinding(engine,source);
+    const prior=await engine.executeRaw<{id:number}>('SELECT id FROM minion_jobs ORDER BY id');
+    const archivedBefore=operation==='restore';
+    const original=MinionQueue.prototype.add;let calls=0;
+    const add=spyOn(MinionQueue.prototype,'add').mockImplementation(async function(this:MinionQueue,...args:Parameters<MinionQueue['add']>){
+      if(++calls===2)throw new Error('synthetic lifecycle settlement outage');
+      const accepted=await original.call(this,...args);
+      if(observer){
+        expect((await observer.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(archivedBefore);
+        expect(await observer.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(prior);
+      }
+      return accepted;
+    });
+    try{await expect(runManagedSourceLifecycle(engine,{operation,sourceId:source})).rejects.toThrow('synthetic lifecycle settlement outage');}
+    finally{add.mockRestore();}
+    expect(calls).toBe(2);
+    expect(await getWorktreeBinding(engine,source)).toEqual(before);
+    expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(archivedBefore);
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(prior);
+    await runManagedSourceLifecycle(engine,{operation,sourceId:source});
+    expect((await engine.executeRaw<{archived:boolean}>('SELECT archived FROM sources WHERE id=$1',[source]))[0].archived).toBe(!archivedBefore);
+    const jobs=await engine.executeRaw<{data:{daily_memory_date?:string;daily_memory_dates?:string[]}}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    expect(jobs).toHaveLength(prior.length+2);
+    expect(jobs.filter(job=>job.data.daily_memory_date==='2026-09-30'&&!job.data.daily_memory_dates)).toHaveLength(operation==='archive'?1:2);
+    expect(jobs.filter(job=>job.data.daily_memory_dates?.includes('2026-09-30'))).toHaveLength(operation==='archive'?1:2);
+  }
 }),60_000);
 
 test('remove/recreate retains old request IDs and creates a new source incarnation',()=>fixture(async(_home,source,root)=>{

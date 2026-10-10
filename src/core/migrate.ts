@@ -1,3 +1,4 @@
+import { GRAPH_SOURCE_MUTATION_SCHEMA_SQL } from './graph-usefulness/schema.ts';
 import { SOURCE_INGESTION_RECEIPTS_SCHEMA_SQL } from './company-brain/receipt-schema.ts';
 import { MANAGED_WRITER_GUARD_SQL } from './persistence/writer-guard-schema.ts';
 import { PERSISTENCE_TOPOLOGY_SCHEMA_SQL } from './persistence/topology-schema.ts';
@@ -6707,6 +6708,55 @@ CREATE TRIGGER minion_queue_protocol BEFORE INSERT OR UPDATE ON minion_jobs
     name: 'fact_withdrawal_subject',
     idempotent: true,
     sql: FACT_WITHDRAWAL_SUBJECT_SQL,
+  },
+  { version: 170, name: 'modern_graph_source_mutation_generation', idempotent: true, sql: GRAPH_SOURCE_MUTATION_SCHEMA_SQL },
+  {
+    // Daily-memory jobs were enqueued with a 60 s timeout, which a busy day's
+    // first write on a hosted database exceeds. add() returns an existing
+    // idempotent row unchanged and claim() reads the stored timeout, so queued
+    // rows need the new 10 minute timeout here or they abort on every run.
+    version: 171,
+    name: 'daily_memory_job_timeout',
+    idempotent: true,
+    sql: `
+      UPDATE minion_jobs SET timeout_ms = 600000
+       WHERE name = 'autopilot-daily-memory' AND timeout_ms = 60000
+         AND status IN ('waiting', 'delayed', 'active', 'waiting-children', 'paused');
+    `,
+  },
+  {
+    // Entity resolution filters pages by lower(title) % $2, slug ILIKE and
+    // slug LIKE patterns, none of which idx_pages_trgm (raw title) serves, so
+    // each resolve read every page in the source; on a large source over a
+    // throttled disk that outlasted the facts-absorb job timeout. Not in the
+    // replayed schema files: initSchema replays them on existing brains before
+    // migrating, which would build these with a plain, write-blocking CREATE
+    // INDEX. Fresh brains start at version 1 and reach this migration too.
+    version: 172,
+    name: 'entity_resolver_trigram_indexes',
+    idempotent: true,
+    transaction: false,
+    sql: '',
+    handler: async engine => {
+      for (const [name, expr] of [['idx_pages_title_lower_trgm', 'lower(title)'], ['idx_pages_slug_trgm', 'slug']]) {
+        if (engine.kind !== 'postgres') {
+          await engine.runMigration(172, `CREATE INDEX IF NOT EXISTS ${name} ON pages USING GIN(${expr} gin_trgm_ops);`);
+          continue;
+        }
+        await dropInvalidConcurrentIndex(engine, 172, name);
+        // Supabase enforces a ~2 min statement_timeout; a concurrent build on a
+        // large pages table can need longer. Session scope on a reserved
+        // connection, reset before the connection returns to the pool.
+        await engine.withReservedConnection(async conn => {
+          await conn.executeRaw("SET statement_timeout = '1800000'");
+          try {
+            await conn.executeRaw(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${name} ON pages USING GIN(${expr} gin_trgm_ops)`);
+          } finally {
+            await conn.executeRaw('RESET statement_timeout');
+          }
+        });
+      }
+    },
   },
 ];
 

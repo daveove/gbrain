@@ -10,6 +10,7 @@
  */
 
 import { sanitizeRemoteBody } from '../remote-body.ts';
+import { isPageHidden } from './private-visibility.ts';
 import type { BrainEngine } from '../engine.ts';
 import { MAX_SEARCH_LIMIT, clampSearchLimit } from '../engine.ts';
 // Type-only (erased at compile time — mode.ts stays a runtime dynamic import
@@ -38,7 +39,7 @@ import {
   resolveAdaptiveReturn,
   applyAdaptiveReturn,
   adaptiveReturnFromConfig,
-  type AdaptiveReturnDecision,
+  type AdaptiveReturnConfig, type AdaptiveReturnDecision,
 } from './return-policy.ts';
 import { applyAutocut, type AutocutDecision } from './autocut.ts';
 import {
@@ -922,7 +923,7 @@ export async function applyAliasHop(
   engine: import('../engine.ts').BrainEngine,
   results: SearchResult[],
   query: string,
-  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; requireSafeChunks?: boolean; excludeSlugs?: string[] },
+  opts: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; requireSafeChunks?: boolean; excludeSlugs?: string[] },
 ): Promise<SearchResult[]> {
   if (!query) return results;
   const qNorm = normalizeAlias(query);
@@ -975,10 +976,14 @@ export async function applyAliasHop(
     // #4352 — the alias inject path bypasses the engines' SQL visibility
     // clause (getPage, not search); re-apply the private predicate here so
     // an untrusted caller can't hop into a `visibility: private` page.
-    if (
-      opts.excludePrivate &&
-      ((page.frontmatter as Record<string, unknown> | null | undefined)?.visibility === 'private')
-    ) continue;
+    // Distinguish full private exclusion from owner-only opt-out: truthy
+    // 'owner-only' must keep ordinary private pages while still hiding
+    // mandatory owner aggregates (shared isPageHidden predicate).
+    if (opts.excludePrivate && isPageHidden({
+      source_id: page.source_id ?? ref.source_id,
+      slug: page.slug,
+      frontmatter: (page.frontmatter as Record<string, unknown> | null | undefined) ?? {},
+    }, opts.excludePrivate)) continue;
     injectScore += 1e-6;
     out.unshift({
       // #2339-sibling: include page_id. The `as SearchResult` cast hid its
@@ -1124,6 +1129,14 @@ export interface HybridSearchOpts extends SearchOpts {
    * (`[CDX-5+6]`), which leave this undefined. Not part of the public contract.
    */
   _searchModeInput?: ResolveSearchModeInput;
+
+  /** Trusted internal retrieval-proof snapshot; never an operation/MCP parameter. */
+  _pinnedSearch?: {
+    embeddingColumn: import('../types.ts').ResolvedColumn;
+    adaptiveReturn: Partial<AdaptiveReturnConfig>;
+    intentPatterns: string | null;
+    embeddingMultimodalModel: string | null;
+  };
 }
 
 const QUERY_EMBED_TIMEOUT_MS = (() => {
@@ -1301,9 +1314,12 @@ export async function hybridSearch(
   // Failing cfg load (pre-config brain, mid-migration, no engine.getConfig)
   // falls through to the file-plane sync loadConfig() — same shape, just
   // misses DB-plane overrides.
-  const mergedCfg = await loadConfigWithEngine(engine).catch(() => null);
-  const cfgForColumn = mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
-  const resolvedCol = cfgForColumn
+  const pinned = opts?._pinnedSearch;
+  const mergedCfg = pinned ? null : await loadConfigWithEngine(engine).catch(() => null);
+  const cfgForColumn = pinned ? null : mergedCfg ?? ((await import('../config.ts')).loadConfig()) ?? null;
+  const resolvedCol = pinned
+    ? resolveEmbeddingColumn({ embeddingColumn: pinned.embeddingColumn }, { engine: 'pglite' })
+    : cfgForColumn
     ? resolveEmbeddingColumn(opts, cfgForColumn)
     : resolveEmbeddingColumn(opts, { engine: 'pglite' });
 
@@ -1319,7 +1335,9 @@ export async function hybridSearch(
   // weight-adjustment path. Intent weighting is on by default (off via
   // `opts.intentWeighting = false`; mode bundle supplies the default).
   // #4415: merges the brain's `search.intent_patterns` config over the banks.
-  const suggestions = await classifyQueryWithBrainPatterns(engine, query);
+  const suggestions = await classifyQueryWithBrainPatterns(
+    pinned ? { getConfig: async () => pinned.intentPatterns } : engine, query,
+  );
   const intentWeightingOn = resolvedMode.intentWeighting;
   const intentWeights = intentWeightingOn
     ? weightsForIntent(suggestions.intent)
@@ -1579,7 +1597,7 @@ export async function hybridSearch(
   // this guard a multimodal-only install would fall to keyword-only here and
   // never run the image/unified vector path.
   const multimodalProviderProbe =
-    cfgForColumn?.embedding_multimodal_model ?? 'voyage:voyage-multimodal-3';
+    (pinned ? pinned.embeddingMultimodalModel : cfgForColumn?.embedding_multimodal_model) ?? 'voyage:voyage-multimodal-3';
   // The LLM intent tie-break (below) can escalate a regex-'text' query to
   // 'image'/'both'; account for that possibility so an ambiguous query on a
   // multimodal-only install still reaches the multimodal branch.
@@ -2356,7 +2374,7 @@ export async function hybridSearch(
   // survives the trim.
   const adaptiveCfg = resolveAdaptiveReturn(
     opts?.adaptiveReturn,
-    adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
+    pinned ? pinned.adaptiveReturn : adaptiveReturnFromConfig(cfgForColumn as Record<string, unknown> | null),
   );
   let returnPool = aliasHopped;
   let adaptiveDecision: AdaptiveReturnDecision | undefined;
@@ -2654,7 +2672,7 @@ export async function hybridSearchCached(
     // serving old-classification rows for the rest of the cache TTL.
     intentPatterns: intentStateForCache.fingerprint,
     // Retained storage-key shape; semantic response reuse is disabled below.
-    excludePrivate: opts?.excludePrivate === true,
+    excludePrivate: opts?.excludePrivate ?? false,
     // v=27 (E5b) — the resolved gate + this query's intent class, classified
     // by the SAME pattern-aware banks bare hybridSearch resolves (above).
     adaptiveReturn: {

@@ -31,6 +31,7 @@ import {
 } from '../src/core/sync-anchor.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null = null;
 let repoRoot: string;
 let subdir: string;
 
@@ -46,6 +47,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -54,6 +56,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   repoRoot = mkdtempSync(join(tmpdir(), 'gbrain-4342-'));
   subdir = join(repoRoot, 'notes');
   git('git init');

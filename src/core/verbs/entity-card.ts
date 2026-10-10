@@ -125,7 +125,7 @@ export async function buildEntityCard(
   const excludePrivate = await resolveExcludePrivatePages(engine, opts.remote ? undefined : false);
   // Predicate text lives ONCE (private-visibility.ts) — both card queries
   // below select `FROM pages` unaliased, so qualify with the table name.
-  const privatePredicate = excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : '';
+  const privatePredicate = excludePrivate ? ` AND ${privatePagesFilterFragment('pages', excludePrivate)}` : '';
 
   const norm = normalizeAlias(trimmed);
   const titleLc = trimmed.toLowerCase();
@@ -416,7 +416,7 @@ async function nearMissSuggestions(
   engine: BrainEngine,
   sourceId: string,
   name: string,
-  excludePrivate = false,
+  excludePrivate: boolean | 'owner-only' = false,
 ): Promise<EntitySuggestion[]> {
   try {
     const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, sourceId, excludePrivate });

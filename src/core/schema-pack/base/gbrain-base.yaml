@@ -325,6 +325,8 @@ page_types:
 # the inference.page_type field. ReDoS guard (E9 + T24) enforces the
 # 50ms-per-regex / 500ms-per-page budget at runtime.
 link_types:
+  # Write vocabulary only; extraction has no inference rule for this verb.
+  - name: contains
   - name: attended
     inference:
       page_type: meeting
