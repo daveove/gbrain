@@ -1212,7 +1212,7 @@ export async function hybridSearchCached(
   let queryEmbedding: Float32Array | null = null;
   // Start the provider budget when an embedding is requested, not before
   // expansion and lexical reads. A cache embed, when enabled, shares its
-  // deadline with the vector arm so a stalled provider gets no second budget.
+  // deadline with the vector arm, without granting a fresh full budget.
   let queryEmbedDl = opts?._queryEmbedDeadline;
   if (semanticCache && !skipCache) {
     try {
