@@ -100,20 +100,33 @@ is the backlog check. On the production brain, 263 stale indexes took about
 
 ## Process queued fact jobs
 
-Page writes queue `facts-absorb` jobs, which extract facts with a paid model.
-Nothing processes them unless a worker runs. Set
-`GBRAIN_DAILY_MEMORY_FACTS_MAX_USD` in the LaunchAgent's environment to let the
-nightly run work through them after the day is written:
+Page writes queue `facts-absorb` jobs. Nothing processes them unless a worker
+runs. Set `GBRAIN_DAILY_MEMORY_FACTS_MAX_USD` in the LaunchAgent's environment
+to let the nightly run work through them after the day is written:
 
 ```bash
 GBRAIN_DAILY_MEMORY_FACTS_MAX_USD=1
 ```
 
+The launcher exports `GBRAIN_AI_BILLING=subscription`, so no nightly step calls
+a paid model API. Fact extraction then defaults to `codex-cli:gpt-5.6-terra`:
+each call is one `codex exec` under the machine's ChatGPT login (`codex login`),
+priced at $0 by the cap. A configured paid embedding model (such as
+`openai:text-embedding-3-large`) is refused before any request, so new facts
+land with a NULL vector for a later `gbrain embed --facts` backfill; the
+configured model, stored vectors and queued embedding effects are left as they
+are. With no ChatGPT login the runner stops `unavailable` and requeues the job
+unspent, without consuming an attempt. There is no OpenAI API fallback.
+The paid-only E5 and answer-packet eval arms also refuse subscription mode
+before opening their run; read-only report/prepare commands stay available.
+See `src/core/ai/billing-policy.ts`.
+
 The step runs `scripts/run-facts-absorb.ts`, which claims only `facts-absorb`
 jobs. Before each job runs, it prices that job's model at its worst case; a job
 that would push spend plus the jobs already running past the cap goes back to
 the queue unspent and the run stops. So does a job whose model is not usable
-(no API key, or an unpriced model); the night then exits non-zero. It also stops after
+(no API key, a paid API under `ai_billing=subscription`, or an unpriced model);
+the night then exits non-zero. It also stops after
 `GBRAIN_DAILY_MEMORY_FACTS_MAX_MINUTES` (default 30). A full cap or a leftover backlog is normal; only a runner error
 fails the night. Explicit-date runs skip this step.
 

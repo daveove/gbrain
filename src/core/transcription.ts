@@ -8,6 +8,8 @@
 
 import { statSync, readFileSync, rmSync } from 'fs';
 import { basename, extname, join } from 'path';
+import { loadConfig } from './config.ts';
+import { PaidModelApiDisabledError, resolveAIBilling } from './ai/billing-policy.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -60,6 +62,12 @@ export async function transcribe(
   const ext = extname(audioPath).toLowerCase();
   if (!AUDIO_EXTENSIONS.has(ext)) {
     throw new Error(`Unsupported audio format: ${ext}. Supported: ${[...AUDIO_EXTENSIONS].join(', ')}`);
+  }
+
+  // Groq, OpenAI and Deepgram are all per-minute paid APIs; a ChatGPT
+  // subscription is not a speech entitlement. Refuse before reading a key.
+  if (resolveAIBilling(loadConfig(), process.env) === 'subscription') {
+    throw new PaidModelApiDisabledError(`${config.provider ?? 'transcription'}:${config.model ?? 'whisper'}`);
   }
 
   // Determine provider and API key

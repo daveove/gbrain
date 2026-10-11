@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { assertModelApiAllowed } from './billing-policy.ts';
 
 export interface AIInvocation {
   operation: string;
@@ -47,6 +48,8 @@ export function hasAIInvocationGuard(): boolean { return guards.getStore() !== u
 
 /** One provider attempt. No guessed usage, no release on an ambiguous failure. */
 export async function invokeAI<T>(call: AIInvocation, run: () => Promise<T>, usage: (result: T) => AIInvocationUsage | null | Promise<AIInvocationUsage | null>): Promise<T> {
+  // Billing policy precedes admission: a refused paid API never reserves budget or reaches the network.
+  assertModelApiAllowed(call.model);
   const guard = guards.getStore();
   if (!guard) return run();
   let permit: AIInvocationPermit;

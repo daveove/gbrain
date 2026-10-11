@@ -55,6 +55,17 @@ test('no servable chat model puts jobs back unspent instead of completing them e
   expect((await rows()).map(row => row.attempts_made)).toEqual([0, 0]);
 }, 60_000);
 
+test('a codex-cli job with no ChatGPT login goes back unspent; no API fallback', async () => {
+  await page();
+  await addFacts({ model: 'codex-cli:gpt-5.6-terra' });
+  // `false` exits 1 for `login status`: no login, so the job must not run.
+  await withEnv({ ...KEYLESS, OPENAI_API_KEY: 'sk-test-not-real', GBRAIN_CODEX_CLI_BIN: '/usr/bin/false' }, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 1, pollMs: 50, maxMinutes: 1 });
+    expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 1]);
+  });
+  expect((await rows()).map(row => row.attempts_made)).toEqual([0]);
+}, 60_000);
+
 test('a cap below one job\'s worst case spends nothing and keeps the attempt', async () => {
   await page();
   await addFacts();

@@ -25,6 +25,8 @@ import { managedPersistenceEnabled } from '../src/core/persistence/ownership.ts'
 import { resolveManagedFactsEmbedding } from '../src/core/persistence/facts-maintenance.ts';
 import { configureGateway, getEmbeddingModel, isAvailable, withBudgetTracker } from '../src/core/ai/gateway.ts';
 import { buildGatewayConfig } from '../src/core/ai/build-gateway-config.ts';
+import { modelApiAllowed } from '../src/core/ai/billing-policy.ts';
+import { assertCodexChatGptLogin } from '../src/core/ai/providers/codex-cli-language-model.ts';
 import {
   MAX_TURN_TEXT_CHARS,
   buildExtractorSystem,
@@ -70,13 +72,15 @@ export async function factsJobWorstCase(engine: BrainEngine, overrides?: Pricing
   const outputTokens = maxTokens + 2 * (2 * maxTokens);
   // Price the model extraction embeds with: the gateway's, or under managed
   // persistence the brain's own policy (which may disable embedding). A model
-  // that cannot be resolved counts as unpriced.
+  // that cannot be resolved counts as unpriced. A model ai_billing=subscription
+  // refuses makes no request (facts land with a NULL vector for the stale
+  // backfill), so it costs nothing.
   let embed: number | null;
   try {
     const model = await managedPersistenceEnabled(engine)
       ? (await resolveManagedFactsEmbedding(engine, loadConfig() ?? { engine: engine.kind }))?.model ?? null
       : getEmbeddingModel();
-    embed = model ? reservationCostUsd(model, 'embed', 25 * 4 * 500, 0, overrides) : 0;
+    embed = model && modelApiAllowed(model) ? reservationCostUsd(model, 'embed', 25 * 4 * 500, 0, overrides) : 0;
   } catch {
     embed = null;
   }
@@ -193,10 +197,13 @@ export async function runFactsAbsorb(engine: BrainEngine, opts: {
     const now = await factsJobWorstCase(engine, pricingOverrides);
     const model = typeof job.data.model === 'string' && job.data.model ? job.data.model : now.defaultModel;
     const cost = now.usd(model);
+    // A codex-cli model needs a live ChatGPT login (cached check, no API
+    // fallback); without one the job goes back unspent instead of failing.
+    const loggedIn = !model.startsWith('codex-cli:') || await assertCodexChatGptLogin().then(() => true, () => false);
     // No await between this check and the reservation, so concurrent claims cannot both pass on the same headroom.
     // The handler completes a job as a calm skip when no chat model is servable
     // (keyless installs), which would consume the queue without facts.
-    const servable = cost !== null && isAvailable('chat', model);
+    const servable = loggedIn && cost !== null && isAvailable('chat', model);
     // A signal or the deadline can pass during setup, before the monitor's first tick.
     const halt: FactsAbsorbRun['stopped'] | null = opts.signal?.aborted ? 'signal'
       : Date.now() > deadline ? 'time'

@@ -96,6 +96,9 @@ function formatInitEmbedWarning(d: Exclude<EmbeddingDiagnosis, { ok: true }>): s
     case 'no_gateway_config':
       lines.push('  Embedding gateway is not configured (startup-order bug — please file an issue).');
       break;
+    case 'paid_api_disabled':
+      lines.push(`  Model "${d.model}" is a paid API; ai_billing=subscription refuses it before any request.`);
+      break;
   }
   lines.push('  Without it, `gbrain sync` imports pages but embeds 0 (search + code graph stay empty).');
   lines.push('  Fixes:');

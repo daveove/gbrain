@@ -2,6 +2,7 @@ import type { GBrainConfig } from '../config.ts';
 import { loadConfig } from '../config.ts';
 import type { AIGatewayConfig } from './types.ts';
 import { mergedProviderEnv } from './provider-env.ts';
+import { resolveAIBilling } from './billing-policy.ts';
 
 /**
  * #3350: fold FILE-plane `provider_base_urls.{anthropic,openai}` into the
@@ -87,6 +88,10 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
     chat_fallback_chain: c.chat_fallback_chain,
     base_urls: { ...envBaseUrls, ...(c.provider_base_urls ?? {}) }, // config wins over env
     provider_chat_options: c.provider_chat_options,
+    // Billing policy reads the FILE plane (never a DB-merged `c`) + env, so a
+    // mounted brain can never switch this process onto a paid API. Omitted
+    // under the `api` default so existing config snapshots stay unchanged.
+    ...(resolveAIBilling(fileCfg, process.env) === 'subscription' ? { ai_billing: 'subscription' as const } : {}),
     // #1249 empty-string drop + GEMINI alias applied inside mergedProviderEnv.
     // #3350 file-plane native base-URL fold layered on top (env wins).
     env: foldNativeBaseUrlsFromFilePlane(fileCfg, mergedProviderEnv(c, process.env)),
