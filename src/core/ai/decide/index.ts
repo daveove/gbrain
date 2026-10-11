@@ -19,6 +19,7 @@ import {
   applyOpenAICompatConfig, applyResolveAuth, authToHeaders, chat, decideTransport, getCurrentBudgetTracker, requireConfig,
 } from '../gateway.ts';
 import { invokeAI, isAIInvocationPolicyError, responseInvocationUsage } from '../invocation-guard.ts';
+import { assertModelApiAllowed } from '../billing-policy.ts';
 import { recordOnTracker } from '../budget-record.ts';
 import { getRecipe } from '../recipes/index.ts';
 import { typesafeApiKey } from '../recipes/typesafe.ts';
@@ -139,6 +140,7 @@ function asDecideError(err: unknown, signal: AbortSignal, caller?: AbortSignal):
 }
 
 async function runTypesafe(req: DecideRequest, ctx: DecideContext, cfg: DecideConfig, a: RunArgs): Promise<DecideResult> {
+  assertModelApiAllowed(a.provider);
   const recipe = getRecipe('typesafe');
   const tp = recipe?.touchpoints.decide;
   if (!recipe || !tp) throw new DecideError('provider_error', 'decide: TypeSafe recipe missing');

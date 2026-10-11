@@ -245,13 +245,19 @@ export function reportJobsError(error: OperationError, json: boolean): void {
   setCliExitVerdict(1);
 }
 
-/** Handlers outside the gateway-refresh set that can still spend: embedding by default, or the subagent and optimizer loops. */
-const OTHER_PAID_JOB_NAMES = new Set(['subagent', 'skillopt', 'import', 'reindex', 'sync', 'ingest_capture']);
+/** Job types that can spend through a model provider, independent of gateway refresh. */
+const PAID_JOB_NAMES = new Set([
+  'embed', 'extract-conversation-facts', 'enrich', 'facts-absorb',
+  'contextual_reindex_per_chunk', 'autopilot-cycle', 'autopilot-global-maintenance',
+  'synthesize', 'patterns', 'consolidate', 'extract_facts', 'extract-atoms-drain',
+  'embed-backfill', 'connector-sync', 'extract-takes-from-pages', 'embed-catch-up',
+  'chronicle_extract', 'loops_extract', 'subagent', 'skillopt', 'import', 'reindex',
+  'sync', 'ingest_capture',
+]);
 
 /** Job names whose handlers can make paid model-provider calls (DX-O3(d) marks them in a legacy preview). */
 export async function paidJobNames(names: Iterable<string>): Promise<string[]> {
-  const { GATEWAY_REFRESH_JOB_NAMES } = await import('../jobs.ts');
-  return [...new Set(names)].filter(name => GATEWAY_REFRESH_JOB_NAMES.has(name) || OTHER_PAID_JOB_NAMES.has(name)).sort();
+  return [...new Set(names)].filter(name => PAID_JOB_NAMES.has(name)).sort();
 }
 
 /** DX-O3(d) human preview lines: counts by job name and status, the first 20 ids, paid markers. */

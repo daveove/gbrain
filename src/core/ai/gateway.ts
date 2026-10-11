@@ -4334,6 +4334,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     input.model ??
     getRerankerModel() ??
     DEFAULT_RERANKER_MODEL;
+  assertModelApiAllowed(modelStr);
 
   const tracker = __budgetStore.getStore() ?? null;
   const { parsed, recipe } = resolveRecipe(modelStr);
