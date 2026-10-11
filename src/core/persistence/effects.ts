@@ -18,6 +18,7 @@ import { wrapChunkTextsForStoredMode } from '../embedding-context.ts';
 import { isEmbedRetriableError, MAX_RATE_LIMIT_RETRIES, rateLimitDelayMs, restampIfDemotedToTitleTier, transientBackoffMs } from '../embed-retry.ts';
 import { AIConfigError, normalizeAIError } from '../ai/errors.ts';
 import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { diagnoseEmbedding } from '../ai/gateway.ts';
 import { quoteIdentifier } from '../search/embedding-column.ts';
 import { acquireWorktree, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts';
@@ -282,8 +283,12 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
     } catch (error) { if (claimed) await recordFailure(engine, claimed, error); }
     finally { await lock.release(); }
   }
+  // A paid embedding API the billing policy refuses stays queued, unclaimed:
+  // claiming would spend an attempt and record it skipped or failed.
+  const embedding = opts.embedding ? null : diagnoseEmbedding();
+  const deferKinds = embedding && !embedding.ok && embedding.reason === 'paid_api_disabled' ? ['embedding'] : [];
   while (attempted++ < limit && !opts.signal?.aborted) {
-    const claimed = await claimPersistenceEffect(engine, opts.hostId);
+    const claimed = await claimPersistenceEffect(engine, opts.hostId, deferKinds);
     if (!claimed) return;
     let effect = claimed;
     let lock: Awaited<ReturnType<typeof acquireWorktree>> = null;

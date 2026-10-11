@@ -124,5 +124,15 @@ export function formatEmbeddingCredsError(d: EmbeddingDiagnosis): string {
       lines.push(`  export ${primaryEnv}=...`);
       return lines.join('\n');
     }
+
+    case 'paid_api_disabled':
+      return [
+        `Embedding model "${d.model}" is a paid API and ai_billing=subscription refuses it; no request was made.`,
+        '',
+        '  A ChatGPT subscription is not an embedding entitlement. Stored vectors and the',
+        '  configured embedding model are unchanged; new text waits for the stale-embedding backfill.',
+        '  • Re-run with --no-embed to import-only and embed later.',
+        '  • Embedding needs either ai_billing=api (paid, explicit approval) or a local embedding model migration.',
+      ].join('\n');
   }
 }

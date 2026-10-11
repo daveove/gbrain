@@ -28,6 +28,7 @@ import { loadConfig } from './config.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
 import { RECIPES } from './ai/recipes/index.ts';
 import { latestOpenAITiers, rankOpenAIChatModels } from './ai/openai-latest.ts';
+import { modelApiAllowed, resolveAIBilling, type AIBilling } from './ai/billing-policy.ts';
 
 export type ModelTier = 'utility' | 'reasoning' | 'deep' | 'subagent';
 
@@ -93,6 +94,20 @@ export const TIER_DEFAULTS: Record<ModelTier, string> = {
   reasoning: 'anthropic:claude-sonnet-4-6',
   deep:      'anthropic:claude-opus-4-7',
   subagent:  'anthropic:claude-sonnet-4-6',
+};
+
+/**
+ * Tier defaults under `ai_billing: subscription` (src/core/ai/billing-policy.ts):
+ * text tiers run on the local Codex CLI's ChatGPT login. No subscription
+ * runtime drives gbrain's own tool loop (codex-cli declares no tools), so the
+ * subagent tier keeps its API default, which the billing policy then refuses
+ * before any request — an honest "unavailable", never a silent API call.
+ */
+export const SUBSCRIPTION_TIER_DEFAULTS: Record<ModelTier, string> = {
+  utility:   'codex-cli:gpt-5.6-luna',
+  reasoning: 'codex-cli:gpt-5.6-terra',
+  deep:      'codex-cli:gpt-6.1-sol',
+  subagent:  TIER_DEFAULTS.subagent,
 };
 
 /**
@@ -184,9 +199,18 @@ const PIN_KEY_BY_TIER: Record<ModelTier, 'expansion_model' | 'chat_model'> = {
 export function resolveTierDefault(
   tier: ModelTier,
   env?: Record<string, string | undefined>,
+  billing?: AIBilling,
 ): string {
   const fileCfg = env ? null : throwSafeLoadConfig();
   const merged = env ? realEnv(env) : mergedProviderEnv(fileCfg, process.env);
+  const rawPin = fileCfg?.[PIN_KEY_BY_TIER[tier]]?.trim();
+  const pin = rawPin ? (DEFAULT_ALIASES[rawPin] ?? rawPin) : undefined;
+  // ai_billing=subscription: present API keys never select a default. A pin
+  // the policy allows (another codex-cli model, a local model) still wins.
+  const policy = billing ?? resolveAIBilling(fileCfg, env ?? process.env);
+  if (policy === 'subscription') {
+    return pin && modelApiAllowed(pin, policy) && providerKeyReady(pin, merged) ? pin : SUBSCRIPTION_TIER_DEFAULTS[tier];
+  }
   for (const entry of PROVIDER_TIER_DEFAULTS) {
     if (merged[entry.envKey]) return entry.tiers(tier);
   }
@@ -196,8 +220,6 @@ export function resolveTierDefault(
   // (extract_atoms, facts classify, page-summary, ...) called a provider with
   // no key. A servable pin for this tier beats the floor. Sits BELOW the key
   // walk so keyed installs route byte-for-byte as before.
-  const rawPin = fileCfg?.[PIN_KEY_BY_TIER[tier]]?.trim();
-  const pin = rawPin ? (DEFAULT_ALIASES[rawPin] ?? rawPin) : undefined;
   if (pin && providerKeyReady(pin, merged)) return pin;
   return TIER_DEFAULTS[tier];
 }
@@ -248,6 +270,7 @@ function resolveEffectiveModelForTier(
   env: Record<string, string | undefined>,
 ): { model: string; source: EffectiveModelSource } {
   const merged = mergedProviderEnv(fileCfg, env);
+  const billing = resolveAIBilling(fileCfg, env);
   const envModel = merged.GBRAIN_MODEL?.trim();
   if (envModel) {
     // Same `gpt` discovery routing as the pin branch below and
@@ -267,7 +290,7 @@ function resolveEffectiveModelForTier(
     const fullPin = rawPin === 'gpt'
       ? discoveredOrStaticOpenAITier('deep')
       : DEFAULT_ALIASES[rawPin] ?? rawPin;
-    if (providerKeyReady(fullPin, merged)) return { model: fullPin, source: 'file_pin' };
+    if (providerKeyReady(fullPin, merged) && modelApiAllowed(fullPin, billing)) return { model: fullPin, source: 'file_pin' };
     if (!_unservablePinWarningsEmitted.has(fullPin)) {
       _unservablePinWarningsEmitted.add(fullPin);
       // A prefix-less pin is a DIFFERENT problem than a missing key — saying
@@ -275,14 +298,16 @@ function resolveEffectiveModelForTier(
       // the user hunting for a key problem they may not have.
       const diagnosis = splitProviderModelId(fullPin).provider === null
         ? `has no provider prefix, so its key can't be verified — prefix it (e.g. "anthropic:${fullPin}")`
-        : `has no usable provider key — set the provider's API key, update the pin`;
+        : !modelApiAllowed(fullPin, billing)
+          ? 'is a paid model API and ai_billing=subscription refuses it — pin a codex-cli: or local model'
+          : `has no usable provider key — set the provider's API key, update the pin`;
       process.stderr.write(
         `[models] configured ${PIN_KEY_BY_TIER[tier]} "${fullPin}" ${diagnosis}, ` +
         `or remove it from ~/.gbrain/config.json. Falling back to the key-aware default.\n`,
       );
     }
   }
-  return { model: resolveTierDefault(tier, merged), source: 'tier_default' };
+  return { model: resolveTierDefault(tier, merged, billing), source: 'tier_default' };
 }
 
 /** Effective chat model (reasoning tier) from raw file config + env. */

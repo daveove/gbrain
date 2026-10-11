@@ -3,6 +3,9 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # Two connections: putPage can need a second one inside its transaction.
 export GBRAIN_POOL_SIZE=2 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
+# Nightly runs never use paid model APIs (DAV-6933): text goes through the
+# Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
+export GBRAIN_AI_BILLING=subscription
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"

@@ -23,7 +23,8 @@ export type Implementation =
   | 'native-google'
   | 'native-anthropic'
   | 'openai-compatible'
-  | 'claude-cli';
+  | 'claude-cli'
+  | 'codex-cli';
 
 export interface EmbeddingTouchpoint {
   models: string[];
@@ -480,6 +481,12 @@ export interface AIGatewayConfig {
   base_urls?: Record<string, string>;
   /** Optional chat providerOptions overrides keyed by recipe id or "recipe:modelId". */
   provider_chat_options?: Record<string, Record<string, unknown>>;
+  /**
+   * Paid model API policy, resolved from the FILE plane + env only
+   * (billing-policy.ts). `subscription` refuses every per-token provider
+   * before a request is built. Omitted = `api`.
+   */
+  ai_billing?: 'api' | 'subscription';
   /** Env snapshot read once at configuration time. Gateway never reads process.env at call time. */
   env: Record<string, string | undefined>;
 }

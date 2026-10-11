@@ -99,6 +99,9 @@ const FREE_LOCAL_EMBED_PROVIDERS: ReadonlySet<string> = new Set([
 const FREE_LOCAL_CHAT_PROVIDERS: ReadonlySet<string> = new Set([
   'ollama',
   'llama-server',
+  // Not local, but subscription-billed: `codex exec` under a ChatGPT login
+  // has no per-token API charge, so a dollar cap has nothing to debit.
+  'codex-cli',
 ]);
 
 function lookupPricing(modelId: string, kind: BudgetKind): ModelPricing | null {

@@ -4,6 +4,7 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import { __setChatTransportForTests, type ChatResult } from '../src/core/ai/gateway.ts';
 import { _resetLlmHaltCooldownsForTests } from '../src/core/minions/llm-halt-cooldown.ts';
 import { factsJobWorstCase, runFactsAbsorb } from '../scripts/run-facts-absorb.ts';
+import { __resetCodexLoginCacheForTests } from '../src/core/ai/providers/codex-cli-language-model.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -53,6 +54,19 @@ test('no servable chat model puts jobs back unspent instead of completing them e
     expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 2]);
   });
   expect((await rows()).map(row => row.attempts_made)).toEqual([0, 0]);
+}, 60_000);
+
+test('a codex-cli job with no ChatGPT login goes back unspent; no API fallback', async () => {
+  __resetCodexLoginCacheForTests();
+  await page();
+  await addFacts({ model: 'codex-cli:gpt-5.6-terra' });
+  // `false` exits 1 for `login status`: no login, so the job must not run.
+  await withEnv({ ...KEYLESS, OPENAI_API_KEY: 'sk-test-not-real', GBRAIN_CODEX_CLI_BIN: '/usr/bin/false' }, async () => {
+    const run = await runFactsAbsorb(engine, { maxUsd: 1, pollMs: 50, maxMinutes: 1 });
+    expect([run.stopped, run.completed, run.spentUsd, run.remaining]).toEqual(['unavailable', 0, 0, 1]);
+  });
+  expect((await rows()).map(row => row.attempts_made)).toEqual([0]);
+  __resetCodexLoginCacheForTests();
 }, 60_000);
 
 test('a cap below one job\'s worst case spends nothing and keeps the attempt', async () => {
