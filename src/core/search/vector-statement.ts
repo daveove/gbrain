@@ -60,7 +60,7 @@
 import type { SearchOpts } from '../types.ts';
 import { hnswIndexExpected } from '../vector-index.ts';
 import { unverifiedExtractionFragment } from '../extraction-review.ts';
-import { buildVectorCastFragment, normalizeEngineColumn } from './embedding-column.ts';
+import { buildVectorCastFragment, normalizeEngineColumn, independentEmbeddingReadFilter } from './embedding-column.ts';
 import { resolveBoostMap, resolveHardExcludes } from './source-boost.ts';
 import { buildBestPerPagePoolCte, buildHardExcludeClause, buildSourceFactorCase, buildVisibilityClause } from './sql-ranking.ts';
 
@@ -307,7 +307,8 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   const overfetch = indexWalkOverfetch(share);
   const preMigration = modelParam ? `(${modelParam}::text IS NULL AND NOT EXISTS(SELECT 1 FROM config WHERE key='embedding_migration.state'))` : '';
   const hashCurrent = `(cc.embedded_text_hash=md5(cc.chunk_text) OR cc.embedded_text_hash IS NULL)`;
-  const guardedGeneration = modelParam ? `AND ((cc.model=${modelParam} AND ${hashCurrent})
+  const independentProof = resolvedCol.provenance ? independentEmbeddingReadFilter(resolvedCol, bind) : undefined;
+  const guardedGeneration = independentProof ? `AND (${independentProof})` : modelParam ? `AND ((cc.model=${modelParam} AND ${hashCurrent})
         OR ${preMigration})` : '';
   const relaxedGeneration = modelParam ? `AND (cc.model=${modelParam} OR ${preMigration})` : '';
 

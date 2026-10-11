@@ -1141,7 +1141,7 @@ export interface BrainEngine {
    * dingColumn rejects bad names). Engines identifier-quote on
    * interpolation as defense in depth (D12).
    */
-  getEmbeddingsByChunkIds(ids: number[], column?: string): Promise<Map<number, Float32Array>>;
+  getEmbeddingsByChunkIds(ids: number[], column?: string | ResolvedColumn): Promise<Map<number, Float32Array>>;
 
   // Chunks
   /**
@@ -1182,7 +1182,7 @@ export interface BrainEngine {
    * them away). `includeEmbedding` opts back in, and beats
    * `getChunksWithEmbeddings`, which honors neither scope precedence nor RLS.
    */
-  getChunks(slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]>;
+  getChunks(slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn }): Promise<Chunk[]>;
   /** Evidence delivery: one batched, re-authorized chunk-window read keyed by page_id (engine-sql/chunks.ts). */
   getChunkWindows(requests: ChunkWindowRequest[], opts: ChunkWindowOpts): Promise<ChunkWindowPage[]>;
   /**
@@ -1200,7 +1200,7 @@ export interface BrainEngine {
    * grandfathered). Provider-migration paths set this so pre-stamp pages
    * aren't silently left in the old embedding space.
    */
-  countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number>;
+  countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number>;
   /**
    * Sum of LENGTH(chunk_text) over stale chunks — the character-count
    * backlog the embed phase / embed-backfill will process. Sibling of
@@ -1217,7 +1217,7 @@ export interface BrainEngine {
    * `includeNullSignature` lifts the grandfather clause (#3391) — see
    * countStaleChunks.
    */
-  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number>;
+  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number>;
   /**
    * Stamp `pages.embedding_signature = signature` for one page. Called after
    * a page's chunks are (re)embedded so a later model swap can detect it as
@@ -1271,6 +1271,7 @@ export interface BrainEngine {
    * support.
    */
   listStaleChunks(opts?: {
+    embeddingColumn?: ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;
@@ -1296,9 +1297,11 @@ export interface BrainEngine {
    * `opts.sourceId` scopes the count to a single source, matching
    * `countStaleChunks`. Quarantined and `embed_skip` pages are excluded —
    * both are intentionally chunkless by design, not drift needing repair.
+   * `activeSourcesOnly` excludes archived sources for independent staging;
+   * omitted, the existing primary count policy is unchanged.
    * See `ChunklessPageRow` for the full rationale.
    */
-  countChunklessPagesWithContent(opts?: { sourceId?: string }): Promise<number>;
+  countChunklessPagesWithContent(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number>;
   /**
    * List pages with non-empty `compiled_truth` and/or `timeline` and zero
    * `content_chunks` rows (sibling of `countChunklessPagesWithContent`;
