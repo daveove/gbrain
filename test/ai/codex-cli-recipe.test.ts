@@ -27,6 +27,9 @@ beforeAll(() => {
     `D="${dir}"`,
     // The provider passes the child an env allowlist, so stub modes ride in files.
     'LOGIN=$(cat "$D/stub-login" 2>/dev/null); SLEEP=$(cat "$D/stub-sleep" 2>/dev/null); CODE=$(cat "$D/stub-exit" 2>/dev/null)',
+    'if [ "$1" = "--version" ]; then',
+    '  VERSION=$(cat "$D/stub-version" 2>/dev/null); echo "${VERSION:-codex-cli 0.162.0}"; exit 0',
+    'fi',
     'if [ "$1" = "login" ]; then',
     '  echo "$*" > "$D/login-argv"',
     '  case "$LOGIN" in',
@@ -48,7 +51,7 @@ beforeAll(() => {
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 beforeEach(() => {
-  for (const f of ['exec-argv', 'exec-env', 'login-argv', 'stub-login', 'stub-sleep', 'stub-exit']) {
+  for (const f of ['exec-argv', 'exec-env', 'login-argv', 'stub-login', 'stub-sleep', 'stub-exit', 'stub-version']) {
     rmSync(join(dir, f), { force: true });
   }
 });
@@ -78,7 +81,7 @@ function call(extra: Partial<LanguageModelV2CallOptions> = {}): LanguageModelV2C
 function stubEnv(env: Record<string, string | undefined> = {}): Record<string, string | undefined> {
   const rest: Record<string, string | undefined> = { GBRAIN_CODEX_CLI_BIN: bin };
   for (const [k, v] of Object.entries(env)) {
-    const mode = k.match(/^CODEX_STUB_(LOGIN|SLEEP|EXIT)$/)?.[1];
+    const mode = k.match(/^CODEX_STUB_(LOGIN|SLEEP|EXIT|VERSION)$/)?.[1];
     if (mode && v !== undefined) writeFileSync(join(dir, `stub-${mode.toLowerCase()}`), v);
     else rest[k] = v;
   }
@@ -87,6 +90,15 @@ function stubEnv(env: Record<string, string | undefined> = {}): Record<string, s
 
 
 describe('CodexCliLanguageModel', () => {
+  for (const version of ['codex-cli 0.144.0-alpha.4', 'unknown build']) {
+    test(`unsupported version ${version}: refused before model execution without dropping isolation`, async () => {
+      stage(ok('never'));
+      await withEnv(stubEnv({ CODEX_STUB_VERSION: version }), async () => {
+        await expect(new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call())).rejects.toBeInstanceOf(AIConfigError);
+      });
+      expect(existsSync(join(dir, 'exec-argv'))).toBe(false);
+    });
+  }
 
   test('the child never inherits API keys or other credentials', async () => {
     stage(ok('x'));

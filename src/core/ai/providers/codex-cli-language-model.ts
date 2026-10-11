@@ -122,6 +122,12 @@ function run(args: string[], opts: { cwd: string; stdin?: string; signal?: Abort
 
 /** Fresh native login check; callers also use it before admitting queued work. */
 export async function assertCodexChatGptLogin(cwd: string = tmpdir(), signal?: AbortSignal): Promise<void> {
+  const version = await run(['--version'], { cwd, signal });
+  const release = version.stdout.trim().match(/^codex(?:-cli)? (\d+)\.(\d+)\.(\d+)$/);
+  if (version.code !== 0 || !release || Number(release[1]) === 0 && Number(release[2]) < 162) {
+    throw new AIConfigError('codex-cli requires stable Codex CLI 0.162.0 or newer for subscription authentication and raw-model tool isolation.',
+      'Upgrade the native Codex CLI before using this recipe. Older releases are unsupported; isolation flags are never silently dropped.');
+  }
   const status = await run(['login', 'status', '-c', 'forced_login_method="chatgpt"'], { cwd, signal });
   if (status.code !== 0 || !/logged in using chatgpt/i.test(`${status.stdout}\n${status.stderr}`)) {
     throw new AIConfigError(
