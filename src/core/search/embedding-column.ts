@@ -846,11 +846,13 @@ export function independentEmbeddingReadFilter(column: ResolvedColumn, bind: (va
 }
 
 /** Canonical and projection changes invalidate a completed page's own-space stamp. */
-export function independentPageProofContextSql(pageAlias = 'p'): string {
+export function independentPageProofContextSql(pageAlias = 'p', sourceAlias?: string): string {
   const p = quoteIdentifier(pageAlias);
+  const incarnation = sourceAlias ? `${quoteIdentifier(sourceAlias)}.incarnation::text`
+    : `(SELECT incarnation::text FROM sources WHERE id=${p}.source_id AND NOT archived)`;
   return `${p}.knowledge_revision::text || ':' || md5(${p}.title)
     || ':' || COALESCE(${p}.contextual_retrieval_mode,'none')
     || ':' || COALESCE(${p}.corpus_generation,'')
     || ':' || COALESCE(${p}.chunker_version::text,'')
-    || ':' || (SELECT incarnation::text FROM sources WHERE id=${p}.source_id AND NOT archived)`;
+    || ':' || ${incarnation}`;
 }

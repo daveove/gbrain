@@ -1,6 +1,7 @@
 import type { BrainEngine } from './engine.ts';
 import { readProjectionSnapshot, queuePageProjection, preparePageProjection, installPageProjection } from './page-state/projections.ts';
-import { getEmbeddingProvenanceColumns, normalizeEngineColumn, quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from './search/embedding-column.ts';
+import { getEmbeddingProvenanceColumns, normalizeEngineColumn, quoteIdentifier, resolveActiveEmbeddingColumnFromEngine,
+  embeddingColumnSignature, independentPageProofContextSql } from './search/embedding-column.ts';
 import type { ResolvedColumn } from './types.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from './quarantine.ts';
 
@@ -10,15 +11,17 @@ export async function countArchivedEmbeddingWork(engine: BrainEngine, opts: { so
   const vector = column ? `c.${quoteIdentifier(column.name)}` : 'NULL::vector';
   const textHash = quoteIdentifier(proof?.textHash ?? 'embedded_text_hash');
   const pageSignature = quoteIdentifier(proof?.pageSignature ?? 'embedding_signature');
-  const ownStale = column?.provenance ? `OR c.${quoteIdentifier(proof!.model)} IS DISTINCT FROM $5 OR c.${quoteIdentifier(proof!.inputHash)} IS NULL` : '';
+  const ownStale = column?.provenance ? `OR c.${quoteIdentifier(proof!.model)} IS DISTINCT FROM $5
+    OR c.${quoteIdentifier(proof!.inputHash)} IS NULL
+    OR p.${pageSignature} IS DISTINCT FROM $6::text || ':' || ${independentPageProofContextSql('p', 's')}` : '';
   const params: unknown[] = [opts.sourceId ?? null, opts.signature ?? null, opts.includeNullSignature ?? false, opts.includeUnsealed ?? false];
-  if (column?.provenance) params.push(column.embeddingModel);
+  if (column?.provenance) params.push(column.embeddingModel, embeddingColumnSignature(column));
   const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages p
     JOIN sources s ON s.id=p.source_id WHERE s.archived AND p.deleted_at IS NULL
       AND NOT (COALESCE(p.frontmatter,'{}'::jsonb) ? 'embed_skip')
       AND ($1::text IS NULL OR p.source_id=$1)
       AND (($4::boolean AND p.text_projection_revision IS DISTINCT FROM p.knowledge_revision)
-        OR EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND (${vector} IS NULL
+        OR EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id ${column?.provenance ? "AND c.modality='text'" : ''} AND (${vector} IS NULL
           OR c.${textHash} ${column?.provenance ? 'IS DISTINCT FROM' : '<>'} md5(c.chunk_text) ${ownStale}
           OR ($2::text IS NOT NULL AND (p.${pageSignature} <> $2 OR ($3::boolean AND p.${pageSignature} IS NULL)))))
         OR ((p.compiled_truth <> '' OR p.timeline <> '') AND ${QUARANTINE_FILTER_FRAGMENT}
