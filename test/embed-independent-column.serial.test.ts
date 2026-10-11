@@ -53,8 +53,8 @@ for (const backend of testBackends()) {
     let seen: Array<{ model: string; value: string }> = [];
 
     /** Every live-space byte a staging run must leave alone, per chunk and page. */
-    async function liveSpace(): Promise<unknown[]> {
-      return engine.executeRaw(`SELECT p.slug, cc.id, cc.chunk_index, cc.chunk_text, cc.embedding::text AS vector, cc.model,
+    async function liveSpace(): Promise<Record<string, unknown>[]> {
+      return engine.executeRaw<Record<string, unknown>>(`SELECT p.slug, cc.id, cc.chunk_index, cc.chunk_text, cc.embedding::text AS vector, cc.model,
           cc.embedded_text_hash, cc.embedding_input_hash, cc.embedded_at::text AS embedded_at,
           cc.embedding_pending_since::text AS pending_since, p.embedding_signature, p.contextual_retrieval_mode,
           p.text_projection_revision::text AS projection, p.chunker_version
@@ -181,6 +181,39 @@ for (const backend of testBackends()) {
           expect(await liveSpace()).toEqual(before);
         } finally {
           await engine.executeRaw(`UPDATE pages SET text_projection_revision = knowledge_revision WHERE slug = 'notes/bravo'`);
+        }
+      });
+
+      test('archived independent work counts missing and stale page stamps, preserves current stamps, and respects scope and exclusions', async () => {
+        await runEmbedCore(engine, { stale: true, quiet: true, embeddingColumn: COLUMN });
+        await engine.executeRaw(`UPDATE content_chunks SET modality='image', ${COLUMN}=NULL
+          WHERE page_id=(SELECT id FROM pages WHERE slug='notes/charlie')`);
+        await engine.executeRaw("UPDATE sources SET archived=true WHERE id='default'");
+        seen = [];
+        const archived = async (sourceId = 'default') => {
+          const before = await liveSpace();
+          const result = await runEmbedCore(engine, { stale: true, quiet: true, sourceId, embeddingColumn: COLUMN });
+          expect(await liveSpace()).toEqual(before);
+          return result;
+        };
+        try {
+          expect((await archived()).failures).toBe(0);
+          await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature=NULL WHERE slug='notes/alpha'`);
+          expect((await archived()).failures).toBe(1);
+          await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature='obsolete-space:obsolete-page' WHERE slug='notes/bravo'`);
+          const blocked = await archived();
+          expect(blocked.failures).toBe(2);
+          expect(blocked.failure_samples.join('\n')).toContain('2 archived page(s)');
+          expect((await archived('unrelated-source')).failures).toBe(0);
+          await engine.executeRaw(`UPDATE pages SET frontmatter=frontmatter || '{"embed_skip":true}'::jsonb WHERE slug='notes/alpha'`);
+          expect((await archived()).failures).toBe(1);
+          await engine.executeRaw(`UPDATE pages SET frontmatter=frontmatter || '{"embed_skip":true}'::jsonb WHERE slug='notes/bravo'`);
+          expect((await archived()).failures).toBe(0);
+          expect(seen).toEqual([]);
+        } finally {
+          await engine.executeRaw("UPDATE sources SET archived=false WHERE id='default'");
+          await engine.executeRaw("UPDATE content_chunks SET modality='text' WHERE page_id=(SELECT id FROM pages WHERE slug='notes/charlie')");
+          await engine.executeRaw("UPDATE pages SET frontmatter=frontmatter - 'embed_skip' WHERE slug IN ('notes/alpha','notes/bravo')");
         }
       });
 
