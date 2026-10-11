@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { chat, configureGateway, type ChatOpts, type ChatResult } from '../src/core/ai/gateway.ts';
+import { chat, type ChatOpts, type ChatResult } from '../src/core/ai/gateway.ts';
 import { assertModelApiAllowed, resolveAIBilling } from '../src/core/ai/billing-policy.ts';
 import { loadConfigFileOnly } from '../src/core/config.ts';
 import { withAIInvocationGuard, type AIInvocationUsage } from '../src/core/ai/invocation-guard.ts';

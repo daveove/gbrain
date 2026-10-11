@@ -18,6 +18,7 @@ import { MAX_RATE_LIMIT_RETRIES } from '../src/core/embed-retry.ts';
 import { AIConfigError } from '../src/core/ai/errors.ts';
 import { invokeAI, isAIInvocationPolicyError, withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { saveConfig } from '../src/core/config.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -625,6 +626,27 @@ for (const kind of testBackends()) {
         if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
         else await engine.setConfig('embedding_columns', previousRegistry);
         await engine.executeRaw('ALTER TABLE content_chunks DROP COLUMN embedding_effect_test');
+      }
+    });
+
+    check('billing opt-out after claim preserves the queued effect and its retry allowance', async () => {
+      const f = await fixture();
+      const fileConfig = { engine: 'pglite' as const, database_path: join(scratch, 'unused') };
+      saveConfig({ ...fileConfig, ai_billing: 'api' });
+      configureGateway({ ai_billing: 'api', env: {} });
+      let requests = 0;
+      try {
+        await run(async () => {
+          saveConfig({ ...fileConfig, ai_billing: 'subscription' });
+          return invokeAI({ operation: 'embed', kind: 'embedding', model: 'openai:text-embedding-3-large' },
+            async () => { requests++; return vectors(); }, () => null);
+        });
+        expect(await state(f.effectId)).toMatchObject({ state: 'queued', attempts: 0, error_code: null });
+        expect(requests).toBe(0);
+        expect(await engine.executeRaw('SELECT id FROM content_chunks WHERE page_id=$1 AND embedding IS NOT NULL', [f.snapshot.page.id])).toEqual([]);
+      } finally {
+        resetGateway();
+        rmSync(join(scratch, '.gbrain', 'config.json'), { force: true });
       }
     });
 

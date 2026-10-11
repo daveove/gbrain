@@ -14,10 +14,11 @@ import {
   modelApiAllowed,
   resolveAIBilling,
 } from '../../src/core/ai/billing-policy.ts';
-import { chat, configureGateway, diagnoseEmbedding, embed, expand, isAvailable, refreshGatewayEnvFromFilePlane, rerank, resetGateway } from '../../src/core/ai/gateway.ts';
+import { chat, configureGateway, diagnoseEmbedding, embed, embedMultimodal, expand, isAvailable, refreshGatewayEnvFromFilePlane, rerank, resetGateway, withBudgetTracker } from '../../src/core/ai/gateway.ts';
 import { saveConfig } from '../../src/core/config.ts';
 import { invokeAI } from '../../src/core/ai/invocation-guard.ts';
 import { reservationCostUsd } from '../../src/core/budget/reservation-cost.ts';
+import { BudgetTracker } from '../../src/core/budget/budget-tracker.ts';
 import { transcribe } from '../../src/core/transcription.ts';
 
 const realFetch = globalThis.fetch;
@@ -54,9 +55,9 @@ describe('resolveAIBilling', () => {
   });
 
 
-  test('subscription allows only subscription CLIs and local inference', () => {
+  test('subscription allows authenticated Codex and local inference, not unverified CLI billing', () => {
     expect(modelApiAllowed('codex-cli:gpt-5.6-terra', 'subscription')).toBe(true);
-    expect(modelApiAllowed('claude-cli:claude-sonnet-4-6', 'subscription')).toBe(true);
+    expect(modelApiAllowed('claude-cli:claude-sonnet-4-6', 'subscription')).toBe(false);
     expect(modelApiAllowed('ollama:llama3', 'subscription')).toBe(true);
     for (const paid of ['openai:text-embedding-3-large', 'openai:gpt-5.6-terra', 'anthropic:claude-sonnet-4-6',
       'voyage:voyage-4', 'openrouter:openai/gpt-5.2', 'litellm:gpt-5.4', 'not-a-provider:x', 'bare-model']) {
@@ -95,6 +96,23 @@ describe('gateway under ai_billing=subscription', () => {
     expect(fetches).toBe(0);
   });
 
+  test('paid multimodal refusal cannot consume or mask an ambient spending cap', async () => {
+    configureGateway({ ai_billing: 'subscription', embedding_multimodal_model: 'voyage:voyage-multimodal-3',
+      env: { VOYAGE_API_KEY: 'test-not-real' } });
+    const tracker = new BudgetTracker({ label: 'subscription-multimodal', maxCostUsd: 0 });
+    await expect(withBudgetTracker(tracker, () => embedMultimodal([{ kind: 'text', text: 'Acme' }])))
+      .rejects.toBeInstanceOf(PaidModelApiDisabledError);
+    expect(tracker.snapshot()).toMatchObject({ cumulativeCostUsd: 0, callsRecorded: 0, models: [] });
+    expect(fetches).toBe(0);
+  });
+
+  test('the unverified legacy Claude CLI cannot bypass the subscription ban', async () => {
+    subscriptionGateway();
+    await expect(chat({ model: 'claude-cli:claude-sonnet-4-6', messages: [{ role: 'user', content: 'hi' }] }))
+      .rejects.toBeInstanceOf(PaidModelApiDisabledError);
+    expect(fetches).toBe(0);
+  });
+
   test('gateway configuration cannot override the process subscription policy', async () => {
     await withEnv({ GBRAIN_AI_BILLING: 'subscription' }, async () => {
       configureGateway({ chat_model: 'openai:gpt-5.6-terra', env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'api' });
@@ -112,12 +130,15 @@ describe('gateway under ai_billing=subscription', () => {
         configureGateway({ chat_model: 'openai:gpt-5.6-terra', env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'api' });
         expect(isAvailable('chat')).toBe(true);
         saveConfig({ ...config, ai_billing: 'subscription' });
-        refreshGatewayEnvFromFilePlane();
         expect(isAvailable('chat')).toBe(false);
         await expect(chat({ messages: [{ role: 'user', content: 'hi' }] })).rejects.toBeInstanceOf(PaidModelApiDisabledError);
         configureGateway({ chat_model: 'openai:gpt-5.6-terra', env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'api' });
         expect(isAvailable('chat')).toBe(false);
         await expect(chat({ messages: [{ role: 'user', content: 'hi' }] })).rejects.toBeInstanceOf(PaidModelApiDisabledError);
+        writeFileSync(join(dir, '.gbrain', 'config.json'), '{');
+        refreshGatewayEnvFromFilePlane();
+        expect(isAvailable('chat')).toBe(false);
+        await expect(chat({ messages: [{ role: 'user', content: 'still refused' }] })).rejects.toBeInstanceOf(PaidModelApiDisabledError);
         expect(fetches).toBe(0);
       });
     } finally {

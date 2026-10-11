@@ -74,7 +74,7 @@ import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gat
 import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError, type AIInvocationUsage } from './invocation-guard.ts';
 import { installAICallLogFromEnv } from './call-log.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
-import { assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
+import { activeAIBilling, assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
 
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
@@ -494,7 +494,7 @@ export function refreshGatewayEnvFromFilePlane(): void {
   // boot fold installed from provider_base_urls.{anthropic,openai}. File-plane
   // only (cfg is loadConfig() here), preserving the mount-safety rule that
   // DB-plane base_urls never steer native keys.
-  _config = { ..._config, ai_billing: resolveAIBilling(cfg?.ai_billing === undefined ? _config : cfg, process.env),
+  _config = { ..._config, ai_billing: cfg?.ai_billing === undefined ? activeAIBilling() : resolveAIBilling(cfg, process.env),
     env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
   setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
@@ -520,7 +520,7 @@ export function refreshGatewayEnvFromFilePlane(): void {
  * config for callers who want to inspect what landed.
  */
 export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise<AIGatewayConfig> {
-  const cfg = requireConfig();
+  const cfg = { ...requireConfig(), ai_billing: activeAIBilling() };
   // Refresh the OpenAI latest-model discovery cache BEFORE resolution so the
   // key-aware tier defaults below see it. TTL-throttled (one fetch/24h),
   // 3s-bounded, fail-open, disabled in test lanes via GBRAIN_MODEL_DISCOVERY
@@ -1860,6 +1860,7 @@ export async function embedMultimodal(
   // text embeddings can route multimodal to Voyage without changing the
   // primary embedding_model. Falls back to embedding_model for single-model setups.
   const modelStr = cfg.embedding_multimodal_model ?? getEmbeddingModel();
+  assertModelApiAllowed(modelStr);
   const { parsed, recipe } = resolveRecipe(modelStr);
   const touchpoint = recipe.touchpoints.embedding;
   if (!touchpoint?.supports_multimodal) {
