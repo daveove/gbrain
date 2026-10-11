@@ -17,6 +17,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. Cache embeddings and low-to-high detail recovery retain the original shared deadline and its existing minimum floor.
 - Foreground projection drains try a still-queued superseded job once per run. An unchanged conflicting or malformed legacy identity stays queued, appears in `failed` and exits non-zero with repair guidance; a genuinely replaced job remains `superseded`.
 - Foreground `embed` enforces its approved spending cap at provider admission, including multimodal HTTP requests and OCR. Budget stops bank installed vectors, leave pending work resumable and exit non-zero. JSON reports measured spend and the original refusal, including `no_pricing` and its pricing remedy. A capped partial text drain still refreshes bounded chunk planner statistics unless its lease was lost or the caller cancelled it.
+- `ai_billing=subscription` refuses paid model APIs before transport and uses native ChatGPT-authenticated Codex CLI for supported text calls. Keyless local inference remains available through its own model/dimension overrides without changing existing vector identity. Every AI builtin refreshes protected billing at execution time; paid embedding effects remain queued and do not keep the persistence consumer busy.
 
 ## [0.60.138.0] - 2026-10-09
 
