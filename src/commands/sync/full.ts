@@ -209,7 +209,7 @@ export async function performFullSync(
       await runEmbedCore(engine, { stale: true });
       embedded = result.imported;
     } catch (e: unknown) {
-      const { EmbeddingDimMismatchError } = await import('../embed.ts');
+      const { EmbeddingDimMismatchError } = await import('../embed-setup.ts');
       if (e instanceof EmbeddingDimMismatchError) {
         serr('\n' + e.recipeMessage + '\n');
         serr(`Tip: pass --no-embed to sync without embedding, then`);

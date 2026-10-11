@@ -632,7 +632,7 @@ async function embedAffectedPages(
       await runEmbedCore(engine, embedOpts);
       embedded = embedSlugs.length;
     } catch (e: unknown) {
-      const { EmbeddingDimMismatchError } = await import('../embed.ts');
+      const { EmbeddingDimMismatchError } = await import('../embed-setup.ts');
       if (e instanceof EmbeddingDimMismatchError) {
         serr('\n' + e.recipeMessage + '\n');
         serr(`Tip: pass --no-embed to sync without embedding, then`);

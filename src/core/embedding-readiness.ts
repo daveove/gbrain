@@ -1,22 +1,29 @@
 import type { BrainEngine } from './engine.ts';
 import { readProjectionSnapshot, queuePageProjection, preparePageProjection, installPageProjection } from './page-state/projections.ts';
-import { quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from './search/embedding-column.ts';
+import { getEmbeddingProvenanceColumns, normalizeEngineColumn, quoteIdentifier, resolveActiveEmbeddingColumnFromEngine } from './search/embedding-column.ts';
+import type { ResolvedColumn } from './types.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from './quarantine.ts';
 
-export async function countArchivedEmbeddingWork(engine: BrainEngine, opts: { sourceId?: string; signature?: string; includeNullSignature?: boolean; includeUnsealed?: boolean } = {}, activeColumn?: string | null): Promise<number> {
-  const column = activeColumn === undefined ? (await resolveActiveEmbeddingColumnFromEngine(engine)).name : activeColumn;
-  const vector = column === null ? 'NULL::vector' : `c.${quoteIdentifier(column)}`;
+export async function countArchivedEmbeddingWork(engine: BrainEngine, opts: { sourceId?: string; signature?: string; includeNullSignature?: boolean; includeUnsealed?: boolean } = {}, activeColumn?: string | ResolvedColumn | null): Promise<number> {
+  const column = activeColumn === undefined ? await resolveActiveEmbeddingColumnFromEngine(engine) : activeColumn === null ? null : normalizeEngineColumn(activeColumn);
+  const proof = column ? getEmbeddingProvenanceColumns(column) : null;
+  const vector = column ? `c.${quoteIdentifier(column.name)}` : 'NULL::vector';
+  const textHash = quoteIdentifier(proof?.textHash ?? 'embedded_text_hash');
+  const pageSignature = quoteIdentifier(proof?.pageSignature ?? 'embedding_signature');
+  const ownStale = column?.provenance ? `OR c.${quoteIdentifier(proof!.model)} IS DISTINCT FROM $5 OR c.${quoteIdentifier(proof!.inputHash)} IS NULL` : '';
+  const params: unknown[] = [opts.sourceId ?? null, opts.signature ?? null, opts.includeNullSignature ?? false, opts.includeUnsealed ?? false];
+  if (column?.provenance) params.push(column.embeddingModel);
   const [row] = await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages p
     JOIN sources s ON s.id=p.source_id WHERE s.archived AND p.deleted_at IS NULL
       AND NOT (COALESCE(p.frontmatter,'{}'::jsonb) ? 'embed_skip')
       AND ($1::text IS NULL OR p.source_id=$1)
       AND (($4::boolean AND p.text_projection_revision IS DISTINCT FROM p.knowledge_revision)
         OR EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id AND (${vector} IS NULL
-          OR c.embedded_text_hash <> md5(c.chunk_text)
-          OR ($2::text IS NOT NULL AND (p.embedding_signature <> $2 OR ($3::boolean AND p.embedding_signature IS NULL)))))
+          OR c.${textHash} ${column?.provenance ? 'IS DISTINCT FROM' : '<>'} md5(c.chunk_text) ${ownStale}
+          OR ($2::text IS NOT NULL AND (p.${pageSignature} <> $2 OR ($3::boolean AND p.${pageSignature} IS NULL)))))
         OR ((p.compiled_truth <> '' OR p.timeline <> '') AND ${QUARANTINE_FILTER_FRAGMENT}
           AND NOT EXISTS (SELECT 1 FROM content_chunks c WHERE c.page_id=p.id)))`,
-  [opts.sourceId ?? null, opts.signature ?? null, opts.includeNullSignature ?? false, opts.includeUnsealed ?? false]);
+  params);
   if (!Number.isSafeInteger(row?.n) || row.n < 0) throw new Error('Cannot determine archived embedding work.');
   return row.n;
 }

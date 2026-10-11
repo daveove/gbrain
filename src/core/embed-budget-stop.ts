@@ -7,6 +7,7 @@
  * instead of reading as a clean finish.
  */
 import type { BrainEngine } from './engine.ts';
+import type { ResolvedColumn } from './types.ts';
 
 export interface EmbedBudgetStopFields {
   embedded: number;
@@ -18,23 +19,27 @@ export interface EmbedBudgetStopFields {
 /**
  * Record a budget stop on `result` when stale chunks remain; a drained run
  * records nothing. `skip` covers dry runs, catch-up (no budget) and caller
- * aborts, which are not budget stops.
+ * aborts, which are not budget stops. `embeddingColumn` counts and resumes an
+ * explicit staging run into that independent column instead of the live one.
  */
 export async function noteEmbedBudgetStop(
   engine: BrainEngine,
   result: EmbedBudgetStopFields,
-  opts: { sourceId?: string; signature?: string; includeNullSignature: boolean; skip: boolean },
+  opts: { sourceId?: string; signature?: string; includeNullSignature: boolean; skip: boolean; embeddingColumn?: ResolvedColumn },
 ): Promise<void> {
   if (opts.skip) return;
   const sourceOpt = opts.sourceId ? { sourceId: opts.sourceId } : undefined;
-  const remaining = await engine.countStaleChunks(opts.signature
-    ? { signature: opts.signature, ...sourceOpt, ...(opts.includeNullSignature && { includeNullSignature: true }) }
-    : sourceOpt);
+  const remaining = await engine.countStaleChunks(opts.embeddingColumn
+    ? { ...sourceOpt, embeddingColumn: opts.embeddingColumn }
+    : opts.signature
+      ? { signature: opts.signature, ...sourceOpt, ...(opts.includeNullSignature && { includeNullSignature: true }) }
+      : sourceOpt);
   if (remaining === 0) return;
   result.reason = 'time_budget';
   result.remaining_stale = remaining;
   result.resume_command = ['gbrain embed --stale --catch-up', opts.sourceId && `--source ${opts.sourceId}`,
-    opts.includeNullSignature && '--include-null-signature'].filter(Boolean).join(' ');
+    opts.embeddingColumn && `--embedding-column ${opts.embeddingColumn.name}`,
+    !opts.embeddingColumn && opts.includeNullSignature && '--include-null-signature'].filter(Boolean).join(' ');
 }
 
 /** The stdout verdict line for a budget stop. */

@@ -38,7 +38,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
-import type { DomainBankRow } from '../types.ts';
+import type { DomainBankRow, ResolvedColumn } from '../types.ts';
 import { INJECTION_PATTERNS } from '../think/sanitize.ts';
 
 /** Default 1-hour TTL for the prefix-enumeration cache (D3). */
@@ -76,8 +76,8 @@ export interface FetchFarOpts {
   prefixCacheTtlMs?: number;
   /** Override the prefix list (tests — bypasses cache + enumeration). */
   prefixListOverride?: string[];
-  /** Default embedding column for distance calc + getEmbeddingsByChunkIds lookup. */
-  embeddingColumn?: string;
+  /** Resolved embedding space for distance calculation and vector hydration. */
+  embeddingColumn?: ResolvedColumn;
   /**
    * Hard cap on the number of distinct prefixes we ask the DB to materialize
    * one-page-per. Defaults to `max(m * 4, 50)`. Without this cap, brains with

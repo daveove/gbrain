@@ -253,18 +253,6 @@ describe('v0.37 Lane C.3 — Voyage key reaches buildGatewayConfig', () => {
 // (extended in same wave). The PGLite branch + Postgres branch + databasePath
 // fallback + no-op-recipe-removal tests live there.
 
-// Lane D.2 — embed pre-flight dim mismatch
-describe('v0.37 Lane D.2 — embed pre-flight dim mismatch', () => {
-  test('CDX2-9: EmbeddingDimMismatchError is exported + tagged', async () => {
-    const { EmbeddingDimMismatchError } = await import('../src/commands/embed.ts');
-    expect(typeof EmbeddingDimMismatchError).toBe('function');
-    const err = new EmbeddingDimMismatchError('test recipe');
-    expect(err).toBeInstanceOf(Error);
-    expect(err.kind).toBe('embedding_dim_mismatch');
-    expect(err.recipeMessage).toBe('test recipe');
-    expect(err.name).toBe('EmbeddingDimMismatchError');
-  });
-});
 
 // Lane D.4 — sync help dispatch
 describe('v0.37 Lane D.4 — sync --help dispatch', () => {

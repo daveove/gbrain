@@ -58,7 +58,10 @@ async function readSnapshotStatement(query: ReadQuery, slug: string, opts?: Page
   const rows = await query<Record<string, unknown>>(`WITH chosen AS (
     SELECT p.*${opts?.requireUnambiguous ? ', count(*) OVER () AS snapshot_matches' : ''} FROM pages p WHERE ${where.join(' AND ')}
     ORDER BY (p.slug=$1) DESC, (p.source_id=$${params.length}) DESC, p.source_id ASC LIMIT 1
-  ) SELECT p.*,
+  ) SELECT p.id,p.source_id,p.slug,p.type,p.title,p.compiled_truth,p.timeline,p.frontmatter,p.content_hash,
+    p.source_path,p.knowledge_revision,p.text_projection_revision,p.emotional_weight,p.created_at,p.updated_at,
+    p.deleted_at,p.effective_date,p.effective_date_source,p.import_filename,p.salience_touched_at,
+    p.source_kind,p.source_uri,p.ingested_via,p.ingested_at,p.contextual_retrieval_mode${opts?.requireUnambiguous ? ',p.snapshot_matches' : ''},
     (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation,
     COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags,
     COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at)

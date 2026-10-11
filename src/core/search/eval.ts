@@ -13,6 +13,7 @@ import type { BrainEngine } from '../engine.ts';
 import { embedQuery } from '../embedding.ts';
 import { loadConfig, loadConfigWithEngine } from '../config.ts';
 import { resolveEmbeddingColumn } from './embedding-column.ts';
+import { queryEmbedOptionsForColumn } from './query-prefix.ts';
 import { hybridSearch } from './hybrid.ts';
 import type { HybridSearchOpts } from './hybrid.ts';
 import { dedupeRankedKeys } from '../eval/ranked-docs.ts';
@@ -248,9 +249,8 @@ async function runQuery(
     const { assertBrainEmbeddingEnabled } = await import('../embedding-dim-check.ts');
     await assertBrainEmbeddingEnabled(engine, cfg);
     const column = resolveEmbeddingColumn(undefined, cfg ?? { engine: 'pglite' });
-    const embedding = await embedQuery(query, column.embeddingModel
-      ? { embeddingModel: column.embeddingModel, dimensions: column.dimensions }
-      : undefined);
+    // An independent column embeds with its own model, dimensions and queryPrefix.
+    const embedding = await embedQuery(query, queryEmbedOptionsForColumn(column, undefined));
     const results = await engine.searchVector(embedding, { limit, embeddingColumn: column });
     return results.map(r => r.slug);
   }

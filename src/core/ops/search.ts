@@ -450,6 +450,7 @@ async function buildRetrievalResponseMeta(
       ...(m.rerank ? { rerank: m.rerank } : {}),
       ...(m.answerability ? { answerability: m.answerability } : {}),
       ...(m.relational_plan ? { relational_plan: m.relational_plan } : {}),
+      ...(m.omitted_vector_arms ? { omitted_vector_arms: m.omitted_vector_arms } : {}),
     } : {}),
     ...((m?.degraded !== undefined || degraded.length > 0) ? { degraded } : {}),
     projection_readiness: readiness,
@@ -974,9 +975,12 @@ const query: Operation = {
       explain: p.explain === true, explainTarget: explainPrep?.trace,
     });
     const declarations = new DeclarationMemo();
+    // The declared-name rerun searches the same embedding column as the
+    // primary run: its rows are spliced into this page, so a default-space
+    // run would mix another model's vectors into a per-column query.
     results = await withDeclaredNameFanOut(results, queryText, declarations, (alt, altLimit) => hybridSearchCached(ctx.engine, alt, {
       limit: altLimit, excludePrivate, requireSafeChunks: ctx.remote !== false, takesHoldersAllowList: readHolders(ctx),
-      expansion: false, types, ...querySourceScope,
+      expansion: false, types, ...querySourceScope, embeddingColumn: embeddingColumnParam,
     }));
     // #1663 — CRAG confidence gate. Grade what retrieval returned (zero-LLM;
     // reads the stamped honesty signals: evidence, exact_lookup, rerank

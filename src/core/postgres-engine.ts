@@ -70,11 +70,13 @@ import { withVectorSettings } from './search/vector-settings.ts';
 import {
   vectorCastSuffix,
   resolveActiveEmbeddingColumnFromEngine,
+  resolveRegisteredEmbeddingColumnFromEngine,
   resolveWriteColumnFromConfigRows,
   quoteIdentifier,
   COLUMN_NAME_REGEX,
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
+import { replaceEmbeddingColumnRegistry } from './embedding-column-schema.ts';
 import { getFtsLanguage, applyFtsLanguagePolicy } from './fts-language.ts';
 import { splitEmbeddingSignature, currentSpaceChunkPredicate, lockEmbeddingSources } from './embedding-invalidation.ts';
 import { SAFE_FENCE_CHUNKER_VERSION, bodyWriteChunkVersion, chunkWriteInvalidation, currentTextProjectionFilter, requiresSafeChunks, safeChunksFilter } from './search/safe-chunks.ts';
@@ -1397,7 +1399,11 @@ export class PostgresEngine implements BrainEngine {
     }, { alwaysTransaction: true, jitOff: true });
   }
 
-  async getEmbeddingsByChunkIds(ids: number[], column: string = 'embedding'): Promise<Map<number, Float32Array>> {
+  async getEmbeddingsByChunkIds(ids: number[], column: string | ResolvedColumn = 'embedding'): Promise<Map<number, Float32Array>> {
+    if (ids.length === 0) return new Map();
+    if (typeof column === 'string' && column !== 'embedding' && column !== 'embedding_image' && column !== 'embedding_multimodal') {
+      column = await resolveRegisteredEmbeddingColumnFromEngine(this, column);
+    }
     return chunksImpl.getEmbeddingsByChunkIds(unscopedExecutor(this.engineSql, 'chunks: unscoped on master (EO4 inventory)'), ids, column);
   }
 
@@ -1500,10 +1506,10 @@ export class PostgresEngine implements BrainEngine {
     return this.withScopedReadTransaction(opts.sourceIds?.length ? opts.sourceIds : undefined, opts.sourceIds?.length ? undefined : opts.sourceId, tx => chunksImpl.getChunkWindows(scopedRead(this.engineSqlOn(tx)), requests, opts));
   }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn }): Promise<Chunk[]> {
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const sourceId = opts?.sourceId ?? 'default';
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return this.withScopedReadTransaction(sourceIds, sourceIds ? undefined : sourceId, tx => chunksImpl.getChunks(scopedRead(this.engineSqlOn(tx)), column, slug, { sourceIds, sourceId }, opts));
   }
 
@@ -1516,13 +1522,13 @@ export class PostgresEngine implements BrainEngine {
     return quoteIdentifier(col.name);
   }
 
-  async countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+  async countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number> {
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return this.withScopedReadTransaction(undefined, opts?.sourceId, tx => chunksImpl.countStaleChunks(scopedRead(this.engineSqlOn(tx)), column, opts));
   }
 
-  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number> {
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return chunksImpl.sumStaleChunkChars(unscopedExecutor(this.engineSql, 'chunks: unscoped on master (EO4 inventory)'), column, opts);
   }
 
@@ -1531,16 +1537,17 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async invalidateStaleSignatureEmbeddings(opts: { signature: string; sourceId?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this)).name;
+    const column = await resolveActiveEmbeddingColumnFromEngine(this);
     return chunksImpl.invalidateStaleSignatureEmbeddings(fn => this.transaction(fn), column, opts);
   }
 
   async invalidateContentDriftEmbeddings(opts?: { sourceId?: string }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this)).name;
+    const column = await resolveActiveEmbeddingColumnFromEngine(this);
     return chunksImpl.invalidateContentDriftEmbeddings(fn => this.transaction(fn), column, opts);
   }
 
   async listStaleChunks(opts?: {
+    embeddingColumn?: ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;
@@ -1548,7 +1555,7 @@ export class PostgresEngine implements BrainEngine {
     orderBy?: 'page_id' | 'updated_desc';
     afterUpdatedAt?: string | null;
   }): Promise<StaleChunkRow[]> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return this.withScopedReadTransaction(undefined, opts?.sourceId, tx => chunksImpl.listStaleChunks(scopedRead(this.engineSqlOn(tx)), column, opts));
   }
 
@@ -2581,6 +2588,10 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async setConfig(key: string, value: string): Promise<void> {
+    if (key === 'embedding_columns') {
+      await replaceEmbeddingColumnRegistry(this, value);
+      return;
+    }
     return this.connRetry(async () => {
       await this.sql`
         INSERT INTO config (key, value) VALUES (${key}, ${value})
@@ -2590,6 +2601,7 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async unsetConfig(key: string): Promise<number> {
+    if (key === 'embedding_columns') return replaceEmbeddingColumnRegistry(this, null);
     return this.connRetry(async () => {
       const result = await this.sql`DELETE FROM config WHERE key = ${key}` as unknown as { count: number };
       return result.count ?? 0;

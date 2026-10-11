@@ -277,8 +277,45 @@ bytes, and `gbrain doctor` stops reporting `embedding_query_prefix`.
 **Unset.** `gbrain config unset embedding_query_prefix` restores bare query
 embeddings on the next query.
 
-nomic-embed also expects `search_document: ` in front of documents. GBrain does
-not prefix documents, so on nomic the query prefix is a partial fix (#3783).
+nomic-embed also expects `search_document: ` in front of documents. The primary
+embedding path does not add it; an independent column can declare it explicitly.
+
+**Independent embedding columns.** An `embedding_columns` entry declared with
+`provenance: "independent"` is a separate model space with its own
+`documentPrefix` and `queryPrefix`. A query that targets it (`embedding_column`
+per call, or `search_embedding_column`) embeds with that column's provider,
+dimensions and `queryPrefix`; `embedding_query_prefix` and the live
+`embedding_model` do not apply to it. ANN, hydration and cosine re-scoring require
+the own-space model, current text hash, non-null input hash and a completed
+page stamp bound to the current revision, title, wrapping mode, corpus
+generation, chunker and source incarnation. Missing or stale proof makes the
+vector unavailable. The primary vector and scalar provenance remain untouched.
+Independent queries skip the semantic cache. With `search.unified_multimodal`
+on, the incompatible unified arm is listed under `omitted_vector_arms`;
+the separate `embedding_image` arm keeps its existing routing.
+
+`config set embedding_columns` creates an independent column's vector,
+provenance fields and supported HNSW index in the same transaction as its
+registry entry. Keep every existing independent entry when replacing the JSON.
+An existing independent space cannot be removed, downgraded or relabeled;
+use a new column name for a different model, width or prefix. Its persisted
+identity also takes precedence over file-plane declarations.
+
+```bash
+# Add this entry to the existing registry; retain the other entries.
+gbrain config set embedding_columns '{"embedding_nomic":{"provider":"ollama:nomic-embed-text","dimensions":768,"type":"vector","provenance":"independent","documentPrefix":"search_document: ","queryPrefix":"search_query: "}}'
+gbrain embed --stale --embedding-column embedding_nomic --dry-run
+gbrain embed --stale --embedding-column embedding_nomic --catch-up
+gbrain query 'recover server heat for nearby homes' --embedding-column embedding_nomic --no-expand
+```
+
+Registration and staging do not change `search_embedding_column` or the
+primary schema. Staging does not repair or re-chunk unavailable projections.
+The gateway's existing 8,000-character input cap applies after document
+wrapping and prefixing; own-space input proof hashes that transmitted input.
+Row coverage does not mean every character beyond the provider's input
+limit is represented. Check eligible coverage and actual concept retrieval
+before changing the live selector.
 
 ## Choosing a lookup verb (search vs query vs get)
 

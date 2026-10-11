@@ -18,6 +18,7 @@ import type {
   PageReadPolicy,
   SearchOpts,
   HybridSearchMeta,
+  ResolvedColumn,
 } from '../types.ts';
 import { affectsRecall } from '../types.ts';
 export { resolveDateBoundary, resolveSearchDateBounds } from './date-bounds.ts';
@@ -951,7 +952,8 @@ export interface HybridSearchOpts extends SearchOpts {
   /**
    * #5691 INTERNAL — the brain's `embedding_query_prefix`, read once per
    * request (by `hybridSearchCached`, or by `hybridSearch` when undefined) and
-   * prepended to the text vector arm's query embeddings only.
+   * prepended to the text vector arm's query embeddings only. An independent
+   * embedding column ignores it and uses its own `queryPrefix`.
    */
   _queryPrefix?: string;
   /** INTERNAL — the brain opted out of embedding (factEmbeddingDisabled), read once per request: keyword-only, no query embed. */
@@ -1109,7 +1111,7 @@ export async function hybridSearch(
     resolvedMode.cross_modal_llm_intent &&
     isAmbiguousModalityQuery(query);
   const willTryMultimodal =
-    (resolvedMode.unified_multimodal === true ||
+    ((resolvedMode.unified_multimodal === true && !resolvedCol.provenance) ||
       earlyModality === 'image' ||
       earlyModality === 'both' ||
       mayEscalateToMultimodal) &&
@@ -1534,7 +1536,7 @@ export async function cosineReScore(
   engine: BrainEngine,
   results: SearchResult[],
   queryEmbedding: Float32Array,
-  column: string = 'embedding',
+  column: string | ResolvedColumn = 'embedding',
   imageSpace?: { queryEmbedding: Float32Array; column: string },
   attribute = false,
 ): Promise<SearchResult[]> {
@@ -1556,7 +1558,11 @@ export async function cosineReScore(
     // v0.36 (D9): hydrate from the active column so rescore happens in
     // the same embedding space the HNSW just ranked in. Without this,
     // a Voyage HNSW retrieval would HNSW-rank against Voyage vectors but
-    // rescore against OpenAI vectors → NaN or wrong rankings.
+    // rescore against OpenAI vectors → NaN or wrong rankings. An
+    // independent column passes its descriptor: the engine hydrates only
+    // vectors whose own model and text-hash proof is current, so a stale
+    // or other-model vector on a keyword/title row reads as missing
+    // (cosine 0) instead of scoring in the wrong space.
     embeddingMap = chunkIds.length > 0 ? await engine.getEmbeddingsByChunkIds(chunkIds, column) : new Map();
     if (imageSpace && imageChunkIds.length > 0) {
       imageEmbeddingMap = await engine.getEmbeddingsByChunkIds(imageChunkIds, imageSpace.column);
