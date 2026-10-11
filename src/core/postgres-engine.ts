@@ -1559,7 +1559,7 @@ export class PostgresEngine implements BrainEngine {
     return this.withScopedReadTransaction(undefined, opts?.sourceId, tx => chunksImpl.listStaleChunks(scopedRead(this.engineSqlOn(tx)), column, opts));
   }
 
-  async countChunklessPagesWithContent(opts?: { sourceId?: string }): Promise<number> {
+  async countChunklessPagesWithContent(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number> {
     return this.withScopedReadTransaction(undefined, opts?.sourceId, tx => chunksImpl.countChunklessPagesWithContent(scopedRead(this.engineSqlOn(tx)), opts));
   }
 

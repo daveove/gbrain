@@ -1,8 +1,9 @@
 import type { BrainEngine } from '../core/engine.ts';
 import type { ResolvedColumn } from '../core/types.ts';
-import type { ProjectionSnapshot } from '../core/page-state/projections.ts';
+import { readProjectionSnapshot, type ProjectionSnapshot } from '../core/page-state/projections.ts';
 import type { EmbedOpts, EmbedResult } from './embed.ts';
-import { resolveRegisteredEmbeddingColumnFromEngine } from '../core/search/embedding-column.ts';
+import { resolveRegisteredEmbeddingColumnFromEngine, getEmbeddingProvenanceColumns, quoteIdentifier,
+  embeddingColumnSignature, independentPageProofContextSql } from '../core/search/embedding-column.ts';
 import { assertIndependentColumnInitialized } from '../core/embedding-column-schema.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
 import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
@@ -12,6 +13,9 @@ import { prepareEmbeddingProjections, countArchivedEmbeddingWork, reportBlockedP
 import { probeEmbedder } from '../core/embed-stale.ts';
 import { embedBatchWithBackoff, type EmbedBatchWithBackoffOpts } from '../core/embed-retry.ts';
 import { isAborted } from '../core/abort-check.ts';
+import { EMBED_SKIP_FILTER_FRAGMENT } from '../core/embed-skip.ts';
+import { QUARANTINE_FILTER_FRAGMENT } from '../core/quarantine.ts';
+import { currentTextProjectionFilter } from '../core/search/safe-chunks.ts';
 
 /** A staging target that is unregistered, not independent or not initialized; nothing ran. */
 export class EmbeddingStagingTargetError extends Error {
@@ -66,6 +70,34 @@ export function embedCallOpts(prepared: ProjectionSnapshot, target: ResolvedColu
     ...(signal && { abortSignal: signal }),
     ...(target && { embeddingModel: prepared.embeddingColumn.embeddingModel, dimensions: prepared.embeddingColumn.dimensions }),
   };
+}
+
+/** Preview units are chunks: use the live guarded input-proof classification before calling them restamps. */
+export async function countIndependentRestampOnlyChunks(engine: BrainEngine, target: ResolvedColumn, sourceId?: string): Promise<number> {
+  const proof = getEmbeddingProvenanceColumns(target);
+  const signature = embeddingColumnSignature(target);
+  const query = `SELECT p.id,p.slug,p.source_id FROM pages p JOIN sources s ON s.id=p.source_id
+    WHERE p.id>$1 AND p.deleted_at IS NULL AND NOT s.archived
+      AND ${currentTextProjectionFilter('p')} AND ${EMBED_SKIP_FILTER_FRAGMENT} AND ${QUARANTINE_FILTER_FRAGMENT}
+      AND ($3::text IS NULL OR p.source_id=$3)
+      AND p.${quoteIdentifier(proof.pageSignature)} IS DISTINCT FROM $2::text || ':' || ${independentPageProofContextSql('p', 's')}
+      AND EXISTS(SELECT 1 FROM content_chunks cc WHERE cc.page_id=p.id AND cc.modality='text'
+        AND cc.${quoteIdentifier(target.name)} IS NOT NULL)
+    ORDER BY p.id LIMIT 100`;
+  let afterPageId = 0;
+  let count = 0;
+  while (true) {
+    const pages = await engine.executeRaw<{ id: number; slug: string; source_id: string }>(query, [afterPageId, signature, sourceId ?? null]);
+    for (const page of pages) {
+      const prepared = await readProjectionSnapshot(engine, page.slug, page.source_id, { requireLiveSource: true, embeddingColumn: target });
+      if (!prepared || !sameStagingTarget(prepared, target)) continue;
+      for (const chunk of prepared.chunks) {
+        if (chunk.modality === 'text' && chunk.embedding_is_null === false) count++;
+      }
+    }
+    if (pages.length < 100) return count;
+    afterPageId = pages[pages.length - 1]!.id;
+  }
 }
 
 
