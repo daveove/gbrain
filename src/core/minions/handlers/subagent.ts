@@ -262,7 +262,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
   // new Anthropic() only reads env, so launchd/MCP workers whose key lives
   // in the gbrain config file would fail auth (#2048).
   const makeAnthropic = deps.makeAnthropic ?? (() => new Anthropic({ apiKey: resolveAnthropicKey() }));
-  const client: MessagesClient = deps.client ?? makeAnthropic().messages;
+  let client = deps.client;
   const config = deps.config ?? loadConfig() ?? ({ engine: 'postgres' } as GBrainConfig);
   const rateLeaseKey = deps.rateLeaseKey ?? DEFAULT_RATE_KEY;
   const maxConcurrent = deps.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
@@ -898,7 +898,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
 
         const combinedSignal = mergeSignals(mergeSignals(ctx.signal, ctx.shutdownSignal), leaseLost.signal);
         assistantMsg = await invokeAI({ ...chatInvocation('subagent_legacy', normalizeModelId(model), maxOutputTokens), cacheWriteTtl: '5m' },
-          () => client.create(params, { signal: combinedSignal, ...(hasAIInvocationGuard() ? { maxRetries: 0 } : {}) }), sdkInvocationUsage);
+          () => (client ??= makeAnthropic().messages).create(params, { signal: combinedSignal, ...(hasAIInvocationGuard() ? { maxRetries: 0 } : {}) }), sdkInvocationUsage);
       } catch (err) {
         // Release lease eagerly on error so we don't starve capacity.
         clearInterval(leaseRenewTimer);
