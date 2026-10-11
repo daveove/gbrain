@@ -22,6 +22,7 @@ import { isEmbedRetriableError, MAX_RATE_LIMIT_RETRIES, rateLimitDelayMs, restam
 import { AIConfigError, normalizeAIError } from '../ai/errors.ts';
 import { EMBEDDING_ZERO_NORM, isEmbeddingZeroNormError, type EmbeddingZeroNormError } from '../ai/embedding-guard.ts';
 import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
+import { diagnoseEmbedding } from '../ai/gateway.ts';
 import { quoteIdentifier } from '../search/embedding-column.ts';
 import type { ResolvedColumn } from '../types.ts';
 import { acquireWorktree, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
@@ -489,6 +490,17 @@ const GIT_YIELD_ATTEMPTS = 20;
 const GIT_YIELD_MS = 250;
 
 /**
+ * A paid embedding API the billing policy refuses stays queued, unclaimed:
+ * claiming would spend an attempt and record it skipped or failed. An
+ * explicitly configured local recipe (ollama) is not refused and stays claimable.
+ */
+export function deferredEffectKinds(opts: Pick<EffectWorkerOptions, 'embedding'> = {}): string[] {
+  if (opts.embedding) return [];
+  const embedding = diagnoseEmbedding();
+  return !embedding.ok && embedding.reason === 'paid_api_disabled' ? ['embedding'] : [];
+}
+
+/**
  * Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim.
  * Resolves with the number of effects attempted, so a caller can keep draining.
  */
@@ -512,6 +524,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
     } catch (error) { if (claimed) await recordFailure(engine, claimed, error); }
     finally { await lock.release(); }
   }
+  const deferKinds = deferredEffectKinds(opts);
   const run = async (claimed: PersistenceEffect, binding: WorktreeBinding | null, hardened?: boolean) => {
     let effect = claimed;
     const attempt: EffectAttempt = {};
@@ -676,7 +689,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   // or work unblocked by an earlier effect) is claimable again after the flush.
   for (;;) {
     while (attempted < limit && !opts.signal?.aborted) {
-      const effect = await claimPersistenceEffect(engine, opts.hostId);
+      const effect = await claimPersistenceEffect(engine, opts.hostId, deferKinds);
       if (!effect) break;
       attempted++;
       let binding: WorktreeBinding | null = null;
