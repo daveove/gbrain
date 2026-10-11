@@ -74,6 +74,8 @@ import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gat
 import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError, type AIInvocationUsage } from './invocation-guard.ts';
 import { installAICallLogFromEnv } from './call-log.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
+import { assertModelApiAllowed, paidModelApiBlocked, setActiveAIBilling } from './billing-policy.ts';
+
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
 
@@ -459,8 +461,10 @@ export function configureGateway(config: AIGatewayConfig): void {
     base_urls: config.base_urls,
     provider_chat_options: config.provider_chat_options,
     env: config.env,
+    ai_billing: config.ai_billing,
   };
   stashGatewayAnthropicKeyFromEnv(config.env); // #2119: filter + rationale in anthropic-key.ts
+  setActiveAIBilling(config.ai_billing ?? 'api');
   _modelCache.clear();
   _shrinkState.clear();
   // A (re)configure is a new env snapshot: a key that appeared or vanished
@@ -529,7 +533,8 @@ export async function reconfigureGatewayWithEngine(engine: BrainEngine): Promise
   // brain, and discovery fires automatically on connect — a hostile shared
   // brain must never be able to point this process's bearer key at an
   // attacker URL (native chat calls ignore base_urls for the same reason).
-  await refreshLatestOpenAIModels({
+  // ai_billing=subscription: no API-key request at all, not even model listing.
+  if (cfg.ai_billing !== 'subscription') await refreshLatestOpenAIModels({
     env: cfg.env ?? process.env,
     baseUrl: resolveNativeBaseUrl('openai', cfg),
   });
@@ -672,6 +677,7 @@ export function __setGatewayResetBaselineForTests(
 /** Clear every piece of module state. Shared by both reset flavors. */
 function clearGatewayState(): void {
   _config = null;
+  setActiveAIBilling(null);
   clearGatewayModelSources();
   stashGatewayAnthropicKeyFromEnv(undefined); // gateway-owned snapshot dies with the config
   _modelCache.clear();
@@ -883,7 +889,8 @@ export type EmbeddingDiagnosis =
   | { ok: false; reason: 'unknown_provider'; model: string; provider: string; message: string }
   | { ok: false; reason: 'no_touchpoint'; model: string; provider: string; recipeId: string }
   | { ok: false; reason: 'user_provided_dims_unset'; model: string; provider: string; recipeId: string }
-  | { ok: false; reason: 'missing_env'; model: string; provider: string; recipeId: string; missingEnvVars: string[] };
+  | { ok: false; reason: 'missing_env'; model: string; provider: string; recipeId: string; missingEnvVars: string[] }
+  | { ok: false; reason: 'paid_api_disabled'; model: string; provider: string; recipeId: string };
 
 export function diagnoseEmbedding(modelOverride?: string): EmbeddingDiagnosis {
   if (_config?.embedding_identity_unverified && !modelOverride) {
@@ -924,6 +931,11 @@ export function diagnoseEmbedding(modelOverride?: string): EmbeddingDiagnosis {
     };
   }
 
+  // ai_billing=subscription refuses paid embedding APIs before any request;
+  // the configured embedding identity and stored vectors stay untouched.
+  if (paidModelApiBlocked(recipe)) {
+    return { ok: false, reason: 'paid_api_disabled', model: modelStr, provider: parsed.providerId, recipeId: recipe.id };
+  }
   const tp = recipe.touchpoints.embedding;
   if (!tp) {
     return {
@@ -1029,6 +1041,7 @@ export function isAvailable(touchpoint: TouchpointKind, modelOverride?: string):
         : null;
     if (!modelStr) return false;
     const { recipe } = resolveRecipe(modelStr);
+    if (paidModelApiBlocked(recipe)) return false;
 
     // Recipe must actually support the requested touchpoint.
     // Anthropic declares only expansion + chat (no embedding model); requesting
@@ -1427,8 +1440,9 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
         `Anthropic has no embedding model. Use openai or google for embeddings.`,
       );
     case 'claude-cli':
+    case 'codex-cli':
       throw new AIConfigError(
-        `claude-cli has no embedding model. Use openai or google for embeddings.`,
+        `${recipe.id} has no embedding model; a chat subscription is not an embedding entitlement.`,
       );
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
@@ -1557,6 +1571,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
+  assertModelApiAllowed(resolveTarget); // before any budget reservation or client
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = truncateEmbedInputs(texts);
@@ -2378,6 +2393,10 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
       return new ClaudeCliLanguageModel(modelId);
     }
+    case 'codex-cli': {
+      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
+      return new CodexCliLanguageModel(modelId);
+    }
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'expansion');
@@ -2521,7 +2540,7 @@ export async function expand(query: string): Promise<string[]> {
       return parseExpansionResponse(textResult.text) ?? [];
     };
 
-    if (recipe.implementation === 'claude-cli') {
+    if (recipe.implementation === 'claude-cli' || recipe.implementation === 'codex-cli') {
       // claude-cli is NOT structured-output capable, despite being a 'native'
       // tier recipe. ClaudeCliLanguageModel.doGenerate ignores
       // `options.responseFormat` entirely (it renders prompt → `claude
@@ -3305,6 +3324,11 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
       return new ClaudeCliLanguageModel(modelId);
     }
+    case 'codex-cli': {
+      // `codex exec` under the user's ChatGPT login (see the provider).
+      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
+      return new CodexCliLanguageModel(modelId);
+    }
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'chat');
@@ -3516,6 +3540,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   if (fallbackChain?.length) return chatWithFallback(opts, opts.model ?? getChatModel(), fallbackChain, chat, { onRefusal: _config?.chat_fallback_on_refusal !== false });
   const tracker = __budgetStore.getStore() ?? null;
   const modelStrEarly = opts.model ?? getChatModel();
+  assertModelApiAllowed(modelStrEarly); // before guardrails, budget reservation or client
 
   // Guardrail seam: classify ONLY the latest user message before provider
   // inference. Observe-only / fail-open; no-op without a registered guardrail.
@@ -3713,7 +3738,7 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
   // expand() keeps — so the caller's own retry lanes don't re-pay the
   // rejection and turn every call into a permanent provider_error.
   const output = opts.responseSchema
-    && recipe.implementation === 'openai-compatible'
+    && (recipe.implementation === 'openai-compatible' || recipe.implementation === 'codex-cli')
     && recipeSupportsStructuredOutputs(recipe)
     && !_structuredOutputRejectedRecipes.has(recipe.id)
     ? jsonSchemaOutput(opts.responseSchema)
