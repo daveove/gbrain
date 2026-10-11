@@ -848,7 +848,6 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       }
       return;
     }
-    // ai_billing is file-plane canonical: billing-policy.ts never reads the DB plane.
     if (FILE_PLANE_API_KEYS.includes(key) || key === 'ai_billing') {
       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
       const cfg = loadConfigFileOnly() as unknown as Record<string, unknown> | null;
@@ -1128,8 +1127,6 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // Vendor credentials are file-plane canonical (see FILE_PLANE_API_KEYS).
     // Routed, not refused: unlike embedding_model there is nothing to re-init,
     // so the user's intent is satisfiable exactly as typed.
-    // ai_billing rides the same file-plane lane: a DB-plane write would be
-    // ignored by billing-policy.ts and read as a policy change that never happened.
     if (key === 'ai_billing' && value !== 'api' && value !== 'subscription') {
       console.error('[config] ai_billing must be "api" or "subscription".');
       process.exit(1);
