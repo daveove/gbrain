@@ -5,7 +5,7 @@
  * single-flight DB lock (already_in_progress on contention, never a throw),
  * signal threading, progress → job.updateProgress, terminal auth/forbidden
  * returned (NOT thrown — a retry can't fix a dead cookie), lock released in
- * finally. Registered via registerBuiltinJob (in GATEWAY_REFRESH_JOB_NAMES):
+ * finally. Registered via registerBuiltinJob for a fresh gateway each job:
  * the fetch+ingest itself needs no LLM, but the PGLite embed kickoff calls
  * runEmbedCore inline (the embedding gateway), so the pre-handler gateway
  * refresh matters on a worker booted before `config set`.
