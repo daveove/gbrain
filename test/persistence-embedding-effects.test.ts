@@ -17,6 +17,7 @@ import { installPageEmbeddings, installPageProjection, readProjectionSnapshot } 
 import { MAX_RATE_LIMIT_RETRIES } from '../src/core/embed-retry.ts';
 import { AIConfigError } from '../src/core/ai/errors.ts';
 import { invokeAI, isAIInvocationPolicyError, withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -613,6 +614,27 @@ for (const kind of testBackends()) {
         if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
         else await engine.setConfig('embedding_columns', previousRegistry);
         await engine.executeRaw('ALTER TABLE content_chunks DROP COLUMN embedding_effect_test');
+      }
+    });
+
+    check('ai_billing=subscription leaves a paid embedding effect queued, unclaimed, with no request', async () => {
+      const f = await fixture();
+      const before = await state(f.effectId);
+      const realFetch = globalThis.fetch;
+      let fetches = 0;
+      globalThis.fetch = (async () => { fetches++; throw new Error('network must not be reached'); }) as unknown as typeof fetch;
+      configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536,
+        env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'subscription' });
+      try {
+        await runPersistenceEffects(engine, { engine: engine.kind }, { hostId: localHostId(), limit: 1 });
+        const after = await state(f.effectId);
+        expect(after.state).toBe(before.state);
+        expect(after.attempts).toBe(before.attempts);
+        expect(after.error_code).toBeNull();
+        expect(fetches).toBe(0);
+      } finally {
+        globalThis.fetch = realFetch;
+        resetGateway();
       }
     });
   });

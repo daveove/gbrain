@@ -37,6 +37,7 @@ import { join } from 'path';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { loadConfig } from '../src/core/config.ts';
+import { assertModelApiAllowed, resolveAIBilling } from '../src/core/ai/billing-policy.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 
 interface ArmStats {
@@ -205,6 +206,7 @@ function computeVerdict(fixed: ArmStats, adaptive: ArmStats): ABReceipt['verdict
 async function main() {
   const argv = process.argv.slice(2);
   const opts = parseArgs(argv);
+  if (!opts.dryRun) assertModelApiAllowed('anthropic:claude-sonnet-4-6', resolveAIBilling(loadConfig()));
 
   const engine = await openEngine();
   try {

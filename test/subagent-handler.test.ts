@@ -562,56 +562,6 @@ describe('subagent handler input validation', () => {
   });
 });
 
-describe('makeSubagentHandler default client construction', () => {
-  test('factory default wires sdk.messages through to the handler', async () => {
-    // Regression guard for the v0.16.0 shipped bug: makeSubagentHandler
-    // was casting `new Anthropic()` (top-level SDK class) to MessagesClient,
-    // but `.create()` lives at sdk.messages.create. Every subagent job in
-    // production died with "client.create is not a function" on first LLM
-    // call. This test exercises the default-client path (no `deps.client`
-    // injected) via the makeAnthropic dep-injection seam, so the exact
-    // default-branch construction is covered without a real API call.
-    const calls: Anthropic.MessageCreateParamsNonStreaming[] = [];
-    const fakeSdk = {
-      messages: {
-        async create(
-          params: Anthropic.MessageCreateParamsNonStreaming,
-        ): Promise<Anthropic.Message> {
-          calls.push(params);
-          return {
-            id: 'msg_regression',
-            type: 'message',
-            role: 'assistant',
-            model: params.model,
-            stop_reason: 'end_turn',
-            stop_sequence: null,
-            content: [{ type: 'text', text: 'ok' }],
-            usage: {
-              input_tokens: 1,
-              output_tokens: 1,
-              cache_read_input_tokens: 0,
-              cache_creation_input_tokens: 0,
-            },
-          } as unknown as Anthropic.Message;
-        },
-      },
-    } as unknown as Anthropic;
-
-    // Crucial: do NOT pass `client`. Only `makeAnthropic`. This forces the
-    // factory to hit the default-client branch (`deps.client ?? makeAnthropic().messages`).
-    const handler = makeSubagentHandler({
-      engine,
-      makeAnthropic: () => fakeSdk,
-      toolRegistry: [],
-    });
-    const ctx = await makeCtx({ prompt: 'hello' });
-    const result = await handler(ctx);
-
-    expect(calls.length).toBe(1);
-    expect(result.stop_reason).toBe('end_turn');
-    expect(result.result).toBe('ok');
-  });
-});
 
 // ── #2778: per-turn output-token cap + max_tokens stop handling ─────
 

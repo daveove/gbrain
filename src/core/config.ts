@@ -139,6 +139,13 @@ export interface GBrainConfig {
    * or the other, never both.
    */
   embedding_disabled?: boolean;
+  /**
+   * Paid model API policy (src/core/ai/billing-policy.ts). `subscription`
+   * refuses every per-token provider API before a request is built and makes
+   * text tiers default to `codex-cli:` (ChatGPT login). File plane + env
+   * (`GBRAIN_AI_BILLING`) only; either selecting `subscription` wins.
+   */
+  ai_billing?: 'api' | 'subscription';
   expansion_model?: string;
   /**
    * Default chat model for `gateway.chat()` callers (v0.27+).
@@ -1213,6 +1220,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'embedding_model',
   'embedding_dimensions',
   'embedding_disabled',
+  'ai_billing',
   'expansion_model',
   'chat_model',
   'chat_fallback_chain',
