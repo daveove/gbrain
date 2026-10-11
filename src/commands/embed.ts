@@ -1288,7 +1288,7 @@ async function embedAll(
     }
     page = prepared.snapshot.page;
     const chunks = prepared.chunks;
-    const toEmbed = chunks; // staleOnly path handled above via embedAllStale
+    const toEmbed = target ? chunks.filter(chunk => chunk.modality === 'text') : chunks;
 
     result.total_chunks += chunks.length;
     result.skipped += chunks.length - toEmbed.length;

@@ -184,7 +184,7 @@ for (const backend of testBackends()) {
         }
       });
 
-      test('single-page staging excludes image chunks without changing their primary vectors', async () => {
+      test('single-page and --all staging exclude image chunks without changing primary vectors', async () => {
         await engine.executeRaw("UPDATE content_chunks SET modality='image' WHERE page_id=(SELECT id FROM pages WHERE slug='notes/alpha')");
         try {
           const before = await liveSpace();
@@ -192,6 +192,11 @@ for (const backend of testBackends()) {
           expect(result.embedded).toBe(0);
           expect(result.failures).toBe(0);
           expect(seen).toEqual([]);
+          expect((await staged()).find(row => row.slug === 'notes/alpha')?.dims).toBeNull();
+          expect(await liveSpace()).toEqual(before);
+          const all = await runEmbedCore(engine, { all: true, quiet: true, embeddingColumn: COLUMN });
+          expect(all.embedded).toBe(SLUGS.length - 1);
+          expect(all.failures).toBe(0);
           expect((await staged()).find(row => row.slug === 'notes/alpha')?.dims).toBeNull();
           expect(await liveSpace()).toEqual(before);
         } finally {
