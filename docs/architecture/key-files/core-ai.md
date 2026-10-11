@@ -3,7 +3,7 @@
 [Subsystem index](../KEY_FILES.md). Read only the entries relevant to your change.
 Current behavior and load-bearing invariants; history belongs in Git and CHANGELOG.
 
-- `src/core/ai/billing-policy.ts` — File `ai_billing` and env `GBRAIN_AI_BILLING`: subscription wins, invalid values refuse paid APIs, no DB override. Local inference and subscription CLIs remain allowed; paid embedding effects stay queued and vector identity stays unchanged.
+- `src/core/ai/billing-policy.ts` — File/env subscription opt-outs latch at admission, with no DB override. Forced-ChatGPT Codex and local inference remain allowed; unverified Claude CLI billing is refused. Paid embedding effects stay queued with retry allowance and vector identity unchanged.
 
 - `src/core/ai/build-gateway-config.ts` — `buildGatewayConfig(c: GBrainConfig): AIGatewayConfig`, re-exported by `src/cli.ts`. Lets core modules (`init-embed-check.ts`) reuse it without importing the CLI entrypoint. Delegates the file-plane API-key fold + env merge to `mergedProviderEnv` (`src/core/ai/provider-env.ts`); keeps ownership of threading local-server `*_BASE_URL` env vars into base_urls. `process.env` wins EXCEPT empty-string / undefined values are dropped before the merge, so an injected empty `ANTHROPIC_API_KEY=''` (Claude Code neuters subprocess LLM calls this way) can't clobber a valid config-plane key; `'0'` / `'false'` are preserved. Pinned by `test/ai/build-gateway-config.test.ts`.
 

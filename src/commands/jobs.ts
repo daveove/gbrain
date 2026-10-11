@@ -478,7 +478,7 @@ export async function registerBuiltinHandlers(
   // terminal with "shell handler registered…" lines. The real `jobs work` path
   // omits opts and prints as before.
   const quiet = opts?.quiet === true;
-  worker.register('sync', makeSyncHandler(engine));
+  registerBuiltinJob(worker, engine, 'sync', makeSyncHandler(engine));
   registerBuiltinJob(worker, engine, 'embed', makeEmbedHandler(engine));
   worker.register('lint', makeLintHandler(engine));
   registerBuiltinJob(worker, engine, 'extract-conversation-facts', makeExtractConversationFactsHandler(engine));
@@ -487,8 +487,8 @@ export async function registerBuiltinHandlers(
   registerBuiltinJob(worker, engine, 'enrich', makeEnrichHandler(engine));
   worker.register('lint-fix', makeLintFixHandler(engine));
   worker.register('integrity-auto', integrityAutoHandler);
-  worker.register('sync-retry-failed', makeSyncRetryFailedHandler(engine));
-  worker.register('import', makeImportHandler(engine));
+  registerBuiltinJob(worker, engine, 'sync-retry-failed', makeSyncRetryFailedHandler(engine));
+  registerBuiltinJob(worker, engine, 'import', makeImportHandler(engine));
   worker.register('extract', makeExtractHandler(engine));
   worker.register('backlinks', makeBacklinksHandler(engine));
   registerBuiltinJob(worker, engine, 'facts-absorb', withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine)));
@@ -541,7 +541,7 @@ export async function registerBuiltinHandlers(
   // caller-provided slug).
   // ============================================================
   const { makeIngestCaptureHandler } = await import('../core/minions/handlers/ingest-capture.ts');
-  worker.register('ingest_capture', makeIngestCaptureHandler(engine));
+  registerBuiltinJob(worker, engine, 'ingest_capture', makeIngestCaptureHandler(engine));
 
   // ============================================================
   // v0.36+ brain-health-100 wave: 11 new handlers for autonomous
@@ -555,7 +555,7 @@ export async function registerBuiltinHandlers(
   // recompute_emotional_weight.
   // ============================================================
 
-  worker.register('reindex', makeReindexHandler(engine));
+  registerBuiltinJob(worker, engine, 'reindex', makeReindexHandler(engine));
   worker.register('repair-jsonb', repairJsonbHandler);
   worker.register('orphans', makeOrphansHandler(engine));
   worker.register('integrity', integrityHandler);

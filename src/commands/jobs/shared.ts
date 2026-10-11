@@ -252,7 +252,7 @@ const PAID_JOB_NAMES = new Set([
   'synthesize', 'patterns', 'consolidate', 'extract_facts', 'extract-atoms-drain',
   'embed-backfill', 'connector-sync', 'extract-takes-from-pages', 'embed-catch-up',
   'chronicle_extract', 'loops_extract', 'subagent', 'skillopt', 'import', 'reindex',
-  'sync', 'ingest_capture',
+  'sync', 'sync-retry-failed', 'ingest_capture',
 ]);
 
 /** Job names whose handlers can make paid model-provider calls (DX-O3(d) marks them in a legacy preview). */

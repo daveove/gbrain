@@ -3,9 +3,9 @@
  *
  * `ai_billing` (file plane, ~/.gbrain/config.json) and `GBRAIN_AI_BILLING`
  * (env) select it. `api` (the default) keeps every recipe callable.
- * `subscription` allows only recipes that bill a logged-in subscription CLI
- * (`codex-cli`, `claude-cli`) or run on local inference; every other recipe
- * (OpenAI, Anthropic, Google, Voyage, OpenRouter, LiteLLM, ...) is refused
+ * `subscription` allows only the ChatGPT-authenticated `codex-cli` recipe
+ * or local inference. The legacy Claude CLI adapter cannot prove its billing
+ * mode; it and every other recipe (OpenAI, Anthropic, Voyage, ...) are refused
  * BEFORE any request is built, for chat, expansion, OCR, embedding,
  * multimodal, rerank and transcription alike.
  *
@@ -23,14 +23,15 @@
  */
 import type { Recipe } from './types.ts';
 import { AIConfigError } from './errors.ts';
+import { loadConfigFileOnly } from '../config.ts';
 import { resolveRecipe } from './model-resolver.ts';
 
 export type AIBilling = 'api' | 'subscription';
 
 export const AI_BILLING_ENV = 'GBRAIN_AI_BILLING';
 
-/** Recipes billed through a logged-in subscription CLI, never per token. */
-const SUBSCRIPTION_IMPLEMENTATIONS: Partial<Record<Recipe['implementation'], true>> = { 'codex-cli': true, 'claude-cli': true };
+/** Only the native CLI adapter that enforces subscription authentication. */
+const SUBSCRIPTION_IMPLEMENTATIONS: Partial<Record<Recipe['implementation'], true>> = { 'codex-cli': true };
 
 /** Local-inference recipes: no provider account, no per-token bill. */
 const LOCAL_RECIPE_IDS: Record<string, true> = { ollama: true, 'llama-server': true, 'llama-server-reranker': true, lmstudio: true };
@@ -58,9 +59,12 @@ export function setActiveAIBilling(billing: AIBilling | null): void {
   _active = billing;
 }
 
-/** The configured gateway's policy, else the env plane alone. */
+/** Re-read protected planes at admission; an observed opt-out stays latched until gateway refresh. */
 export function activeAIBilling(): AIBilling {
-  return _active ?? resolveAIBilling(null, process.env);
+  if (_active === 'subscription') return _active;
+  const billing = resolveAIBilling(loadConfigFileOnly(), process.env);
+  if (billing === 'subscription') _active = billing;
+  return billing;
 }
 
 /** True when `recipe` bills per token through a provider API account. */

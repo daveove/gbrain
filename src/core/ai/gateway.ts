@@ -79,7 +79,7 @@ import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationG
 import { installAICallLogFromEnv } from './call-log.ts';
 import { cachedQueryEmbedding, clearQueryEmbedCache, queryEmbedCacheKey, queryEmbedGeneration, storeQueryEmbedding } from './query-embed-cache.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
-import { assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
+import { activeAIBilling, assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
 
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
@@ -514,7 +514,7 @@ export function refreshGatewayEnvFromFilePlane(): void {
   // boot fold installed from provider_base_urls.{anthropic,openai}. File-plane
   // only (cfg is loadConfig() here), preserving the mount-safety rule that
   // DB-plane base_urls never steer native keys.
-  _config = { ..._config, ai_billing: resolveAIBilling(cfg?.ai_billing === undefined ? _config : cfg, process.env),
+  _config = { ..._config, ai_billing: cfg?.ai_billing === undefined ? activeAIBilling() : resolveAIBilling(cfg, process.env),
     env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
   setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
@@ -558,7 +558,7 @@ let _discovery: Promise<void> | null = null;
  * key. Fail-open.
  */
 async function discoverBeforeOpenAICall(modelStr: string | undefined): Promise<void> {
-  if (!modelStr) return;
+  if (!modelStr || activeAIBilling() === 'subscription') return;
   try { if (resolveRecipe(modelStr).recipe.id !== 'openai') return; } catch { return; }
   _discovery ??= (async () => {
     try {
@@ -575,9 +575,7 @@ async function discoverBeforeOpenAICall(modelStr: string | undefined): Promise<v
 }
 
 async function resolveGatewayModels(engine: BrainEngine): Promise<AIGatewayConfig> {
-  const cfg = requireConfig();
-
-
+  const cfg = { ...requireConfig(), ai_billing: activeAIBilling() };
   // The two resolutions below each walk a 5-tier precedence chain that reads
   // up to 4 config keys, plus alias expansion. Against the engine that is
   // many sequential round trips before the CLI does any work — seconds of
@@ -1944,6 +1942,7 @@ async function embedMultimodalUnmetered(
   // text embeddings can route multimodal to Voyage without changing the
   // primary embedding_model. Falls back to embedding_model for single-model setups.
   const modelStr = cfg.embedding_multimodal_model ?? getEmbeddingModel();
+  assertModelApiAllowed(modelStr);
   const { parsed, recipe } = resolveRecipe(modelStr);
   const touchpoint = recipe.touchpoints.embedding;
   if (!touchpoint?.supports_multimodal) {
