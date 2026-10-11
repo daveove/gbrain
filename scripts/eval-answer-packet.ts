@@ -1,6 +1,8 @@
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { chat, configureGateway, type ChatOpts, type ChatResult } from '../src/core/ai/gateway.ts';
+import { assertModelApiAllowed, resolveAIBilling } from '../src/core/ai/billing-policy.ts';
+import { loadConfigFileOnly } from '../src/core/config.ts';
 import { withAIInvocationGuard, type AIInvocationUsage } from '../src/core/ai/invocation-guard.ts';
 import { BudgetTracker } from '../src/core/budget/budget-tracker.ts';
 import { canonicalLookup } from '../src/core/model-pricing.ts';
@@ -204,6 +206,7 @@ export function reportSummaries(manifest: JsonRecord, pairs: JsonRecord[], calls
 }
 
 async function countReader(opts: ChatOpts): Promise<number> {
+  assertModelApiAllowed(READER, resolveAIBilling(loadConfigFileOnly()));
   const response = await fetch('https://api.anthropic.com/v1/messages/count_tokens', {
     method: 'POST', headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-api-key': process.env.ANTHROPIC_API_KEY! },
     body: JSON.stringify({ model: READER.split(':')[1], system: opts.system, messages: opts.messages }), signal: AbortSignal.timeout(60_000),
@@ -223,6 +226,7 @@ async function main(args: string[]) {
   if (!['prepare', 'dev', 'freeze', 'holdout', 'report'].includes(command) || !outputArg) {
     throw new Error('Usage: bun scripts/eval-answer-packet.ts <prepare|dev|freeze|holdout|report> OUT DATASET RECEIPT [v1|v2]. prepare/report make no generation calls; dev/holdout are paid ($20 shared maximum).');
   }
+  if (command === 'dev' || command === 'holdout') assertModelApiAllowed(READER, resolveAIBilling(loadConfigFileOnly()));
   const out = resolve(outputArg);
   mkdirSync(out, { recursive: true, mode: 0o700 });
   const lock = join(out, 'writer.lock');

@@ -59,13 +59,13 @@ import { hasAnthropicKey, stashGatewayAnthropicKeyFromEnv } from './anthropic-ke
 import { AIConfigError, AITransientError, isStructuredOutputRejection, normalizeAIError } from './errors.ts';
 import { getProviderCapabilities } from './capabilities.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
-import { loadConfig } from '../config.ts';
+import { loadConfig, loadConfigFileOnly } from '../config.ts';
 import type { GBrainConfig } from '../config.ts';
 import { mergedProviderEnv } from './provider-env.ts';
 import { buildGatewayConfig, foldNativeBaseUrlsFromFilePlane } from './build-gateway-config.ts';
 import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationGuard, isAIInvocationPolicyError } from './invocation-guard.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
-import { assertModelApiAllowed, paidModelApiBlocked, setActiveAIBilling } from './billing-policy.ts';
+import { assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
 
 // ---- Gateway-wide AI-HTTP timeout (v0.42.20.0, #1762/#1775) ----
@@ -450,10 +450,10 @@ export function configureGateway(config: AIGatewayConfig): void {
     base_urls: config.base_urls,
     provider_chat_options: config.provider_chat_options,
     env: config.env,
-    ai_billing: config.ai_billing,
+    ai_billing: resolveAIBilling(config, process.env) === 'subscription' ? 'subscription' : resolveAIBilling(loadConfigFileOnly(), config.env),
   };
   stashGatewayAnthropicKeyFromEnv(config.env); // #2119: filter + rationale in anthropic-key.ts
-  setActiveAIBilling(config.ai_billing ?? 'api');
+  setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
   _shrinkState.clear();
   // A (re)configure is a new env snapshot: a key that appeared or vanished
@@ -463,12 +463,11 @@ export function configureGateway(config: AIGatewayConfig): void {
 }
 
 /**
- * Re-fold ONLY the provider-key env from the file plane + process env into the
- * LIVE gateway config, leaving models/base_urls/chat-options untouched. For
- * long-lived workers: a key added to ~/.gbrain/config.json reaches the gateway
- * at the next job without clobbering the DB-plane-merged fields the worker's
- * boot fold installed (a full configureGateway(buildGatewayConfig(loadConfig()))
- * here would reset those to file-plane-only values). No-op before configure.
+ * Re-fold provider keys and billing from the file/env plane into the LIVE
+ * gateway, leaving models/base_urls/chat-options untouched. Long-lived workers
+ * pick up a billing opt-out at the next job without clobbering DB-merged model
+ * fields. A missing file policy preserves the configured mode; an explicit
+ * file policy can change it, subject to the process subscription-only setting.
  */
 export function refreshGatewayEnvFromFilePlane(): void {
   if (!_config) return;
@@ -483,7 +482,9 @@ export function refreshGatewayEnvFromFilePlane(): void {
   // boot fold installed from provider_base_urls.{anthropic,openai}. File-plane
   // only (cfg is loadConfig() here), preserving the mount-safety rule that
   // DB-plane base_urls never steer native keys.
-  _config = { ..._config, env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
+  _config = { ..._config, ai_billing: resolveAIBilling(cfg?.ai_billing === undefined ? _config : cfg, process.env),
+    env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
+  setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
 }
 
@@ -3127,12 +3128,11 @@ export interface ChatOpts {
   cacheSystem?: boolean;
   /**
    * JSON Schema the reply must conform to (#4863). Honored ONLY on
-   * openai-compatible recipes that declare `supports_structured_outputs` —
-   * backends that enforce `response_format: json_schema` server-side
-   * (Ollama's grammar-constrained decoding). Every other lane ignores the
-   * field, so native / claude-cli calls are byte-identical with or without
-   * it, and the reply still arrives as `text`: callers keep parsing and
-   * validating it themselves (see `jsonSchemaOutput`).
+   * recipes declaring `supports_structured_outputs`: openai-compatible
+   * backends enforce `response_format: json_schema`; Codex CLI uses its
+   * supported `--output-schema`. Other lanes ignore the field (including
+   * claude-cli), and every reply still arrives as `text`: callers keep parsing
+   * and validating it themselves (see `jsonSchemaOutput`).
    */
   responseSchema?: { name: string; description?: string; schema: Record<string, unknown> };
   /** Caller purpose (`skillopt.judge`, …) stamped on the BudgetTracker ledger row. */

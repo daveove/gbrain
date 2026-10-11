@@ -3,9 +3,6 @@ set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 # Two connections: putPage can need a second one inside its transaction.
 export GBRAIN_POOL_SIZE=2 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
-# Nightly runs never use paid model APIs (DAV-6933): text goes through the
-# Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
-export GBRAIN_AI_BILLING=subscription
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"
@@ -14,6 +11,9 @@ mkdir -p "$(dirname "$LOG")" "$STATE"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
+# Nightly runs never use paid model APIs (DAV-6933): text goes through the
+# Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
+export GBRAIN_AI_BILLING=subscription
 # Scheduled jobs hold one session-mode connection (:5432), never the Supabase
 # transaction pooler (:6543). loadConfig honors GBRAIN_HOME and env precedence.
 session_url="$(bun -e 'const { loadConfig } = await import(process.argv[1]); const { deriveSessionPoolerUrl } = await import(process.argv[2]); const url = loadConfig()?.database_url; if (url) process.stdout.write(deriveSessionPoolerUrl(url) ?? url);' "$REPO/src/core/config.ts" "$REPO/src/core/connection-manager.ts")"

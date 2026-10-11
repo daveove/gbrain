@@ -115,8 +115,11 @@ priced at $0 by the cap. A configured paid embedding model (such as
 `openai:text-embedding-3-large`) is refused before any request, so new facts
 land with a NULL vector for a later `gbrain embed --facts` backfill; the
 configured model, stored vectors and queued embedding effects are left as they
-are. With no ChatGPT login the runner stops `unavailable` before claiming a job;
-there is no fallback to the OpenAI API. See `src/core/ai/billing-policy.ts`.
+are. With no ChatGPT login the runner stops `unavailable` and requeues the job
+unspent, without consuming an attempt. There is no OpenAI API fallback.
+The paid-only E5 and answer-packet eval arms also refuse subscription mode
+before opening their run; read-only report/prepare commands stay available.
+See `src/core/ai/billing-policy.ts`.
 
 The step runs `scripts/run-facts-absorb.ts`, which claims only `facts-absorb`
 jobs. Before each job runs, it prices that job's model at its worst case; a job

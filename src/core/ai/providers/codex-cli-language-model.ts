@@ -39,8 +39,6 @@ import type {
 } from '@ai-sdk/provider';
 import { AIConfigError } from '../errors.ts';
 
-const LOGIN_RECHECK_MS = 10 * 60_000;
-
 /** Tool surfaces a raw text call must never reach (codex 0.162 feature names). */
 const DISABLED_FEATURES = [
   'shell_tool', 'unified_exec', 'apps', 'plugins', 'multi_agent', 'image_generation',
@@ -122,19 +120,8 @@ function run(args: string[], opts: { cwd: string; stdin?: string; signal?: Abort
   return promise;
 }
 
-let _loginVerifiedAt = 0;
-let _loginVerifiedBin: string | undefined;
-
-/** @internal test seam: forget the cached login check. */
-export function __resetCodexLoginCacheForTests(): void {
-  _loginVerifiedAt = 0;
-  _loginVerifiedBin = undefined;
-}
-
-/** One cached `codex login status` check; exported for callers that must refuse before claiming work. */
+/** Fresh native login check; callers also use it before admitting queued work. */
 export async function assertCodexChatGptLogin(cwd: string = tmpdir(), signal?: AbortSignal): Promise<void> {
-  const bin = process.env.GBRAIN_CODEX_CLI_BIN ?? 'codex';
-  if (_loginVerifiedBin === bin && Date.now() - _loginVerifiedAt < LOGIN_RECHECK_MS) return;
   const status = await run(['login', 'status', '-c', 'forced_login_method="chatgpt"'], { cwd, signal });
   if (status.code !== 0 || !/logged in using chatgpt/i.test(`${status.stdout}\n${status.stderr}`)) {
     throw new AIConfigError(
@@ -142,8 +129,6 @@ export async function assertCodexChatGptLogin(cwd: string = tmpdir(), signal?: A
       'Run `codex login` and sign in with the ChatGPT account. Do not use `codex login --with-api-key`.',
     );
   }
-  _loginVerifiedAt = Date.now();
-  _loginVerifiedBin = bin;
 }
 
 function textOf(parts: ReadonlyArray<{ type: string; text?: string }>): string {
@@ -246,7 +231,7 @@ export class CodexCliLanguageModel implements LanguageModelV2 {
       const turnFailed = events.some(e => e.type === 'turn.failed');
       const messages = events.filter(e => e.type === 'item.completed' && e.item?.type === 'agent_message');
       const text = messages.at(-1)?.item?.text;
-      if (result.code !== 0 || turnFailed || text === undefined) {
+      if (result.code !== 0 || turnFailed || !text?.trim()) {
         const detail = failure ?? (result.stderr.trim() || 'no agent message');
         // Raw CLI text goes after the marker: classifyGlobalLlmError's phrase
         // regexes only scan the text before it (see claude-cli provider).

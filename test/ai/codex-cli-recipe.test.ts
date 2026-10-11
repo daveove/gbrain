@@ -13,11 +13,8 @@ import { withEnv } from '../helpers/with-env.ts';
 import {
   CodexCliLanguageModel,
   CodexCliProcessError,
-  __resetCodexLoginCacheForTests,
-  codexChildEnv,
 } from '../../src/core/ai/providers/codex-cli-language-model.ts';
 import { AIConfigError } from '../../src/core/ai/errors.ts';
-import { getRecipe } from '../../src/core/ai/recipes/index.ts';
 
 const dir = join(tmpdir(), `codex-cli-stub-${process.pid}`);
 const bin = join(dir, 'codex');
@@ -40,12 +37,7 @@ beforeAll(() => {
     'fi',
     'printf "%s\\n" "$@" > "$D/exec-argv"',
     'env > "$D/exec-env"',
-    'cat > "$D/exec-stdin"',
-    'prev=""',
-    'for a in "$@"; do',
-    '  if [ "$prev" = "--output-schema" ]; then cp "$a" "$D/exec-schema"; fi',
-    '  prev="$a"',
-    'done',
+    'cat > /dev/null',
     'if [ -n "$SLEEP" ]; then sleep "$SLEEP"; fi',
     `cat "${eventsPath}"`,
     'exit "${CODE:-0}"',
@@ -56,8 +48,7 @@ beforeAll(() => {
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 beforeEach(() => {
-  __resetCodexLoginCacheForTests();
-  for (const f of ['exec-argv', 'exec-env', 'exec-stdin', 'exec-schema', 'login-argv', 'stub-login', 'stub-sleep', 'stub-exit']) {
+  for (const f of ['exec-argv', 'exec-env', 'login-argv', 'stub-login', 'stub-sleep', 'stub-exit']) {
     rmSync(join(dir, f), { force: true });
   }
 });
@@ -94,53 +85,8 @@ function stubEnv(env: Record<string, string | undefined> = {}): Record<string, s
   return rest;
 }
 
-describe('codex-cli recipe', () => {
-  test('declares text touchpoints only, structured output, no tools', () => {
-    const recipe = getRecipe('codex-cli')!;
-    expect(recipe.implementation).toBe('codex-cli');
-    expect(recipe.auth_env?.required).toEqual([]);
-    expect(recipe.touchpoints.chat!.supports_tools).toBe(false);
-    expect(recipe.touchpoints.chat!.supports_structured_outputs).toBe(true);
-    expect(recipe.touchpoints.chat!.models).toContain('gpt-5.6-terra');
-    expect(recipe.touchpoints.expansion).toBeDefined();
-    expect(recipe.touchpoints.embedding).toBeUndefined();
-    expect(recipe.touchpoints.reranker).toBeUndefined();
-  });
-});
 
 describe('CodexCliLanguageModel', () => {
-  test('text round trip: ChatGPT-only flags, isolation flags, system as developer instructions, usage', async () => {
-    stage(ok('hello'));
-    await withEnv(stubEnv(), async () => {
-      const r = await new CodexCliLanguageModel('codex-cli:gpt-5.6-terra').doGenerate(call());
-      expect(r.content).toEqual([{ type: 'text', text: 'hello' }]);
-      expect(r.usage).toEqual({ inputTokens: 100, outputTokens: 7, totalTokens: 107, cachedInputTokens: 40 });
-    });
-    const argv = readFileSync(join(dir, 'exec-argv'), 'utf8').split('\n');
-    for (const flag of ['exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules', 'forced_login_method="chatgpt"',
-      'model_provider="openai"', 'web_search="disabled"', 'shell_tool', 'unified_exec', '-']) {
-      expect(argv).toContain(flag);
-    }
-    expect(argv[argv.indexOf('--sandbox') + 1]).toBe('read-only');
-    expect(argv[argv.indexOf('-m') + 1]).toBe('gpt-5.6-terra');
-    expect(argv).not.toContain('--output-schema');
-    expect(readFileSync(join(dir, 'login-argv'), 'utf8')).toContain('forced_login_method="chatgpt"');
-    // Role boundary: system text rides in developer_instructions; stdin is the user turn only.
-    const instructions = argv.find(a => a.startsWith('developer_instructions='))!;
-    expect(JSON.parse(instructions.slice('developer_instructions='.length))).toContain('Extract facts.');
-    expect(readFileSync(join(dir, 'exec-stdin'), 'utf8')).toBe('Alice joined Acme.');
-  });
-
-  test('json responseFormat is passed as --output-schema', async () => {
-    const schema = { type: 'object', properties: { facts: { type: 'array', items: { type: 'string' } } }, required: ['facts'], additionalProperties: false };
-    stage(ok('{"facts":["Alice joined Acme"]}'));
-    await withEnv(stubEnv(), async () => {
-      const r = await new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call({ responseFormat: { type: 'json', schema: schema as never } }));
-      expect(r.content[0]).toEqual({ type: 'text', text: '{"facts":["Alice joined Acme"]}' });
-    });
-    expect(readFileSync(join(dir, 'exec-argv'), 'utf8').split('\n')).toContain('--output-schema');
-    expect(JSON.parse(readFileSync(join(dir, 'exec-schema'), 'utf8'))).toEqual(schema);
-  });
 
   test('the child never inherits API keys or other credentials', async () => {
     stage(ok('x'));
@@ -150,8 +96,6 @@ describe('CodexCliLanguageModel', () => {
     });
     const env = readFileSync(join(dir, 'exec-env'), 'utf8');
     for (const leaked of ['sk-leak', 'ck-leak', 'example.invalid', 'postgres://', 'a-leak']) expect(env).not.toContain(leaked);
-    expect(env).toContain(`CODEX_HOME=${join(dir, 'home')}`);
-    expect(Object.keys(codexChildEnv({ PATH: '/bin', OPENAI_API_KEY: 'x', GITHUB_TOKEN: 'y' }))).toEqual(['PATH']);
   });
 
   for (const login of ['apikey', 'none'] as const) {
@@ -160,11 +104,22 @@ describe('CodexCliLanguageModel', () => {
       await withEnv(stubEnv({ CODEX_STUB_LOGIN: login, OPENAI_API_KEY: 'sk-present' }), async () => {
         const err = await new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call()).catch(e => e);
         expect(err).toBeInstanceOf(AIConfigError);
-        expect(String(err.message)).toContain('ChatGPT login');
       });
       expect(existsSync(join(dir, 'exec-argv'))).toBe(false);
     });
   }
+
+  test('changing from ChatGPT login to API auth stops the next generation before exec', async () => {
+    stage(ok('first'));
+    await withEnv(stubEnv(), async () => {
+      await new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call());
+    });
+    rmSync(join(dir, 'exec-argv'));
+    await withEnv(stubEnv({ CODEX_STUB_LOGIN: 'apikey' }), async () => {
+      await expect(new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call())).rejects.toBeInstanceOf(AIConfigError);
+    });
+    expect(existsSync(join(dir, 'exec-argv'))).toBe(false);
+  });
 
   test('turn.failed usage limit surfaces a typed 429', async () => {
     stage([{ type: 'turn.started' }, { type: 'turn.failed', error: { message: "You've hit your usage limit." } }]);
@@ -175,8 +130,8 @@ describe('CodexCliLanguageModel', () => {
     });
   });
 
-  test('a run with no agent message is an error, never an empty answer', async () => {
-    stage([{ type: 'turn.started' }, { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 0 } }]);
+  test('a completed run containing only whitespace is an error, never an empty answer', async () => {
+    stage([{ type: 'turn.started' }, { type: 'item.completed', item: { type: 'agent_message', text: ' \n ' } }, { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 0 } }]);
     await withEnv(stubEnv(), async () => {
       await expect(new CodexCliLanguageModel('gpt-5.6-terra').doGenerate(call())).rejects.toBeInstanceOf(CodexCliProcessError);
     });

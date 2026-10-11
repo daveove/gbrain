@@ -33,7 +33,7 @@ export const codexCli: Recipe = {
       // Subscription-billed: no per-token API charge.
       cost_per_1m_tokens_usd: 0,
       price_last_verified: '2026-10-11',
-      // One `codex exec` cold start (~8s measured) per call.
+      // One Codex CLI process per call; allow for subscription startup.
       default_timeout_ms: 60_000,
     },
     chat: {

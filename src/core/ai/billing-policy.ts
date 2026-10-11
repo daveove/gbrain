@@ -36,6 +36,7 @@ const SUBSCRIPTION_IMPLEMENTATIONS: Partial<Record<Recipe['implementation'], tru
 const LOCAL_RECIPE_IDS: Record<string, true> = { ollama: true, 'llama-server': true, 'llama-server-reranker': true, lmstudio: true };
 
 function selects(raw: unknown): AIBilling | null {
+  if (raw !== undefined && typeof raw !== 'string') return 'subscription';
   if (typeof raw !== 'string' || !raw.trim()) return null;
   return raw.trim().toLowerCase() === 'api' ? 'api' : 'subscription';
 }
