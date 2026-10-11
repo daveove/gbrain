@@ -92,6 +92,12 @@ export interface HybridRequest {
   relationalPlan?: import('../relational-recall.ts').RelationalPlanMeta;
   /** The op's stage-timing collector (`opts._timings`), or the no-op timer. */
   timer: StageTimer;
+  /**
+   * Vector arms the configuration would run that this request's embedding
+   * column rules out: unified multimodal routing would replace an
+   * independent column's own model space with the multimodal one.
+   */
+  omittedVectorArms?: NonNullable<HybridSearchMeta['omitted_vector_arms']>;
 }
 
 const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
@@ -323,6 +329,9 @@ export async function resolveHybridRequest(
     lastRank1Score: undefined,
     timer: opts?._timings ?? UNTIMED,
   };
+  if (resolvedMode.unified_multimodal === true && resolvedCol.provenance) {
+    req.omittedVectorArms = [{ arm: 'unified_multimodal', reason: 'independent_embedding_column' }];
+  }
   if (decide) req.decide = decide;
   return req;
 }
@@ -359,7 +368,8 @@ export async function applyIdentityBoosts(req: HybridRequest, list: SearchResult
   // never waits.
 export function emitHybridMeta(req: HybridRequest, armMeta: HybridSearchMeta): void {
   const { engine, opts } = req;
-  const rawMeta = req.keywordCandidates ? { ...armMeta, keyword_candidates: req.keywordCandidates } : armMeta;
+  const baseMeta = req.keywordCandidates ? { ...armMeta, keyword_candidates: req.keywordCandidates } : armMeta;
+  const rawMeta = req.omittedVectorArms ? { ...baseMeta, omitted_vector_arms: req.omittedVectorArms } : baseMeta;
   const decide = decideMetaFor(req.decide);
   const answerability = req.decide?.answerability;
   const meta: HybridSearchMeta = decide || req.rerankMeta || answerability || req.relationalPlan

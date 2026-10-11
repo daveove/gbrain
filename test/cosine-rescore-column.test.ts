@@ -48,6 +48,9 @@ beforeAll(async () => {
   await (engine as any).db.exec(
     `ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_voyage vector(1024)`,
   );
+  await engine.setConfig('embedding_columns', JSON.stringify({
+    embedding_voyage: { provider: 'voyage:voyage-3-large', dimensions: 1024, type: 'vector' },
+  }));
 
   // Seed a page with two chunks.
   const page: PageInput = {

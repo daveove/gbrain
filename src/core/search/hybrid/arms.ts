@@ -19,6 +19,7 @@ import { markKeywordHits } from '../evidence.ts';
 import { resolveEffectiveRecency, resolveEffectiveSalience } from './effective-modes.ts';
 import { searchSalvageEnabled } from '../token-budget.ts';
 import { isDatetimeInputError, warnOncePerProcess } from '../../utils.ts';
+import { queryEmbedOptionsForColumn } from '../query-prefix.ts';
 
 export interface LexicalArms {
   earlyModality: ModalityMode;
@@ -222,7 +223,9 @@ export async function resolveModalityAndQueries(req: HybridRequest) {
   // The tie-break may still pick image/both; a brain with no image embeddings has nothing for that arm.
   if (explicitModality === undefined && regexModality !== 'text' && !await brainHasImageVectors(req.engine)) regexModality = 'text';
   const effectiveModality = regexModality;
-  const unifiedRouting = resolvedMode.unified_multimodal === true;
+  // Unified routing replaces the text column with embedding_multimodal; an
+  // independent column's own space must answer its query (req.omittedVectorArms).
+  const unifiedRouting = resolvedMode.unified_multimodal === true && !req.resolvedCol.provenance;
 
   // Determine query variants (optionally with expansion)
   // expandQuery already includes the original query in its return value,
@@ -423,13 +426,9 @@ export async function runVectorArms(
     // query against `embedding_voyage` actually embeds via Voyage, not
     // the global default. Empty embeddingModel falls back to gateway
     // default — preserves pre-v0.36 behavior for the builtin 'embedding'
-    // column.
-    const embedOpts = resolvedCol.embeddingModel || opts?._queryPrefix
-      ? {
-        ...(resolvedCol.embeddingModel ? { embeddingModel: resolvedCol.embeddingModel, dimensions: resolvedCol.dimensions } : {}),
-        ...(opts?._queryPrefix ? { queryPrefix: opts._queryPrefix } : {}),
-      }
-      : undefined;
+    // column. An independent column embeds with its own model, dimensions
+    // and queryPrefix and never with the brain-wide prefix (query-prefix.ts).
+    const embedOpts = queryEmbedOptionsForColumn(resolvedCol, opts?._queryPrefix);
     // v0.42.20.0 (Fix 3) — bound the query embed. Reuse the shared deadline
     // threaded from hybridSearchCached (so the cache-lookup embed + this one
     // share one ~6s budget); direct callers get a fresh deadline. On timeout

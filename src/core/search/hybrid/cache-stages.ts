@@ -111,7 +111,9 @@ export async function prepareSemanticCache(
   const mergedCfgCached = await loadConfigWithEngine(engine).catch(() => null);
   const cfgCached = mergedCfgCached ?? ((await import('../../config.ts')).loadConfig()) ?? { engine: 'pglite' as const };
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
-  const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
+  // The cache table and its lookup embed live in the primary space with the
+  // brain prefix; an independent column never reads or writes it.
+  const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached) || resolvedColCached.provenance !== undefined;
 
   // wave-g (#4415): classify ONCE with the brain's `search.intent_patterns`
   // applied (loadEngineIntentPatterns is per-engine + TTL-cached) so the

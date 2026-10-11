@@ -8,8 +8,12 @@ import { jsonRequested, setCliExitVerdict, writeStdoutFinal } from '../../core/c
 import { lastBackgroundJob } from '../../core/cli-options.ts';
 import { BUDGET_STOP_EXIT_CODE } from '../../core/exit-codes.ts';
 import type { BrainEngine } from '../../core/engine.ts';
-import type { Authorization } from '../../core/consent.ts';
 import type { CliDispatchContext } from '../command-table.ts';
+import { validateEmbeddingCreds, EmbeddingCredentialError } from '../../core/embed-preflight.ts';
+import { EmbeddingStagingTargetError, parseEmbeddingColumnArg, resolveEmbeddingStagingTarget } from '../../commands/embed-setup.ts';
+import { EmbeddingColumnConfigError, EmbeddingColumnNotRegisteredError } from '../../core/search/embedding-column.ts';
+import { embeddingProviderIsFree, requireEmbedBackfillConsent } from '../../core/embed-consent.ts';
+import { isConsentRefusal, printConsentRefusal, requireConsent, type Authorization } from '../../core/consent.ts';
 
 export async function run(engine: BrainEngine, args: string[], ctx: CliDispatchContext): Promise<void> {
   if (args.includes('--help') || args.includes('-h')) {
@@ -53,12 +57,11 @@ async function authorizeEmbed(engine: BrainEngine, args: string[]): Promise<{ au
   const end = args.indexOf('--');
   const opts = end >= 0 ? args.slice(0, end) : args;
   if (opts.includes('--dry-run') || opts.includes('--help') || opts.includes('-h')) return { authorization: null };
-  const { requireEmbedBackfillConsent } = await import('../../core/embed-consent.ts');
-  const { isConsentRefusal, printConsentRefusal } = await import('../../core/consent.ts');
   const sourceAt = opts.indexOf('--source');
   const estimable = opts.includes('--stale') || opts.includes('--all');
   const argv = ['gbrain', 'embed', ...args.filter(a => a !== '--yes')];
   try {
+    if (opts.includes('--embedding-column')) return { authorization: await authorizeStaging(engine, opts, args, argv, estimable) };
     const authorization = await requireEmbedBackfillConsent(engine, {
       command: 'embed',
       argv,
@@ -78,11 +81,51 @@ async function authorizeEmbed(engine: BrainEngine, args: string[]): Promise<{ au
   }
 }
 
+/**
+ * `--embedding-column` staging spends with the TARGET column's provider, not
+ * the configured one: a local target needs no approval even when the live
+ * model bills, and a paid target needs it even when the live model is free.
+ * A target that does not resolve or cannot reach its provider runs nothing;
+ * runEmbed reports why, so no consent is asked for it.
+ */
+async function authorizeStaging(engine: BrainEngine, opts: string[], args: string[], argv: string[], estimable: boolean): Promise<Authorization | null> {
+  let model: string;
+  try {
+    const { embeddingColumn } = parseEmbeddingColumnArg(opts);
+    model = (await resolveEmbeddingStagingTarget(engine, embeddingColumn!)).embeddingModel;
+  } catch (error) {
+    if (error instanceof EmbeddingStagingTargetError || error instanceof EmbeddingColumnNotRegisteredError
+      || error instanceof EmbeddingColumnConfigError) return null;
+    throw error;
+  }
+  if (await embeddingProviderIsFree(model)) return null;
+  try { validateEmbeddingCreds(model); } catch (error) {
+    if (error instanceof EmbeddingCredentialError) return null;
+    throw error;
+  }
+  return requireConsent({
+    command: 'embed',
+    effects: ['paid'],
+    actor: 'agent',
+    what: 'Embedding staging',
+    why: `Staging sends page text to ${model}, which bills per token; its cost could not be estimated in advance.`,
+    risk: 'Spends money with the staging column\'s embedding provider. Live search and its vectors are unchanged either way.',
+    user_message: `Staging vectors for the new embedding model sends your page text to ${model} and costs money (cost unknown in advance). OK to run it?`,
+    argv,
+    ...(estimable ? { preview_argv: [...argv.filter(a => a !== '--background'), '--dry-run'] } : {}),
+    est_usd: null,
+    args,
+  }, { getConfig: (key) => engine.getConfig(key) });
+}
+
 /** `gbrain embed --help` (answered without a brain) and the usage error. */
 const EMBED_USAGE = [
-  'Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--source <id>] [--yes | --max-usd N] [--json] | --stale --images | --facts',
+  'Usage: gbrain embed [<slug>|--all|--stale|--slugs s1 s2 ...] [--dry-run] [--batch-size N] [--priority recent] [--catch-up] [--include-null-signature] [--source <id>] [--embedding-column <name>] [--yes | --max-usd N] [--json] | --stale --images | --facts',
   '  Embeds chunks without a vector (--stale; --catch-up keeps going until the backlog is empty) or re-embeds pages (--all, a slug, --slugs).',
   '  It calls the configured embedding provider, which bills per token: without a terminal it stops with exit 3 and the consent payload',
   '  unless --yes (cap: the estimate x1.5), --max-usd N, spend.posture=tokenmax or a per-run preapproval covers it. Pass those only after',
   '  the user agrees. --dry-run previews with no provider calls. Local providers that bill nothing (ollama, llama-server, lmstudio) need no approval.',
+  '  --embedding-column <name> stages vectors into a registered, initialized independent column with its own model, width and document prefix;',
+  '  the live column, its vectors and stamps, the chunks and the configured search model stay as they are. Unsealed or chunkless pages are',
+  '  reported, not rebuilt. Approval follows that column\'s provider, not the configured one.',
 ].join('\n');

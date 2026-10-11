@@ -7,6 +7,7 @@ import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 import { dotenvValuesForKey } from './env-trust.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from './search/private-visibility.ts';
+import { mergeEmbeddingColumnRegistries } from './search/embedding-column.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -973,11 +974,11 @@ export async function loadConfigWithEngine(
       merged.provider_base_urls = next;
     }
   }
-  if (merged.embedding_columns === undefined && dbEmbeddingColumns !== undefined) {
+  if (dbEmbeddingColumns !== undefined) {
     try {
       const parsed = JSON.parse(dbEmbeddingColumns);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        merged.embedding_columns = parsed as Record<string, EmbeddingColumnConfig>;
+        merged.embedding_columns = mergeEmbeddingColumnRegistries(merged.embedding_columns, parsed);
       } else {
         console.warn('[gbrain] config: embedding_columns DB value is not a JSON object; ignoring');
       }

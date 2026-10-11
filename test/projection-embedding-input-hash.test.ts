@@ -106,6 +106,23 @@ for (const kind of backends) {
       expect(await vectors()).toEqual(stamped);
     });
 
+    test('a prefix declared on a shared-provenance entry cannot erase existing primary vectors', async () => {
+      await seed({ mode: 'title' });
+      await embedAll();
+      const stamped = await vectors();
+      const previous = await engine.getConfig('embedding_columns');
+      try {
+        await engine.setConfig('embedding_columns', JSON.stringify({
+          embedding: { provider: 'openai:text-embedding-3-large', dimensions: 1536, type: 'vector', documentPrefix: 'search_document: ' },
+        }));
+        await rebuild();
+        expect(await vectors()).toEqual(stamped);
+      } finally {
+        if (previous === null) await engine.unsetConfig('embedding_columns');
+        else await engine.setConfig('embedding_columns', previous);
+      }
+    });
+
     test('changing one chunk nulls only that chunk', async () => {
       await seed({ mode: 'title' });
       await embedAll();

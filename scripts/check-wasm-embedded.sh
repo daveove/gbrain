@@ -31,6 +31,14 @@ cp -R "$REPO_ROOT/src" "$BUILD_DIR/src"
 cp -R "$REPO_ROOT/vendor" "$BUILD_DIR/vendor"
 cp "$REPO_ROOT/package.json" "$BUILD_DIR/package.json"
 cp "$REPO_ROOT/scripts/chunker-smoketest.ts" "$BUILD_DIR/scripts/chunker-smoketest.ts"
+# The chunker's configuration closure also references these embedded assets.
+# Copy only the required assets, not the test suite or its database snapshots.
+mkdir -p "$BUILD_DIR/skills" "$BUILD_DIR/test/fixtures/conversation-formats"
+cp -R "$REPO_ROOT/templates" "$BUILD_DIR/templates"
+cp "$REPO_ROOT/LICENSE" "$BUILD_DIR/LICENSE"
+cp "$REPO_ROOT/skills/_brain-filing-rules.json" "$BUILD_DIR/skills/"
+cp "$REPO_ROOT/test/fixtures/longmemeval-nightly.jsonl" "$BUILD_DIR/test/fixtures/"
+cp "$REPO_ROOT/test/fixtures/conversation-formats/"{all,adversarial}.jsonl "$BUILD_DIR/test/fixtures/conversation-formats/"
 ln -s "$REPO_ROOT/node_modules" "$BUILD_DIR/node_modules"
 
 # Build a minimal smoketest binary that imports the chunker. We compile this

@@ -124,11 +124,13 @@ import { EMBED_SKIP_FILTER_FRAGMENT } from './embed-skip.ts';
 import {
   vectorCastSuffix,
   resolveActiveEmbeddingColumnFromEngine,
+  resolveRegisteredEmbeddingColumnFromEngine,
   resolveWriteColumnFromConfigRows,
   quoteIdentifier,
   COLUMN_NAME_REGEX,
   EmbeddingColumnNotRegisteredError,
 } from './search/embedding-column.ts';
+import { replaceEmbeddingColumnRegistry } from './embedding-column-schema.ts';
 import { hasCJK } from './cjk.ts';
 import * as factsImpl from './engine-sql/facts.ts';
 import * as takesImpl from './engine-sql/takes.ts';
@@ -1730,7 +1732,11 @@ export class PGLiteEngine implements BrainEngine {
     return rows.map(rowToSearchResult);
   }
 
-  async getEmbeddingsByChunkIds(ids: number[], column: string = 'embedding'): Promise<Map<number, Float32Array>> {
+  async getEmbeddingsByChunkIds(ids: number[], column: string | ResolvedColumn = 'embedding'): Promise<Map<number, Float32Array>> {
+    if (ids.length === 0) return new Map();
+    if (typeof column === 'string' && column !== 'embedding' && column !== 'embedding_image' && column !== 'embedding_multimodal') {
+      column = await resolveRegisteredEmbeddingColumnFromEngine(this, column);
+    }
     return chunksImpl.getEmbeddingsByChunkIds(unscopedExecutor(this.engineSql, 'chunks: unscoped on master (EO4 inventory)'), ids, column);
   }
 
@@ -1796,10 +1802,10 @@ export class PGLiteEngine implements BrainEngine {
 
   getChunkWindows(requests: ChunkWindowRequest[], opts: ChunkWindowOpts): Promise<ChunkWindowPage[]> { return chunksImpl.getChunkWindows(scopedRead(this.engineSql), requests, opts); }
 
-  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]> {
+  async getChunks(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn }): Promise<Chunk[]> {
     const sourceIds = opts?.sourceIds && opts.sourceIds.length > 0 ? opts.sourceIds : undefined;
     const sourceId = opts?.sourceId ?? 'default';
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return chunksImpl.getChunks(scopedRead(this.engineSql), column, slug, { sourceIds, sourceId }, opts);
   }
 
@@ -1812,13 +1818,13 @@ export class PGLiteEngine implements BrainEngine {
     return quoteIdentifier(col.name);
   }
 
-  async countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+  async countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number> {
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return chunksImpl.countStaleChunks(scopedRead(this.engineSql), column, opts);
   }
 
-  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+  async sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number> {
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return chunksImpl.sumStaleChunkChars(unscopedExecutor(this.engineSql, 'chunks: unscoped on master (EO4 inventory)'), column, opts);
   }
 
@@ -1827,16 +1833,17 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async invalidateStaleSignatureEmbeddings(opts: { signature: string; sourceId?: string; includeNullSignature?: boolean }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this)).name;
+    const column = await resolveActiveEmbeddingColumnFromEngine(this);
     return chunksImpl.invalidateStaleSignatureEmbeddings(fn => this.transaction(fn), column, opts);
   }
 
   async invalidateContentDriftEmbeddings(opts?: { sourceId?: string }): Promise<number> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this)).name;
+    const column = await resolveActiveEmbeddingColumnFromEngine(this);
     return chunksImpl.invalidateContentDriftEmbeddings(fn => this.transaction(fn), column, opts);
   }
 
   async listStaleChunks(opts?: {
+    embeddingColumn?: ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;
@@ -1844,7 +1851,7 @@ export class PGLiteEngine implements BrainEngine {
     orderBy?: 'page_id' | 'updated_desc';
     afterUpdatedAt?: string | null;
   }): Promise<StaleChunkRow[]> {
-    const column = (await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })).name;
+    const column = opts?.embeddingColumn ?? await resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true });
     return chunksImpl.listStaleChunks(scopedRead(this.engineSql), column, opts);
   }
 
@@ -2790,6 +2797,10 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async setConfig(key: string, value: string): Promise<void> {
+    if (key === 'embedding_columns') {
+      await replaceEmbeddingColumnRegistry(this, value);
+      return;
+    }
     await this.db.query(
       `INSERT INTO config (key, value) VALUES ($1, $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
@@ -2798,6 +2809,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async unsetConfig(key: string): Promise<number> {
+    if (key === 'embedding_columns') return replaceEmbeddingColumnRegistry(this, null);
     const { affectedRows } = await this.db.query(
       'DELETE FROM config WHERE key = $1',
       [key],

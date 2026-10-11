@@ -14,6 +14,8 @@
  */
 import { digest, sha256 } from './persistence/digest.ts';
 import { buildContextualPrefix, wrapChunkForEmbedding } from './embedding-context.ts';
+import { truncateUtf8 } from './text-safe.ts';
+import { EMBED_MAX_CHARS } from './embedding-input-cap.ts';
 
 export type EmbeddingTier = 'none' | 'title' | 'per_chunk_synopsis';
 
@@ -26,6 +28,9 @@ export interface EmbeddingInputContext {
   corpusGeneration: string | null;
   /** `synopsisBodyHash` of the page's installed chunk set. */
   bodyHash: string;
+  /** Provider document prefix is part of this space's exact input identity. */
+  documentPrefix?: string;
+  independent?: boolean;
 }
 
 type HashedChunk = { chunk_text: string; chunk_source?: string | null };
@@ -50,8 +55,10 @@ export function embeddingInputHash(ctx: EmbeddingInputContext, tier: EmbeddingTi
   const input = raw ? chunk.chunk_text
     : tier === 'title' ? wrapChunkForEmbedding(chunk.chunk_text, buildContextualPrefix(ctx.title, null), chunk.chunk_source)
     : digest([ctx.title, ctx.bodyHash, chunk.chunk_text]);
+  const prefixed = ctx.documentPrefix ? ctx.documentPrefix + input : input;
   return digest(['embedding-input-v1', ctx.column, ctx.model, ctx.dimensions, tier,
-    tier === 'per_chunk_synopsis' ? ctx.corpusGeneration : null, sha256(input)]);
+    tier === 'per_chunk_synopsis' ? ctx.corpusGeneration : null,
+    sha256(ctx.independent ? truncateUtf8(prefixed, EMBED_MAX_CHARS) : prefixed)]);
 }
 
 /**

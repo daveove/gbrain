@@ -496,6 +496,7 @@ async function buildRetrievalResponseMeta(
       ...(m.answerability ? { answerability: m.answerability } : {}),
       ...(m.relational_plan ? { relational_plan: m.relational_plan } : {}),
       ...(m.rerank_gate ? { rerank_gate: m.rerank_gate } : {}),
+      ...(m.omitted_vector_arms ? { omitted_vector_arms: m.omitted_vector_arms } : {}),
     } : {}),
     ...((m?.degraded !== undefined || degraded.length > 0) ? { degraded } : {}),
     projection_readiness: readiness,

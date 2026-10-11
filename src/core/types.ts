@@ -677,6 +677,8 @@ export interface Chunk {
   model: string;
   token_count: number | null;
   embedded_at: Date | null;
+  /** Selected own-space input proof, used by guarded staging reads. */
+  embedding_input_hash?: string | null;
   /** v0.19.0 code metadata (NULL for markdown chunks). */
   language?: string | null;
   symbol_name?: string | null;
@@ -1168,6 +1170,20 @@ export interface EmbeddingColumnConfig {
   dimensions: number;
   /** pgvector type — drives the SQL cast at search time. */
   type: 'vector' | 'halfvec';
+  /** Separate model space: derives its own chunk provenance and page signature columns. */
+  provenance?: 'independent';
+  /** Provider-specific input prefixes, included in document-input provenance. */
+  documentPrefix?: string;
+  queryPrefix?: string;
+}
+
+export interface EmbeddingProvenanceColumns {
+  model: string;
+  textHash: string;
+  inputHash: string;
+  embeddedAt: string;
+  pendingSince: string;
+  pageSignature: string;
 }
 
 /**
@@ -1190,6 +1206,10 @@ export interface ResolvedColumn {
   dimensions: number;
   /** 'provider:model' identifier, e.g. 'voyage:voyage-3-large'. */
   embeddingModel: string;
+  /** Derived by the resolver, never a user-selected alias for another model's fields. */
+  provenance?: EmbeddingProvenanceColumns;
+  documentPrefix?: string;
+  queryPrefix?: string;
 }
 
 export interface VectorPoolMeta {
@@ -2120,6 +2140,8 @@ export function affectsRecall(d: { stage?: string; reason?: string } | undefined
  * "keyword-only fallback" from "full hybrid with expansion."
  */
 export interface HybridSearchMeta {
+  /** Explicitly report an incompatible arm rather than mixing embedding spaces. */
+  omitted_vector_arms?: Array<{ arm: 'unified_multimodal'; reason: 'independent_embedding_column' }>;
   /** True iff vector search actually ran. False when OPENAI_API_KEY missing or embed failed. */
   vector_enabled: boolean;
   /** System One: slot diagnostics (only when a slot ran visibly) and the reranker model version that answered. */

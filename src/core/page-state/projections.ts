@@ -10,7 +10,8 @@ import { resolveMaxChunkTokens } from '../embedding-input-limit.ts';
 import { assertPageRevision, PageRevisionConflictError, type PageSnapshot } from './types.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { digest } from '../persistence/digest.ts';
-import { quoteIdentifier, resolveWriteColumnFromConfigRows, vectorCastSuffix } from '../search/embedding-column.ts';
+import { quoteIdentifier, resolveWriteColumnFromConfigRows, resolveRegisteredEmbeddingColumnFromEngine, getEmbeddingProvenanceColumns,
+  embeddingColumnSignature, independentPageProofContextSql, vectorCastSuffix } from '../search/embedding-column.ts';
 import { getFtsLanguage, pageSearchVectorSql } from '../fts-language.ts';
 import { getEmbeddingModel } from '../ai/gateway.ts';
 import { refreshProjectionStatistics } from '../search/projection-statistics.ts';
@@ -57,6 +58,8 @@ export interface ProjectionSnapshot {
   embeddingColumn: ResolvedColumn;
   maxChunkTokens: number;
   maxChunkTokensOverride?: number;
+  /** Explicit staging keeps its registered target independent of the live selector. */
+  embeddingColumnOverride?: string;
   pageKind: PageKind;
   /** #5575 ENG-1: held, purged and below-page-tier fence rows, read with the snapshot. */
   fenceOverlay?: FenceChunkOverlay;
@@ -89,16 +92,17 @@ export async function retryProjectionConflict<T>(attempt: () => Promise<T>, rand
 }
 
 /** The vector column and model a write targets; `model` is what a stored chunk's label and provenance are compared to. */
-export async function embeddingWriteTarget(engine: Pick<BrainEngine, 'executeRaw'>): Promise<{ config: Array<{ key: string; value: string }>; model: string | null; column: ResolvedColumn; provenanceModel: string | null }> {
+export async function embeddingWriteTarget(engine: Pick<BrainEngine, 'executeRaw'>, overrideName?: string): Promise<{ config: Array<{ key: string; value: string }>; model: string | null; column: ResolvedColumn; provenanceModel: string | null }> {
   // A missing config table reads as defaults, as upsertChunks' own resolution does.
   const config = await engine.executeRaw<{ key: string; value: string }>(
     "SELECT key,value FROM config WHERE key IN ('search_embedding_column','embedding_columns','embedding_model','embedding_dimensions','contextual_retrieval.mode') ORDER BY key") ?? [];
   let model = config.find(row => row.key === 'embedding_model')?.value ?? null;
   try { model = getEmbeddingModel(); } catch { /* Unconfigured gateway: retain the brain's recorded model. */ }
-  const column = resolveWriteColumnFromConfigRows({
+  const column = overrideName ? await resolveRegisteredEmbeddingColumnFromEngine(engine, overrideName) : resolveWriteColumnFromConfigRows({
     searchEmbeddingColumn: config.find(row => row.key === 'search_embedding_column')?.value ?? null,
     embeddingColumnsJson: config.find(row => row.key === 'embedding_columns')?.value ?? null,
   });
+  if (column.provenance) model = column.embeddingModel;
   return { config, model, column, provenanceModel: column.name === 'embedding' ? model : column.embeddingModel };
 }
 
@@ -106,7 +110,7 @@ export async function embeddingWriteTarget(engine: Pick<BrainEngine, 'executeRaw
 export function embeddingInputContext(target: { column: ResolvedColumn; provenanceModel: string | null }, title: string,
   corpusGeneration: string | null, chunks: ReadonlyArray<{ chunk_text: string; chunk_source?: string | null }>): EmbeddingInputContext {
   return { column: target.column.name, model: target.provenanceModel, dimensions: target.column.dimensions, title, corpusGeneration,
-    bodyHash: synopsisBodyHash(chunks) };
+    bodyHash: synopsisBodyHash(chunks), documentPrefix: target.column.provenance ? target.column.documentPrefix : undefined, independent: !!target.column.provenance };
 }
 
 /**
@@ -125,8 +129,8 @@ export async function stampEmbeddingInputs(engine: Pick<BrainEngine, 'executeRaw
   return target.column;
 }
 
-async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot, maxChunkTokensOverride?: number): Promise<{ key: string; model: string | null; maxChunkTokens: number; column: ResolvedColumn; pageKind: PageKind; provenanceModel: string | null; corpusGeneration: string | null }> {
-  const { config, model, column, provenanceModel } = await embeddingWriteTarget(engine);
+async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot, maxChunkTokensOverride?: number, overrideName?: string): Promise<{ key: string; model: string | null; maxChunkTokens: number; column: ResolvedColumn; pageKind: PageKind; provenanceModel: string | null; corpusGeneration: string | null }> {
+  const { config, model, column, provenanceModel } = await embeddingWriteTarget(engine, overrideName);
   const maxChunkTokens = maxChunkTokensOverride ?? resolveMaxChunkTokens();
   const [projection] = await engine.executeRaw<{ chunker_version: number | null; corpus_generation: string | null }>(
     'SELECT chunker_version,corpus_generation FROM pages WHERE id=$1', [snapshot.page.id]);
@@ -141,7 +145,7 @@ async function indexingContext(engine: BrainEngine, snapshot: PageSnapshot, maxC
 
 /** A short guarded read binds the exact chunk set and title/body revision. */
 export async function readProjectionSnapshot(engine: BrainEngine, slug: string, sourceId: string,
-  opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean } = {}): Promise<ProjectionSnapshot | null> {
+  opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean; embeddingColumn?: ResolvedColumn } = {}): Promise<ProjectionSnapshot | null> {
   return engine.transaction(async tx => {
     await tx.lockPageKeys([{ sourceId, slug }]);
     return readGuardedProjectionSnapshot(tx, slug, sourceId, opts);
@@ -150,14 +154,24 @@ export async function readProjectionSnapshot(engine: BrainEngine, slug: string, 
 
 /** readProjectionSnapshot for a caller whose transaction already holds the page guard. */
 async function readGuardedProjectionSnapshot(tx: BrainEngine, slug: string, sourceId: string,
-  opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean }): Promise<ProjectionSnapshot | null> {
-  const snapshot = await tx.readPageSnapshot(slug, { sourceId, ...(opts.requireLiveSource && { requireLiveSource: true }) });
+  opts: { allowUnsealed?: boolean; maxChunkTokens?: number; requireLiveSource?: boolean; embeddingColumn?: ResolvedColumn }): Promise<ProjectionSnapshot | null> {
+  const snapshot = await tx.readPageSnapshot(slug, { sourceId, ...((opts.requireLiveSource || opts.embeddingColumn?.provenance) && { requireLiveSource: true }) });
   if (!snapshot || (!opts.allowUnsealed && snapshot.page.text_projection_revision !== snapshot.revision)) return null;
-  const context = await indexingContext(tx, snapshot, opts.maxChunkTokens);
+  const context = await indexingContext(tx, snapshot, opts.maxChunkTokens, opts.embeddingColumn?.name);
   const fenceOverlay = context.pageKind === 'markdown' ? await loadFenceChunkOverlay(tx, { sourceId, slug, compiled_truth: snapshot.page.compiled_truth, timeline: snapshot.page.timeline }) : undefined;
-  return { snapshot, chunks: await tx.getChunks(slug, { sourceId, includeUnsealed: true }), indexingContext: context.key,
+  const chunks = await tx.getChunks(slug, { sourceId, includeUnsealed: true, embeddingColumn: context.column });
+  if (context.column.provenance) {
+    const input = embeddingInputContext(context, snapshot.page.title, context.corpusGeneration, chunks);
+    for (const chunk of chunks) {
+      if (chunk.modality === 'image') continue;
+      chunk.embedding_is_null ||= chunk.model !== context.provenanceModel || !chunk.embedding_input_hash
+        || !acceptedEmbeddingInputHashes(input, snapshot.page.contextual_retrieval_mode, chunk).includes(chunk.embedding_input_hash);
+    }
+  }
+  return { snapshot, chunks, indexingContext: context.key,
     embeddingModel: context.model, embeddingColumn: context.column, maxChunkTokens: context.maxChunkTokens, maxChunkTokensOverride: opts.maxChunkTokens, pageKind: context.pageKind,
-    ...(fenceOverlay ? { fenceOverlay } : {}) };
+    ...(fenceOverlay ? { fenceOverlay } : {}),
+    ...(opts.embeddingColumn && { embeddingColumnOverride: opts.embeddingColumn.name }) };
 }
 
 /** No provider work under the guard. Delayed derived results lose to newer content. */
@@ -175,7 +189,7 @@ export async function installPageProjection(engine: BrainEngine, prepared: Proje
       throw new PageRevisionConflictError(snapshot.revision, current!.revision);
     }
     const stored = await tx.getChunks(slug, { sourceId, includeUnsealed: true });
-    const context = await indexingContext(tx, current!, prepared.maxChunkTokensOverride);
+    const context = await indexingContext(tx, current!, prepared.maxChunkTokensOverride, prepared.embeddingColumnOverride);
     // getChunks omits vector payloads but includes identity, text/source, metadata
     // and embedding completion state. A newer installation must not be deleted,
     // even when its canonical revision stayed the same.
@@ -244,9 +258,9 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
       || current.page.text_projection_revision !== current.revision) return false;
     const [source] = await tx.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id=$1', [sourceId]);
     if (!source || source.archived) return false;
-    const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride);
+    const context = await indexingContext(tx, current, prepared.maxChunkTokensOverride, prepared.embeddingColumnOverride);
     if (context.key !== prepared.indexingContext) return false;
-    const stored = await tx.getChunks(slug, { sourceId, includeUnsealed: true });
+    const stored = await tx.getChunks(slug, { sourceId, includeUnsealed: true, embeddingColumn: context.column });
     if (stored.length !== prepared.chunks.length || stored.some((c, i) => c.id !== prepared.chunks[i].id
       || c.chunk_index !== prepared.chunks[i].chunk_index || c.chunk_text !== prepared.chunks[i].chunk_text)) return false;
     const byIndex = new Map(stored.map(chunk => [chunk.chunk_index, chunk]));
@@ -255,6 +269,8 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     // Use the checked descriptor: config writes do not take the page guard,
     // so resolving again could send these vectors to a different model's column.
     const column = context.column;
+    if (column.provenance && chunks.some(chunk => chunk.embedding_image ||
+      (chunk.embedding && (chunk.embedding.length !== column.dimensions || (chunk.model !== undefined && chunk.model !== context.provenanceModel))))) return false;
     const tier = built?.tier ?? plainEmbeddingTier(current.page.contextual_retrieval_mode);
     const provenance = embeddingInputContext(context, current.page.title,
       built?.corpusGeneration !== undefined ? built.corpusGeneration : context.corpusGeneration, stored);
@@ -263,8 +279,18 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
     for (const chunk of chunks) {
       if (!chunk.embedding && !chunk.embedding_image) continue;
       const original = byIndex.get(chunk.chunk_index)!;
-      const vector = chunk.embedding ? `[${Array.from(chunk.embedding).join(',')}]` : null;
-      const image = chunk.embedding_image ? `[${Array.from(chunk.embedding_image).join(',')}]` : null;
+      const vector = chunk.embedding ? `[${chunk.embedding.join(',')}]` : null;
+      const image = chunk.embedding_image ? `[${chunk.embedding_image.join(',')}]` : null;
+      if (column.provenance) {
+        if (!vector) continue;
+        const proof = getEmbeddingProvenanceColumns(column);
+        await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(column.name)}=$2${vectorCastSuffix(column)},
+          ${quoteIdentifier(proof.inputHash)}=$3,${quoteIdentifier(proof.embeddedAt)}=now(),
+          ${quoteIdentifier(proof.textHash)}=md5(chunk_text),${quoteIdentifier(proof.model)}=$4,
+          ${quoteIdentifier(proof.pendingSince)}=NULL WHERE id=$1 AND page_id=$5 AND chunk_text=$6`,
+        [original.id, vector, embeddingInputHash(provenance, tier, original), context.provenanceModel, snapshot.page.id, original.chunk_text]);
+        continue;
+      }
       await tx.executeRaw(`UPDATE content_chunks SET
         ${quoteIdentifier(column.name)}=CASE WHEN $2::text IS NULL THEN ${quoteIdentifier(column.name)} ELSE $2${vectorCastSuffix(column)} END,
         embedding_image=CASE WHEN $3::text IS NULL THEN embedding_image ELSE $3::vector END,
@@ -277,7 +303,26 @@ export async function installPageEmbeddings(engine: BrainEngine, prepared: Proje
       [original.id, vector, image, chunk.model ?? (vector ? prepared.embeddingModel : null), snapshot.page.id, original.chunk_text,
         embeddingInputHash(provenance, tier, original)]);
     }
-    if (signature) await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
+    if (signature && column.provenance) {
+      await stampIndependentPageEmbeddingSignature(tx, slug, sourceId, column);
+    } else if (signature) await tx.setPageEmbeddingSignature(slug, { sourceId, signature });
+    return true;
+  });
+}
+
+/** A private-space page stamp is published only after every document input is current. */
+export async function stampIndependentPageEmbeddingSignature(engine: BrainEngine, slug: string, sourceId: string, column: ResolvedColumn): Promise<boolean> {
+  if (!column.provenance) throw new Error('Independent page stamping requires independent provenance');
+  return engine.transaction(async tx => {
+    await tx.lockPageKeys([{ sourceId, slug }]);
+    const prepared = await readGuardedProjectionSnapshot(tx, slug, sourceId, { embeddingColumn: column, requireLiveSource: true });
+    if (!prepared || !prepared.embeddingColumn.provenance ||
+      prepared.chunks.some(chunk => chunk.modality !== 'image' && chunk.embedding_is_null !== false)) return false;
+    const checked = prepared.embeddingColumn;
+    const proof = getEmbeddingProvenanceColumns(checked);
+    await tx.executeRaw(`UPDATE pages p SET ${quoteIdentifier(proof.pageSignature)}=$2 || ':' || ${independentPageProofContextSql()}
+      WHERE p.id=$1 AND p.knowledge_revision=$3::uuid`,
+    [prepared.snapshot.page.id, embeddingColumnSignature(checked), prepared.snapshot.revision]);
     return true;
   });
 }
