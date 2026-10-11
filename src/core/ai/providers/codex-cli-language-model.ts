@@ -11,9 +11,9 @@
  *     and `--ignore-user-config` + `-c model_provider="openai"` ignore any
  *     user-configured provider (a custom `model_provider` could carry an
  *     `env_key`).
- *   - `codex login status` must report a ChatGPT login before the first call
- *     (re-checked every 10 minutes). Anything else is an AIConfigError with
- *     the fix; there is no fallback to the `openai` API recipe.
+ *   - `codex login status` must report a ChatGPT login before every call.
+ *     Anything else is an AIConfigError with the fix; there is no fallback
+ *     to the `openai` API recipe.
  *
  * Raw-model isolation: `--sandbox read-only`, `--ephemeral` (no session
  * files, so transcript discovery never re-ingests these calls), no rules,

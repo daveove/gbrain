@@ -16,6 +16,7 @@ import { configureGateway, resetGateway, __setChatTransportForTests, __setDecide
 import { readDecideConfig } from '../../src/core/ai/decide/config.ts';
 import { checkEgress } from '../../src/core/ai/decide/egress.ts';
 import { runDecide } from '../../src/core/ai/decide/index.ts';
+import { PaidModelApiDisabledError } from '../../src/core/ai/billing-policy.ts';
 import { buildReceiptRows } from '../../src/core/ai/decide/receipts.ts';
 import {
   dailySpend, flushDecideWrites, receiptSalt, recordReceipts, __resetDecideStoreForTests,
@@ -112,6 +113,18 @@ describe('egress gate', () => {
 });
 
 describe('runner', () => {
+  test('subscription refusal neither sends TypeSafe evidence nor records a failed paid request', async () => {
+    configureGateway({ ai_billing: 'subscription', env: { TYPESAFE_API_KEY: 'sk-test' } });
+    const sent = answerAll();
+    await expect(runDecide(
+      { slot: 'evidence', callSite: 'search', state: STATE, questions: [q('w', cand('notes/world'))] },
+      { engine, config: readDecideConfig(CONSENT) },
+    )).rejects.toBeInstanceOf(PaidModelApiDisabledError);
+    await flushDecideWrites();
+    expect(sent).toEqual([]);
+    expect(await engine.executeRaw('SELECT outcome, cost_usd FROM decide_spend')).toEqual([]);
+  });
+
   test('writes one spend row per request; failed requests are charged their estimate', async () => {
     const cfg = readDecideConfig(CONSENT);
     answerAll();

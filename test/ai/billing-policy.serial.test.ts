@@ -14,7 +14,7 @@ import {
   modelApiAllowed,
   resolveAIBilling,
 } from '../../src/core/ai/billing-policy.ts';
-import { chat, configureGateway, diagnoseEmbedding, embed, expand, isAvailable, refreshGatewayEnvFromFilePlane, resetGateway } from '../../src/core/ai/gateway.ts';
+import { chat, configureGateway, diagnoseEmbedding, embed, expand, isAvailable, refreshGatewayEnvFromFilePlane, rerank, resetGateway } from '../../src/core/ai/gateway.ts';
 import { saveConfig } from '../../src/core/config.ts';
 import { invokeAI } from '../../src/core/ai/invocation-guard.ts';
 import { reservationCostUsd } from '../../src/core/budget/reservation-cost.ts';
@@ -88,6 +88,13 @@ describe('gateway under ai_billing=subscription', () => {
     expect(await expand('alice acme')).toEqual(['alice acme']);
     expect(fetches).toBe(0);
   });
+  test('a paid reranker is refused before transport or missing-key fallback', async () => {
+    subscriptionGateway();
+    await expect(rerank({ model: 'voyage:rerank-2.5', query: 'Acme', documents: ['Alice joined Acme.'] }))
+      .rejects.toBeInstanceOf(PaidModelApiDisabledError);
+    expect(fetches).toBe(0);
+  });
+
   test('gateway configuration cannot override the process subscription policy', async () => {
     await withEnv({ GBRAIN_AI_BILLING: 'subscription' }, async () => {
       configureGateway({ chat_model: 'openai:gpt-5.6-terra', env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'api' });
