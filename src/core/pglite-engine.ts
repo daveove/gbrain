@@ -1855,7 +1855,7 @@ export class PGLiteEngine implements BrainEngine {
     return chunksImpl.listStaleChunks(scopedRead(this.engineSql), column, opts);
   }
 
-  async countChunklessPagesWithContent(opts?: { sourceId?: string }): Promise<number> {
+  async countChunklessPagesWithContent(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number> {
     return chunksImpl.countChunklessPagesWithContent(scopedRead(this.engineSql), opts);
   }
 

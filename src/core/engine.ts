@@ -1340,9 +1340,11 @@ export interface BrainEngine {
    * `opts.sourceId` scopes the count to a single source, matching
    * `countStaleChunks`. Quarantined and `embed_skip` pages are excluded —
    * both are intentionally chunkless by design, not drift needing repair.
+   * `activeSourcesOnly` excludes archived sources for independent staging;
+   * omitted, the existing primary count policy is unchanged.
    * See `ChunklessPageRow` for the full rationale.
    */
-  countChunklessPagesWithContent(opts?: { sourceId?: string }): Promise<number>;
+  countChunklessPagesWithContent(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number>;
   /**
    * List pages with non-empty `compiled_truth` and/or `timeline` and zero
    * `content_chunks` rows (sibling of `countChunklessPagesWithContent`;

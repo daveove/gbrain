@@ -167,6 +167,90 @@ for (const backend of testBackends()) {
         expect(await liveSpace()).toEqual(before);
       });
 
+      test('independent preview counts chunk-unit restamps and real input work without publishing or calling a provider', async () => {
+        const multi = 'notes/preview-multi';
+        await importFromContent(engine, multi, '---\ntitle: preview multi\n---\n\nFirst document.\n\nSecond document.\n', { noEmbed: true });
+        try {
+          await engine.upsertChunks(multi, [
+            { chunk_index: 0, chunk_text: 'First document.', chunk_source: 'compiled_truth' },
+            { chunk_index: 1, chunk_text: 'Second document.', chunk_source: 'compiled_truth' },
+          ], { sourceId: 'default' });
+          await engine.executeRaw("UPDATE pages SET text_projection_revision=knowledge_revision WHERE source_id='default' AND slug=$1", [multi]);
+          await runEmbedCore(engine, { stale: true, quiet: true, embeddingColumn: COLUMN });
+          await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature=NULL WHERE source_id='default' AND slug=$1`, [multi]);
+          await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature='obsolete-space:obsolete-page' WHERE source_id='default' AND slug='notes/bravo'`);
+          const ownSpace = () => engine.executeRaw(`SELECT p.id,p.${COLUMN}_signature,c.id AS chunk_id,c.${COLUMN}::text,c.${COLUMN}_model,
+            c.${COLUMN}_embedded_text_hash,c.${COLUMN}_embedding_input_hash,c.${COLUMN}_embedded_at::text,c.${COLUMN}_pending_since::text
+            FROM pages p JOIN content_chunks c ON c.page_id=p.id ORDER BY p.id,c.id`);
+          const before = await liveSpace();
+          const config = await liveConfig();
+          const ownBefore = await ownSpace();
+          seen = [];
+          const preview = await runEmbedCore(engine, { stale: true, dryRun: true, quiet: true, sourceId: 'default', embeddingColumn: COLUMN });
+          expect(preview).toMatchObject({ would_embed: 0, would_restamp: 3, total_chunks: 3 });
+          expect(await ownSpace()).toEqual(ownBefore);
+          expect(await liveSpace()).toEqual(before);
+          expect(await liveConfig()).toEqual(config);
+          expect(seen).toEqual([]);
+          const drain = await runEmbedCore(engine, { stale: true, quiet: true, sourceId: 'default', embeddingColumn: COLUMN });
+          expect(drain).toMatchObject({ embedded: 0, failures: 0 });
+          expect(seen).toEqual([]);
+          expect((await runEmbedCore(engine, { stale: true, dryRun: true, quiet: true, sourceId: 'default', embeddingColumn: COLUMN })).total_chunks).toBe(0);
+          expect(await liveSpace()).toEqual(before);
+          await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature=NULL WHERE source_id='default' AND slug=$1`, [multi]);
+          await engine.executeRaw(`UPDATE content_chunks SET ${COLUMN}_embedding_input_hash='invalid-input-proof'
+            WHERE page_id=(SELECT id FROM pages WHERE source_id='default' AND slug=$1) AND chunk_index=0`, [multi]);
+          const staleBefore = await ownSpace();
+          const realWork = await runEmbedCore(engine, { stale: true, dryRun: true, quiet: true, sourceId: 'default', embeddingColumn: COLUMN });
+          expect(realWork).toMatchObject({ would_embed: 1, would_restamp: 1, total_chunks: 2 });
+          expect(await ownSpace()).toEqual(staleBefore);
+          expect(await liveSpace()).toEqual(before);
+          expect(await liveConfig()).toEqual(config);
+          expect(seen).toEqual([]);
+        } finally {
+          await engine.executeRaw("DELETE FROM pages WHERE source_id='default' AND slug=$1", [multi]);
+        }
+      });
+
+      test('independent chunkless staging counts only active eligible sources and reports archived content once', async () => {
+        const active = 'preview-active';
+        const archived = 'preview-archived';
+        await runEmbedCore(engine, { stale: true, quiet: true, embeddingColumn: COLUMN });
+        try {
+          for (const sourceId of [active, archived]) {
+            await engine.executeRaw("INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)", [sourceId, `/private/tmp/${sourceId}`]);
+            for (const kind of ['content', 'skip', 'quarantine']) {
+              await importFromContent(engine, `notes/${kind}`, `---\ntitle: ${kind}\n---\n\nContentful ${kind} page.\n`, { noEmbed: true, sourceId });
+            }
+            await engine.executeRaw("UPDATE pages SET frontmatter=frontmatter || '{\"embed_skip\":true}'::jsonb WHERE source_id=$1 AND slug='notes/skip'", [sourceId]);
+            await engine.executeRaw("UPDATE pages SET frontmatter=frontmatter || '{\"quarantine\":true}'::jsonb WHERE source_id=$1 AND slug='notes/quarantine'", [sourceId]);
+            await engine.executeRaw("DELETE FROM content_chunks WHERE page_id IN (SELECT id FROM pages WHERE source_id=$1)", [sourceId]);
+          }
+          await engine.executeRaw("UPDATE sources SET archived=true WHERE id=$1", [archived]);
+          const before = await liveSpace();
+          const config = await liveConfig();
+          const pagesBefore = await engine.executeRaw("SELECT id,source_id,slug,frontmatter,text_projection_revision::text FROM pages ORDER BY id");
+          seen = [];
+          const blocked = await runEmbedCore(engine, { stale: true, quiet: true, sourceId: archived, embeddingColumn: COLUMN });
+          expect(blocked.failures).toBe(1);
+          expect(blocked.failure_samples).toEqual([expect.stringContaining('1 archived page(s)')]);
+          const live = await runEmbedCore(engine, { stale: true, quiet: true, sourceId: active, embeddingColumn: COLUMN });
+          expect(live.failures).toBe(1);
+          expect(live.failure_samples).toEqual([expect.stringContaining('1 page(s) with content have no chunks')]);
+          const all = await runEmbedCore(engine, { stale: true, quiet: true, embeddingColumn: COLUMN });
+          expect(all.failures).toBe(2);
+          expect((await runEmbedCore(engine, { stale: true, quiet: true, sourceId: 'unrelated-source', embeddingColumn: COLUMN })).failures).toBe(0);
+          expect(await engine.countChunklessPagesWithContent({ sourceId: archived })).toBe(1);
+          expect(await liveSpace()).toEqual(before);
+          expect(await liveConfig()).toEqual(config);
+          expect(await engine.executeRaw("SELECT id,source_id,slug,frontmatter,text_projection_revision::text FROM pages ORDER BY id")).toEqual(pagesBefore);
+          expect(seen).toEqual([]);
+        } finally {
+          await engine.executeRaw("DELETE FROM pages WHERE source_id IN ($1,$2)", [active, archived]);
+          await engine.executeRaw("DELETE FROM sources WHERE id IN ($1,$2)", [active, archived]);
+        }
+      });
+
       test('an unsealed page is reported, not repaired, and its live vectors survive', async () => {
         await engine.executeRaw(`UPDATE pages SET text_projection_revision = NULL WHERE slug = 'notes/bravo'`);
         try {

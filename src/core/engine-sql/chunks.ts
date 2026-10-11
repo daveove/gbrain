@@ -679,7 +679,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string | Resolve
  * embed_skip pages — both are intentionally chunkless by design, not drift
  * the safety net should repair.
  */
-function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
+function chunklessPagesWhere(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): SqlFragment {
   const conds: SqlFragment[] = [
     sqlFragment`p.deleted_at IS NULL`,
     // healChunklessPages chunks BOTH compiled_truth and timeline (mirrors
@@ -691,10 +691,11 @@ function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
     sqlFragment`NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)`,
   ];
   if (opts?.sourceId) conds.push(sqlFragment`p.source_id = ${opts.sourceId}`);
+  if (opts?.activeSourcesOnly) conds.push(sqlFragment`EXISTS(SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived)`);
   return joinFragments(conds, ' AND ');
 }
 
-export async function countChunklessPagesWithContent(exec: ScopedRead, opts?: { sourceId?: string }): Promise<number> {
+export async function countChunklessPagesWithContent(exec: ScopedRead, opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number> {
     const { text, params } = renderFragment(sqlFragment`SELECT count(*)::int AS count FROM pages p WHERE ${chunklessPagesWhere(opts)}`);
     const { rows } = await exec.unsafe<{ count?: number }>(text, params);
     return Number(rows[0]?.count ?? 0);

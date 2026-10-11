@@ -1,7 +1,7 @@
 import { jsonRequested } from '../core/cli-force-exit.ts';
 import { prepareProseChunks } from '../core/markdown-chunks.ts';
 import type { FenceChunkOverlay } from '../core/eligibility/fence-overlay.ts';
-import { preflightEmbeddingRun, archivedEmbeddingReporter, prepareStaleDrainProjections, sameStagingTarget, documentInputs, embedCallOpts,
+import { preflightEmbeddingRun, archivedEmbeddingReporter, prepareStaleDrainProjections, sameStagingTarget, documentInputs, embedCallOpts, countIndependentRestampOnlyChunks,
   EmbeddingDimMismatchError, parseEmbeddingColumnArg, type EmbeddingColumnArg,
   STAGING_UNSEALED_MESSAGE, STAGING_NO_CHUNKS_MESSAGE, STAGING_TARGET_CHANGED_MESSAGE } from './embed-setup.ts';
 import { embedStaleFacts, type EmbedFactsResult } from '../core/embed-facts.ts';
@@ -1650,7 +1650,7 @@ async function embedAllStale(
   // do we pay for the keyset-paginated chunk sweep. Chunking here (before
   // countStaleChunks) means any newly-written NULL-embedding chunks flow
   // into the SAME pass via the existing cursor; staging only reports missing chunks.
-  const chunklessCount = await engine.countChunklessPagesWithContent(sourceOpt);
+  const chunklessCount = await engine.countChunklessPagesWithContent(target ? { ...sourceOpt, activeSourcesOnly: true } : sourceOpt);
   if (chunklessCount > 0 && target) {
     if (!dryRun) result.failures += chunklessCount;
     result.failure_samples.push(`${chunklessCount} page(s) with content have no chunks, so nothing was staged for them: staging never chunks pages. `
@@ -1804,7 +1804,8 @@ async function embedAllStale(
 
   if (dryRun) {
     // #5289: current-space vectors on a drifted page are restamped, not re-embedded.
-    const restamp = signature ? await countRestampOnlyChunks(engine, { signature, sourceId, includeNullSignature: includeNullSig }) : 0;
+    const restamp = target ? await countIndependentRestampOnlyChunks(engine, target, sourceId)
+      : signature ? await countRestampOnlyChunks(engine, { signature, sourceId, includeNullSignature: includeNullSig }) : 0;
     result.would_embed += staleCount - restamp;
     result.would_restamp = restamp;
     result.total_chunks += staleCount;
