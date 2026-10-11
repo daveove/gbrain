@@ -41,12 +41,4 @@ describe('transcription', () => {
     }
   });
 
-  test('supported audio extensions are comprehensive', () => {
-    // Verify common audio formats are supported
-    const expected = ['.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mp4', '.webm'];
-    // We can't access the private set directly, but we can test via error messages
-    // The unsupported format test above verifies .txt is rejected
-    // This test documents the expected formats
-    expect(expected.length).toBeGreaterThan(5);
-  });
 });

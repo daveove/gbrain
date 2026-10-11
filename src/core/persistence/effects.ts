@@ -20,6 +20,7 @@ import { validateEmbeddingCreds, EmbeddingCredentialError } from '../embed-prefl
 import { wrapChunkTextsForStoredMode } from '../embedding-context.ts';
 import { isEmbedRetriableError, MAX_RATE_LIMIT_RETRIES, rateLimitDelayMs, restampIfDemotedToTitleTier, transientBackoffMs } from '../embed-retry.ts';
 import { AIConfigError, normalizeAIError } from '../ai/errors.ts';
+import { modelApiAllowed, PaidModelApiDisabledError } from '../ai/billing-policy.ts';
 import { EMBEDDING_ZERO_NORM, isEmbeddingZeroNormError, type EmbeddingZeroNormError } from '../ai/embedding-guard.ts';
 import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
 import { quoteIdentifier } from '../search/embedding-column.ts';
@@ -297,7 +298,9 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     if (effect.attempts - (effect.data.embedding_retry_base ?? effect.data.embedding_attempt_base ?? 0) > MAX_RATE_LIMIT_RETRIES) {
       await failEffect(engine, effect, 'embedding_attempts_exhausted'); return;
     }
-    if (!opts.embedding) validateEmbeddingCreds();
+    if (!opts.embedding) {
+      validateEmbeddingCreds();
+    }
     opts.signal?.throwIfAborted();
     const lease = new AbortController();
     const signal = opts.signal ? AbortSignal.any([opts.signal, lease.signal]) : lease.signal;
@@ -408,6 +411,14 @@ async function recordFailure(engine: BrainEngine, effect: PersistenceEffect, err
     if (!current?.recovering && (!source || source.archived || source.incarnation !== effect.source_incarnation)) { await failEffect(engine, effect, code); return; }
   }
   if (effect.kind === 'embedding') {
+    if (error instanceof PaidModelApiDisabledError || error instanceof EmbeddingCredentialError && !error.diagnosis.ok && error.diagnosis.reason === 'paid_api_disabled') {
+      // Billing revocation is not a provider failure and must preserve retry allowance.
+      await engine.executeRaw(`UPDATE persistence_effects SET state='queued',execution_token=NULL,claim_expires_at=NULL,
+        attempts=GREATEST(0,attempts-1),error_code=NULL,next_attempt_at=now(),updated_at=now()
+        WHERE id=$1 AND execution_token=$2::uuid AND recovery IS NULL AND ${PERSISTENCE_PROTOCOL_PREDICATE}`,
+      [effect.id, effect.execution_token]);
+      return;
+    }
     if (error instanceof EmbeddingDisabledError || error instanceof EmbeddingCredentialError || code === 'embedding_unconfigured') {
       await completeEffect(engine, effect, { embedding: 'skipped', reason: error instanceof EmbeddingDisabledError ? 'embedding_disabled' : 'embedding_unconfigured' }); return;
     }
@@ -471,6 +482,19 @@ const GIT_GROUP_SIZE = 100;
 /** A short Git group yields to queued publications at most this many claims, GIT_YIELD_MS apart. */
 const GIT_YIELD_ATTEMPTS = 20;
 const GIT_YIELD_MS = 250;
+
+/**
+ * A paid embedding API the billing policy refuses stays queued, unclaimed:
+ * claiming would spend an attempt and record it skipped or failed. An
+ * explicitly configured local recipe (ollama) is not refused and stays claimable.
+ */
+export function deferredEffectKinds(opts: Pick<EffectWorkerOptions, 'embedding'> = {}): string[] {
+  if (opts.embedding) return [];
+  const signature = currentEmbeddingSignature();
+  // The embedding boundary owns the exact provider:model:dimensions signature.
+  const model = signature?.slice(0, signature.lastIndexOf(':'));
+  return model && !modelApiAllowed(model) ? ['embedding'] : [];
+}
 
 /**
  * Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim.
@@ -605,7 +629,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
   // or work unblocked by an earlier effect) is claimable again after the flush.
   for (;;) {
     while (attempted < limit && !opts.signal?.aborted) {
-      const effect = await claimPersistenceEffect(engine, opts.hostId);
+      const effect = await claimPersistenceEffect(engine, opts.hostId, deferredEffectKinds(opts));
       if (!effect) break;
       attempted++;
       let binding: WorktreeBinding | null = null;

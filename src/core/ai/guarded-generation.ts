@@ -1,5 +1,6 @@
 import { invokeAI, sdkInvocationUsage, hasAIInvocationGuard, hasAIInvocationObservers, type AIInvocation } from './invocation-guard.ts';
 import { resolveChatContextTokens } from './model-resolver.ts';
+import { assertModelApiAllowed } from './billing-policy.ts';
 
 export function chatInvocation(operation: string, model: string, maxOutputTokens: number): AIInvocation {
   let maxInputTokens: number | undefined;
@@ -11,8 +12,12 @@ export function chatInvocation(operation: string, model: string, maxOutputTokens
 export function createGuardedGeneration(defaultMaxOutputTokens: () => number) {
   return async function guardedGeneration<T>(model: string, transport: (opts: any) => Promise<T>, opts: any): Promise<T> {
     if (!hasAIInvocationGuard()) {
-      if (!hasAIInvocationObservers()) return transport(opts);
+      if (!hasAIInvocationObservers()) {
+        assertModelApiAllowed(model);
+        return transport(opts);
+      }
       // Observed but unguarded: the transport sees the caller's options unchanged (SDK retries, token defaults).
+      // invokeAI applies the billing policy before observing the call.
       return invokeAI({ ...chatInvocation('gateway.generate', model, opts.maxOutputTokens ?? defaultMaxOutputTokens()) },
         () => transport(opts), sdkInvocationUsage);
     }

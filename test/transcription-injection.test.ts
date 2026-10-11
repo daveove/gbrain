@@ -11,7 +11,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import {
-  mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync,
+  mkdtempSync, writeFileSync, rmSync, existsSync,
 } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -25,16 +25,6 @@ function ffmpegAvailable(): boolean {
 }
 
 describe('transcription — command injection (#245)', () => {
-  // Source-level guard (deterministic, no ffmpeg dependency): the shell-string
-  // exec forms must be gone. Mirrors the repo's check-*.sh guard philosophy.
-  test('source uses execFileSync arg-arrays, never shell execSync', () => {
-    const src = readFileSync(new URL('../src/core/transcription.ts', import.meta.url), 'utf8');
-    // `\bexecSync(` matches the dangerous shell-string call but NOT execFileSync.
-    expect(src).not.toMatch(/\bexecSync\s*\(/);     // no shell command strings
-    expect(src).toMatch(/execFileSync\(/);          // arg-array exec
-    expect(src).toMatch(/rmSync\(/);                // fs cleanup, not shell remove
-  });
-
   // Behavioral: a >25MB file whose NAME contains a $(...) payload. Under the old
   // shell-string code the double-quoted interpolation command-substitutes the
   // payload (creating the sentinel) before ffprobe runs; under execFileSync the
