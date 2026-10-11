@@ -9,7 +9,7 @@ import {
   EmbeddingColumnNotRegisteredError,
   EmbeddingColumnConfigError,
 } from '../core/search/embedding-column.ts';
-
+import { activeAIBilling } from '../core/ai/billing-policy.ts';
 import { redactPgUrl } from '../core/url-redact.ts';
 import { PUBLISH_GATE_KEYS } from '../mcp/publish-gates.ts';
 import { isConsentConfigKey, setConsentPreapproval, unsetConsentPreapproval } from '../core/consent-preapproval.ts';
@@ -645,7 +645,7 @@ async function showConfig(engine: BrainEngine): Promise<void> {
     process.exit(1);
   }
   console.log('GBrain config:');
-  const effective: Record<string, { value: unknown; note: string }> = {};
+  const effective: Record<string, { value: unknown; note: string }> = { ai_billing: { value: activeAIBilling(), note: 'protected file/env billing policy; DB ignored' } };
   try {
     effective.schema_pack = await effectiveSchemaPack(engine);
     const disabled = await effectiveEmbeddingDisabled(engine);
@@ -882,8 +882,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
 
-  if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack')) {
-    const effective = key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
+  if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack' || key === 'ai_billing')) {
+    const effective = key === 'ai_billing' ? { value: activeAIBilling(), note: 'protected file/env billing policy; DB ignored' } : key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
     if (!effective) {
       console.error(`Config key not found: ${key}`);
       process.exit(1);
