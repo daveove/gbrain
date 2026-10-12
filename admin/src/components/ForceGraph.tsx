@@ -122,13 +122,17 @@ export function ForceGraph({ nodes, edges, selectedId, onSelect, onActivate, lab
 
   const target = useMemo(() => computeLayout(nodes, edges, shownRef.current, charge, labelsBelow), [nodes, edges, charge, labelsBelow]);
 
-  // Ease from what is on screen to the new rest layout.
+  // Ease from what is on screen to the new rest layout. Frames are only an
+  // animation: a timer lands the rest layout even when the browser pauses or
+  // throttles requestAnimationFrame (background tab, low-power iPad), and the
+  // render below draws any node without an eased position at its rest
+  // position, so a new neighbourhood is never missing from the canvas.
   useEffect(() => {
     const from = shownRef.current;
+    const land = () => { shownRef.current = target; setPositions(target); };
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     if (reduce || from.size === 0) {
-      shownRef.current = target;
-      setPositions(target);
+      land();
       return;
     }
     const start = performance.now();
@@ -146,7 +150,8 @@ export function ForceGraph({ nodes, edges, selectedId, onSelect, onActivate, lab
       if (t < 1) frame = requestAnimationFrame(step);
     };
     frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
+    const settle = setTimeout(() => { cancelAnimationFrame(frame); land(); }, EASE_MS + 80);
+    return () => { cancelAnimationFrame(frame); clearTimeout(settle); };
   }, [target]);
 
   const fit = () => {
@@ -197,8 +202,8 @@ export function ForceGraph({ nodes, edges, selectedId, onSelect, onActivate, lab
         <g ref={viewportRef}>
           <g>
             {edges.map(e => {
-              const a = positions.get(e.source);
-              const b = positions.get(e.target);
+              const a = positions.get(e.source) ?? target.get(e.source);
+              const b = positions.get(e.target) ?? target.get(e.target);
               if (!a || !b) return null;
               const dx = b.x - a.x, dy = b.y - a.y;
               const len = Math.hypot(dx, dy) || 1;
@@ -216,7 +221,7 @@ export function ForceGraph({ nodes, edges, selectedId, onSelect, onActivate, lab
           </g>
           <g>
             {nodes.map(n => {
-              const p = positions.get(n.id);
+              const p = positions.get(n.id) ?? target.get(n.id);
               if (!p) return null;
               const dim = lit !== null && !lit.has(n.id);
               const showLabel = n.showLabel || n.id === focusId || (lit !== null && lit.has(n.id));

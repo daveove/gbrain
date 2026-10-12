@@ -98,6 +98,16 @@ export async function seedGraphFixture(engine: BrainEngine): Promise<void> {
   }
   await link(`${N}:pricing-experiments`, `default:companies/blue-harbor-co`, 'mentions', 'mentions');
 
+  // A hub whose 2-hop neighbourhood exceeds the 150-node default cap: 180
+  // member pages mention it, and each mentions one person, so recentring
+  // between large neighbourhoods is exercised.
+  await page(N, 'team-directory', 'Team directory');
+  for (let i = 1; i <= 180; i++) {
+    await page(N, `members/member-${i}`, `Member ${i}`);
+    await link(`${N}:members/member-${i}`, `${N}:team-directory`, 'mentions', 'mentions');
+    await link(`${N}:members/member-${i}`, `default:people/${slugify(PEOPLE[i % PEOPLE.length])}`, 'mentions', 'mentions');
+  }
+
   // Isolated pages, so the source map shows a realistic isolated share.
   for (const source of [...SOURCES, 'default']) {
     for (let i = 1; i <= 6; i++) await page(source, `loose/${i}`, `Loose note ${i}`);
