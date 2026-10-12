@@ -7,17 +7,20 @@ LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"
 export GBRAIN_DAILY_MEMORY_STATE="$STATE"
 mkdir -p "$(dirname "$LOG")" "$STATE"
+# The LaunchAgent's pool size outranks anything env.sh assigns.
+launch_pool_size="${GBRAIN_DAILY_MEMORY_POOL_SIZE:-}"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
 # Nightly runs never use paid model APIs (DAV-6933): text goes through the
 # Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
 export GBRAIN_AI_BILLING=subscription
-# Sessions each step may hold: a positive integer, else 2. Set after env.sh so
-# a pool size there cannot widen it, and exported normalized so the writer
+# Sessions each step may hold: a positive integer, else 2. The LaunchAgent value
+# wins over env.sh, and GBRAIN_POOL_SIZE is set after env.sh so a pool size
+# there cannot widen it; one normalized value goes to the writer
 # (GBRAIN_DAILY_MEMORY_POOL_SIZE) and the timezone, ingest and facts steps
-# (GBRAIN_POOL_SIZE) agree.
-pool_size="${GBRAIN_DAILY_MEMORY_POOL_SIZE:-2}"
+# (GBRAIN_POOL_SIZE).
+pool_size="${launch_pool_size:-${GBRAIN_DAILY_MEMORY_POOL_SIZE:-2}}"
 [[ "$pool_size" =~ ^[1-9][0-9]*$ ]] || pool_size=2
 export GBRAIN_DAILY_MEMORY_POOL_SIZE="$pool_size" GBRAIN_POOL_SIZE="$pool_size"
 # A session pooler at its client cap (EMAXCONNSESSION) is waited out at each

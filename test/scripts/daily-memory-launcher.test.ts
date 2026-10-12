@@ -476,12 +476,20 @@ finally:
 
   it('gives every step the LaunchAgent pool size, which env.sh cannot widen', () => {
     const { home, run } = fixture();
-    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_POOL_SIZE=2\n');
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_POOL_SIZE=2 GBRAIN_DAILY_MEMORY_POOL_SIZE=2\n');
     todayInputs(home);
     const one = run([], { GBRAIN_DAILY_MEMORY_POOL_SIZE: '1', GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1' });
     expect(one.code).toBe(0);
     expect(one.calls.map(call => call.kind)).toEqual(['ingest', 'write', 'facts']);
     expect(one.calls.map(call => [call.pool, call.writerPool])).toEqual([['1', '1'], ['1', '1'], ['1', '1']]);
+  });
+
+  it('uses an env.sh daily pool size when the LaunchAgent sets none', () => {
+    const { home, run } = fixture();
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_DAILY_MEMORY_POOL_SIZE=1\n');
+    const result = run(['2026-09-29']);
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => [call.pool, call.writerPool])).toEqual([['1', '1']]);
   });
 
   it('normalizes an invalid pool size to 2 for every step', () => {
