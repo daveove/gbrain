@@ -18,6 +18,7 @@ import { mountAdminClients } from './serve-http-clients.ts';
 import { mountAdminRegistration } from './serve-http-registration.ts';
 import { parseAdminGrantRequest, grantHttpStatus, GRANT_TOKEN_IMPLICATIONS, mountAdminGrantDiscovery, mountAdminGrantEdits } from './serve-http-grants.ts';
 import { probeHealth } from './serve-http-metrics.ts';
+import { mountAdminGraphApi } from './serve-http-admin-graph.ts';
 import type { ServeHttpContext } from './serve-http.ts';
 
 /** Narrowest contract the handshake consumes. */
@@ -221,6 +222,7 @@ export function mountAdminApi(app: Express, ctx: ServeHttpContext): void {
   mountAdminCalibrationApi(app, ctx);
   mountAdminKeyApi(app, ctx);
   mountAdminClientApi(app, ctx);
+  mountAdminGraphApi(app, ctx);
 
   // ---------------------------------------------------------------------------
   // SSE live activity feed

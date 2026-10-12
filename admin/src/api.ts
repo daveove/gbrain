@@ -1,3 +1,5 @@
+import type { GraphNeighbourhood, GraphPageDetail, GraphSearchHit, GraphSourceMap } from './lib/graph-types';
+
 const BASE = '';
 
 export class ApiError extends Error {
@@ -88,4 +90,16 @@ export const api = {
     apiFetchText(`/admin/api/calibration/charts/${encodeURIComponent(type)}${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
   // v0.41 D2 — live minion-jobs dashboard snapshot.
   jobsWatch: () => apiFetch('/admin/api/jobs/watch'),
+  // Graph explorer (serve-http-admin-graph.ts).
+  graphSearch: (q: string, signal?: AbortSignal): Promise<GraphSearchHit[]> =>
+    apiFetch(`/admin/api/graph/search?${new URLSearchParams({ q, limit: '12' })}`, { signal }),
+  graphNeighbourhood: (id: number, opts: { depth: number; limit: number; hideTypes: string[]; hideSources: string[] }): Promise<GraphNeighbourhood> =>
+    apiFetch(`/admin/api/graph/neighbourhood?${new URLSearchParams({
+      id: String(id), depth: String(opts.depth), limit: String(opts.limit),
+      hide_types: opts.hideTypes.join(','), hide_sources: opts.hideSources.join(','),
+    })}`),
+  graphPage: (id: number): Promise<GraphPageDetail> => apiFetch(`/admin/api/graph/page?id=${id}`),
+  graphSources: (): Promise<GraphSourceMap> => apiFetch('/admin/api/graph/sources'),
+  graphSourceTop: (sourceId: string): Promise<GraphSearchHit[]> =>
+    apiFetch(`/admin/api/graph/sources/${encodeURIComponent(sourceId)}/top?limit=25`),
 };
