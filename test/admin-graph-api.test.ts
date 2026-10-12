@@ -76,6 +76,7 @@ beforeAll(async () => {
   await page('tana-json-fixture', 'container', 'Container', JSON.stringify({ children: ['x1', 'x2'], id: 'c1', props: { created: 1 } }));
   await page('tana-json-fixture', 'draft', 'Draft outline');
   await page('tana-json-fixture', 'invoice', 'Send invoice');
+  await page('tana-json-fixture', 'budget-json', 'Budget export', '{"title":"Budget","rows":[1,2]}');
   await link('tana-json-fixture:container', 'tana-json-fixture:draft', 'contains');
   await link('tana-json-fixture:container', 'tana-json-fixture:invoice', 'contains');
   // Same slug in two sources -> ambiguous without source.
@@ -208,6 +209,9 @@ describe('admin graph API', () => {
     expect(unnamed.body.excerpt).toBe('contains: Draft outline, Send invoice');
     const prose = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-fixture:project']}`);
     expect(prose.body.excerpt.startsWith('Atlas root node. Atlas root node.')).toBe(true);
+    // Ordinary JSON (no Tana node shape) keeps its text, even in a Tana source.
+    const json = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-json-fixture:budget-json']}`);
+    expect(json.body.excerpt).toBe('{"title":"Budget","rows":[1,2]}');
   });
 
   test('search ranks exact matches first; page panel carries link counts and a bounded excerpt', async () => {

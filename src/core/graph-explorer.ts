@@ -315,7 +315,9 @@ export function tanaExcerpt(body: string): string | null {
   if (!body.startsWith('{')) return null;
   let doc: unknown;
   try { doc = JSON.parse(body); } catch { return null; }
-  if (!doc || typeof doc !== 'object' || !('props' in doc) || !doc.props || typeof doc.props !== 'object') return null;
+  // A Tana node document: a string `id` and a `props` object.
+  if (!doc || typeof doc !== 'object' || !('id' in doc) || typeof doc.id !== 'string'
+    || !('props' in doc) || !doc.props || typeof doc.props !== 'object') return null;
   const props = doc.props;
   const clean = (raw: unknown): string => typeof raw !== 'string' ? '' : raw
     .replace(/<span[^>]*data-inlineref-(node|date)=[^>]*>(.*?)<\/span>/gis, (_m, kind: string, text: string) => text.trim() || (kind.toLowerCase() === 'date' ? '[date]' : '[ref]'))
@@ -334,7 +336,8 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
   const rows = await engine.executeRaw<Row>(
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, p.created_at, p.updated_at,
             CASE WHEN left(p.compiled_truth, 1) = '{' AND length(p.compiled_truth) <= ${TANA_BODY_PARSE_MAX}
-                 THEN p.compiled_truth ELSE left(p.compiled_truth, ${GRAPH_EXCERPT_CHARS * 3}) END AS body
+                 THEN p.compiled_truth ELSE left(p.compiled_truth, ${GRAPH_EXCERPT_CHARS * 3}) END AS body,
+            length(p.compiled_truth) AS body_length
        FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL`,
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
@@ -346,10 +349,13 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
      ORDER BY count DESC, link_type, direction LIMIT 200`,
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   const raw = String(r.body ?? '');
-  // A JSON body too large to parse (cut to the excerpt window) is still a node
-  // document, never readable prose: fall through to the neighbour summary.
-  let text = tanaExcerpt(raw) ?? (raw.startsWith('{"') ? '' : raw.replace(/\s+/g, ' ').trim());
-  if (text === '' && raw.startsWith('{')) {
+  // Tana is identified by the parsed node shape, or, for a node body too large
+  // to parse (cut to the excerpt window), by a Tana source holding JSON. Any
+  // other body, including ordinary JSON, keeps its text.
+  const tana = tanaExcerpt(raw);
+  const isTana = tana !== null || (String(r.source_id).startsWith('tana') && raw.startsWith('{"') && Number(r.body_length) > TANA_BODY_PARSE_MAX);
+  let text = tana ?? (isTana ? '' : raw.replace(/\s+/g, ' ').trim());
+  if (isTana && text === '') {
     // A Tana node with no name or description: name what it links to instead,
     // children (`contains`) first.
     const near = await engine.executeRaw<Row>(

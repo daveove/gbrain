@@ -164,7 +164,9 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
     setLoading(true);
     api.graphNeighbourhood(rootId, { depth, limit, hideTypes: hiddenTypes, hideSources: hiddenSources })
       .then(next => { if (alive) { setData(next); setError(null); setSelected(null); } },
-        (e: unknown) => { if (alive) setError(e instanceof Error ? e.message : String(e)); })
+        // A failed request must not leave the previous neighbourhood on screen
+        // under controls that now describe a different request.
+        (e: unknown) => { if (alive) { setData(null); setSelected(null); setError(e instanceof Error ? e.message : String(e)); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [rootId, depth, limit, hiddenTypes, hiddenSources]);
@@ -251,7 +253,9 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
         </p>
         {rootId === null || !data ? (
           <div className="graph-empty">
-            <p>Search for a page above, or open the <a href="#graph?view=sources">source map</a> and pick one of a source's most connected pages.</p>
+            {rootId !== null && error
+              ? <p>This neighbourhood could not be loaded. Try 1 hop, fewer nodes, or more filters.</p>
+              : <p>Search for a page above, or open the <a href="#graph?view=sources">source map</a> and pick one of a source's most connected pages.</p>}
           </div>
         ) : data.nodes.length === 1 ? (
           <div className="graph-empty">
@@ -340,12 +344,15 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
 function SourceMapView({ map }: { map: GraphSourceMap | null }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [top, setTop] = useState<GraphSearchHit[] | null>(null);
+  const [topError, setTopError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selected) { setTop(null); return; }
-    let alive = true;
     setTop(null);
-    api.graphSourceTop(selected).then(rows => { if (alive) setTop(rows); }, () => { if (alive) setTop([]); });
+    setTopError(null);
+    if (!selected) return;
+    let alive = true;
+    api.graphSourceTop(selected).then(rows => { if (alive) setTop(rows); },
+      (e: unknown) => { if (alive) setTopError(e instanceof Error ? e.message : String(e)); });
     return () => { alive = false; };
   }, [selected]);
 
@@ -436,7 +443,8 @@ function SourceMapView({ map }: { map: GraphSourceMap | null }) {
               {fmt.format(chosen.pages)} pages · {fmt.format(chosen.connected)} connected · {pct(chosen.isolated, chosen.pages)} isolated
             </p>
             <h3 className="section-title">Most connected pages</h3>
-            {top === null ? <p className="graph-muted">Loading…</p>
+            {topError ? <p className="graph-status graph-error">Could not load this source's pages: {topError}</p>
+              : top === null ? <p className="graph-muted">Loading…</p>
               : top.length === 0 ? <p className="graph-muted">No page in this source has a link yet.</p>
               : (
                 <ol className="graph-top-list">
