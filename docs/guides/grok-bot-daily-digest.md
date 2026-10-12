@@ -2,8 +2,8 @@
 
 A Grok Bot routine can write one digest page per day into your brain through
 `gbrain serve --http`. This guide defines that write contract, shows how to
-verify it on loopback, and lists what publishing it beyond your computer would
-take. The publication step is not part of the verified local setup.
+verify it on loopback, and shows how to publish only the endpoints the Bot
+needs over Tailscale Funnel.
 
 **Say to your agent:** *"Give my Grok Bot a daily digest page in my brain"*
 (on the brain host, the agent runs `gbrain mcp grant` with
@@ -217,69 +217,171 @@ client: forced re-runs converge on one page, a retry replays its receipt, and
 a reused `request_id` is refused. `test/client-slug-fence.test.ts` and
 `test/e2e/qm-provisioning.test.ts` cover the prefix fence.
 
-## What exposing beyond this computer would take
+## Publish the endpoint over Tailscale Funnel
 
-> **Not done. Waiting for the owner's go-ahead.** Nothing below has been run. The
-> verified setup listens only on `127.0.0.1`.
+Grok Bot runs in the vendor's cloud, so it needs a public HTTPS endpoint.
+Grok rejects `localhost` and private addresses for custom MCP servers and
+suggests a tunnel
+([Custom MCP Server Tunneling](https://docs.x.ai/grok/connectors/custom-mcp-tunneling)).
+Its private-network options are an Enterprise-only Team Setup script or
+routing the Bot's traffic through a desktop that must stay online
+([Connect to private networks](https://docs.x.ai/grok-bot/private-networks)),
+so neither suits an unattended daily routine. Tailscale Funnel gives the
+brain host a stable `https://<machine>.<tailnet>.ts.net` name with a
+Tailscale-managed certificate and no inbound port on your router.
 
-Grok Bot runs in xAI's cloud, so it needs a public HTTPS endpoint. The
-supported path is Tailscale Funnel:
+`gbrain mcp expose --funnel` publishes the whole server at `/`, including
+`/admin`. The steps below publish only the four paths the digest client
+uses and keep the server on loopback.
+
+### 1. Enable HTTPS and Funnel for the tailnet
 
 ```bash
-# 0. Stop the manually started loopback server first. expose installs its own
-#    service on port 3131 and refuses with foreign_listener while anything listens there.
+tailscale funnel --bg --set-path=/mcp http://127.0.0.1:3131/mcp
+```
 
-# 1. Publish serve --http as a user service on the machine's MagicDNS name (consent prompt).
-gbrain mcp expose --funnel
-gbrain mcp expose --status
+On a tailnet without these features, the command prints
+`https://login.tailscale.com/f/funnel?node=...` and waits. Open that URL as a
+tailnet admin. It turns on HTTPS certificates and adds a Funnel `nodeAttrs`
+entry for `autogroup:member` to the policy file. Narrow that target in the
+policy file if other members should not run Funnel. Re-run the command
+afterwards. `tailscale cert <machine>.<tailnet>.ts.net` fails with
+`your Tailscale account does not support getting TLS certs` until HTTPS is on.
 
-# 2. Grant the routine against the public URL. Use a new client name: the
-#    loopback client from "Host setup" still exists, and its handoff is bound
-#    to the loopback URL. Revoke that loopback client once this one verifies.
-gbrain mcp grant grok-bot-digest-public --harness grok-bot --profile memory-writer --source default \
+### 2. Run the server on loopback
+
+Run it as a user service (a launchd LaunchAgent or systemd user unit with
+restart-always) so it survives logout and crashes:
+
+```bash
+umask 077
+openssl rand -hex 32 > /absolute/private/admin-token
+GBRAIN_ADMIN_BOOTSTRAP_TOKEN=$(cat /absolute/private/admin-token) \
+  gbrain serve --http --bind 127.0.0.1 --port 3131 \
+  --public-url https://your-machine.your-tailnet.ts.net --suppress-bootstrap-token
+```
+
+`--public-url` makes the OAuth issuer and the protected-resource metadata
+name the public host. On a Postgres brain behind a session-mode pooler, each
+resident process holds its own sessions. Set `GBRAIN_POOL_SIZE=2` and
+`GBRAIN_DISABLE_DIRECT_POOL=1` in the service environment when the pooler's
+client limit is shared with imports or embedding runs. The server then holds
+at most two sessions.
+
+### 3. Publish only the client paths
+
+```bash
+for p in /mcp /token /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource; do
+  tailscale funnel --bg --https=443 --set-path="$p" "http://127.0.0.1:3131$p"
+done
+tailscale funnel status
+```
+
+The thin client discovers the issuer at
+`/.well-known/oauth-authorization-server`, mints tokens at `/token`, and calls
+`/mcp`. MCP clients also read `/.well-known/oauth-protected-resource/mcp`,
+which the last handler covers. Every other path, including `/admin`,
+`/authorize`, `/register`, `/revoke`, `/ingest`, `/health` and `/metrics`,
+gets Funnel's `404 page not found`. These paths stay reachable on
+`http://127.0.0.1:3131` for the host owner.
+
+### 4. Grant the routine on the brain host
+
+Use a dedicated database-only source so the grant can read only its own
+digests:
+
+```bash
+gbrain sources add grok-digests --federated
+gbrain mcp grant grok-bot-digest-public --harness grok-bot --profile memory-writer \
+  --source grok-digests --federated-read grok-digests \
   --bound-slug-prefixes digests/grok-bot/ \
   --url https://your-machine.your-tailnet.ts.net/mcp \
-  --admin-token-file ~/.gbrain/serve/admin-token \
-  --credentials-out /private/grok-bot-digest-public.json --json
+  --credentials-out /absolute/private/grok-bot-digest-public.json --json
+```
 
-# 3. Move the handoff file to the Bot's computer privately, then inside the Bot:
+Run this on the brain host without `--admin-token-file`. The grant is then
+written through the local database connection, and the handoff is bound to
+the public URL. With `--admin-token-file`, `gbrain mcp grant` sends the grant
+to `/admin/api/grants` on the `--url` host, which Funnel does not publish.
+
+### 5. Verify from outside the tailnet
+
+On the brain host, MagicDNS can answer with the tailnet address. Pin the
+public Funnel address so the checks take the internet path:
+
+```bash
+host=your-machine.your-tailnet.ts.net
+ip=$(dig +short @1.1.1.1 "$host" A | head -1)
+curl -s -o /dev/null -w '%{http_code}\n' --resolve "$host:443:$ip" -X POST "https://$host/mcp" \
+  -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'                              # 401
+curl -s -o /dev/null -w '%{http_code}\n' --resolve "$host:443:$ip" "https://$host/admin"   # 404
+```
+
+Then mint a token at `https://$host/token` with the handoff's `client_id` and
+`client_secret` and run the [write contract](#each-run) against
+`https://$host/mcp`. A correct grant gives these results:
+
+- `put_page` on `digests/grok-bot/<date>` commits with `source_id: grok-digests`.
+- `put_page` on `notes/...` returns `permission_denied`.
+- `put_page` with `source_id: default` returns `permission_denied` with the
+  message that the source is outside the current write grant.
+- `get_page` on a `default` page returns `page_not_found`. With
+  `source_id: default` it returns `permission_denied`.
+- `list_pages` lists only `grok-digests` pages.
+
+### 6. Connect the Bot
+
+Move the handoff file to the Bot's computer privately, then inside the Bot:
+
+```bash
 gbrain connect https://your-machine.your-tailnet.ts.net/mcp --harness grok-bot \
   --credentials-file /private/grok-bot-digest-public.json --install --root /workspace/gbrain
 /workspace/gbrain/bin/gbrain mcp verify --client CLIENT_ID --harness grok-bot \
   --url https://your-machine.your-tailnet.ts.net/mcp --credentials-file /private/grok-bot-digest-public.json
 ```
 
-To revoke the client or roll back the exposure:
+### Revoke or roll back
+
+The admin API is on loopback only, so run these on the brain host:
 
 ```bash
 # Preview, then apply with the revision the preview shows.
-gbrain mcp admin revoke CLIENT_ID --url https://your-machine.your-tailnet.ts.net/mcp \
-  --admin-token-file ~/.gbrain/serve/admin-token --json
+gbrain mcp admin revoke CLIENT_ID --url http://127.0.0.1:3131/mcp \
+  --admin-token-file /absolute/private/admin-token --json
 gbrain mcp admin revoke CLIENT_ID --yes --if-version REVISION \
-  --url https://your-machine.your-tailnet.ts.net/mcp --admin-token-file ~/.gbrain/serve/admin-token --json
+  --url http://127.0.0.1:3131/mcp --admin-token-file /absolute/private/admin-token --json
 
-# Remove the Funnel handler and the service. This does not revoke clients, so revoke first.
-gbrain mcp expose --remove --yes
+# Remove every Funnel handler on :443. This does not revoke clients, so revoke first.
+tailscale funnel --https=443 off
 ```
 
 After revocation, `/token` returns `invalid_client` and existing access tokens
 get HTTP 401. Both were verified on loopback.
 
-Risks to weigh before saying go:
+### Reporting back to you
 
-- **Public endpoint.** Funnel makes `/mcp`, `/token`, and `/admin` reachable
-  from the internet. Bearer auth and grants are the only gate.
-- **Reads are source-wide.** The fence limits writes to `digests/grok-bot/`,
-  but a `--source default` grant can read the whole `default` source. A
-  dedicated database-only source confines reads too. Create it with
-  `gbrain sources add grok-digests --federated` (no `--path`; federated so
-  your own unqualified searches still include the digests), then grant with
-  `--source grok-digests --federated-read grok-digests`. The grant's read
-  list, not the source's federation, is what confines the Bot. On a
-  loopback test brain that grant wrote the digest into `grok-digests` and
-  could not see a `default` page through `get_page`, `search`, `query` or
-  `list_pages`, or write into `default`; the `--source default` grant saw it
-  through all four.
+Grok automations accept inbound webhooks: an external service can start an
+automation with a signed POST
+([Webhook Triggers](https://docs.x.ai/grok/automations/webhooks)). Grok Bot
+routines run on a schedule or start from Slack or GitHub events
+([Skills and routines](https://docs.x.ai/grok-bot/skills-routines-and-automations)).
+Neither documents an outbound webhook that could deliver a Bot's results to
+the brain, so `put_page` remains the write path. The routine reports to you in
+its own conversation, and each run's receipt (`revision`, `request_id`)
+identifies the committed page.
+
+### Risks
+
+- **Public endpoint.** `/mcp` and `/token` are reachable from the internet.
+  Bearer auth and grants are the only gate. `gbrain mcp expose --funnel`
+  would add `/admin` and the other server paths.
+- **Reads follow the grant's read list.** The fence limits writes to
+  `digests/grok-bot/`. A `--source default` grant can still read the whole
+  `default` source. The `grok-digests` grant in step 4 confines reads too:
+  the grant's read list, not the source's federation, is what confines the
+  Bot. The source is federated so your own unqualified searches still
+  include the digests.
 - **Shared Bot computer.** Grok documents one account-wide computer. Every
   Bot and routine on that account can use the handoff file and launcher.
 - **Broad tool surface.** `memory-writer` for the `grok-bot` adapter
