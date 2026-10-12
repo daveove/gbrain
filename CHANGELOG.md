@@ -12,6 +12,10 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ## [Unreleased]
 
+### Added
+
+- Admin **Graph** tab (`/admin/#graph`). The explorer searches a page and draws its one- or two-hop neighbourhood, capped at 50, 150 or 300 pages, most connected first. Nodes are coloured by source and edges styled by link type. The tab has link-type and source filters, with `duplicate` hidden by default, and a side panel with link counts and an excerpt. The source map shows each source's size, its isolated share and cross-source edge counts. It is backed by owner-only, read-only `GET /admin/api/graph/*` routes. Every statement is bounded by a statement timeout, and the aggregates are memoized for five minutes.
+
 ### Fixed
 
 - Query embedding deadlines begin at the first provider request. Lexical reads and query expansion no longer spend the provider's six-second budget before an embedding starts. Cache embeddings and low-to-high detail recovery retain the original shared deadline and its existing minimum floor.
