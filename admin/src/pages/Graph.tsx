@@ -42,13 +42,18 @@ export function GraphPage() {
   }, []);
 
   // The source map is a whole-brain aggregate: load it only when its tab is
-  // opened (once per visit; the server memoizes it for five minutes).
+  // opened (once per visit; the server memoizes it for five minutes and a
+  // failure for 90 seconds). `mapAttempt` re-requests it from the Retry button.
   const wantsMap = route.view === 'sources';
+  const [mapAttempt, setMapAttempt] = useState(0);
   useEffect(() => {
     if (!wantsMap || sourceMap) return;
+    let alive = true;
     setMapError(null);
-    api.graphSources().then(setSourceMap, (e: unknown) => setMapError(e instanceof Error ? e.message : String(e)));
-  }, [wantsMap, sourceMap]);
+    api.graphSources().then(m => { if (alive) setSourceMap(m); },
+      (e: unknown) => { if (alive) setMapError(e instanceof Error ? e.message : String(e)); });
+    return () => { alive = false; };
+  }, [wantsMap, sourceMap, mapAttempt]);
 
   return (
     <div>
@@ -59,9 +64,8 @@ export function GraphPage() {
         <button type="button" role="tab" aria-selected={route.view === 'sources'} className={`tab tab-button${route.view === 'sources' ? ' active' : ''}`}
           onClick={() => go({ view: 'sources' })}>Source map</button>
       </div>
-      {wantsMap && mapError && <div className="warning-bar">Source map unavailable: {mapError}</div>}
       {route.view === 'sources'
-        ? <SourceMapView map={sourceMap} />
+        ? <SourceMapView map={sourceMap} error={mapError} onRetry={() => setMapAttempt(n => n + 1)} />
         : <ExplorerView rootId={route.id} />}
     </div>
   );
@@ -91,19 +95,30 @@ function PageSearch({ onPick }: { onPick: (hit: GraphSearchHit) => void }) {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  const [searchError, setSearchError] = useState<string | null>(null);
+  // Title search needs 3 characters (the trigram index matches nothing
+  // shorter); a 2-character slug-shaped input is an exact slug lookup.
+  const term = q.trim();
+  const searchable = term.length >= 3 || (term.length === 2 && /^[a-z0-9][a-z0-9._/-]*$/.test(term));
+
   useEffect(() => {
     // Results always belong to the text in the box: drop the previous list as
     // soon as the query changes and reopen only for this query's response.
     setHits([]);
     setOpen(false);
-    const term = q.trim();
-    if (term.length < 2) return;
+    setSearchError(null);
+    if (!searchable) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
-      api.graphSearch(term, abort.signal).then(found => { setHits(found); setActive(0); setOpen(true); }, () => {});
+      api.graphSearch(term, abort.signal).then(found => { setHits(found); setActive(0); setOpen(true); },
+        (e: unknown) => {
+          if (abort.signal.aborted) return;
+          setSearchError(e instanceof Error ? e.message : String(e));
+          setOpen(true);
+        });
     }, 220);
     return () => { clearTimeout(timer); abort.abort(); };
-  }, [q]);
+  }, [term, searchable]);
 
   const pick = (hit: GraphSearchHit) => { onPick(hit); setOpen(false); setQ(''); inputRef.current?.blur(); };
 
@@ -123,9 +138,10 @@ function PageSearch({ onPick }: { onPick: (hit: GraphSearchHit) => void }) {
           else if (event.key === 'Enter' && hits[active]) { event.preventDefault(); pick(hits[active]); }
           else if (event.key === 'Escape') setOpen(false);
         }} />
-      {open && q.trim().length >= 2 && (
+      {open && searchable && (
         <ul id="graph-search-results" role="listbox" className="graph-results">
-          {hits.length === 0 && <li className="graph-results-empty">No page matches “{q.trim()}”.</li>}
+          {searchError && <li className="graph-results-empty graph-error">Search failed: {searchError}</li>}
+          {!searchError && hits.length === 0 && <li className="graph-results-empty">No page matches “{term}”.</li>}
           {hits.map((hit, i) => (
             <li key={hit.id} id={`graph-hit-${hit.id}`} role="option" aria-selected={i === active}
               className={i === active ? 'active' : ''}
@@ -172,10 +188,13 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
   }, [rootId, depth, limit, hiddenTypes, hiddenSources]);
 
   const focusId = selected ?? data?.root.id ?? null;
+  const [detailError, setDetailError] = useState<string | null>(null);
   useEffect(() => {
+    setDetailError(null);
     if (focusId === null) { setDetail(null); return; }
     let alive = true;
-    api.graphPage(focusId).then(d => { if (alive) setDetail(d); }, () => { if (alive) setDetail(null); });
+    api.graphPage(focusId).then(d => { if (alive) setDetail(d); },
+      (e: unknown) => { if (alive) { setDetail(null); setDetailError(e instanceof Error ? e.message : String(e)); } });
     return () => { alive = false; };
   }, [focusId]);
 
@@ -271,6 +290,7 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
       </section>
 
       <aside className="graph-panel" aria-label="Page details and filters">
+        {detailError && <p className="graph-status graph-error">Page details could not be loaded: {detailError}</p>}
         {detail && (
           <div className="graph-detail">
             <h2>{detail.title}</h2>
@@ -341,7 +361,7 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
 // Source map
 // ---------------------------------------------------------------------------
 
-function SourceMapView({ map }: { map: GraphSourceMap | null }) {
+function SourceMapView({ map, error, onRetry }: { map: GraphSourceMap | null; error: string | null; onRetry: () => void }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [top, setTop] = useState<GraphSearchHit[] | null>(null);
   const [topError, setTopError] = useState<string | null>(null);
@@ -392,7 +412,14 @@ function SourceMapView({ map }: { map: GraphSourceMap | null }) {
     return { nodes: graphNodes, edges: graphEdges };
   }, [map, crossBySource]);
 
-  if (!map) return <p className="graph-status">Loading source map…</p>;
+  if (!map) {
+    return error ? (
+      <div className="warning-bar" role="alert">
+        Source map unavailable: {error} A failed source map is not re-run for 90 seconds.{' '}
+        <button type="button" className="btn btn-secondary" onClick={onRetry}>Retry</button>
+      </div>
+    ) : <p className="graph-status">Loading source map…</p>;
+  }
   const chosen: GraphSourceStats | undefined = map.sources.find(s => s.id === selected);
   const totals = map.sources.reduce((t, s) => ({ pages: t.pages + s.pages, isolated: t.isolated + s.isolated }), { pages: 0, isolated: 0 });
 

@@ -14,7 +14,7 @@ import type { Server } from 'node:http';
 import express from 'express';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { buildServeHttpApp } from '../src/commands/serve-http.ts';
-import { GRAPH_MAX_LIMIT, type GraphPageDetail, type GraphSearchHit, type NeighbourhoodResult, type SourceMapResult } from '../src/core/graph-explorer.ts';
+import { GRAPH_MAX_LIMIT, GRAPH_TITLE_SEARCH_SQL, createTtlMemo, type GraphPageDetail, type GraphSearchHit, type NeighbourhoodResult, type SourceMapResult } from '../src/core/graph-explorer.ts';
 
 let engine: PGLiteEngine;
 let server: Server;
@@ -176,6 +176,11 @@ describe('admin graph API', () => {
     expect((await get('/admin/api/graph/neighbourhood?id=999999')).status).toBe(404);
     expect((await get(`/admin/api/graph/neighbourhood?id=${ids['tana-fixture:ghost']}`)).status).toBe(404);
     expect((await get('/admin/api/graph/search?q=a')).status).toBe(400);
+    // Two characters that are not slug-shaped would be an unindexable title scan.
+    expect((await get('/admin/api/graph/search?q=Pr')).status).toBe(400);
+    // Page ids are int4: a larger id is a bad request, not a database error.
+    expect((await get('/admin/api/graph/neighbourhood?id=9999999999')).status).toBe(400);
+    expect((await get('/admin/api/graph/page?id=2147483648')).status).toBe(400);
     expect((await get('/admin/api/graph/sources/tana-fixture/top?limit=1000')).status).toBe(200);
   });
 
@@ -227,5 +232,57 @@ describe('admin graph API', () => {
     expect(body.excerpt.length).toBeLessThanOrEqual(361);
     expect(body.links).toContainEqual({ link_type: 'contains', direction: 'out', count: 5 });
     expect(body.links).toContainEqual({ link_type: 'duplicate', direction: 'in', count: 1 });
+  });
+
+  test('search matches titles by substring and slugs only exactly', async () => {
+    // 'lonely' is a slug whose title is 'Isolated page': a slug substring finds nothing ...
+    expect((await get<GraphSearchHit[]>('/admin/api/graph/search?q=lonel')).body).toEqual([]);
+    // ... the exact slug finds it, in every source unless one is given.
+    const exact = (await get<GraphSearchHit[]>('/admin/api/graph/search?q=lonely')).body;
+    expect(exact.map(h => `${h.source_id}:${h.slug}`)).toEqual(['logseq-fixture:lonely']);
+    const both = (await get<GraphSearchHit[]>('/admin/api/graph/search?q=project')).body;
+    expect(both.slice(0, 2).map(h => h.source_id)).toEqual(['logseq-fixture', 'tana-fixture']);
+    // The title arm never matches slugs, so the title trigram index serves it.
+    expect(GRAPH_TITLE_SEARCH_SQL).not.toMatch(/slug\s+ILIKE/i);
+    // With sequential scans off, the only index that can serve the match scan
+    // is the title trigram index (no OR on slug, no deleted_at beside it).
+    const scratch = new PGLiteEngine();
+    await scratch.connect({});
+    try {
+      await scratch.initSchema();
+      await scratch.executeRaw(`INSERT INTO pages (source_id, slug, type, title, compiled_truth)
+        SELECT 'default', 'n/' || g, 'note', 'Note ' || md5(g::text), '' FROM generate_series(1, 2000) g`);
+      await scratch.executeRaw('ANALYZE pages');
+      await scratch.executeRaw('SET enable_seqscan = off');
+      const plan = await scratch.executeRaw<{ 'QUERY PLAN': string }>(`EXPLAIN ${GRAPH_TITLE_SEARCH_SQL}`,
+        ['abcdef', '%abcdef%', 'abcdef%', 20, null]);
+      const text = plan.map(r => r['QUERY PLAN']).join('\n');
+      expect(text).toContain('Bitmap Index Scan on idx_pages_trgm');
+      expect(text).not.toContain('pages_dedup_idx');
+    } finally {
+      await scratch.disconnect();
+    }
+  }, 60_000);
+});
+
+describe('graph aggregate memo', () => {
+  test('a failure is replayed for failureTtlMs, then the load runs again', async () => {
+    let t = 0;
+    let calls = 0;
+    const memo = createTtlMemo<number>({ ttlMs: 300_000, failureTtlMs: 90_000, maxEntries: 2, now: () => t });
+    const failing = () => { calls++; return Promise.reject(new Error('timeout')); };
+    await expect(memo('all', failing)).rejects.toThrow('timeout');
+    t = 89_000;
+    await expect(memo('all', failing)).rejects.toThrow('timeout');
+    expect(calls).toBe(1);
+    t = 91_000;
+    expect(await memo('all', async () => { calls++; return 7; })).toBe(7);
+    t = 300_000;
+    expect(await memo('all', async () => { calls++; return 8; })).toBe(7);
+    expect(calls).toBe(2);
+    // Oldest key is dropped past maxEntries.
+    await memo('b', async () => 1);
+    await memo('c', async () => 1);
+    expect(await memo('all', async () => { calls++; return 9; })).toBe(9);
   });
 });

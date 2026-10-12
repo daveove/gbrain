@@ -4,15 +4,18 @@
  *   GET /admin/api/graph/search?q=&source=&limit=
  *   GET /admin/api/graph/neighbourhood?id= | ?slug=&source= [&depth=&limit=&hide_types=&hide_sources=]
  *   GET /admin/api/graph/page?id=
- *   GET /admin/api/graph/sources                 (memoized GRAPH_SOURCE_MAP_TTL_MS)
- *   GET /admin/api/graph/sources/:id/top?limit=  (memoized per source and limit)
+ *   GET /admin/api/graph/sources                 (memoized GRAPH_SOURCE_MAP_TTL_MS; failures GRAPH_FAILURE_TTL_MS)
+ *   GET /admin/api/graph/sources/:id/top?limit=  (memoized per source and limit, same TTLs)
  *
  * Every route carries requireAdmin; the SQL and its bounds live in
  * src/core/graph-explorer.ts.
  */
 import type { Express, Request, Response } from 'express';
 import {
+  GRAPH_SEARCH_MAX_LIMIT,
+  GRAPH_TOP_PAGES_MAX_LIMIT,
   GraphRequestError,
+  clampGraphLimit,
   createTtlMemo,
   queryGraphNeighbourhood,
   queryGraphPage,
@@ -26,21 +29,29 @@ import {
 import type { ServeHttpContext } from './serve-http.ts';
 
 export const GRAPH_SOURCE_MAP_TTL_MS = 5 * 60_000;
+/** A failed aggregate (usually its 30 s timeout) is replayed this long before it runs again. */
+export const GRAPH_FAILURE_TTL_MS = 90_000;
+const PG_INT4_MAX = 2_147_483_647;
 
-function sendGraphError(res: Response, e: unknown): void {
+function sendGraphError(res: Response, route: string, e: unknown): void {
   if (e instanceof GraphRequestError) {
     res.status(e.status).json({ error: e.code, message: e.message, ...e.details });
     return;
   }
   // Postgres SQLSTATE 57014: the statement ran past its transaction-local
   // statement_timeout. AbortError / TimeoutError: the paired signal deadline
-  // fired (PGLite, or a saturated Postgres pool).
-  const timedOut = (e && typeof e === 'object' && 'code' in e && e.code === '57014')
+  // fired (PGLite, or a saturated Postgres pool), or the client went away.
+  const code = e && typeof e === 'object' && 'code' in e ? String(e.code) : undefined;
+  const timedOut = code === '57014'
     || (e instanceof DOMException && (e.name === 'AbortError' || e.name === 'TimeoutError'));
   if (timedOut) {
-    res.status(503).json({ error: 'graph_query_timeout', message: 'The graph query hit its statement timeout. Narrow the request (depth 1, fewer nodes) and retry.' });
+    if (!res.headersSent && !res.writableEnded) {
+      res.status(503).json({ error: 'graph_query_timeout', message: 'The graph query hit its statement timeout. Narrow the request (depth 1, fewer nodes) and retry.' });
+    }
     return;
   }
+  // Name and code only: messages and parameters can carry page text.
+  console.error(`[admin-graph] ${route} failed: ${e instanceof Error ? e.name : typeof e}${code ? ` (${code})` : ''}`);
   res.status(503).json({ error: 'service_unavailable' });
 }
 
@@ -52,7 +63,7 @@ function graphListParam(raw: unknown): string[] {
 
 function graphIdParam(raw: unknown): number {
   const id = Number(raw);
-  if (!Number.isInteger(id) || id < 1) throw new GraphRequestError('id must be a positive integer', 400, 'invalid_id');
+  if (!Number.isInteger(id) || id < 1 || id > PG_INT4_MAX) throw new GraphRequestError('id must be a positive integer (page ids are int4)', 400, 'invalid_id');
   return id;
 }
 
@@ -62,17 +73,22 @@ function graphStringParam(raw: unknown): string | undefined {
 
 export function mountAdminGraphApi(app: Express, ctx: ServeHttpContext): void {
   const { engine, requireAdmin } = ctx;
-  const sourceMapMemo = createTtlMemo<SourceMapResult>(GRAPH_SOURCE_MAP_TTL_MS);
-  const topPagesMemo = createTtlMemo<GraphSearchHit[]>(GRAPH_SOURCE_MAP_TTL_MS);
+  const sourceMapMemo = createTtlMemo<SourceMapResult>({ ttlMs: GRAPH_SOURCE_MAP_TTL_MS, failureTtlMs: GRAPH_FAILURE_TTL_MS, maxEntries: 1 });
+  const topPagesMemo = createTtlMemo<GraphSearchHit[]>({ ttlMs: GRAPH_SOURCE_MAP_TTL_MS, failureTtlMs: GRAPH_FAILURE_TTL_MS, maxEntries: 100 });
 
   app.get('/admin/api/graph/search', requireAdmin, async (req: Request, res: Response) => {
+    // The picker searches as the owner types and aborts superseded requests;
+    // a request whose client is gone stops waiting for a pooled connection.
+    const gone = new AbortController();
+    res.on('close', () => { if (!res.writableFinished) gone.abort(new DOMException('client closed', 'AbortError')); });
     try {
       res.json(await searchGraphPages(engine, String(req.query.q ?? ''), {
-        limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
+        limit: req.query.limit === undefined ? undefined : clampGraphLimit(req.query.limit, 20, GRAPH_SEARCH_MAX_LIMIT),
         sourceId: graphStringParam(req.query.source),
+        signal: gone.signal,
       }));
     } catch (e) {
-      sendGraphError(res, e);
+      sendGraphError(res, 'search', e);
     }
   });
 
@@ -94,7 +110,7 @@ export function mountAdminGraphApi(app: Express, ctx: ServeHttpContext): void {
         hideSources: graphListParam(req.query.hide_sources),
       }));
     } catch (e) {
-      sendGraphError(res, e);
+      sendGraphError(res, 'neighbourhood', e);
     }
   });
 
@@ -104,7 +120,7 @@ export function mountAdminGraphApi(app: Express, ctx: ServeHttpContext): void {
       if (!page) throw new GraphRequestError('Page not found', 404, 'not_found');
       res.json(page);
     } catch (e) {
-      sendGraphError(res, e);
+      sendGraphError(res, 'page', e);
     }
   });
 
@@ -112,17 +128,17 @@ export function mountAdminGraphApi(app: Express, ctx: ServeHttpContext): void {
     try {
       res.json(await sourceMapMemo('all', () => querySourceMap(engine)));
     } catch (e) {
-      sendGraphError(res, e);
+      sendGraphError(res, 'sources', e);
     }
   });
 
   app.get('/admin/api/graph/sources/:id/top', requireAdmin, async (req: Request, res: Response) => {
     try {
       const sourceId = String(req.params.id);
-      const limit = req.query.limit === undefined ? 20 : Number(req.query.limit);
+      const limit = clampGraphLimit(req.query.limit, 20, GRAPH_TOP_PAGES_MAX_LIMIT);
       res.json(await topPagesMemo(`${sourceId}\u0000${limit}`, () => querySourceTopPages(engine, sourceId, limit)));
     } catch (e) {
-      sendGraphError(res, e);
+      sendGraphError(res, 'sources/top', e);
     }
   });
 }

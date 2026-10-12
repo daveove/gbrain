@@ -109,8 +109,9 @@ link cannot recreate a lost OAuth request or verifier.
 
 The **Graph** tab (`/admin/#graph`) shows the page link graph to the owner.
 
-- **Explorer** (`#graph?id=<page id>`): search a page by title or slug (`/`
-  focuses search), then see its neighbourhood one or two hops out. The server
+- **Explorer** (`#graph?id=<page id>`): search a page by a title substring
+  (at least 3 characters) or by its exact slug (`/` focuses search), then see
+  its neighbourhood one or two hops out. The server
   keeps at most 50, 150 or 300 pages, root first, then the most connected
   pages. The status line says when the cap or a scan bound dropped reachable
   pages. Colour shows the source family; edge colour and dash show the link
@@ -130,9 +131,13 @@ under a deadline: 8 seconds for search, neighbourhood and page reads, and 30
 seconds for aggregates. On Postgres the deadline is a transaction-local
 `statement_timeout`. PGLite cannot cancel a query, so the request returns
 `503 graph_query_timeout` at the deadline and the query runs on to completion.
-The source map and top-pages aggregates read only `id`, `source_id` and
-`deleted_at` from `pages`, never page content. The source map loads only when
-its tab is opened, and the server keeps both results for five minutes.
+The title search uses the title trigram index (`idx_pages_trgm`). There is
+no slug trigram index, so slugs match only exactly, through the
+`(source_id, slug)` key, one probe per source. The source map and top-pages
+aggregates read only `id`, `source_id` and `deleted_at` from `pages`, never
+page content. The source map loads only when its tab is opened. The server
+keeps both results for five minutes and a failure for 90 seconds, so
+reopening the tab after a timeout does not run the scan again at once.
 
 ## Register and connect a client
 

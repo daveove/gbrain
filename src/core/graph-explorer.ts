@@ -101,24 +101,35 @@ function toPageRef(r: Row): GraphPageRef {
   };
 }
 
-function bound(ms: number): { timeoutMs: number; signal: AbortSignal } {
-  return { timeoutMs: ms, signal: AbortSignal.timeout(ms) };
+/**
+ * Deadline for one statement: `timeoutMs` (Postgres statement_timeout) plus
+ * an abort signal that also fires when `cancel` does (the HTTP client went
+ * away). On Postgres the signal only releases a caller still waiting for a
+ * pooled connection; a running statement ends at its timeout.
+ */
+function bound(ms: number, cancel?: AbortSignal): { timeoutMs: number; signal: AbortSignal } {
+  const deadline = AbortSignal.timeout(ms);
+  return { timeoutMs: ms, signal: cancel ? AbortSignal.any([deadline, cancel]) : deadline };
 }
 
 const DEGREE_SQL = `((SELECT count(*) FROM links o WHERE o.from_page_id = p.id) + (SELECT count(*) FROM links i WHERE i.to_page_id = p.id))::int`;
 const TITLE_SQL = `COALESCE(NULLIF(p.title, ''), p.slug)`;
 
+/**
+ * Live pages with exactly this slug, one probe of the (source_id, slug) key
+ * per source. A bare `slug = $1` cannot use that key's leading column and
+ * scans the whole index.
+ */
+const SLUG_LOOKUP_SQL = `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, ${DEGREE_SQL} AS degree
+  FROM sources s
+  CROSS JOIN LATERAL (SELECT p.id, p.source_id, p.slug, p.title, p.type FROM pages p
+                       WHERE p.source_id = s.id AND p.slug = $1 AND p.deleted_at IS NULL) p
+ WHERE ($2::text IS NULL OR s.id = $2)
+ ORDER BY p.source_id LIMIT 10`;
+
 /** Resolve the root page. Without a source, a slug shared by two sources is ambiguous. */
 export async function resolveGraphRoot(engine: BrainEngine, slug: string, sourceId?: string): Promise<GraphPageRef | null> {
-  const rows = sourceId
-    ? await engine.executeRaw<Row>(
-        `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type FROM pages p
-          WHERE p.source_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL`,
-        [sourceId, slug], bound(GRAPH_QUERY_TIMEOUT_MS))
-    : await engine.executeRaw<Row>(
-        `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type FROM pages p
-          WHERE p.slug = $1 AND p.deleted_at IS NULL ORDER BY p.source_id LIMIT 10`,
-        [slug], bound(GRAPH_QUERY_TIMEOUT_MS));
+  const rows = await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [slug, sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
   if (rows.length > 1) {
     throw new GraphRequestError(`Slug "${slug}" exists in ${rows.length} sources; pass source.`, 409, 'ambiguous_slug',
@@ -260,31 +271,54 @@ export interface GraphSearchHit extends GraphPageRef {
   degree: number;
 }
 
+/** Characters a slug can hold; anything else (spaces, capitals) is not a slug lookup. */
+const SLUG_SHAPE = /^[a-z0-9][a-z0-9._/-]*$/;
+
 /**
- * Title / slug substring search for the explorer's search box: exact slug or
- * title first, then prefix matches, then shorter titles. Degree is measured
- * only for the returned page.
+ * Title substring search for the page picker, `ILIKE '%q%'` on `title` only,
+ * which the title trigram index (`idx_pages_trgm`) serves. There is no slug
+ * trigram index, so slugs are matched exactly instead, and only when the
+ * input is slug-shaped (see SLUG_LOOKUP_SQL). Exact slug hits come first,
+ * then exact titles, prefix matches and shorter titles.
+ *
+ * `OFFSET 0` keeps the match scan to the title predicate alone. With
+ * `deleted_at IS NULL` beside it, the planner can instead pick the partial
+ * `pages_dedup_idx` (same predicate), which visits every live page; the
+ * deleted and source filters run on the matches instead.
  */
-export async function searchGraphPages(engine: BrainEngine, query: string, opts: { limit?: number; sourceId?: string } = {}): Promise<GraphSearchHit[]> {
+export const GRAPH_TITLE_SEARCH_SQL = `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, ${DEGREE_SQL} AS degree
+  FROM (
+    SELECT m.id FROM (SELECT p.id, p.title, p.source_id, p.deleted_at FROM pages p WHERE p.title ILIKE $2 OFFSET 0) m
+     WHERE m.deleted_at IS NULL AND ($5::text IS NULL OR m.source_id = $5)
+     ORDER BY lower(m.title) = lower($1) DESC, m.title ILIKE $3 DESC, length(m.title), m.id
+     LIMIT $4
+  ) hit JOIN pages p ON p.id = hit.id
+ ORDER BY lower(p.title) = lower($1) DESC, p.title ILIKE $3 DESC, length(p.title), p.id`;
+
+export async function searchGraphPages(engine: BrainEngine, query: string,
+  opts: { limit?: number; sourceId?: string; signal?: AbortSignal } = {}): Promise<GraphSearchHit[]> {
   const q = query.trim();
-  if (q.length < 2) throw new GraphRequestError('Search needs at least 2 characters', 400, 'query_too_short');
+  const slugShaped = SLUG_SHAPE.test(q);
+  // Fewer than 3 characters give the trigram index nothing to match, so a
+  // title search would read every title; only an exact slug lookup is cheap.
+  if (q.length < (slugShaped ? 2 : 3)) throw new GraphRequestError('Search needs at least 3 characters (2 for an exact slug)', 400, 'query_too_short');
   if (q.length > 200) throw new GraphRequestError('Search is limited to 200 characters', 400, 'query_too_long');
   const limit = clampGraphLimit(opts.limit, 20, GRAPH_SEARCH_MAX_LIMIT);
+  const bySlug = slugShaped
+    ? await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [q, opts.sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS, opts.signal))
+    : [];
   const esc = q.replace(/[\\%_]/g, ch => `\\${ch}`);
-  const rows = await engine.executeRaw<Row>(
-    `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, ${DEGREE_SQL} AS degree
-       FROM (
-         SELECT p.id FROM pages p
-          WHERE p.deleted_at IS NULL AND ($5::text IS NULL OR p.source_id = $5)
-            AND (p.title ILIKE $2 OR p.slug ILIKE $2)
-          ORDER BY (p.slug = $1 OR lower(p.title) = lower($1)) DESC, (p.title ILIKE $3) DESC,
-                   length(COALESCE(p.title, p.slug)), p.id
-          LIMIT $4
-       ) hit JOIN pages p ON p.id = hit.id
-      ORDER BY (p.slug = $1 OR lower(p.title) = lower($1)) DESC, (p.title ILIKE $3) DESC,
-               length(COALESCE(p.title, p.slug)), p.id`,
-    [q, `%${esc}%`, `${esc}%`, limit, opts.sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS));
-  return rows.map(r => ({ ...toPageRef(r), degree: Number(r.degree) }));
+  const byTitle = q.length < 3 ? [] : await engine.executeRaw<Row>(GRAPH_TITLE_SEARCH_SQL,
+    [q, `%${esc}%`, `${esc}%`, limit, opts.sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS, opts.signal));
+  const seen = new Set<number>();
+  const hits: GraphSearchHit[] = [];
+  for (const r of [...bySlug, ...byTitle]) {
+    const id = Number(r.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    hits.push({ ...toPageRef(r), degree: Number(r.degree) });
+  }
+  return hits.slice(0, limit);
 }
 
 export interface GraphPageDetail extends GraphPageRef {
@@ -496,16 +530,23 @@ export async function querySourceTopPages(engine: BrainEngine, sourceId: string,
 
 /**
  * Single-flight TTL memo for the aggregate endpoints: concurrent callers
- * share one in-flight query; a failure is not cached.
+ * share one in-flight query, a result is kept for `ttlMs`, and a failure for
+ * `failureTtlMs`, so reopening a view after a timeout does not run the same
+ * 30-second scan again at once. At most `maxEntries` keys are kept (oldest
+ * dropped first).
  */
-export function createTtlMemo<T>(ttlMs: number, now: () => number = Date.now) {
-  const entries = new Map<string, { at: number; value: Promise<T> }>();
+export function createTtlMemo<T>(opts: { ttlMs: number; failureTtlMs: number; maxEntries: number; now?: () => number }) {
+  const now = opts.now ?? Date.now;
+  const entries = new Map<string, { at: number; ttl: number; value: Promise<T> }>();
   return (key: string, load: () => Promise<T>): Promise<T> => {
     const hit = entries.get(key);
-    if (hit && now() - hit.at < ttlMs) return hit.value;
+    if (hit && now() - hit.at < hit.ttl) return hit.value;
+    entries.delete(key);
     const value = load();
-    entries.set(key, { at: now(), value });
-    value.catch(() => { if (entries.get(key)?.value === value) entries.delete(key); });
+    const entry = { at: now(), ttl: opts.ttlMs, value };
+    entries.set(key, entry);
+    while (entries.size > opts.maxEntries) entries.delete(entries.keys().next().value!);
+    value.catch(() => { entry.at = now(); entry.ttl = opts.failureTtlMs; });
     return value;
   };
 }
