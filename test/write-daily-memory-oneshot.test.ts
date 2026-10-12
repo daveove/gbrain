@@ -3,7 +3,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { DAILY_MEMORY_SOURCE_ID, ensureDailyMemorySource, writeDailyMemoryFromSources } from '../src/core/cycle/daily-memory.ts';
 import { extractStaleFromDB, STALE_TIME_BUDGET_MS } from '../src/commands/extract.ts';
-import { extractOneShotDailyMemory, lookbackRecoveryDays, lookbackWatermarkAfter, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
+import { dailyMemoryPoolSize, extractOneShotDailyMemory, lookbackRecoveryDays, lookbackWatermarkAfter, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -519,4 +519,12 @@ test('exact-target extract skips a raced human page without advancing its waterm
     [DAILY_MEMORY_SOURCE_ID, written.slug],
   )).toEqual(before);
   expect(await engine.getLinks(written.slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual([]);
+});
+
+test('writer pool size defaults to two and honors GBRAIN_DAILY_MEMORY_POOL_SIZE', () => {
+  expect(dailyMemoryPoolSize({})).toBe(2);
+  expect(dailyMemoryPoolSize({ GBRAIN_DAILY_MEMORY_POOL_SIZE: '1' })).toBe(1);
+  expect(dailyMemoryPoolSize({ GBRAIN_DAILY_MEMORY_POOL_SIZE: '0' })).toBe(2);
+  expect(dailyMemoryPoolSize({ GBRAIN_DAILY_MEMORY_POOL_SIZE: 'two' })).toBe(2);
+  expect(dailyMemoryPoolSize({ GBRAIN_DAILY_MEMORY_POOL_SIZE: '1.5' })).toBe(2);
 });

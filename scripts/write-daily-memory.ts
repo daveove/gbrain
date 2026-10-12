@@ -1,5 +1,6 @@
 import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
+import { connectWithRetry } from '../src/core/db.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import {
   DAILY_MEMORY_SOURCE_ID,
@@ -137,14 +138,20 @@ export async function runOneShotDailyMemoryWrite(
   return result;
 }
 
+/** Writer pool size: GBRAIN_DAILY_MEMORY_POOL_SIZE when a positive integer, else 2. */
+export function dailyMemoryPoolSize(env: Record<string, string | undefined> = process.env): number {
+  const parsed = Number(env.GBRAIN_DAILY_MEMORY_POOL_SIZE);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : 2;
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
-  // putPage can need a second connection inside its transaction; one deadlocks.
-  const engineConfig = { ...toEngineConfig(config), poolSize: 2 };
+  const engineConfig = { ...toEngineConfig(config), poolSize: dailyMemoryPoolSize() };
   const engine = await createEngine(engineConfig);
   try {
-    await engine.connect(engineConfig);
+    // A full session pooler at startup waits out GBRAIN_CONNECT_RETRY_BUDGET_MS.
+    await connectWithRetry(engine, engineConfig);
     const result = await runOneShotDailyMemoryWrite(engine, process.argv[2]);
     const page = result.slug ? await engine.getPage(result.slug, { sourceId: result.source_id ?? DAILY_MEMORY_SOURCE_ID, includeDeleted: true }) : null;
     console.log(JSON.stringify({ ...result, dream_generated: page?.frontmatter?.dream_generated === true, deleted: Boolean(page?.deleted_at) }));

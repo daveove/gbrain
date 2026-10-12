@@ -15,6 +15,7 @@ import { UnrecoverableError } from '../src/core/minions/types.ts';
 import type { MinionJob } from '../src/core/minions/types.ts';
 import { waitFor, waitForValue } from './helpers/wait-for.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { connectWithRetry, resolveConnectRetryBudgetMs } from '../src/core/db.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -2729,6 +2730,58 @@ describe('connectWithRetry / isRetryableDbConnectError', () => {
     await expect(
       connectWithRetry(fakeEngine, { database_url: 'postgres://x' }, { noRetry: true, log: () => {} })
     ).rejects.toThrow();
+    expect(attempts).toBe(1);
+  });
+
+  test('connectWithRetry: budgetMs keeps retrying a full session pooler past three attempts', async () => {
+    let attempts = 0;
+    const fakeEngine = {
+      connect: async () => {
+        attempts++;
+        if (attempts < 6) throw new Error('(EMAXCONNSESSION) max clients reached in session mode - max clients are limited to pool_size: 15');
+      },
+    } as unknown as BrainEngine;
+
+    await connectWithRetry(fakeEngine, { database_url: 'postgres://x' }, { budgetMs: 5_000, baseDelayMs: 1, maxDelayMs: 4, log: () => {} });
+    expect(attempts).toBe(6);
+  });
+
+  test('connectWithRetry: budgetMs gives up once the next wait would pass the budget', async () => {
+    let attempts = 0;
+    const fakeEngine = {
+      connect: async () => {
+        attempts++;
+        throw new Error('(EMAXCONNSESSION) max clients reached in session mode');
+      },
+    } as unknown as BrainEngine;
+
+    const started = Date.now();
+    await expect(
+      connectWithRetry(fakeEngine, { database_url: 'postgres://x' }, { budgetMs: 60, baseDelayMs: 10, maxDelayMs: 10, log: () => {} })
+    ).rejects.toThrow('EMAXCONNSESSION');
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(attempts).toBeGreaterThan(3);
+  });
+
+  test('connectWithRetry: budget comes from GBRAIN_CONNECT_RETRY_BUDGET_MS', async () => {
+    expect(resolveConnectRetryBudgetMs({})).toBeUndefined();
+    expect(resolveConnectRetryBudgetMs({ GBRAIN_CONNECT_RETRY_BUDGET_MS: '1200000' })).toBe(1_200_000);
+    expect(resolveConnectRetryBudgetMs({ GBRAIN_CONNECT_RETRY_BUDGET_MS: '0' })).toBeUndefined();
+    expect(resolveConnectRetryBudgetMs({ GBRAIN_CONNECT_RETRY_BUDGET_MS: 'soon' })).toBeUndefined();
+  });
+
+  test('connectWithRetry: budgetMs never retries a permanent error', async () => {
+    let attempts = 0;
+    const fakeEngine = {
+      connect: async () => {
+        attempts++;
+        throw new Error('relation "pages" does not exist');
+      },
+    } as unknown as BrainEngine;
+
+    await expect(
+      connectWithRetry(fakeEngine, { database_url: 'postgres://x' }, { budgetMs: 5_000, baseDelayMs: 1, log: () => {} })
+    ).rejects.toThrow('relation "pages"');
     expect(attempts).toBe(1);
   });
 });
