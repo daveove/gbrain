@@ -218,13 +218,17 @@ Each run:
    `force` and no `expected_revision`, so the call only creates. If another
    bot created the page first, the call fails with `revision_required` or
    `revision_conflict`. Go back to step 1.
-3. If the page exists, call `edit_page` with `expected_revision` set to the
-   revision from step 1 and one edit:
-   - when this bot's markers are present, `old_text` is the whole current
-     section, from its start marker to its end marker inclusive, and
-     `new_text` is the new section;
-   - otherwise `old_text` is `<!-- grok-digest:end -->`, and `new_text` is
-     the new section, a blank line, then `<!-- grok-digest:end -->`.
+3. If the page exists, build the new content from the `content` you read:
+   - when this bot's markers are present, replace the text from its start
+     marker to its end marker inclusive with the new section;
+   - otherwise insert the new section and a blank line directly above
+     `<!-- grok-digest:end -->`.
+
+   Leave every other line unchanged. Send it with `put_page`, no `force`, and
+   `expected_revision` set to the revision from step 1. Avoid `edit_page`
+   here: on a brain where any write worker lacks its handler, the write fails
+   with `unsupported_mutation_protocol` (observed 2026-10-12), while
+   `put_page` is handled by every worker version.
 4. On `revision_conflict`, another bot wrote in between. Go back to step 1
    with a new `request_id`; stop after 5 attempts and report.
 5. `write_pending` and transport failures are handled as in the table above:
