@@ -300,11 +300,41 @@ function iso(v: unknown): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
+/** Tana node bodies above this size keep the plain-text excerpt instead of being parsed. */
+const TANA_BODY_PARSE_MAX = 200_000;
+
+/**
+ * Tana imports store the node document as JSON (`{"children":[…],"id":…,
+ * "props":{"name":…}}`), so the leading characters of the body are node ids.
+ * Returns the readable part of such a body: `props.name`, then ` — ` and
+ * `props.description`, with HTML removed and inline references replaced by
+ * their text (or `[ref]` / `[date]` when the span is empty). Returns '' for
+ * a Tana node that has neither, and null when the body is not a Tana node.
+ */
+export function tanaExcerpt(body: string): string | null {
+  if (!body.startsWith('{')) return null;
+  let doc: unknown;
+  try { doc = JSON.parse(body); } catch { return null; }
+  if (!doc || typeof doc !== 'object' || !('props' in doc) || !doc.props || typeof doc.props !== 'object') return null;
+  const props = doc.props;
+  const clean = (raw: unknown): string => typeof raw !== 'string' ? '' : raw
+    .replace(/<span[^>]*data-inlineref-(node|date)=[^>]*>(.*?)<\/span>/gis, (_m, kind: string, text: string) => text.trim() || (kind.toLowerCase() === 'date' ? '[date]' : '[ref]'))
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ').trim();
+  const name = clean('name' in props ? props.name : undefined);
+  const description = clean('description' in props ? props.description : undefined);
+  return [name, description].filter(Boolean).join(' — ');
+}
+
 /** Side-panel detail for one live page: metadata, link counts by type, a short excerpt. */
 export async function queryGraphPage(engine: BrainEngine, id: number): Promise<GraphPageDetail | null> {
+  // A JSON body (Tana) is read whole, up to TANA_BODY_PARSE_MAX, so it can be
+  // parsed; any other body only to the excerpt window.
   const rows = await engine.executeRaw<Row>(
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, p.created_at, p.updated_at,
-            left(p.compiled_truth, ${GRAPH_EXCERPT_CHARS * 3}) AS body
+            CASE WHEN left(p.compiled_truth, 1) = '{' AND length(p.compiled_truth) <= ${TANA_BODY_PARSE_MAX}
+                 THEN p.compiled_truth ELSE left(p.compiled_truth, ${GRAPH_EXCERPT_CHARS * 3}) END AS body
        FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL`,
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
@@ -315,12 +345,29 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
      SELECT 'in' AS direction, link_type, count(*)::int AS count FROM links WHERE to_page_id = $1 GROUP BY link_type
      ORDER BY count DESC, link_type, direction LIMIT 200`,
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
-  const body = String(r.body ?? '').replace(/\s+/g, ' ').trim();
+  const raw = String(r.body ?? '');
+  // A JSON body too large to parse (cut to the excerpt window) is still a node
+  // document, never readable prose: fall through to the neighbour summary.
+  let text = tanaExcerpt(raw) ?? (raw.startsWith('{"') ? '' : raw.replace(/\s+/g, ' ').trim());
+  if (text === '' && raw.startsWith('{')) {
+    // A Tana node with no name or description: name what it links to instead,
+    // children (`contains`) first.
+    const near = await engine.executeRaw<Row>(
+      `SELECT l.link_type, ${TITLE_SQL} AS title FROM links l JOIN pages p ON p.id = l.to_page_id
+        WHERE l.from_page_id = $1 AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
+        ORDER BY (l.link_type = 'contains') DESC, l.id LIMIT 6`,
+      [id], bound(GRAPH_QUERY_TIMEOUT_MS));
+    if (near.length > 0) {
+      const label = near[0].link_type === 'contains' ? 'contains' : 'links to';
+      const titles = near.slice(0, 5).map(n => String(n.title));
+      text = `${label}: ${titles.join(', ')}${near.length > 5 ? ', …' : ''}`;
+    }
+  }
   return {
     ...toPageRef(r),
     created_at: iso(r.created_at),
     updated_at: iso(r.updated_at),
-    excerpt: body.length > GRAPH_EXCERPT_CHARS ? `${body.slice(0, GRAPH_EXCERPT_CHARS).trimEnd()}…` : body,
+    excerpt: text.length > GRAPH_EXCERPT_CHARS ? `${text.slice(0, GRAPH_EXCERPT_CHARS).trimEnd()}…` : text,
     links: links.map(l => ({ link_type: String(l.link_type ?? ''), direction: l.direction === 'in' ? 'in' : 'out', count: Number(l.count) })),
   };
 }

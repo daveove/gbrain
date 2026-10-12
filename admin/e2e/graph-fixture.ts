@@ -32,13 +32,18 @@ export async function seedGraphFixture(engine: BrainEngine): Promise<void> {
   for (const c of COMPANIES) await page('default', `companies/${slugify(c)}`, c, 'company');
   for (const [i, p] of PEOPLE.entries()) await link(`default:people/${slugify(p)}`, `default:companies/${slugify(COMPANIES[i % COMPANIES.length])}`, 'works_at', 'frontmatter');
 
-  // Tana: a project tree with supertags and fields.
+  // Tana: a project tree with supertags and fields. Bodies use the Tana import
+  // shape (a JSON node document), as real Tana pages do.
   const T = 'tana-cache-fixture';
-  await page(T, 'project-atlas', 'Project Atlas', 'note', 'Project Atlas: a synthetic project tree used to exercise the explorer. It contains milestones, tasks and meeting notes, tagged with supertags and linked to people.');
+  const tanaNode = (id: string, props: Record<string, unknown>) => JSON.stringify({ children: [`${id}-c1`, `${id}-c2`], id, props: { created: 1700000000000, ...props } });
+  await page(T, 'project-atlas', 'Project Atlas', 'note', tanaNode('atlas', {
+    name: 'Project Atlas',
+    description: 'A synthetic project tree: milestones, tasks and <b>meeting notes</b>, owned by <span data-inlineref-node="ada">Ada Park</span>.',
+  }));
   await page(T, 'tag-task', '#task', 'tag');
   await page(T, 'tag-meeting', '#meeting', 'tag');
   for (let m = 1; m <= 4; m++) {
-    await page(T, `milestone-${m}`, `Milestone ${m}`);
+    await page(T, `milestone-${m}`, `Milestone ${m}`, 'note', tanaNode(`m${m}`, {}));
     await link(`${T}:project-atlas`, `${T}:milestone-${m}`, 'contains', 'tana-children');
     for (let t = 1; t <= 5; t++) {
       const slug = `task-${m}-${t}`;

@@ -40,7 +40,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
-  for (const id of ['tana-fixture', 'bear-fixture', 'logseq-fixture']) {
+  for (const id of ['tana-fixture', 'bear-fixture', 'logseq-fixture', 'tana-json-fixture']) {
     await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [id]);
   }
   // Tana: a project with children; one child is a hub with extra fan-out.
@@ -64,6 +64,20 @@ beforeAll(async () => {
   await link('bear-fixture:meeting-notes', 'tana-fixture:project', 'wikilink');
   await link('bear-fixture:meeting-notes', 'tana-fixture:alpha', 'wikilink');
   await link('bear-fixture:reading-list', 'tana-fixture:alpha', 'wikilink');
+  // Tana-shaped JSON bodies: one with a name/description, one with neither.
+  await page('tana-json-fixture', 'call', 'Call', JSON.stringify({
+    children: ['k1', 'k2'], id: 'abc123',
+    props: {
+      created: 1,
+      name: 'Call <span data-inlineref-node="n1">Ada</span> about <b>pricing</b> &amp; <span data-inlineref-node="n2"></span> on <span data-inlineref-date="{&quot;dateTimeString&quot;:&quot;2024-05-01&quot;}"></span>',
+      description: 'Follow up  next week',
+    },
+  }));
+  await page('tana-json-fixture', 'container', 'Container', JSON.stringify({ children: ['x1', 'x2'], id: 'c1', props: { created: 1 } }));
+  await page('tana-json-fixture', 'draft', 'Draft outline');
+  await page('tana-json-fixture', 'invoice', 'Send invoice');
+  await link('tana-json-fixture:container', 'tana-json-fixture:draft', 'contains');
+  await link('tana-json-fixture:container', 'tana-json-fixture:invoice', 'contains');
   // Same slug in two sources -> ambiguous without source.
   await page('logseq-fixture', 'project', 'Logseq project page');
   await page('logseq-fixture', 'lonely', 'Isolated page');
@@ -179,12 +193,21 @@ describe('admin graph API', () => {
     expect(by['logseq-fixture']).toMatchObject({ pages: 2, connected: 0, isolated: 2 });
     expect(by['bear-fixture']).toMatchObject({ pages: 2, connected: 2, internal_edges: 0 });
     expect(body.cross).toEqual([{ from_source: 'bear-fixture', to_source: 'tana-fixture', edges: 3 }]);
-    expect(body.link_types.find(t => t.link_type === 'contains')?.edges).toBe(5);
+    expect(body.link_types.find(t => t.link_type === 'contains')?.edges).toBe(7);
     const again = await get<SourceMapResult>('/admin/api/graph/sources');
     expect(again.body.generated_at).toBe(body.generated_at);
 
     const top = await get<GraphSearchHit[]>('/admin/api/graph/sources/tana-fixture/top?limit=2');
     expect(top.body.map(p => p.slug)).toEqual(['project', 'alpha']);
+  });
+
+  test('a Tana JSON body gets a readable excerpt, falling back to its children', async () => {
+    const named = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-json-fixture:call']}`);
+    expect(named.body.excerpt).toBe('Call Ada about pricing & [ref] on [date] — Follow up next week');
+    const unnamed = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-json-fixture:container']}`);
+    expect(unnamed.body.excerpt).toBe('contains: Draft outline, Send invoice');
+    const prose = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-fixture:project']}`);
+    expect(prose.body.excerpt.startsWith('Atlas root node. Atlas root node.')).toBe(true);
   });
 
   test('search ranks exact matches first; page panel carries link counts and a bounded excerpt', async () => {

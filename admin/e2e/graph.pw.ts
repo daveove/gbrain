@@ -44,6 +44,9 @@ for (const viewport of VIEWPORTS) {
     const panel = page.getByRole('complementary', { name: 'Page details and filters' });
     await expect(panel.getByRole('heading', { name: 'Milestone 2' })).toBeVisible();
     await expect(panel.getByRole('cell', { name: 'contains' })).toBeVisible();
+    // Its Tana JSON body has no name, so the excerpt names its children instead of showing JSON.
+    await expect(panel.getByText(/^contains: Quarterly planning — task 2\.1, /)).toBeVisible();
+    await expect(panel).not.toContainText('"children"');
     await shot(page, `explorer-${viewport.name}`);
 
     // Keyboard: Enter on a focused node recentres the explorer on it.
