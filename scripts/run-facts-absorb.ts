@@ -14,6 +14,7 @@
  */
 import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
+import { connectWithRetry } from '../src/core/db.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
 import { RateLeaseUnavailableError } from '../src/core/minions/rate-leases.ts';
@@ -287,7 +288,9 @@ async function main(): Promise<void> {
   const abort = new AbortController();
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => abort.abort());
   try {
-    await engine.connect(engineConfig);
+    // A full session pooler at startup waits out GBRAIN_CONNECT_RETRY_BUDGET_MS;
+    // SIGINT/SIGTERM ends that wait.
+    await connectWithRetry(engine, engineConfig, { signal: abort.signal });
     const run = await runFactsAbsorb(engine, { maxUsd, concurrency, maxMinutes, signal: abort.signal });
     console.log(JSON.stringify({ action: 'facts_absorb_run', ...run }));
     if (run.stopped === 'unpriced' || run.stopped === 'unavailable' || run.stopped === 'failing') process.exitCode = 1;

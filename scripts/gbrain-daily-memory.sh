@@ -1,19 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-# Two connections: putPage can need a second one inside its transaction.
-export GBRAIN_POOL_SIZE=2 GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
+export GBRAIN_SELF_UPGRADE_MODE=off GBRAIN_DISABLE_DIRECT_POOL=1
 REPO="${GBRAIN_REPO_ROOT:-$HOME/gbrain}"
 LOG="${GBRAIN_DAILY_MEMORY_LOG:-$HOME/Library/Logs/gbrain-daily-memory.log}"
 STATE="${GBRAIN_DAILY_MEMORY_STATE:-$HOME/.local/state/gbrain}"
 export GBRAIN_DAILY_MEMORY_STATE="$STATE"
 mkdir -p "$(dirname "$LOG")" "$STATE"
+# The LaunchAgent's pool size outranks anything env.sh assigns.
+launch_pool_size="${GBRAIN_DAILY_MEMORY_POOL_SIZE:-}"
 if [[ -f "$HOME/.gbrain/env.sh" ]]; then
   source "$HOME/.gbrain/env.sh" >/dev/null 2>/dev/null
 fi
 # Nightly runs never use paid model APIs (DAV-6933): text goes through the
 # Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
 export GBRAIN_AI_BILLING=subscription
+# Sessions each step may hold: a positive integer, else 2. The LaunchAgent value
+# wins over env.sh, and GBRAIN_POOL_SIZE is set after env.sh so a pool size
+# there cannot widen it; one normalized value goes to the writer
+# (GBRAIN_DAILY_MEMORY_POOL_SIZE) and the timezone, ingest and facts steps
+# (GBRAIN_POOL_SIZE).
+pool_size="${launch_pool_size:-${GBRAIN_DAILY_MEMORY_POOL_SIZE:-2}}"
+[[ "$pool_size" =~ ^[1-9][0-9]*$ ]] || pool_size=2
+export GBRAIN_DAILY_MEMORY_POOL_SIZE="$pool_size" GBRAIN_POOL_SIZE="$pool_size"
+# A session pooler at its client cap (EMAXCONNSESSION) is waited out at each
+# step's connect for up to 20 minutes instead of failing the night.
+export GBRAIN_CONNECT_RETRY_BUDGET_MS="${GBRAIN_CONNECT_RETRY_BUDGET_MS:-1200000}"
 # Scheduled jobs hold one session-mode connection (:5432), never the Supabase
 # transaction pooler (:6543). loadConfig honors GBRAIN_HOME and env precedence.
 session_url="$(bun -e 'const { loadConfig } = await import(process.argv[1]); const { deriveSessionPoolerUrl } = await import(process.argv[2]); const url = loadConfig()?.database_url; if (url) process.stdout.write(deriveSessionPoolerUrl(url) ?? url);' "$REPO/src/core/config.ts" "$REPO/src/core/connection-manager.ts")"
@@ -21,9 +33,12 @@ if [[ -n "$session_url" ]]; then
   export GBRAIN_DATABASE_URL="$session_url" DATABASE_URL="$session_url"
 fi
 # Launcher calendar zone: explicit setting > brain DB (config set) >
-# file-plane cycle.timezone > TZ from env.sh/host > UTC.
+# file-plane cycle.timezone > TZ from env.sh/host > UTC. A failed brain DB
+# lookup fails the run: a fallback zone could pin the wrong day and advance
+# seat watermarks past sessions it never selected.
+zone_ec=0
 zone="$(REPO="$REPO" python3 -c '
-import json, os, subprocess
+import json, os, subprocess, sys
 from pathlib import Path
 explicit = (os.environ.get("GBRAIN_DAILY_MEMORY_TZ") or "").strip()
 if explicit:
@@ -32,18 +47,28 @@ if explicit:
 repo = Path(os.environ["REPO"])
 helper = repo / "scripts" / "daily-memory-timezone.ts"
 bun = os.environ.get("PATH", "")
+# The helper waits out a full pooler for the connect retry budget; give it that
+# long so a busy pooler cannot silently swap in a fallback zone.
+try:
+    wait_s = 60 + max(0.0, float(os.environ.get("GBRAIN_CONNECT_RETRY_BUDGET_MS") or 0) / 1000)
+except ValueError:
+    wait_s = 60
 try:
     proc = subprocess.run(
         ["bun", str(helper)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=wait_s,
         env=os.environ,
     )
-    value = (proc.stdout or "").strip()
-    if proc.returncode == 0 and value:
-        print(value, end="")
-        raise SystemExit
-except (OSError, subprocess.SubprocessError):
-    pass
+except (OSError, subprocess.SubprocessError) as exc:
+    sys.stderr.write(f"cycle.timezone lookup failed: {type(exc).__name__}\n")
+    raise SystemExit(75)
+if proc.returncode != 0:
+    sys.stderr.write((proc.stderr or "")[-2000:])
+    raise SystemExit(75)
+value = (proc.stdout or "").strip()
+if value:
+    print(value, end="")
+    raise SystemExit
 cfg = Path.home() / ".gbrain" / "config.json"
 if cfg.is_file():
     try:
@@ -54,7 +79,11 @@ if cfg.is_file():
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
 print((os.environ.get("TZ") or "UTC").strip() or "UTC", end="")
-')"
+')" || zone_ec=$?
+if [[ $zone_ec -ne 0 ]]; then
+  printf 'daily-memory: cycle.timezone lookup failed (exit %s); not running on a fallback zone\n' "$zone_ec" | tee -a "$LOG" >&2
+  exit "$zone_ec"
+fi
 # Validate IANA name; fall back to UTC when invalid.
 if ! python3 -c 'import sys; from zoneinfo import ZoneInfo; ZoneInfo(sys.argv[1])' "$zone" 2>/dev/null; then
   zone=UTC

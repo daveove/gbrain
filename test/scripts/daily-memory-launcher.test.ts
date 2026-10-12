@@ -8,7 +8,7 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-seat-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null; pool?: string | null; writerPool?: string | null };
 
 function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
@@ -32,12 +32,15 @@ kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if kind == 'tz':
+    if os.environ.get('TEST_TZ_FAIL') == '1':
+        print('EMAXCONNSESSION', file=sys.stderr)
+        sys.exit(7)
     value = (os.environ.get('TEST_BRAIN_TZ') or '').strip()
     if value:
         print(value, end='')
     sys.exit(0)
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK'), 'pool': os.environ.get('GBRAIN_POOL_SIZE'), 'writerPool': os.environ.get('GBRAIN_DAILY_MEMORY_POOL_SIZE')}) + '\\n')
 if kind == os.environ.get('TEST_FAIL_KIND'):
     attempts = sum(call['kind'] == kind for call in previous)
     if attempts == 0 or os.environ.get('TEST_FAIL_ALWAYS') == '1':
@@ -469,6 +472,42 @@ finally:
     const result = fixture().run(['2026-09-29'], { TEST_FAIL_KIND: 'write', TEST_FAIL_MODE: 'error' });
     expect(result.code).toBe(7);
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
+  });
+
+  it('gives every step the LaunchAgent pool size, which env.sh cannot widen', () => {
+    const { home, run } = fixture();
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_POOL_SIZE=2 GBRAIN_DAILY_MEMORY_POOL_SIZE=2\n');
+    todayInputs(home);
+    const one = run([], { GBRAIN_DAILY_MEMORY_POOL_SIZE: '1', GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1' });
+    expect(one.code).toBe(0);
+    expect(one.calls.map(call => call.kind)).toEqual(['ingest', 'write', 'facts']);
+    expect(one.calls.map(call => [call.pool, call.writerPool])).toEqual([['1', '1'], ['1', '1'], ['1', '1']]);
+  });
+
+  it('uses an env.sh daily pool size when the LaunchAgent sets none', () => {
+    const { home, run } = fixture();
+    writeFileSync(join(home, '.gbrain/env.sh'), 'export GBRAIN_DAILY_MEMORY_POOL_SIZE=1\n');
+    const result = run(['2026-09-29']);
+    expect(result.code).toBe(0);
+    expect(result.calls.map(call => [call.pool, call.writerPool])).toEqual([['1', '1']]);
+  });
+
+  it('normalizes an invalid pool size to 2 for every step', () => {
+    for (const bad of ['0', 'two', '-1', '1.5']) {
+      const { run } = fixture();
+      const result = run(['2026-09-29'], { GBRAIN_DAILY_MEMORY_POOL_SIZE: bad });
+      expect(result.code).toBe(0);
+      expect(result.calls.map(call => [call.pool, call.writerPool])).toEqual([['2', '2']]);
+    }
+  });
+
+  it('fails the run without ingesting or writing when the brain DB timezone lookup fails', () => {
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila' });
+    todayInputs(home);
+    const result = run([], { TEST_TZ_FAIL: '1' });
+    expect(result.code).toBe(75);
+    expect(result.calls).toEqual([]);
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
   });
 
   it('uses cycle.timezone from config over env.sh TZ', () => {

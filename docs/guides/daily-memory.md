@@ -60,12 +60,18 @@ watermark until a later run reads it whole.
 ## Keep the database on the session port
 
 Every launcher command uses a pool of two connections on the Supabase session
-pooler, port 5432. One connection deadlocks: a page write can need a second
-connection inside its transaction. The launcher reads the database URL the way
+pooler, port 5432. Set `GBRAIN_DAILY_MEMORY_POOL_SIZE=1` in the LaunchAgent's
+environment to hold one session instead, when other jobs share a nearly full
+pooler. A value that is not a positive integer means two. The launcher sets
+the pool after sourcing `env.sh`, so a pool size there cannot widen it. The
+launcher reads the database URL the way
 every gbrain command does: the environment first, then `config.json` under
 `GBRAIN_HOME`. When that URL is a Supabase pooler URL on port 6543, it moves it
-to port 5432. It never retries on the transaction pooler. A full session pool
-fails the run, and the next night retries.
+to port 5432. It never retries on the transaction pooler. When the session
+pooler is full (`EMAXCONNSESSION`), each step's connect, including the
+`cycle.timezone` lookup, waits and retries for up to 20 minutes before failing
+the run; set `GBRAIN_CONNECT_RETRY_BUDGET_MS` to change that. The next night
+retries a failed run.
 
 ## Drain queued days
 
