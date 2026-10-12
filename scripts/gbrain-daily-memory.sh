@@ -13,11 +13,13 @@ fi
 # Nightly runs never use paid model APIs (DAV-6933): text goes through the
 # Codex CLI's ChatGPT login, paid embeddings stay queued for a later backfill.
 export GBRAIN_AI_BILLING=subscription
-# Sessions each step may hold (default 2), set after env.sh so a pool size
-# there cannot widen it. The writer reads GBRAIN_DAILY_MEMORY_POOL_SIZE; the
-# ingest and facts steps read GBRAIN_POOL_SIZE.
-export GBRAIN_DAILY_MEMORY_POOL_SIZE="${GBRAIN_DAILY_MEMORY_POOL_SIZE:-2}"
-export GBRAIN_POOL_SIZE="$GBRAIN_DAILY_MEMORY_POOL_SIZE"
+# Sessions each step may hold: a positive integer, else 2. Set after env.sh so
+# a pool size there cannot widen it, and exported normalized so the writer
+# (GBRAIN_DAILY_MEMORY_POOL_SIZE) and the timezone, ingest and facts steps
+# (GBRAIN_POOL_SIZE) agree.
+pool_size="${GBRAIN_DAILY_MEMORY_POOL_SIZE:-2}"
+[[ "$pool_size" =~ ^[1-9][0-9]*$ ]] || pool_size=2
+export GBRAIN_DAILY_MEMORY_POOL_SIZE="$pool_size" GBRAIN_POOL_SIZE="$pool_size"
 # A session pooler at its client cap (EMAXCONNSESSION) is waited out at each
 # step's connect for up to 20 minutes instead of failing the night.
 export GBRAIN_CONNECT_RETRY_BUDGET_MS="${GBRAIN_CONNECT_RETRY_BUDGET_MS:-1200000}"
@@ -39,10 +41,16 @@ if explicit:
 repo = Path(os.environ["REPO"])
 helper = repo / "scripts" / "daily-memory-timezone.ts"
 bun = os.environ.get("PATH", "")
+# The helper waits out a full pooler for the connect retry budget; give it that
+# long so a busy pooler cannot silently swap in a fallback zone.
+try:
+    wait_s = 60 + max(0.0, float(os.environ.get("GBRAIN_CONNECT_RETRY_BUDGET_MS") or 0) / 1000)
+except ValueError:
+    wait_s = 60
 try:
     proc = subprocess.run(
         ["bun", str(helper)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, timeout=wait_s,
         env=os.environ,
     )
     value = (proc.stdout or "").strip()

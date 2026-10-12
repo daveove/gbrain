@@ -405,6 +405,8 @@ export interface ConnectWithRetryOpts {
    */
   budgetMs?: number;
   maxDelayMs?: number;
+  /** Aborting ends the current wait and rethrows the last connect error. */
+  signal?: AbortSignal;
 }
 
 /** GBRAIN_CONNECT_RETRY_BUDGET_MS as a positive ms count, else undefined. */
@@ -432,15 +434,20 @@ export async function connectWithRetry(
       return;
     } catch (e: unknown) {
       const delay = Math.min(baseDelayMs * Math.pow(2, i), maxDelayMs);
-      const isLast = i + 1 >= attempts || Date.now() + delay > deadline;
+      const isLast = i + 1 >= attempts || Date.now() + delay > deadline || opts.signal?.aborted === true;
       if (!isRetryableDbConnectError(e) || isLast) {
         throw e;
       }
       const msg = e instanceof Error ? e.message : String(e);
       log(`[connect] attempt ${i + 1} failed (${msg.slice(0, 80)}), retrying in ${delay}ms`);
       const { promise, resolve } = Promise.withResolvers<void>();
-      setTimeout(resolve, delay);
+      const timer = setTimeout(resolve, delay);
+      const onAbort = () => { clearTimeout(timer); resolve(); };
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
+      if (opts.signal?.aborted) onAbort();
       await promise;
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (opts.signal?.aborted) throw e;
     }
   }
 }

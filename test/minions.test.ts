@@ -2784,6 +2784,25 @@ describe('connectWithRetry / isRetryableDbConnectError', () => {
     ).rejects.toThrow('relation "pages"');
     expect(attempts).toBe(1);
   });
+
+  test('connectWithRetry: an abort ends the budget wait and rethrows', async () => {
+    let attempts = 0;
+    const fakeEngine = {
+      connect: async () => {
+        attempts++;
+        throw new Error('(EMAXCONNSESSION) max clients reached in session mode');
+      },
+    } as unknown as BrainEngine;
+    const abort = new AbortController();
+
+    // Abort as the first wait is announced: the 60 s wait must end at once.
+    const started = Date.now();
+    await expect(
+      connectWithRetry(fakeEngine, { database_url: 'postgres://x' }, { budgetMs: 600_000, baseDelayMs: 60_000, signal: abort.signal, log: () => abort.abort() })
+    ).rejects.toThrow('EMAXCONNSESSION');
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(attempts).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
