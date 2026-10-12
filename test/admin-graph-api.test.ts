@@ -85,7 +85,9 @@ beforeAll(async () => {
   await page('tana-json-fixture', 'draft', 'Draft outline');
   await page('tana-json-fixture', 'invoice', 'Send invoice');
   await page('tana-json-fixture', 'budget-json', 'Budget export', '{"title":"Budget","rows":[1,2]}');
-  await link('tana-json-fixture:container', 'tana-json-fixture:draft', 'contains');
+  // The same child stored by two provenances must appear once in the excerpt.
+  await link('tana-json-fixture:container', 'tana-json-fixture:draft', 'contains', 'tana-structure');
+  await link('tana-json-fixture:container', 'tana-json-fixture:draft', 'contains', 'tana-children');
   await link('tana-json-fixture:container', 'tana-json-fixture:invoice', 'contains');
   // Same slug in two sources -> ambiguous without source.
   await page('logseq-fixture', 'project', 'Logseq project page');
@@ -214,7 +216,7 @@ describe('admin graph API', () => {
     expect(by['logseq-fixture']).toMatchObject({ pages: 2, connected: 0, isolated: 2 });
     expect(by['bear-fixture']).toMatchObject({ pages: 2, connected: 2, internal_edges: 0 });
     expect(body.cross).toEqual([{ from_source: 'bear-fixture', to_source: 'tana-fixture', edges: 3 }]);
-    expect(body.link_types.find(t => t.link_type === 'contains')?.edges).toBe(7);
+    expect(body.link_types.find(t => t.link_type === 'contains')?.edges).toBe(8);
     const again = await get<SourceMapResult>('/admin/api/graph/sources');
     expect(again.body.generated_at).toBe(body.generated_at);
 
@@ -229,6 +231,7 @@ describe('admin graph API', () => {
     const named = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-json-fixture:call']}`);
     expect(named.body.excerpt).toBe('Call Ada about pricing & [ref] on [date] — Follow up next week');
     const unnamed = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-json-fixture:container']}`);
+    // draft is linked twice (two provenances); invoice must still be listed, draft once.
     expect(unnamed.body.excerpt).toBe('contains: Draft outline, Send invoice');
     const prose = await get<GraphPageDetail>(`/admin/api/graph/page?id=${ids['tana-fixture:project']}`);
     expect(prose.body.excerpt.startsWith('Atlas root node. Atlas root node.')).toBe(true);

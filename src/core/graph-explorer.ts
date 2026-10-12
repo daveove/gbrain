@@ -414,11 +414,16 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
   let text = tana ?? (isTana ? '' : raw.replace(/\s+/g, ' ').trim());
   if (isTana && text === '') {
     // A Tana node with no name or description: name what it links to instead,
-    // children (`contains`) first.
+    // children (`contains`) first. One row per target page: the same link can
+    // be stored once per provenance, and must not fill the list.
     const near = await engine.executeRaw<Row>(
-      `SELECT l.link_type, ${TITLE_SQL} AS title FROM links l JOIN pages p ON p.id = l.to_page_id
-        WHERE l.from_page_id = $1 AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL AND ${live('l')}
-        ORDER BY (l.link_type = 'contains') DESC, l.id LIMIT 6`,
+      `SELECT n.link_type, n.title FROM (
+         SELECT DISTINCT ON (l.to_page_id) l.link_type, ${TITLE_SQL} AS title, (l.link_type = 'contains') AS child, l.id AS first_id
+           FROM links l JOIN pages p ON p.id = l.to_page_id
+          WHERE l.from_page_id = $1 AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL AND ${live('l')}
+          ORDER BY l.to_page_id, (l.link_type = 'contains') DESC, l.id
+       ) n
+       ORDER BY n.child DESC, n.first_id LIMIT 6`,
       [id], bound(GRAPH_QUERY_TIMEOUT_MS));
     if (near.length > 0) {
       const label = near[0].link_type === 'contains' ? 'contains' : 'links to';
@@ -464,7 +469,9 @@ export interface SourceMapResult {
  * memoizes the result (GRAPH_SOURCE_MAP_TTL_MS).
  */
 export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResult> {
-  const sourceRows = await engine.executeRaw<Row>(`SELECT id, name, archived FROM sources ORDER BY id LIMIT 1000`, [], bound(GRAPH_QUERY_TIMEOUT_MS));
+  // One row per registered source (a handful in practice); never capped, so
+  // every source keeps its name and archived flag.
+  const sourceRows = await engine.executeRaw<Row>(`SELECT id, name, archived FROM sources ORDER BY id`, [], bound(GRAPH_QUERY_TIMEOUT_MS));
   const live = await liveLinkFilter(engine);
   const rows = await engine.executeRaw<Row>(
     `WITH live AS MATERIALIZED (
