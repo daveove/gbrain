@@ -32,8 +32,12 @@ function sendGraphError(res: Response, e: unknown): void {
     res.status(e.status).json({ error: e.code, message: e.message, ...e.details });
     return;
   }
-  // Postgres SQLSTATE 57014: the statement ran past its transaction-local statement_timeout.
-  if (e && typeof e === 'object' && 'code' in e && e.code === '57014') {
+  // Postgres SQLSTATE 57014: the statement ran past its transaction-local
+  // statement_timeout. AbortError / TimeoutError: the paired signal deadline
+  // fired (PGLite, or a saturated Postgres pool).
+  const timedOut = (e && typeof e === 'object' && 'code' in e && e.code === '57014')
+    || (e instanceof DOMException && (e.name === 'AbortError' || e.name === 'TimeoutError'));
+  if (timedOut) {
     res.status(503).json({ error: 'graph_query_timeout', message: 'The graph query hit its statement timeout. Narrow the request (depth 1, fewer nodes) and retry.' });
     return;
   }

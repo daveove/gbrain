@@ -41,9 +41,14 @@ export function GraphPage() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
+  // The source map is a whole-brain aggregate: load it only when its tab is
+  // opened (once per visit; the server memoizes it for five minutes).
+  const wantsMap = route.view === 'sources';
   useEffect(() => {
+    if (!wantsMap || sourceMap) return;
+    setMapError(null);
     api.graphSources().then(setSourceMap, (e: unknown) => setMapError(e instanceof Error ? e.message : String(e)));
-  }, []);
+  }, [wantsMap, sourceMap]);
 
   return (
     <div>
@@ -54,10 +59,10 @@ export function GraphPage() {
         <button type="button" role="tab" aria-selected={route.view === 'sources'} className={`tab tab-button${route.view === 'sources' ? ' active' : ''}`}
           onClick={() => go({ view: 'sources' })}>Source map</button>
       </div>
-      {mapError && <div className="warning-bar">Source map unavailable: {mapError}</div>}
+      {wantsMap && mapError && <div className="warning-bar">Source map unavailable: {mapError}</div>}
       {route.view === 'sources'
         ? <SourceMapView map={sourceMap} />
-        : <ExplorerView rootId={route.id} sourceMap={sourceMap} />}
+        : <ExplorerView rootId={route.id} />}
     </div>
   );
 }
@@ -87,8 +92,12 @@ function PageSearch({ onPick }: { onPick: (hit: GraphSearchHit) => void }) {
   }, []);
 
   useEffect(() => {
+    // Results always belong to the text in the box: drop the previous list as
+    // soon as the query changes and reopen only for this query's response.
+    setHits([]);
+    setOpen(false);
     const term = q.trim();
-    if (term.length < 2) { setHits([]); return; }
+    if (term.length < 2) return;
     const abort = new AbortController();
     const timer = setTimeout(() => {
       api.graphSearch(term, abort.signal).then(found => { setHits(found); setActive(0); setOpen(true); }, () => {});
@@ -138,7 +147,7 @@ function PageSearch({ onPick }: { onPick: (hit: GraphSearchHit) => void }) {
 
 const NODE_CAPS = [50, 150, 300];
 
-function ExplorerView({ rootId, sourceMap }: { rootId: number | null; sourceMap: GraphSourceMap | null }) {
+function ExplorerView({ rootId }: { rootId: number | null }) {
   const [depth, setDepth] = useState(2);
   const [limit, setLimit] = useState(150);
   const [hiddenTypes, setHiddenTypes] = useState<string[]>(DEFAULT_HIDDEN_LINK_TYPES);
@@ -197,13 +206,16 @@ function ExplorerView({ rootId, sourceMap }: { rootId: number | null; sourceMap:
     return { nodes: graphNodes, edges: graphEdges };
   }, [data]);
 
-  const linkTypes = useMemo(() => {
-    const counts = new Map<string, number>((sourceMap?.link_types ?? []).map(t => [t.link_type, t.edges]));
-    for (const e of data?.edges ?? []) if (!counts.has(e.link_type)) counts.set(e.link_type, 0);
-    for (const t of hiddenTypes) if (!counts.has(t)) counts.set(t, 0);
+  // Filters list what this view contains (edges / pages per value) plus
+  // whatever is hidden, so a hidden value can always be shown again.
+  const tally = (values: string[], hidden: string[]) => {
+    const counts = new Map<string, number>();
+    for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+    for (const v of hidden) if (!counts.has(v)) counts.set(v, 0);
     return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-  }, [sourceMap, data, hiddenTypes]);
-  const sources = (sourceMap?.sources ?? []).filter(s => s.pages > 0);
+  };
+  const linkTypes = useMemo(() => tally((data?.edges ?? []).map(e => e.link_type), hiddenTypes), [data, hiddenTypes]);
+  const sources = useMemo(() => tally((data?.nodes ?? []).map(n => n.source_id), hiddenSources), [data, hiddenSources]);
   const toggle = (list: string[], value: string) => (list.includes(value) ? list.filter(v => v !== value) : [...list, value]);
   const rootSource = data?.root.source_id;
 
@@ -304,13 +316,14 @@ function ExplorerView({ rootId, sourceMap }: { rootId: number | null; sourceMap:
 
         <h3 className="section-title">Sources</h3>
         <ul className="graph-filter-list">
-          {sources.map(s => (
-            <li key={s.id}>
-              <label className="checkbox-label" title={s.id === rootSource ? 'The root page’s source is always shown' : undefined}>
-                <input type="checkbox" checked={!hiddenSources.includes(s.id)} disabled={s.id === rootSource}
-                  onChange={() => setHiddenSources(list => toggle(list, s.id))} />
-                <span className="graph-swatch" style={{ background: sourceFamily(s.id).color }} aria-hidden="true" />
-                <span className="mono graph-source-id">{s.id}</span>
+          {sources.map(([id, count]) => (
+            <li key={id}>
+              <label className="checkbox-label" title={id === rootSource ? 'The root page’s source is always shown' : undefined}>
+                <input type="checkbox" checked={!hiddenSources.includes(id)} disabled={id === rootSource}
+                  onChange={() => setHiddenSources(list => toggle(list, id))} />
+                <span className="graph-swatch" style={{ background: sourceFamily(id).color }} aria-hidden="true" />
+                <span className="mono graph-source-id">{id}</span>
+                <span className="graph-count mono">{fmt.format(count)}</span>
               </label>
             </li>
           ))}

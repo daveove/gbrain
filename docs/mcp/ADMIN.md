@@ -126,10 +126,13 @@ The **Graph** tab (`/admin/#graph`) shows the page link graph to the owner.
 
 The views use `GET /admin/api/graph/{search,neighbourhood,page,sources,sources/:id/top}`.
 Every route requires the owner session and reads only. Each statement runs
-under a transaction-local `statement_timeout`: 8 seconds for search,
-neighbourhood and page reads, 30 seconds for aggregates. The source map and
-top-pages aggregates read only `id`, `source_id` and `deleted_at` from
-`pages`, never page content. The server keeps their results for five minutes.
+under a deadline: 8 seconds for search, neighbourhood and page reads, and 30
+seconds for aggregates. On Postgres the deadline is a transaction-local
+`statement_timeout`. PGLite cannot cancel a query, so the request returns
+`503 graph_query_timeout` at the deadline and the query runs on to completion.
+The source map and top-pages aggregates read only `id`, `source_id` and
+`deleted_at` from `pages`, never page content. The source map loads only when
+its tab is opened, and the server keeps both results for five minutes.
 
 ## Register and connect a client
 

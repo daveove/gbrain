@@ -18,9 +18,11 @@
  *   source-pair edge counts. Aggregates over `links` joined to the id,
  *   source_id and deleted_at columns of `pages`; no content column is read.
  *
- * Every statement carries `timeoutMs` (a transaction-local
- * statement_timeout on Postgres, see BrainEngine.executeRaw) and a LIMIT or a
- * GROUP BY over indexed keys.
+ * Every statement carries `bound(ms)` and a LIMIT or a GROUP BY over indexed
+ * keys. On Postgres `timeoutMs` is a transaction-local statement_timeout (the
+ * server ends the statement); PGLite ignores it and has no cancellation, so
+ * the paired abort signal bounds the caller's wait and the request fails with
+ * a timeout while the in-process query runs to completion.
  */
 import type { BrainEngine } from './engine.ts';
 
@@ -99,6 +101,10 @@ function toPageRef(r: Row): GraphPageRef {
   };
 }
 
+function bound(ms: number): { timeoutMs: number; signal: AbortSignal } {
+  return { timeoutMs: ms, signal: AbortSignal.timeout(ms) };
+}
+
 const DEGREE_SQL = `((SELECT count(*) FROM links o WHERE o.from_page_id = p.id) + (SELECT count(*) FROM links i WHERE i.to_page_id = p.id))::int`;
 const TITLE_SQL = `COALESCE(NULLIF(p.title, ''), p.slug)`;
 
@@ -108,11 +114,11 @@ export async function resolveGraphRoot(engine: BrainEngine, slug: string, source
     ? await engine.executeRaw<Row>(
         `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type FROM pages p
           WHERE p.source_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL`,
-        [sourceId, slug], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS })
+        [sourceId, slug], bound(GRAPH_QUERY_TIMEOUT_MS))
     : await engine.executeRaw<Row>(
         `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type FROM pages p
           WHERE p.slug = $1 AND p.deleted_at IS NULL ORDER BY p.source_id LIMIT 10`,
-        [slug], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+        [slug], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
   if (rows.length > 1) {
     throw new GraphRequestError(`Slug "${slug}" exists in ${rows.length} sources; pass source.`, 409, 'ambiguous_slug',
@@ -127,7 +133,7 @@ async function pageInfo(engine: BrainEngine, ids: number[]): Promise<Map<number,
   const rows = await engine.executeRaw<Row>(
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, ${DEGREE_SQL} AS degree
        FROM pages p WHERE p.id = ANY($1::int[]) AND p.deleted_at IS NULL`,
-    [ids], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [ids], bound(GRAPH_QUERY_TIMEOUT_MS));
   for (const r of rows) out.set(Number(r.id), { ...toPageRef(r), degree: Number(r.degree) });
   return out;
 }
@@ -148,7 +154,7 @@ async function expand(engine: BrainEngine, frontier: number[], hideTypes: string
        WHERE l.to_page_id = ANY($1::int[]) AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
          AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[]))
        ORDER BY l.id LIMIT $4)`,
-    [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP], bound(GRAPH_QUERY_TIMEOUT_MS));
   let outRows = 0;
   let inRows = 0;
   const edges: Array<{ a: number; b: number }> = [];
@@ -233,7 +239,7 @@ export async function queryGraphNeighbourhood(engine: BrainEngine, rootId: numbe
       GROUP BY l.from_page_id, l.to_page_id, l.link_type
       ORDER BY l.from_page_id, l.to_page_id, l.link_type
       LIMIT $3`,
-    [ids, hideTypes, GRAPH_EDGE_RESULT_CAP + 1], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [ids, hideTypes, GRAPH_EDGE_RESULT_CAP + 1], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (edgeRows.length > GRAPH_EDGE_RESULT_CAP) truncated = true;
   const edges: GraphEdgeView[] = edgeRows.slice(0, GRAPH_EDGE_RESULT_CAP).map(r => ({
     from: Number(r.from), to: Number(r.to), link_type: String(r.link_type ?? ''), count: Number(r.count),
@@ -277,7 +283,7 @@ export async function searchGraphPages(engine: BrainEngine, query: string, opts:
        ) hit JOIN pages p ON p.id = hit.id
       ORDER BY (p.slug = $1 OR lower(p.title) = lower($1)) DESC, (p.title ILIKE $3) DESC,
                length(COALESCE(p.title, p.slug)), p.id`,
-    [q, `%${esc}%`, `${esc}%`, limit, opts.sourceId ?? null], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [q, `%${esc}%`, `${esc}%`, limit, opts.sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS));
   return rows.map(r => ({ ...toPageRef(r), degree: Number(r.degree) }));
 }
 
@@ -300,7 +306,7 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, p.created_at, p.updated_at,
             left(p.compiled_truth, ${GRAPH_EXCERPT_CHARS * 3}) AS body
        FROM pages p WHERE p.id = $1 AND p.deleted_at IS NULL`,
-    [id], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
   const r = rows[0];
   const links = await engine.executeRaw<Row>(
@@ -308,7 +314,7 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
      UNION ALL
      SELECT 'in' AS direction, link_type, count(*)::int AS count FROM links WHERE to_page_id = $1 GROUP BY link_type
      ORDER BY count DESC, link_type, direction LIMIT 200`,
-    [id], { timeoutMs: GRAPH_QUERY_TIMEOUT_MS });
+    [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   const body = String(r.body ?? '').replace(/\s+/g, ' ').trim();
   return {
     ...toPageRef(r),
@@ -348,8 +354,7 @@ export interface SourceMapResult {
  * memoizes the result (GRAPH_SOURCE_MAP_TTL_MS).
  */
 export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResult> {
-  const opts = { timeoutMs: GRAPH_AGGREGATE_TIMEOUT_MS };
-  const sourceRows = await engine.executeRaw<Row>(`SELECT id, name, archived FROM sources ORDER BY id LIMIT 1000`, [], opts);
+  const sourceRows = await engine.executeRaw<Row>(`SELECT id, name, archived FROM sources ORDER BY id LIMIT 1000`, [], bound(GRAPH_QUERY_TIMEOUT_MS));
   const rows = await engine.executeRaw<Row>(
     `WITH live AS MATERIALIZED (
        SELECT id, source_id FROM pages WHERE deleted_at IS NULL
@@ -366,7 +371,7 @@ export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResu
      SELECT 'edges', sf, st, link_type, count(*)::int FROM e GROUP BY sf, st, link_type
      UNION ALL
      SELECT 'connected', s, NULL, NULL, count(*)::int FROM (SELECT f AS id, sf AS s FROM e UNION SELECT t, st FROM e) c GROUP BY s`,
-    [], opts);
+    [], bound(GRAPH_AGGREGATE_TIMEOUT_MS));
   const pageRows = rows.filter(r => r.kind === 'pages');
   const connectedRows = rows.filter(r => r.kind === 'connected');
   const edgeRows = rows.filter(r => r.kind === 'edges').map(r => ({ from_source: r.a, to_source: r.b, link_type: r.link_type, edges: r.n }));
@@ -432,7 +437,7 @@ export async function querySourceTopPages(engine: BrainEngine, sourceId: string,
       WHERE p.deleted_at IS NULL
       ORDER BY d.degree DESC, p.slug, p.id
       LIMIT $2`,
-    [sourceId, n], { timeoutMs: GRAPH_AGGREGATE_TIMEOUT_MS });
+    [sourceId, n], bound(GRAPH_AGGREGATE_TIMEOUT_MS));
   return rows.map(r => ({ ...toPageRef(r), degree: Number(r.degree) }));
 }
 
