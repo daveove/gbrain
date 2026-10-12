@@ -30,9 +30,12 @@ if [[ -n "$session_url" ]]; then
   export GBRAIN_DATABASE_URL="$session_url" DATABASE_URL="$session_url"
 fi
 # Launcher calendar zone: explicit setting > brain DB (config set) >
-# file-plane cycle.timezone > TZ from env.sh/host > UTC.
+# file-plane cycle.timezone > TZ from env.sh/host > UTC. A failed brain DB
+# lookup fails the run: a fallback zone could pin the wrong day and advance
+# seat watermarks past sessions it never selected.
+zone_ec=0
 zone="$(REPO="$REPO" python3 -c '
-import json, os, subprocess
+import json, os, subprocess, sys
 from pathlib import Path
 explicit = (os.environ.get("GBRAIN_DAILY_MEMORY_TZ") or "").strip()
 if explicit:
@@ -53,12 +56,16 @@ try:
         capture_output=True, text=True, timeout=wait_s,
         env=os.environ,
     )
-    value = (proc.stdout or "").strip()
-    if proc.returncode == 0 and value:
-        print(value, end="")
-        raise SystemExit
-except (OSError, subprocess.SubprocessError):
-    pass
+except (OSError, subprocess.SubprocessError) as exc:
+    sys.stderr.write(f"cycle.timezone lookup failed: {type(exc).__name__}\n")
+    raise SystemExit(75)
+if proc.returncode != 0:
+    sys.stderr.write((proc.stderr or "")[-2000:])
+    raise SystemExit(75)
+value = (proc.stdout or "").strip()
+if value:
+    print(value, end="")
+    raise SystemExit
 cfg = Path.home() / ".gbrain" / "config.json"
 if cfg.is_file():
     try:
@@ -69,7 +76,11 @@ if cfg.is_file():
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
 print((os.environ.get("TZ") or "UTC").strip() or "UTC", end="")
-')"
+')" || zone_ec=$?
+if [[ $zone_ec -ne 0 ]]; then
+  printf 'daily-memory: cycle.timezone lookup failed (exit %s); not running on a fallback zone\n' "$zone_ec" | tee -a "$LOG" >&2
+  exit "$zone_ec"
+fi
 # Validate IANA name; fall back to UTC when invalid.
 if ! python3 -c 'import sys; from zoneinfo import ZoneInfo; ZoneInfo(sys.argv[1])' "$zone" 2>/dev/null; then
   zone=UTC

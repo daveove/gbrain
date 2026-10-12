@@ -32,6 +32,9 @@ kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if kind == 'tz':
+    if os.environ.get('TEST_TZ_FAIL') == '1':
+        print('EMAXCONNSESSION', file=sys.stderr)
+        sys.exit(7)
     value = (os.environ.get('TEST_BRAIN_TZ') or '').strip()
     if value:
         print(value, end='')
@@ -488,6 +491,15 @@ finally:
       expect(result.code).toBe(0);
       expect(result.calls.map(call => [call.pool, call.writerPool])).toEqual([['2', '2']]);
     }
+  });
+
+  it('fails the run without ingesting or writing when the brain DB timezone lookup fails', () => {
+    const { home, run } = fixture({ 'cycle.timezone': 'Asia/Manila' });
+    todayInputs(home);
+    const result = run([], { TEST_TZ_FAIL: '1' });
+    expect(result.code).toBe(75);
+    expect(result.calls).toEqual([]);
+    expect(existsSync(join(home, '.local/state/gbrain/daily-memory-codex-mtime'))).toBe(false);
   });
 
   it('uses cycle.timezone from config over env.sh TZ', () => {
