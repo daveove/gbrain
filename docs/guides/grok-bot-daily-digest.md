@@ -165,9 +165,73 @@ with `error` (the code) and `message`.
   plus frontmatter stamping.
 - Conditional writes (`get_page` first, then `put_page` with
   `expected_revision`) also work. They cost an extra round trip and fail with
-  `revision_conflict` whenever anything else touched the page. The digest is
-  regenerated whole and owned by one routine, so last-writer-wins is the
-  intended result.
+  `revision_conflict` whenever anything else touched the page. With a single
+  routine the digest is regenerated whole, so last-writer-wins is the intended
+  result. Several bots sharing one page must not use `force`: see the next
+  section.
+
+### Several bots on one page
+
+When more than one bot writes the same day's digest, each bot owns one section
+of `digests/grok-bot/YYYY-MM-DD` and changes only that section. A `force`
+write would replace the other bots' sections, so the shared page uses
+conditional writes instead.
+
+Each bot uses a fixed, unique `BOT` name (lowercase, letters, digits and
+hyphens). Its section sits between two marker lines:
+
+```markdown
+<!-- grok-digest:BOT:start -->
+## BOT
+
+- Decided: ship the acme-example pilot.
+<!-- grok-digest:BOT:end -->
+```
+
+The page ends with `<!-- grok-digest:end -->`, and new sections go directly
+above it:
+
+```markdown
+---
+type: note
+title: Grok Bot digest 2026-10-06
+digest_date: 2026-10-06
+---
+
+# Grok Bot digest 2026-10-06
+
+<!-- grok-digest:research-bot:start -->
+## research-bot
+
+- alice-example confirmed the review slot.
+<!-- grok-digest:research-bot:end -->
+
+<!-- grok-digest:end -->
+```
+
+Each run:
+
+1. Read the page with `get_page` and `include_content: true`. Keep its
+   `revision` and `content`.
+2. If it returns `page_not_found`, create the page with `put_page`: the
+   frontmatter, the title, this bot's section and the end marker. Send no
+   `force` and no `expected_revision`, so the call only creates. If another
+   bot created the page first, the call fails with `revision_required` or
+   `revision_conflict`. Go back to step 1.
+3. If the page exists, call `edit_page` with `expected_revision` set to the
+   revision from step 1 and one edit:
+   - when this bot's markers are present, `old_text` is the whole current
+     section, from its start marker to its end marker inclusive, and
+     `new_text` is the new section;
+   - otherwise `old_text` is `<!-- grok-digest:end -->`, and `new_text` is
+     the new section, a blank line, then `<!-- grok-digest:end -->`.
+4. On `revision_conflict`, another bot wrote in between. Go back to step 1
+   with a new `request_id`; stop after 5 attempts and report.
+5. `write_pending` and transport failures are handled as in the table above:
+   repeat the identical call with the same `request_id`.
+
+Never touch another bot's markers or text. Running the bots a few minutes
+apart keeps conflicts rare, but correctness does not depend on the spacing.
 
 ## Thin CLI form inside the Bot
 
