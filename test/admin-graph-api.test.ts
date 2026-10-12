@@ -90,6 +90,11 @@ beforeAll(async () => {
   // Same slug in two sources -> ambiguous without source.
   await page('logseq-fixture', 'project', 'Logseq project page');
   await page('logseq-fixture', 'lonely', 'Isolated page');
+  // A live page whose only link points at a soft-deleted page is still isolated.
+  await link('logseq-fixture:lonely', 'tana-fixture:ghost', 'mentions');
+  // An archived source keeps live pages; the map flags it rather than hiding it.
+  await engine.executeRaw(`INSERT INTO sources (id, name, archived) VALUES ('archived-fixture', 'archived-fixture', true) ON CONFLICT DO NOTHING`);
+  await page('archived-fixture', 'old-note', 'Old note');
 
   const app = express();
   const listening = Promise.withResolvers<void>();
@@ -215,6 +220,9 @@ describe('admin graph API', () => {
 
     const top = await get<GraphSearchHit[]>('/admin/api/graph/sources/tana-fixture/top?limit=2');
     expect(top.body.map(p => p.slug)).toEqual(['project', 'alpha']);
+    // Only a link to a deleted page: neither ranked nor counted as connected.
+    expect((await get<GraphSearchHit[]>('/admin/api/graph/sources/logseq-fixture/top')).body).toEqual([]);
+    expect(by['archived-fixture']).toMatchObject({ archived: true, pages: 1 });
   });
 
   test('a Tana JSON body gets a readable excerpt, falling back to its children', async () => {

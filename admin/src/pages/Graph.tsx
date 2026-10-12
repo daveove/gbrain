@@ -391,10 +391,11 @@ function SourceMapView({ map, error, onRetry }: { map: GraphSourceMap | null; er
     const maxPages = Math.max(1, ...live.map(s => s.pages));
     const graphNodes: ForceGraphNode[] = live.map(s => ({
       id: s.id,
-      label: `${s.name.length > 30 ? `${s.name.slice(0, 29)}…` : s.name}\n${fmt.format(s.pages)} pages · ${pct(s.isolated, s.pages)} isolated`,
-      title: `${s.name}: ${fmt.format(s.pages)} pages, ${pct(s.isolated, s.pages)} isolated, ${fmt.format(s.internal_edges)} internal edges, ${fmt.format(crossBySource.get(s.id) ?? 0)} cross-source edges`,
+      // Archived sources keep their pages (deleted_at stays NULL); show them, but as archived.
+      label: `${s.name.length > 30 ? `${s.name.slice(0, 29)}…` : s.name}${s.archived ? ' (archived)' : ''}\n${fmt.format(s.pages)} pages · ${pct(s.isolated, s.pages)} isolated`,
+      title: `${s.name}${s.archived ? ' (archived)' : ''}: ${fmt.format(s.pages)} pages, ${pct(s.isolated, s.pages)} isolated, ${fmt.format(s.internal_edges)} internal edges, ${fmt.format(crossBySource.get(s.id) ?? 0)} cross-source edges`,
       radius: 7 + 38 * Math.sqrt(s.pages / maxPages),
-      color: sourceFamily(s.id).color,
+      color: s.archived ? '#3a3a4a' : sourceFamily(s.id).color,
       showLabel: true,
     }));
     const pairs = new Map<string, { a: string; b: string; edges: number }>();
@@ -422,13 +423,16 @@ function SourceMapView({ map, error, onRetry }: { map: GraphSourceMap | null; er
     ) : <p className="graph-status">Loading source map…</p>;
   }
   const chosen: GraphSourceStats | undefined = map.sources.find(s => s.id === selected);
-  const totals = map.sources.reduce((t, s) => ({ pages: t.pages + s.pages, isolated: t.isolated + s.isolated }), { pages: 0, isolated: 0 });
+  const active = map.sources.filter(s => !s.archived);
+  const archivedCount = map.sources.filter(s => s.archived && s.pages > 0).length;
+  const totals = active.reduce((t, s) => ({ pages: t.pages + s.pages, isolated: t.isolated + s.isolated }), { pages: 0, isolated: 0 });
 
   return (
     <div className="graph-layout">
       <section className="graph-main" aria-label="Source map">
         <p className="graph-status" role="status">
-          {fmt.format(totals.pages)} live pages in {fmt.format(nodes.length)} sources · {pct(totals.isolated, totals.pages)} isolated
+          {fmt.format(totals.pages)} live pages in {fmt.format(active.filter(s => s.pages > 0).length)} active sources · {pct(totals.isolated, totals.pages)} isolated
+          {archivedCount > 0 && ` (archived sources excluded: ${fmt.format(archivedCount)})`}
           {' · '}{fmt.format(map.cross.reduce((n, c) => n + c.edges, 0))} cross-source edges · as of {new Date(map.generated_at).toLocaleTimeString()}
         </p>
         <ForceGraph nodes={nodes} edges={edges} charge={-900} labelsBelow
@@ -445,6 +449,7 @@ function SourceMapView({ map, error, onRetry }: { map: GraphSourceMap | null; er
                   <button type="button" className="client-name-button" onClick={() => setSelected(s.id)}>
                     <span className="graph-swatch" style={{ background: sourceFamily(s.id).color }} aria-hidden="true" />
                     <span className="mono">{s.id}</span>
+                    {s.archived && <span className="badge graph-archived">archived</span>}
                   </button>
                 </td>
                 <td className="mono">{fmt.format(s.pages)}</td>

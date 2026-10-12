@@ -538,10 +538,14 @@ export async function querySourceTopPages(engine: BrainEngine, sourceId: string,
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, d.degree
        FROM (
          SELECT x.id, count(*)::int AS degree FROM (
+           -- Both endpoints live, as in the source map: a link to a soft-deleted
+           -- page (kept for the recovery window) does not count.
            SELECT l.from_page_id AS id FROM links l JOIN pages s ON s.id = l.from_page_id
+             JOIN pages o ON o.id = l.to_page_id AND o.deleted_at IS NULL
             WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id AND ${live('l')}
            UNION ALL
            SELECT l.to_page_id AS id FROM links l JOIN pages s ON s.id = l.to_page_id
+             JOIN pages o ON o.id = l.from_page_id AND o.deleted_at IS NULL
             WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id AND ${live('l')}
          ) x GROUP BY x.id
        ) d

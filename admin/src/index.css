@@ -416,6 +416,7 @@ label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
 .graph-source-table { margin-top: 16px; }
 .graph-source-table tr.selected td { background: var(--bg-tertiary); }
 .graph-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; flex-shrink: 0; }
+.graph-archived { margin-left: 6px; background: rgba(136,136,136,0.15); color: var(--text-secondary); }
 .graph-line-swatch { display: inline-block; width: 18px; border-top-width: 2px; margin-right: 8px; vertical-align: middle; }
 .graph-filter-list { list-style: none; display: flex; flex-direction: column; gap: 6px; }
 .graph-filter-list .checkbox-label { font-weight: 400; margin: 0; }
