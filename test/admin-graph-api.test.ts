@@ -58,6 +58,14 @@ beforeAll(async () => {
   await link('tana-fixture:twin', 'tana-fixture:project', 'duplicate');
   await link('tana-fixture:alpha', 'tana-fixture:leaf', 'contains');
   await link('tana-fixture:alpha', 'tana-fixture:beta', 'mentions');
+  // An ended temporal relationship: the links row stays, link_relationships
+  // marks it ended, and the live-by-default graph contract hides it.
+  await page('tana-fixture', 'former-employer', 'Former employer');
+  await link('tana-fixture:project', 'tana-fixture:former-employer', 'works_at');
+  await engine.executeRaw(`INSERT INTO link_relationships (from_page_id, to_page_id, link_type, scope, source_id, semantics,
+      valid_ranges, status_now, first_start, last_end, evidence_hash)
+    VALUES ($1, $2, 'works_at', 'all', 'tana-fixture', 'state', '{[2020-01-01,2021-01-01)}', 'ended', '2020-01-01', '2021-01-01', 'fixture')`,
+    [ids['tana-fixture:project'], ids['tana-fixture:former-employer']]);
   // alpha is the most connected child: extra edges into Bear (cross-source).
   await page('bear-fixture', 'meeting-notes', 'Meeting notes');
   await page('bear-fixture', 'reading-list', 'Reading list');
@@ -145,6 +153,7 @@ describe('admin graph API', () => {
     expect(hop['bear-fixture:reading-list']).toBe(2);
     expect(hop['tana-fixture:ghost']).toBeUndefined();
     expect(hop['tana-fixture:twin']).toBeUndefined();
+    expect(hop['tana-fixture:former-employer']).toBeUndefined();
     // Two provenances of project->alpha collapse into one edge with count 2.
     const projectAlpha = body.edges.find(e => e.from === ids['tana-fixture:project'] && e.to === ids['tana-fixture:alpha']);
     expect(projectAlpha).toMatchObject({ link_type: 'contains', count: 2 });
@@ -195,7 +204,8 @@ describe('admin graph API', () => {
     const { status, body } = await get<SourceMapResult>('/admin/api/graph/sources');
     expect(status).toBe(200);
     const by = Object.fromEntries(body.sources.map(s => [s.id, s]));
-    expect(by['tana-fixture']).toMatchObject({ pages: 7, connected: 7, isolated: 0 });
+    // former-employer's only edge is an ended relationship, so it counts as isolated.
+    expect(by['tana-fixture']).toMatchObject({ pages: 8, connected: 7, isolated: 1 });
     expect(by['logseq-fixture']).toMatchObject({ pages: 2, connected: 0, isolated: 2 });
     expect(by['bear-fixture']).toMatchObject({ pages: 2, connected: 2, internal_edges: 0 });
     expect(body.cross).toEqual([{ from_source: 'bear-fixture', to_source: 'tana-fixture', edges: 3 }]);

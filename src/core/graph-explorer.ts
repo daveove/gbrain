@@ -25,6 +25,7 @@
  * a timeout while the in-process query runs to completion.
  */
 import type { BrainEngine } from './engine.ts';
+import { edgeValidityEnabled, relationshipFilterSql } from './link-validity.ts';
 
 export const GRAPH_MAX_DEPTH = 2;
 export const GRAPH_DEFAULT_LIMIT = 150;
@@ -150,20 +151,31 @@ async function pageInfo(engine: BrainEngine, ids: number[]): Promise<Map<number,
 }
 
 /**
+ * The live-by-default graph contract (`graph.edge_validity`, link-validity.ts):
+ * a WHERE fragment per `links` alias that hides ended temporal relationships
+ * (`TRUE` when the policy is off). Applies to every edge these views count or
+ * draw; `degree` stays the raw stored-row count.
+ */
+async function liveLinkFilter(engine: BrainEngine): Promise<(alias: string) => string> {
+  const disabled = !(await edgeValidityEnabled(engine));
+  return alias => relationshipFilterSql(alias, { disabled });
+}
+
+/**
  * One hop: link rows touching `frontier` whose far endpoint is live, not in a
  * hidden source, and whose type is not hidden. Each direction reads at most
  * GRAPH_EDGE_SCAN_CAP rows in link-id order.
  */
-async function expand(engine: BrainEngine, frontier: number[], hideTypes: string[], hideSources: string[]): Promise<{ edges: Array<{ a: number; b: number }>; truncated: boolean }> {
+async function expand(engine: BrainEngine, live: (alias: string) => string, frontier: number[], hideTypes: string[], hideSources: string[]): Promise<{ edges: Array<{ a: number; b: number }>; truncated: boolean }> {
   const rows = await engine.executeRaw<Row>(
     `(SELECT 'out' AS dir, l.from_page_id AS a, l.to_page_id AS b FROM links l JOIN pages p ON p.id = l.to_page_id
        WHERE l.from_page_id = ANY($1::int[]) AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
-         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[]))
+         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')}
        ORDER BY l.id LIMIT $4)
      UNION ALL
      (SELECT 'in' AS dir, l.to_page_id AS a, l.from_page_id AS b FROM links l JOIN pages p ON p.id = l.from_page_id
        WHERE l.to_page_id = ANY($1::int[]) AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
-         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[]))
+         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')}
        ORDER BY l.id LIMIT $4)`,
     [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP], bound(GRAPH_QUERY_TIMEOUT_MS));
   let outRows = 0;
@@ -209,13 +221,14 @@ export async function queryGraphNeighbourhood(engine: BrainEngine, rootId: numbe
   const hideTypes = [...new Set(opts.hideLinkTypes ?? [])];
   const hideSources = [...new Set(opts.hideSources ?? [])].filter(s => s !== rootInfo.source_id);
   let truncated = false;
+  const live = await liveLinkFilter(engine);
 
   const kept = new Map<number, GraphNodeView>([[rootId, { ...rootInfo, hop: 0 }]]);
   const seen = new Set<number>([rootId]);
 
   let frontier = [rootId];
   for (let hop = 1; hop <= depth; hop++) {
-    const step = await expand(engine, frontier, hideTypes, hideSources);
+    const step = await expand(engine, live, frontier, hideTypes, hideSources);
     truncated ||= step.truncated;
     // Score = distinct kept pages a candidate connects to.
     const touches = new Map<number, Set<number>>();
@@ -246,7 +259,7 @@ export async function queryGraphNeighbourhood(engine: BrainEngine, rootId: numbe
     `SELECT l.from_page_id AS "from", l.to_page_id AS "to", l.link_type, count(*)::int AS count
        FROM links l
       WHERE l.from_page_id = ANY($1::int[]) AND l.to_page_id = ANY($1::int[])
-        AND l.from_page_id <> l.to_page_id AND NOT (l.link_type = ANY($2::text[]))
+        AND l.from_page_id <> l.to_page_id AND NOT (l.link_type = ANY($2::text[])) AND ${live('l')}
       GROUP BY l.from_page_id, l.to_page_id, l.link_type
       ORDER BY l.from_page_id, l.to_page_id, l.link_type
       LIMIT $3`,
@@ -376,10 +389,11 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
   const r = rows[0];
+  const live = await liveLinkFilter(engine);
   const links = await engine.executeRaw<Row>(
-    `SELECT 'out' AS direction, link_type, count(*)::int AS count FROM links WHERE from_page_id = $1 GROUP BY link_type
+    `SELECT 'out' AS direction, l.link_type, count(*)::int AS count FROM links l WHERE l.from_page_id = $1 AND ${live('l')} GROUP BY l.link_type
      UNION ALL
-     SELECT 'in' AS direction, link_type, count(*)::int AS count FROM links WHERE to_page_id = $1 GROUP BY link_type
+     SELECT 'in' AS direction, l.link_type, count(*)::int AS count FROM links l WHERE l.to_page_id = $1 AND ${live('l')} GROUP BY l.link_type
      ORDER BY count DESC, link_type, direction LIMIT 200`,
     [id], bound(GRAPH_QUERY_TIMEOUT_MS));
   const raw = String(r.body ?? '');
@@ -394,7 +408,7 @@ export async function queryGraphPage(engine: BrainEngine, id: number): Promise<G
     // children (`contains`) first.
     const near = await engine.executeRaw<Row>(
       `SELECT l.link_type, ${TITLE_SQL} AS title FROM links l JOIN pages p ON p.id = l.to_page_id
-        WHERE l.from_page_id = $1 AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
+        WHERE l.from_page_id = $1 AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL AND ${live('l')}
         ORDER BY (l.link_type = 'contains') DESC, l.id LIMIT 6`,
       [id], bound(GRAPH_QUERY_TIMEOUT_MS));
     if (near.length > 0) {
@@ -442,6 +456,7 @@ export interface SourceMapResult {
  */
 export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResult> {
   const sourceRows = await engine.executeRaw<Row>(`SELECT id, name, archived FROM sources ORDER BY id LIMIT 1000`, [], bound(GRAPH_QUERY_TIMEOUT_MS));
+  const live = await liveLinkFilter(engine);
   const rows = await engine.executeRaw<Row>(
     `WITH live AS MATERIALIZED (
        SELECT id, source_id FROM pages WHERE deleted_at IS NULL
@@ -451,7 +466,7 @@ export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResu
          FROM links l
          JOIN live pf ON pf.id = l.from_page_id
          JOIN live pt ON pt.id = l.to_page_id
-        WHERE l.from_page_id <> l.to_page_id
+        WHERE l.from_page_id <> l.to_page_id AND ${live('l')}
      )
      SELECT 'pages' AS kind, source_id AS a, NULL::text AS b, NULL::text AS link_type, count(*)::int AS n FROM live GROUP BY source_id
      UNION ALL
@@ -509,15 +524,16 @@ export async function querySourceMap(engine: BrainEngine): Promise<SourceMapResu
 /** The most connected live pages of one source (entry points from the source map). */
 export async function querySourceTopPages(engine: BrainEngine, sourceId: string, limit = 20): Promise<GraphSearchHit[]> {
   const n = clampGraphLimit(limit, 20, GRAPH_TOP_PAGES_MAX_LIMIT);
+  const live = await liveLinkFilter(engine);
   const rows = await engine.executeRaw<Row>(
     `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title, p.type, d.degree
        FROM (
          SELECT x.id, count(*)::int AS degree FROM (
            SELECT l.from_page_id AS id FROM links l JOIN pages s ON s.id = l.from_page_id
-            WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id
+            WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id AND ${live('l')}
            UNION ALL
            SELECT l.to_page_id AS id FROM links l JOIN pages s ON s.id = l.to_page_id
-            WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id
+            WHERE s.source_id = $1 AND l.from_page_id <> l.to_page_id AND ${live('l')}
          ) x GROUP BY x.id
        ) d
        JOIN pages p ON p.id = d.id
