@@ -250,6 +250,15 @@ describe('admin graph API', () => {
     // ... the exact slug finds it, in every source unless one is given.
     const exact = (await get<GraphSearchHit[]>('/admin/api/graph/search?q=lonely')).body;
     expect(exact.map(h => `${h.source_id}:${h.slug}`)).toEqual(['logseq-fixture:lonely']);
+    // Unicode slugs are slugs too (canonical grammar), even when the title differs.
+    await page('logseq-fixture', '日本/計画', 'Planning notes');
+    expect((await get<GraphSearchHit[]>(`/admin/api/graph/search?q=${encodeURIComponent('日本/計画')}`)).body.map(h => h.title)).toEqual(['Planning notes']);
+    // Exact-slug hits follow the requested limit, not a fixed ambiguity cap.
+    for (let i = 0; i < 12; i++) {
+      await engine.executeRaw('INSERT INTO sources (id, name) VALUES ($1, $1) ON CONFLICT DO NOTHING', [`many-${i}`]);
+      await page(`many-${i}`, 'shared-slug', `Shared ${i}`);
+    }
+    expect((await get<GraphSearchHit[]>('/admin/api/graph/search?q=shared-slug&limit=12')).body).toHaveLength(12);
     const both = (await get<GraphSearchHit[]>('/admin/api/graph/search?q=project')).body;
     expect(both.slice(0, 2).map(h => h.source_id)).toEqual(['logseq-fixture', 'tana-fixture']);
     // The title arm never matches slugs, so the title trigram index serves it.

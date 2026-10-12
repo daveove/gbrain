@@ -99,7 +99,8 @@ function PageSearch({ onPick }: { onPick: (hit: GraphSearchHit) => void }) {
   // Title search needs 3 characters (the trigram index matches nothing
   // shorter); a 2-character slug-shaped input is an exact slug lookup.
   const term = q.trim();
-  const searchable = term.length >= 3 || (term.length === 2 && /^[a-z0-9][a-z0-9._/-]*$/.test(term));
+  // Slug-shaped = no whitespace and already lower-case (the server checks the full grammar).
+  const searchable = term.length >= 3 || (term.length === 2 && !/\s/.test(term) && term === term.toLowerCase());
 
   useEffect(() => {
     // Results always belong to the text in the box: drop the previous list as

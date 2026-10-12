@@ -25,6 +25,7 @@
  * a timeout while the in-process query runs to completion.
  */
 import type { BrainEngine } from './engine.ts';
+import { validateSlug } from './utils.ts';
 import { edgeValidityEnabled, relationshipFilterSql } from './link-validity.ts';
 
 export const GRAPH_MAX_DEPTH = 2;
@@ -126,11 +127,12 @@ const SLUG_LOOKUP_SQL = `SELECT p.id, p.source_id, p.slug, ${TITLE_SQL} AS title
   CROSS JOIN LATERAL (SELECT p.id, p.source_id, p.slug, p.title, p.type FROM pages p
                        WHERE p.source_id = s.id AND p.slug = $1 AND p.deleted_at IS NULL) p
  WHERE ($2::text IS NULL OR s.id = $2)
- ORDER BY p.source_id LIMIT 10`;
+ ORDER BY p.source_id LIMIT $3`;
 
 /** Resolve the root page. Without a source, a slug shared by two sources is ambiguous. */
 export async function resolveGraphRoot(engine: BrainEngine, slug: string, sourceId?: string): Promise<GraphPageRef | null> {
-  const rows = await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [slug, sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS));
+  // Ten rows are enough to report an ambiguous slug.
+  const rows = await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [slug, sourceId ?? null, 10], bound(GRAPH_QUERY_TIMEOUT_MS));
   if (rows.length === 0) return null;
   if (rows.length > 1) {
     throw new GraphRequestError(`Slug "${slug}" exists in ${rows.length} sources; pass source.`, 409, 'ambiguous_slug',
@@ -284,8 +286,15 @@ export interface GraphSearchHit extends GraphPageRef {
   degree: number;
 }
 
-/** Characters a slug can hold; anything else (spaces, capitals) is not a slug lookup. */
-const SLUG_SHAPE = /^[a-z0-9][a-z0-9._/-]*$/;
+/**
+ * Input that can be a stored slug: valid under the canonical grammar
+ * (validateSlug, Unicode letters and CJK allowed), already lower-case, and
+ * free of whitespace.
+ */
+function isSlugShaped(q: string): boolean {
+  if (/\s/.test(q)) return false;
+  try { return validateSlug(q) === q; } catch { return false; }
+}
 
 /**
  * Title substring search for the page picker, `ILIKE '%q%'` on `title` only,
@@ -311,14 +320,14 @@ export const GRAPH_TITLE_SEARCH_SQL = `SELECT p.id, p.source_id, p.slug, ${TITLE
 export async function searchGraphPages(engine: BrainEngine, query: string,
   opts: { limit?: number; sourceId?: string; signal?: AbortSignal } = {}): Promise<GraphSearchHit[]> {
   const q = query.trim();
-  const slugShaped = SLUG_SHAPE.test(q);
+  const slugShaped = isSlugShaped(q);
   // Fewer than 3 characters give the trigram index nothing to match, so a
   // title search would read every title; only an exact slug lookup is cheap.
   if (q.length < (slugShaped ? 2 : 3)) throw new GraphRequestError('Search needs at least 3 characters (2 for an exact slug)', 400, 'query_too_short');
   if (q.length > 200) throw new GraphRequestError('Search is limited to 200 characters', 400, 'query_too_long');
   const limit = clampGraphLimit(opts.limit, 20, GRAPH_SEARCH_MAX_LIMIT);
   const bySlug = slugShaped
-    ? await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [q, opts.sourceId ?? null], bound(GRAPH_QUERY_TIMEOUT_MS, opts.signal))
+    ? await engine.executeRaw<Row>(SLUG_LOOKUP_SQL, [q, opts.sourceId ?? null, limit], bound(GRAPH_QUERY_TIMEOUT_MS, opts.signal))
     : [];
   const esc = q.replace(/[\\%_]/g, ch => `\\${ch}`);
   const byTitle = q.length < 3 ? [] : await engine.executeRaw<Row>(GRAPH_TITLE_SEARCH_SQL,
