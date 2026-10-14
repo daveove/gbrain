@@ -316,10 +316,47 @@ policy file if other members should not run Funnel. Re-run the command
 afterwards. `tailscale cert <machine>.<tailnet>.ts.net` fails with
 `your Tailscale account does not support getting TLS certs` until HTTPS is on.
 
-### 2. Run the server on loopback
+### 2. Grant the routine before starting the server
 
-Run it as a user service (a launchd LaunchAgent or systemd user unit with
-restart-always) so it survives logout and crashes:
+Before starting `gbrain serve`, create a dedicated database-only source so
+the grant can read only its own digests. On PGLite, a running server holds
+the single-writer lock and a tokenless local grant returns
+`pglite_live_serve`. If the server is already running, stop it (and prevent
+its supervisor from restarting it) for this provisioning step, then
+restart it with the configuration in step 3.
+
+```bash
+unset GBRAIN_ADMIN_BOOTSTRAP_TOKEN
+gbrain sources add grok-digests --federated
+gbrain mcp grant grok-bot-digest-public --harness grok-bot --profile memory-writer \
+  --source grok-digests --federated-read grok-digests \
+  --bound-slug-prefixes digests/grok-bot/ \
+  --url https://your-machine.your-tailnet.ts.net/mcp \
+  --credentials-out /absolute/private/grok-bot-digest-public.json --json
+```
+
+Run this on the brain host without `--admin-token-file` and with
+`GBRAIN_ADMIN_BOOTSTRAP_TOKEN` unset. The grant is then written through the
+local database connection, and the handoff is bound to the public URL.
+With an admin credential, `gbrain mcp grant` instead sends the grant to
+`/admin/api/grants` on the `--url` host, which Funnel does not publish.
+
+### 3. Run the server on loopback
+
+Run the command below under a supervisor configured to restart after
+crashes. A macOS launchd **LaunchAgent runs only while the user is logged
+in**; an always-logged-in Mac with auto-login can use that arrangement,
+but the agent stops at logout. Running across logout requires a
+system-level **LaunchDaemon**, configured to run as the brain owner with
+the correct `GBRAIN_HOME`, executable paths and private credential access.
+The standard GBrain user-service installer creates a LaunchAgent, not a
+LaunchDaemon.
+
+On Linux, use a systemd user unit with `Restart=always` and enable
+lingering (`sudo loginctl enable-linger "$USER"`) to keep the user manager
+running after logout. Without lingering the user service stops at logout.
+Either arrangement still requires the host to remain awake and online.
+The foreground command alone does not install a service:
 
 ```bash
 umask 077
@@ -336,7 +373,7 @@ resident process holds its own sessions. Set `GBRAIN_POOL_SIZE=2` and
 client limit is shared with imports or embedding runs. The server then holds
 at most two sessions.
 
-### 3. Publish only the client paths
+### 4. Publish only the client paths
 
 ```bash
 for p in /mcp /token /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource; do
@@ -352,25 +389,6 @@ which the last handler covers. Every other path, including `/admin`,
 `/authorize`, `/register`, `/revoke`, `/ingest`, `/health` and `/metrics`,
 gets Funnel's `404 page not found`. These paths stay reachable on
 `http://127.0.0.1:3131` for the host owner.
-
-### 4. Grant the routine on the brain host
-
-Use a dedicated database-only source so the grant can read only its own
-digests:
-
-```bash
-gbrain sources add grok-digests --federated
-gbrain mcp grant grok-bot-digest-public --harness grok-bot --profile memory-writer \
-  --source grok-digests --federated-read grok-digests \
-  --bound-slug-prefixes digests/grok-bot/ \
-  --url https://your-machine.your-tailnet.ts.net/mcp \
-  --credentials-out /absolute/private/grok-bot-digest-public.json --json
-```
-
-Run this on the brain host without `--admin-token-file`. The grant is then
-written through the local database connection, and the handoff is bound to
-the public URL. With `--admin-token-file`, `gbrain mcp grant` sends the grant
-to `/admin/api/grants` on the `--url` host, which Funnel does not publish.
 
 ### 5. Verify from outside the tailnet
 
@@ -420,9 +438,15 @@ gbrain mcp admin revoke CLIENT_ID --url http://127.0.0.1:3131/mcp \
 gbrain mcp admin revoke CLIENT_ID --yes --if-version REVISION \
   --url http://127.0.0.1:3131/mcp --admin-token-file /absolute/private/admin-token --json
 
-# Remove every Funnel handler on :443. This does not revoke clients, so revoke first.
-tailscale funnel --https=443 off
+# Remove only the four digest mounts. This does not revoke clients, so revoke first.
+for p in /mcp /token /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource; do
+  tailscale funnel --https=443 --set-path="$p" off
+done
 ```
+
+Keep `--set-path` on every removal: omitting it removes all handlers on
+`:443`, including unrelated services. Do not use `tailscale funnel reset`
+or `tailscale serve reset` for this rollback.
 
 After revocation, `/token` returns `invalid_client` and existing access tokens
 get HTTP 401. Both were verified on loopback.
@@ -446,7 +470,7 @@ identifies the committed page.
   would add `/admin` and the other server paths.
 - **Reads follow the grant's read list.** The fence limits writes to
   `digests/grok-bot/`. A `--source default` grant can still read the whole
-  `default` source. The `grok-digests` grant in step 4 confines reads too:
+  `default` source. The `grok-digests` grant in step 2 confines reads too:
   the grant's read list, not the source's federation, is what confines the
   Bot. The source is federated so your own unqualified searches still
   include the digests.
