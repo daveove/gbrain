@@ -3,6 +3,8 @@
 [Subsystem index](../KEY_FILES.md). Read only the entries relevant to your change.
 Current behavior and load-bearing invariants; history belongs in Git and CHANGELOG.
 
+- `src/core/graph-explorer.ts` — read-side owner graph views keyed by page id across all sources. Neighbourhood expansion caps each directional edge scan, degree shortlist, node count and induced edge set; hidden types/sources and soft-deleted endpoints are filtered before expansion. Title search uses the title trigram index, exact Unicode slugs probe the source/slug key, and the excerpt fallback lists distinct Tana children. Source-map aggregates read no page bodies, preserve every source's archived metadata and count edges only between live endpoints. Every edge view respects `graph.edge_validity` through `relationshipFilterSql`; raw stored degree remains a ranking signal. Each query carries a deadline and abort signal.
+
 ## Attendance evidence and ownership
 
 The shared and filesystem extractors recognize canonical attendance only from

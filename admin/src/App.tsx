@@ -6,15 +6,17 @@ import { RequestLogPage } from './pages/RequestLog';
 import { CalibrationPage } from './pages/Calibration';
 import { JobsWatchPage } from './pages/JobsWatch';
 import { OAuthConsentPage } from './pages/OAuthConsent';
+import { GraphPage } from './pages/Graph';
 import { pendingOAuthRequest } from './lib/oauth-request';
 import { api } from './api';
 
-type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'oauth-consent';
+type Page = 'login' | 'dashboard' | 'agents' | 'log' | 'calibration' | 'jobs' | 'graph' | 'oauth-consent';
 
 function getPage(): Page {
-  const hash = window.location.hash.replace('#', '') || 'dashboard';
+  // Pages may carry their own state after '?', e.g. #graph?id=42.
+  const hash = window.location.hash.replace('#', '').split('?')[0] || 'dashboard';
   if (pendingOAuthRequest() && hash === 'dashboard') return 'oauth-consent';
-  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'oauth-consent'].includes(hash)) return hash as Page;
+  if (['login', 'dashboard', 'agents', 'log', 'calibration', 'jobs', 'graph', 'oauth-consent'].includes(hash)) return hash as Page;
   return 'dashboard';
 }
 
@@ -63,6 +65,7 @@ export function App() {
              onClick={() => navigate('calibration')}>Calibration</a>
           <a className={`nav-item ${page === 'jobs' ? 'active' : ''}`}
              onClick={() => navigate('jobs')}>Jobs Watch</a>
+          <a className={`nav-item ${page === 'graph' ? 'active' : ''}`} href="#graph">Graph</a>
         </div>
         <div style={{ marginTop: 'auto', padding: '16px 12px', borderTop: '1px solid var(--border)' }}>
           <button
@@ -89,6 +92,7 @@ export function App() {
         {page === 'log' && <RequestLogPage />}
         {page === 'calibration' && <CalibrationPage />}
         {page === 'jobs' && <JobsWatchPage />}
+        {page === 'graph' && <GraphPage />}
         {page === 'oauth-consent' && <OAuthConsentPage />}
       </main>
     </div>
