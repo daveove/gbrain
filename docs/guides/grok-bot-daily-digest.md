@@ -219,10 +219,13 @@ Each run:
    bot created the page first, the call fails with `revision_required` or
    `revision_conflict`. Go back to step 1.
 3. If the page exists, build the new content from the `content` you read:
+   - if the page predates this protocol and has no terminal
+     `<!-- grok-digest:end -->` marker, preserve all existing content and
+     append a newline followed by that marker on its own line first;
    - when this bot's markers are present, replace the text from its start
      marker to its end marker inclusive with the new section;
    - otherwise insert the new section and a blank line directly above
-     `<!-- grok-digest:end -->`.
+     `<!-- grok-digest:end -->` (including the marker just appended).
 
    Leave every other line unchanged. Send it with `put_page`, no `force`, and
    `expected_revision` set to the revision from step 1. Avoid `edit_page`
@@ -234,18 +237,49 @@ Each run:
 5. `write_pending` and transport failures are handled as in the table above:
    repeat the identical call with the same `request_id`.
 
-Never touch another bot's markers or text. Running the bots a few minutes
-apart keeps conflicts rare, but correctness does not depend on the spacing.
+Never touch another bot's markers or text. Before switching an existing
+single-bot digest to this shared protocol, stop that bot's `force` writes
+and switch every writer to conditional writes. Running the bots a few
+minutes apart keeps conflicts rare, but correctness does not depend on
+the spacing.
 
 ## Thin CLI form inside the Bot
 
 When the Bot uses the installed launcher from the
-[Grok Bot guide](grok-bot.md), the same write is:
+[Grok Bot guide](grok-bot.md), the **single-bot-only** write is:
 
 ```bash
 /workspace/gbrain/bin/gbrain put digests/grok-bot/2026-10-06 --force --request-id "$REQUEST_ID" < digest.md
 /workspace/gbrain/bin/gbrain get digests/grok-bot/2026-10-06
 ```
+
+For a shared page, first read the content and revision:
+
+```bash
+/workspace/gbrain/bin/gbrain get digests/grok-bot/2026-10-06 --include-content --json
+```
+
+Build `merged.md` using the [shared-page protocol](#several-bots-on-one-page),
+preserving all other content, and set `EXPECTED_REVISION` to the revision
+returned by that read. Submit the complete merged Markdown conditionally:
+
+```bash
+REQUEST_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+/workspace/gbrain/bin/gbrain put digests/grok-bot/2026-10-06 \
+  --expected-revision "$EXPECTED_REVISION" --request-id "$REQUEST_ID" < merged.md
+```
+
+If the read returned `page_not_found`, create the shared page with no
+`--force` and no `--expected-revision`:
+
+```bash
+REQUEST_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
+/workspace/gbrain/bin/gbrain put digests/grok-bot/2026-10-06 --request-id "$REQUEST_ID" < merged.md
+```
+
+On `revision_conflict` or a concurrent-create failure, reread and merge again
+with a new request ID; for pending or transport retries reuse the same
+request ID, revision and content.
 
 The launcher authenticates from its stored handoff. Do not pass `--json` to
 `put`. The thin client forwards it to the server as a `json` tool argument.
@@ -303,6 +337,24 @@ Tailscale-managed certificate and no inbound port on your router.
 uses and keep the server on loopback.
 
 ### 1. Enable HTTPS and Funnel for the tailnet
+
+Before any `funnel` command, inspect the existing configuration:
+
+```bash
+tailscale serve status --json
+```
+
+If the command fails or its output cannot be inspected, stop. Check
+`:443` handlers in `Web` and any `Foreground` sessions. If `/mcp`, `/token`,
+`/.well-known/oauth-authorization-server` or
+`/.well-known/oauth-protected-resource` is already mounted, stop rather
+than overwrite it; preserve that service and choose a different node.
+Also stop if `:443` has a root `/` handler or raw TCP forwarding, since
+this guide cannot then guarantee its unpublished paths stay private.
+Funnel enables public access for the whole port, so do not proceed if an
+unrelated handler on `:443` is meant to remain tailnet-only.
+
+Only after this inspection, enable the features on a free `/mcp` mount:
 
 ```bash
 tailscale funnel --bg --set-path=/mcp http://127.0.0.1:3131/mcp
@@ -374,6 +426,12 @@ client limit is shared with imports or embedding runs. The server then holds
 at most two sessions.
 
 ### 4. Publish only the client paths
+
+Re-read `tailscale serve status --json` immediately before the loop. Stop
+if the read fails, a selected path now belongs to another service, or the
+root/TCP/private-handler conflicts from step 1 appeared. Each selected
+path must be absent or still be the handler this guide created; do not
+take over another service even if it uses the same local port.
 
 ```bash
 for p in /mcp /token /.well-known/oauth-authorization-server /.well-known/oauth-protected-resource; do
