@@ -2119,6 +2119,27 @@ describe('daily memory from sources the brain already holds', () => {
     expect(days).toContain('2026-09-25'); // live calendar date
   });
 
+  for (const pinned of [false, true]) {
+    test(`dailyMemoryDaysForSlugs reconstructs offset-less version dates in the ${pinned ? 'pinned' : 'configured'} cycle timezone`, async () => {
+      await engine.setConfig('cycle.timezone', pinned ? 'UTC' : 'America/Los_Angeles');
+      await engine.putPage('notes/versioned-local-time', {
+        type: 'note', title: 'Versioned local time', compiled_truth: 'old',
+        frontmatter: { date: '2026-09-30T00:30:00' },
+      }, { sourceId: 'default' });
+      await engine.createVersion('notes/versioned-local-time', { sourceId: 'default' });
+      await engine.putPage('notes/versioned-local-time', {
+        type: 'note', title: 'Versioned local time', compiled_truth: 'new',
+        frontmatter: { date: '2026-10-02' },
+      }, { sourceId: 'default' });
+      await engine.executeRaw(
+        "UPDATE pages SET effective_date='2026-10-02T00:00:00Z'::timestamptz, effective_date_source='date' WHERE source_id='default' AND slug='notes/versioned-local-time'",
+      );
+      const days = await dailyMemoryDaysForSlugs(engine, 'default', ['notes/versioned-local-time'],
+        pinned ? { timezone: 'America/Los_Angeles' } : {});
+      expect(days).toEqual(['2026-09-30', '2026-10-02']);
+    });
+  }
+
   test('same-day revision conflict rescans and keeps the full index', async () => {
     await engine.setConfig('cycle.timezone', 'UTC');
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ($1, $1)`, ['notes']);

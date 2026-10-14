@@ -220,6 +220,7 @@ export async function dailyMemoryDaysForSlugs(
         const computed = computeEffectiveDate({
           slug: ver.slug,
           frontmatter,
+          timeZone: zone,
           filename: ver.import_filename,
           createdAt: new Date(ver.created_at),
           updatedAt: new Date(ver.snapshot_at ?? ver.updated_at),
