@@ -167,6 +167,7 @@ const NODE_CAPS = [50, 150, 300];
 function ExplorerView({ rootId }: { rootId: number | null }) {
   const [depth, setDepth] = useState(2);
   const [limit, setLimit] = useState(150);
+  const [maxDegree, setMaxDegree] = useState<number | undefined>(undefined);
   const [hiddenTypes, setHiddenTypes] = useState<string[]>(DEFAULT_HIDDEN_LINK_TYPES);
   const [hiddenSources, setHiddenSources] = useState<string[]>([]);
   const [data, setData] = useState<GraphNeighbourhood | null>(null);
@@ -179,14 +180,14 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
     if (rootId === null) { setData(null); return; }
     let alive = true;
     setLoading(true);
-    api.graphNeighbourhood(rootId, { depth, limit, hideTypes: hiddenTypes, hideSources: hiddenSources })
+    api.graphNeighbourhood(rootId, { depth, limit, hideTypes: hiddenTypes, hideSources: hiddenSources, maxDegree })
       .then(next => { if (alive) { setData(next); setError(null); setSelected(null); } },
         // A failed request must not leave the previous neighbourhood on screen
         // under controls that now describe a different request.
         (e: unknown) => { if (alive) { setData(null); setSelected(null); setError(e instanceof Error ? e.message : String(e)); } })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [rootId, depth, limit, hiddenTypes, hiddenSources]);
+  }, [rootId, depth, limit, hiddenTypes, hiddenSources, maxDegree]);
 
   const focusId = selected ?? data?.root.id ?? null;
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -257,6 +258,14 @@ function ExplorerView({ rootId }: { rootId: number | null }) {
             Nodes
             <select value={limit} onChange={event => setLimit(Number(event.target.value))}>
               {NODE_CAPS.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className="graph-inline-label">
+            Hide hubs
+            <select value={maxDegree ?? ''} onChange={event => setMaxDegree(event.target.value ? Number(event.target.value) : undefined)}
+              title="Hide pages above this total degree, counting all stored links in both directions. The center is always kept.">
+              <option value="">Off</option>
+              {[500, 1000, 2000].map(n => <option key={n} value={n}>Above {fmt.format(n)} links</option>)}
             </select>
           </label>
         </div>

@@ -93,10 +93,11 @@ export const api = {
   // Graph explorer (serve-http-admin-graph.ts).
   graphSearch: (q: string, signal?: AbortSignal): Promise<GraphSearchHit[]> =>
     apiFetch(`/admin/api/graph/search?${new URLSearchParams({ q, limit: '12' })}`, { signal }),
-  graphNeighbourhood: (id: number, opts: { depth: number; limit: number; hideTypes: string[]; hideSources: string[] }): Promise<GraphNeighbourhood> =>
+  graphNeighbourhood: (id: number, opts: { depth: number; limit: number; hideTypes: string[]; hideSources: string[]; maxDegree?: number }): Promise<GraphNeighbourhood> =>
     apiFetch(`/admin/api/graph/neighbourhood?${new URLSearchParams({
       id: String(id), depth: String(opts.depth), limit: String(opts.limit),
       hide_types: opts.hideTypes.join(','), hide_sources: opts.hideSources.join(','),
+      ...(opts.maxDegree === undefined ? {} : { max_degree: String(opts.maxDegree) }),
     })}`),
   graphPage: (id: number): Promise<GraphPageDetail> => apiFetch(`/admin/api/graph/page?id=${id}`),
   graphSources: (): Promise<GraphSourceMap> => apiFetch('/admin/api/graph/sources'),

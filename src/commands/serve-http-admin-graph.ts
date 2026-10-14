@@ -2,7 +2,7 @@
  * Owner-only graph explorer endpoints for the admin SPA (#graph):
  *
  *   GET /admin/api/graph/search?q=&source=&limit=
- *   GET /admin/api/graph/neighbourhood?id= | ?slug=&source= [&depth=&limit=&hide_types=&hide_sources=]
+ *   GET /admin/api/graph/neighbourhood?id= | ?slug=&source= [&depth=&limit=&hide_types=&hide_sources=&max_degree=]
  *   GET /admin/api/graph/page?id=
  *   GET /admin/api/graph/sources                 (memoized GRAPH_SOURCE_MAP_TTL_MS; failures GRAPH_FAILURE_TTL_MS)
  *   GET /admin/api/graph/sources/:id/top?limit=  (memoized per source and limit, same TTLs)
@@ -17,6 +17,7 @@ import {
   GraphRequestError,
   clampGraphLimit,
   createTtlMemo,
+  graphMaxDegree,
   queryGraphNeighbourhood,
   queryGraphPage,
   querySourceMap,
@@ -108,6 +109,7 @@ export function mountAdminGraphApi(app: Express, ctx: ServeHttpContext): void {
         limit: req.query.limit === undefined ? undefined : Number(req.query.limit),
         hideLinkTypes: graphListParam(req.query.hide_types),
         hideSources: graphListParam(req.query.hide_sources),
+        maxDegree: graphMaxDegree(req.query.max_degree),
       }));
     } catch (e) {
       sendGraphError(res, 'neighbourhood', e);

@@ -182,11 +182,70 @@ describe('admin graph API', () => {
     expect(body.candidates).toBeGreaterThan(1);
   });
 
+  test('hide hubs uses total stored degree before ranking, keeps the root, and does not traverse hidden hubs', async () => {
+    const root = ids['tana-fixture:project'];
+    const path = `/admin/api/graph/neighbourhood?id=${root}&hide_types=duplicate`;
+    const capped = await get<NeighbourhoodResult>(`${path}&depth=1&limit=3&max_degree=2`);
+    expect(capped.status).toBe(200);
+    expect(capped.body.root.degree).toBe(9);
+    expect(capped.body.nodes.map(n => [n.source_id, n.slug, n.degree, n.hop])).toEqual([
+      ['tana-fixture', 'project', 9, 0],
+      ['bear-fixture', 'meeting-notes', 2, 1],
+      ['tana-fixture', 'beta', 2, 1],
+    ]);
+    expect(capped.body.candidates).toBe(4);
+    expect(capped.body.truncated).toBe(true);
+    expect(capped.body.edges.map(e => [e.link_type, e.count])).toEqual([['contains', 1], ['wikilink', 1]]);
+
+    const deep = await get<NeighbourhoodResult>(`${path}&depth=2&max_degree=1`);
+    expect(deep.body.nodes.map(n => [n.slug, n.degree, n.hop])).toEqual([
+      ['project', 9, 0], ['delta', 1, 1], ['gamma', 1, 1],
+    ]);
+    expect(deep.body.candidates).toBe(2);
+    expect(deep.body.truncated).toBe(false);
+    // alpha's degree is still 6 even when its mentions/wikilinks are hidden:
+    // hub filtering does not measure just the currently visible edge types.
+    const types = await get<NeighbourhoodResult>(`/admin/api/graph/neighbourhood?id=${root}&depth=1&max_degree=3&hide_types=duplicate,mentions,wikilink`);
+    expect(types.body.nodes.map(n => n.slug)).toEqual(['project', 'beta', 'delta', 'gamma']);
+    const off = await get<NeighbourhoodResult>(`${path}&depth=1&limit=2`);
+    expect(off.body.nodes.map(n => n.slug)).toEqual(['project', 'alpha']);
+  });
+
+  test('hub rows cannot consume either direction of the bounded edge scan', async () => {
+    await engine.executeRaw("INSERT INTO sources (id, name) VALUES ('scan-fixture', 'scan-fixture')");
+    for (const direction of ['out', 'in']) {
+      const root = await page('scan-fixture', `${direction}-root`, `${direction} root`);
+      const hub = await page('scan-fixture', `${direction}-hub`, `${direction} hub`);
+      const leaf = await page('scan-fixture', `${direction}-leaf`, `${direction} leaf`);
+      const [from, to] = direction === 'out' ? [root, hub] : [hub, root];
+      await engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
+        SELECT $1, $2, 'mentions', 'scan-' || n FROM generate_series(1, 4000) n`, [from, to]);
+      await engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
+        VALUES ($1, $2, 'contains', 'manual')`, direction === 'out' ? [root, leaf] : [leaf, root]);
+      const { status, body } = await get<NeighbourhoodResult>(`/admin/api/graph/neighbourhood?id=${root}&depth=2&limit=2&max_degree=1`);
+      expect(status).toBe(200);
+      expect(body.nodes.map(n => [n.slug, n.degree, n.hop])).toEqual([
+        [`${direction}-root`, 4001, 0], [`${direction}-leaf`, 1, 1],
+      ]);
+      expect(body.edges).toEqual([{ from: direction === 'out' ? root : leaf, to: direction === 'out' ? leaf : root, link_type: 'contains', count: 1 }]);
+      expect(body.candidates).toBe(1);
+      expect(body.truncated).toBe(false);
+    }
+    // Keep the other tests' literal whole-brain aggregate expectations isolated.
+    await engine.executeRaw("DELETE FROM pages WHERE source_id = 'scan-fixture'");
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'scan-fixture'");
+  }, 60_000);
+
   test('request bounds', async () => {
     const root = ids['tana-fixture:project'];
     expect((await get(`/admin/api/graph/neighbourhood?id=${root}&depth=3`)).status).toBe(400);
     expect((await get(`/admin/api/graph/neighbourhood?id=${root}&depth=0`)).status).toBe(400);
     expect((await get(`/admin/api/graph/neighbourhood?id=${root}&limit=-4`)).status).toBe(400);
+    for (const threshold of ['0', '-1', '1.5', 'nope', '', '2147483647', '1&max_degree=2']) {
+      const invalid = await get(`/admin/api/graph/neighbourhood?id=${root}&max_degree=${threshold}`);
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.error).toBe('invalid_max_degree');
+    }
     expect((await get<NeighbourhoodResult>(`/admin/api/graph/neighbourhood?id=${root}&limit=100000`)).body.limit).toBe(GRAPH_MAX_LIMIT);
     expect((await get('/admin/api/graph/neighbourhood')).status).toBe(400);
     expect((await get('/admin/api/graph/neighbourhood?id=999999')).status).toBe(404);
