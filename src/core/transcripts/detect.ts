@@ -25,6 +25,9 @@ import { hermesAdapter } from './hermes.ts';
 import { grokAdapter } from './grok.ts';
 import { chatgptExportAdapter } from './chatgpt-export.ts';
 import { claudeExportAdapter } from './claude-export.ts';
+import { ompAdapter, piAdapter } from './pi-session.ts';
+import { opencodeAdapter } from './opencode.ts';
+import { cursorAdapter } from './cursor.ts';
 
 // ── Harness discovery roots (discovery mode only) ───────────────────────────
 
@@ -65,21 +68,29 @@ export function harnessRoots(overrides?: HarnessRoot[]): HarnessRoot[] {
 
 /**
  * Detection order: SQLite magic is unambiguous; JSONL first-line shapes are
- * mutually exclusive (session_meta / session-header / claude keys / grok
- * system-head); the two monolithic-JSON exports are sniffed by their
- * distinguishing keys. claude-code detects BEFORE grok: a claude session can
- * lead with a `type:'system'` row (string content), which is grok's head
- * shape — grok's sniff also rejects claude-family keys, so the ordering is
- * belt-and-braces, not the only defence. Every adapter registers here
+ * mutually exclusive (session_meta / session-header / title header / claude
+ * keys / cursor role+message rows / grok system-head); the monolithic-JSON
+ * exports are sniffed by their distinguishing keys. pi precedes openclaw:
+ * both write the identical pi-session header, so pi's detector is gated on
+ * the `.pi/agent/sessions` path and anything else stays openclaw.
+ * claude-code detects BEFORE grok: a claude session can lead with a
+ * `type:'system'` row (string content), which is grok's head shape — grok's
+ * sniff also rejects claude-family keys, so the ordering is belt-and-braces,
+ * not the only defence. opencode's anchored `{"info":{"id":"ses_` head runs
+ * before the substring export sniffs. Every adapter registers here
  * unconditionally; any format-level scoping belongs to callers.
  */
 export function transcriptAdapters(): TranscriptAdapter[] {
   return [
     hermesAdapter,
+    piAdapter,
+    ompAdapter,
     openclawAdapter,
     codexAdapter,
     claudeCodeAdapter,
+    cursorAdapter,
     grokAdapter,
+    opencodeAdapter,
     claudeExportAdapter,
     chatgptExportAdapter,
   ];

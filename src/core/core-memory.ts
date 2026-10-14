@@ -220,7 +220,7 @@ type RawExec = Pick<BrainEngine, 'executeRaw' | 'readPageSnapshot'>;
 export interface ListCorePagesOpts {
   /** Restrict to these sources; omitted = every source in the brain. */
   sourceIds?: readonly string[];
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Exclude one page (the page being written, measured separately). */
   exclude?: { sourceId: string; slug: string };
   /**
@@ -250,7 +250,7 @@ export async function listCorePages(exec: RawExec, opts: ListCorePagesOpts = {})
     params.push(opts.exclude.sourceId, opts.exclude.slug);
     where.push(`NOT (p.source_id = $${params.length - 1} AND p.slug = $${params.length})`);
   }
-  if (opts.excludePrivate) where.push(privatePagesFilterFragment('p'));
+  if (opts.excludePrivate) where.push(privatePagesFilterFragment('p', opts.excludePrivate));
   const policy = opts.eligibility;
   if (policy) where.push(quarantineFilterFragment('p'), pageEligibleSql('p', { floor: policy.floor }));
   const trustCols = policy
@@ -289,7 +289,7 @@ export interface LoadCoreBlockOpts {
   sessionSourceId?: string | null;
   /** Federated grant; when set, only these sources render. */
   allowedSources?: readonly string[] | null;
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   notices?: string[];
   settings?: CoreSettings;
   /** #5575: the caller's proactive eligibility (token floor); absent, the `core_delivery` surface policy applies. */

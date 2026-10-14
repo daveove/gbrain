@@ -62,6 +62,7 @@ export const HANDLER_DEFAULT_TIMEOUT_MS: Readonly<Record<string, number>> = {
   // #2194 fix #3: brain-wide maintenance (embed-all/orphans/purge/…) can run
   // longer than a single source cycle; give it the same 30-min budget.
   'autopilot-global-maintenance': THIRTY_MIN_MS,
+  'autopilot-daily-memory': TEN_MIN_MS,
   // #5761: a brain-wide `extract --stale` pass (the remediation plan submits it
   // without --timeout-ms) walks every stale page; same 30-min budget.
   extract: THIRTY_MIN_MS,
@@ -106,6 +107,7 @@ export const HANDLER_DEFAULT_LOCK_DURATION_MS: Readonly<Record<string, number>> 
   'connector-sync': FIVE_MIN_MS,
   'autopilot-cycle': FIVE_MIN_MS,
   'autopilot-global-maintenance': FIVE_MIN_MS,
+  'autopilot-daily-memory': TWO_MIN_MS,
   // A sync job's synchronous git helpers (sync-git.ts, 30s timeout each) can
   // hold the event loop for a full 30s worker lease on their own, so a
   // healthy sync would lose its lock without a longer default.

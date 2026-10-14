@@ -160,6 +160,15 @@ export function makeAutopilotCycleHandler(engine: BrainEngine): MinionHandler {
       },
     });
 
+    let handoffSource = sourceId ?? report.source_id;
+    if (!handoffSource && !connectorSource && effectiveBrainDir
+      && report.phases.some(phase => phase.phase === 'sync' && phase.status !== 'skipped')) {
+      const { resolveSourceForDir } = await import('../../cycle.ts');
+      handoffSource = await resolveSourceForDir(engine, effectiveBrainDir) ?? 'default';
+    }
+    const { refreshDailyMemoryAfterSourceSync } = await import('../../cycle/daily-memory-followup.ts');
+    await refreshDailyMemoryAfterSourceSync(engine, job, handoffSource, report);
+
     return {
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,

@@ -12,6 +12,7 @@ export {
   recoverFrontmatter, RECOVERY_VERSION, PROTECTED_FRONTMATTER_KEYS, IDENTITY_FRONTMATTER_KEYS,
   type FrontmatterRecovery, type FrontmatterRecoveryStatus, type FrontmatterRecoveryStep, type RecoveryKind,
 } from './frontmatter-recovery.ts';
+import { withDateInstantProvenance } from './effective-date.ts';
 
 export type ParseValidationCode =
   | 'MISSING_OPEN'
@@ -418,7 +419,7 @@ export function parseMarkdown(
   const tags = extractTags(frontmatter);
   const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
 
-  const cleanFrontmatter = comparableFrontmatter(frontmatter);
+  const cleanFrontmatter = comparableFrontmatter(withDateInstantProvenance(frontmatter, true));
 
   const result: ParsedMarkdown = {
     frontmatter: cleanFrontmatter,

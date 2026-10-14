@@ -195,7 +195,7 @@ async function evidenceOutput(ctx: OperationContext, p: Record<string, unknown>,
 }
 
 /** Keyword rows (every one a direct FTS hit): the markers hybridSearch would stamp, then bookkeeping. */
-async function stampKeywordRows(ctx: OperationContext, results: SearchResult[], scope: SourceScope & { excludePrivate: boolean }, queryText: string, startedAt: number, timings: SearchTimings): Promise<void> {
+async function stampKeywordRows(ctx: OperationContext, results: SearchResult[], scope: SourceScope & { excludePrivate: boolean | 'owner-only' }, queryText: string, startedAt: number, timings: SearchTimings): Promise<void> {
   // #3783: mark before stamping so evidence still reads keyword_exact.
   markKeywordHits(results);
   stampDeepResearchIds(results);
@@ -222,7 +222,7 @@ async function stampKeywordRows(ctx: OperationContext, results: SearchResult[], 
  * `pages_safe_chunk_pending_idx`, which holds unsealed pages only, and this
  * runs on every remote result.
  */
-async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean,
+async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean | 'owner-only',
   filters: { types?: string[]; excludeSlugPrefixes: string[] }): Promise<boolean> {
   if (scope.sourceIds?.length === 0) return false;
   const params: unknown[] = [];
@@ -257,7 +257,7 @@ async function hasUnsealedPagesInScope(ctx: OperationContext, scope: SourceScope
  * dropped, the rest stay; when none remain the filter is lifted. Either way
  * the caller is told which types exist so it can refine.
  */
-async function reconcileTypeFilter(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean,
+async function reconcileTypeFilter(ctx: OperationContext, scope: SourceScope, excludePrivate: boolean | 'owner-only',
   types: string[] | undefined): Promise<{ types: string[] | undefined; notice?: string }> {
   if (!types || scope.sourceIds?.length === 0) return { types };
   const params: unknown[] = [];
@@ -384,7 +384,7 @@ async function matchingSavedFacts(ctx: OperationContext, scope: SourceScope, que
   if (terms.length === 0 || !ctx.emitResponseMeta) return [];
   const sources = scope.sourceIds?.length ? scope.sourceIds : [scope.sourceId ?? ctx.sourceId ?? 'default'];
   const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
-  const visibility = `${ctx.remote !== false ? `AND f.visibility = 'world'` : ''} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('f')}` : ''}
+  const visibility = `${ctx.remote !== false ? `AND f.visibility = 'world'` : ''} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('f', excludePrivate)}` : ''}
          AND ${projectionEligibleSql('facts', 'f', { floor: scope.minTrust })}`;
   try {
     // Most searches have no saved fact to find: one indexed probe (idx_facts_since) with the
@@ -579,7 +579,7 @@ function parseExplainTarget(raw: string): { slug: string; sourceId?: string } {
  * (not visible / ambiguous) that needs no trace.
  */
 async function prepareExplainTarget(
-  ctx: OperationContext, p: Record<string, unknown>, scope: SourceScope, excludePrivate: boolean, tool: 'search' | 'query',
+  ctx: OperationContext, p: Record<string, unknown>, scope: SourceScope, excludePrivate: boolean | 'owner-only', tool: 'search' | 'query',
 ): Promise<{ trace?: TargetTrace; early?: ExplainTargetDiagnosis } | null> {
   if (typeof p.explain_target !== 'string' || p.explain_target.trim() === '') return null;
   const { slug, sourceId } = parseExplainTarget(p.explain_target.trim());

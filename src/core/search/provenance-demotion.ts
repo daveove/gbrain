@@ -39,7 +39,7 @@ export function recordsCorrection(frontmatter: Record<string, unknown> | null, b
 }
 
 export async function applyGeneratedDemotion(engine: BrainEngine, list: SearchResult[], query: string,
-  scope: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean }): Promise<void> {
+  scope: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' }): Promise<void> {
   try {
     const ids = [...new Set(list.map(r => r.page_id).filter((id): id is number => typeof id === 'number'))];
     if (!ids.length) return;

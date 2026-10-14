@@ -605,10 +605,10 @@ async function runInlineCycle(
     // extract + embed, which didn't match the Minions-dispatch
     // path's phase set). Now both converge on the same primitive.
     try {
-      const { runCycle } = await import('../core/cycle.ts');
+      const { runInlineAutopilotCycle } = await import('../core/cycle/inline-autopilot.ts');
       // #1872: track the promise so closeEngine can drain it on shutdown,
       // and pass the abort signal so the cycle winds down between phases.
-      const cyclePromise = runCycle(engine, {
+      const cyclePromise = runInlineAutopilotCycle(engine, {
         brainDir: repoPath,
         // Autopilot daemon path: pulls by default (matches
         // pre-v0.17 autopilot behavior). CLI dream defaults false

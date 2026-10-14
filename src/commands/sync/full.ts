@@ -1,3 +1,4 @@
+import { prepareSyncDailyMemory, readFullSyncAffectedSlugs } from '../../core/sync-daily-memory.ts';
 /** Full-tree sync: `performFullSync` (first sync, fallbacks, --full). */
 import { assertSourceFilesystemActive } from '../../core/minions/source-filesystem.ts';
 import { currentJobSignal } from '../../core/minions/submission-authority.ts';
@@ -96,6 +97,14 @@ export async function performFullSync(
   // v0.30.x: thread sourceId so performFullSync routes pages to the named
   // source (incremental path already does this).
   // #753/#774: thread exclude (--exclude CLI) + slugRoot (monorepo subdir).
+  const dailyScope = slugRoot && syncScopeRoot !== gitContextRoot
+    ? gitRelativePath(gitContextRoot, syncScopeRoot).replace(/\\/g, '/') + '/' : '';
+  const acceptsPath = (path: string) => isSyncable(path, opts.strategy ? { strategy: opts.strategy } : undefined) || isPoisonedPath(path);
+  const dailyFollowup = opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: opts.dailyMemoryOwnerJobId, sourceId: opts.sourceId ?? DEFAULT_SOURCE_ID,
+    commit: headCommit, scope: dailyScope, signal: opts.signal, acceptsPath,
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
   const _fullImportT0 = Date.now();
   serr(`[gbrain phase] sync.fullsync.import start strategy=${opts.strategy ?? 'markdown'}`);
   opts.onProgress?.({ phase: 'full_import' });
@@ -114,6 +123,7 @@ export async function performFullSync(
       // issue #1939: performFullSync owns the failure ledger + bookmark via the
       // shared gate below; don't let runImport double-record or write its own.
       managedBookmark: true,
+      fullSync: true,
       // #5988: a held rename destination whose old page changed is held, never imported as a new page.
       heldPaths: new Set(holds?.heldPaths),
       // #5988: content refusals are held, not failed (never gating the bookmark).
@@ -154,13 +164,21 @@ export async function performFullSync(
   const fullSucceeded = loadSyncFailures()
     .filter(e => e.source_id === fullSourceId && isSkippablePath(e.path) && !fullFailureSet.has(e.path))
     .map(e => e.path);
+  let reconciledDeletes = 0;
+  let fullPagesAffected: string[] = [];
   const advanceFull = async (): Promise<void> => {
+    reconciledDeletes = await reconcileFullSyncDeletes(engine, opts, { company, gitContextRoot, syncScopeRoot, slugRoot });
+    fullPagesAffected = await readFullSyncAffectedSlugs(engine, {
+      sourceId: fullSourceId, signal: opts.signal, scope: dailyScope, acceptsPath,
+    });
+    await dailyFollowup?.accept();
     // Persist sync state so the next sync is incremental. Routed through
     // writeSyncAnchor so --source pins the right sources row.
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', headCommit, newestCommitMs(gitContextRoot), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
+    await dailyFollowup?.clear();
   };
 
   const fullGate = await applySyncFailureGate({
@@ -190,7 +208,6 @@ export async function performFullSync(
     );
   }
 
-  const reconciledDeletes = await reconcileFullSyncDeletes(engine, opts, { company, gitContextRoot, syncScopeRoot, slugRoot });
 
   // #3479 blocker 2 — the post-gate sweep above ran BEFORE this reconcile,
   // so a `<rename:…>` sentinel whose stale row the reconcile just removed
@@ -229,7 +246,7 @@ export async function performFullSync(
     renamed: 0,
     chunksCreated: result.chunksCreated,
     embedded,
-    pagesAffected: [],
+    pagesAffected: fullPagesAffected,
     // Warning aggregates ride the result for worker/JSON consumers — a full
     // sync that only prints to a daemon's stderr hides them from cron
     // topologies (codex re-review; same rationale as the incremental path).

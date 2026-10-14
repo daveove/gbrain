@@ -69,7 +69,7 @@ export const renderNewerMentionRow = (r: NewerMention): string =>
  * a caller never sees a referrer the `entity` card would hide.
  */
 export async function readNewerMentions(engine: BrainEngine, sourceId: string, slug: string,
-  opts: { excludePrivate: boolean; keepVisibility: ('private' | 'world')[]; charBudget?: number; eligibility?: ReadEligibility; includeQuarantined?: boolean }):
+  opts: { excludePrivate: boolean | 'owner-only'; keepVisibility: ('private' | 'world')[]; charBudget?: number; eligibility?: ReadEligibility; includeQuarantined?: boolean }):
   Promise<NewerMentions | null> {
   try {
     const [page] = await engine.executeRaw<{ d: string | null }>(

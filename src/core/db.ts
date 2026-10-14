@@ -622,6 +622,22 @@ export interface ConnectWithRetryOpts {
    * keeps failing fast on a timeout, which usually means a bad route.
    */
   retryConnectTimeout?: boolean;
+  /**
+   * Keep retrying retryable errors until this many ms have passed, instead of
+   * a fixed attempt count; each wait doubles up to `maxDelayMs`. Defaults to
+   * GBRAIN_CONNECT_RETRY_BUDGET_MS, so a scheduled job can wait out a full
+   * session pooler (EMAXCONNSESSION) rather than fail its run.
+   */
+  budgetMs?: number;
+  maxDelayMs?: number;
+  /** Aborting ends the current wait and rethrows the last connect error. */
+  signal?: AbortSignal;
+}
+
+/** GBRAIN_CONNECT_RETRY_BUDGET_MS as a positive ms count, else undefined. */
+export function resolveConnectRetryBudgetMs(env: Record<string, string | undefined> = process.env): number | undefined {
+  const parsed = Number(env.GBRAIN_CONNECT_RETRY_BUDGET_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 export async function connectWithRetry(
@@ -630,28 +646,35 @@ export async function connectWithRetry(
   opts: ConnectWithRetryOpts = {},
 ): Promise<void> {
   const noRetry = opts.noRetry ?? (process.env.GBRAIN_NO_RETRY_CONNECT === '1');
-  const attempts = noRetry ? 1 : (opts.attempts ?? 3);
+  const budgetMs = noRetry ? undefined : opts.budgetMs ?? resolveConnectRetryBudgetMs();
+  const attempts = noRetry ? 1 : budgetMs !== undefined ? Infinity : (opts.attempts ?? 3);
   const baseDelayMs = opts.baseDelayMs ?? 1000;
+  const maxDelayMs = opts.maxDelayMs ?? 30_000;
   const log = opts.log ?? ((line) => console.warn(line));
+  const deadline = budgetMs === undefined ? Infinity : Date.now() + budgetMs;
 
-  let lastErr: unknown;
-  for (let i = 0; i < attempts; i++) {
+  for (let i = 0; ; i++) {
+    opts.signal?.throwIfAborted();
     try {
       await engine.connect(config);
       return;
     } catch (e: unknown) {
-      lastErr = e;
-      const retryable = isRetryableDbConnectError(e) || (opts.retryConnectTimeout === true && isConnectTimeoutError(e));
-      const isLast = i === attempts - 1;
+      const retryable = isRetryableDbConnectError(e) || ((opts.retryConnectTimeout === true || budgetMs !== undefined) && isConnectTimeoutError(e));
+      const delay = Math.min(baseDelayMs * Math.pow(2, i), maxDelayMs);
+      const isLast = i + 1 >= attempts || Date.now() + delay > deadline || opts.signal?.aborted === true;
       if (!retryable || isLast) {
         throw e;
       }
-      const delay = baseDelayMs * Math.pow(2, i);
       const msg = e instanceof Error ? e.message : String(e);
       log(`[connect] attempt ${i + 1} failed (${msg.slice(0, 80)}), retrying in ${delay}ms`);
-      await new Promise(resolve => setTimeout(resolve, delay));
+      const { promise, resolve } = Promise.withResolvers<void>();
+      const timer = setTimeout(resolve, delay);
+      const onAbort = () => { clearTimeout(timer); resolve(); };
+      opts.signal?.addEventListener('abort', onAbort, { once: true });
+      if (opts.signal?.aborted) onAbort();
+      await promise;
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (opts.signal?.aborted) throw e;
     }
   }
-  // Unreachable, but TS needs the throw.
-  throw lastErr;
 }

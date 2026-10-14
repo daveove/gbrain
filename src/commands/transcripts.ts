@@ -65,6 +65,10 @@ const FORMATS: readonly TranscriptFormat[] = [
   'openclaw',
   'hermes',
   'grok',
+  'omp',
+  'pi',
+  'opencode',
+  'cursor',
   'chatgpt',
   'claude-export',
 ];
@@ -80,6 +84,8 @@ interface IngestCliOpts {
   maxCostUsd?: number;
   /** gbrain#4149: explicit per-format byte-cap override; undefined = adapter-native defaults. */
   maxBytes?: number;
+  /** IANA zone for the transcript frontmatter calendar date. */
+  dateZone?: string;
   embed?: boolean;
   all?: boolean;
   json?: boolean;
@@ -99,6 +105,7 @@ export function ingestCheckpointFingerprintInput(args: {
   format: string;
   version: string | number;
   maxBytes?: number;
+  dateZone?: string;
 }): Record<string, string | number | string[]> {
   return {
     sourceId: args.sourceId,
@@ -111,6 +118,7 @@ export function ingestCheckpointFingerprintInput(args: {
     // rescan. Omitting the key keeps the default path on the legacy
     // fingerprint; every explicit cap still gets its own scope.
     ...(args.maxBytes != null ? { maxBytes: args.maxBytes } : {}),
+    ...(args.dateZone != null ? { dateZone: args.dateZone } : {}),
   };
 }
 
@@ -156,6 +164,17 @@ export function parseIngestArgs(args: string[]): IngestCliOpts | { help: true } 
         continue;
       }
       opts.since = v;
+      continue;
+    }
+    if (a === '--date-zone') {
+      const v = args[++i];
+      if (!v) return { error: 'date-zone needs an IANA timezone' };
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: v });
+      } catch {
+        return { error: `date-zone needs an IANA timezone (got '${v}')` };
+      }
+      opts.dateZone = v;
       continue;
     }
     if (a === '--source-id' || a === '--source') {
@@ -209,12 +228,16 @@ skip). Embedding is OFF by default; run the embed backfill later or opt in.
   --include-self    Also discover gbrain's OWN claude-cli subprocess sessions
                     (recorded by Claude Code for the provider's scratch cwds;
                     excluded by default to avoid a self-ingestion loop)
-  --format F        claude-code | codex | openclaw | hermes | grok |
-                    chatgpt | claude-export (auto-detected when omitted)
+  --format F        claude-code | codex | openclaw | hermes | grok | omp |
+                    pi | opencode | cursor | chatgpt | claude-export
+                    (auto-detected when omitted)
   --dry-run         Parse + redact + report; writes nothing
   --limit N         Max sessions this run
   --since T         Only sessions newer than ISO time T; the word "last"
                     resumes from the previous clean run
+  --date-zone Z     Project each session's frontmatter date into IANA zone Z.
+                    The slug stays on the UTC day. Asia/Manila makes a
+                    00:00–07:59 session land on that Manila calendar day.
   --source-id S     Target source (default: the canonical 6-tier resolution)
   --embed           Embed pages at import (default: defer to embed backfill)
   --facts           Extract facts from imported pages (budget-capped)
@@ -224,8 +247,9 @@ skip). Embedding is OFF by default; run the embed backfill later or opt in.
                     format's native safety default. Changing it starts a
                     fresh --since last scope (caps are part of the
                     checkpoint fingerprint). Adapters differ over budget:
-                    codex degrades to a bounded head+tail read, while
-                    claude-code, openclaw, hermes and grok reject the file
+                    codex, omp, pi and cursor degrade to a bounded
+                    head+tail read, while claude-code, openclaw, hermes,
+                    grok and opencode reject the file
                     outright — so LOWERING this can drop those formats
   --json            Machine-readable result
   --quiet           Suppress the human summary
@@ -471,6 +495,7 @@ async function runIngest(engine: BrainEngine, args: string[], dispatch: Pick<Cli
       format: parsed.format ?? 'auto',
       version: TRANSCRIPT_IMPORT_VERSION,
       maxBytes: parsed.maxBytes,
+      dateZone: parsed.dateZone,
     })),
   };
   let sinceIso = parsed.since;
@@ -504,6 +529,7 @@ async function runIngest(engine: BrainEngine, args: string[], dispatch: Pick<Cli
       sinceIso,
       sourceId,
       maxBytes: parsed.maxBytes,
+      dateZone: parsed.dateZone,
       embed: parsed.embed,
       activePack,
       context,
@@ -514,6 +540,11 @@ async function runIngest(engine: BrainEngine, args: string[], dispatch: Pick<Cli
     });
   } finally {
     reporter.finish();
+  }
+
+  if (result.dailyMemoryError !== undefined) {
+    console.error(`gbrain transcripts ingest: daily-memory refresh requires retry: ${result.dailyMemoryError}`);
+    setCliExitVerdict(1);
   }
 
   if (!parsed.embed && !parsed.dryRun && result.pages.imported > 0 && !parsed.quiet) {

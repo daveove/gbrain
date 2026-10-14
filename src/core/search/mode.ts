@@ -1040,7 +1040,7 @@ export interface KnobsHashContext {
    * knob — same path as detail/hardExcludes. Undefined hashes like `false`
    * (private included), matching enforcement's strict `=== true` semantics.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * v=24 (#4415, wave-g): the EFFECTIVE salience/recency boost modes for
    * this call — per-call SearchOpts, or the classifier's auto-suggestion

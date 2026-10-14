@@ -83,7 +83,7 @@ export function makeSyncHandler(engine: BrainEngine): MinionHandler {
     let result;
     try {
       result = await performSync(engine, {
-        repoPath, sourceId, noPull, noEmbed, noExtract, signal,
+        repoPath, sourceId, noPull, noEmbed, noExtract, signal, dailyMemoryFollowup: true,
         explicitProcessing: explicitSyncProcessing(job.data),
         concurrency: concurrencyOverride,
         ...(githubItem ? { githubItem } : {}),

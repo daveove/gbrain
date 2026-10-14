@@ -1,3 +1,4 @@
+import { dateProvenanceForWrite } from '../effective-date.ts';
 /**
  * Pages: one SQL implementation for both engines (refactor wave 1,
  * W1-extended). Statement text is PostgresEngine's master text (SQL-text
@@ -94,8 +95,8 @@ export async function putPage(
 ): Promise<Page> {
     slug = validateSlug(slug);
     const hash = page.content_hash || contentHash(page);
-    const frontmatter = page.frontmatter || {};
     const sourceId = opts?.sourceId ?? 'default';
+    const frontmatter = await dateProvenanceForWrite(exec, sourceId, slug, page.frontmatter || {});
 
     // Data-loss guard: a page edit is a read-modify-write; if the read returned
     // empty, the modify lands on nothing and this upsert would blank the body
@@ -438,8 +439,8 @@ export async function listPages(exec: ScopedRead, filters?: PageFilters): Promis
       ? sqlFragment``
       : sqlFragment`AND p.deleted_at IS NULL`;
     // #4352: untrusted-caller private-page filter (see PageFilters.excludePrivate).
-    const privateCondition = filters?.excludePrivate === true
-      ? trustedSql(`AND ${privatePagesFilterFragment('p')}`)
+    const privateCondition = filters?.excludePrivate
+      ? trustedSql(`AND ${privatePagesFilterFragment('p', filters?.excludePrivate)}`)
       : sqlFragment``;
     const effectiveAfterCondition = filters?.effective_after
       ? sqlFragment`AND p.effective_date >= ${filters.effective_after}::timestamptz`
@@ -656,7 +657,7 @@ export async function listCorpusSample(scoped: ScopedReadRunner, opts: CorpusSam
 export async function resolveSlugs(
   exec: LegacyUnscopedRead,
   partial: string,
-  opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean },
+  opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only' },
 ): Promise<string[]> {
     // v0.41.13 #1436: source scope. When neither opt is set the resolver
     // stays unscoped for back-compat with internal callers. The
@@ -665,7 +666,7 @@ export async function resolveSlugs(
     // `get_page`.
     const sources = opts?.sourceIds?.length ? opts.sourceIds : null;
     const scalar = opts?.sourceId ?? null;
-    const privacy = opts?.excludePrivate ? trustedSql(` AND ${privatePagesFilterFragment('pages')}`) : sqlFragment``;
+    const privacy = opts?.excludePrivate ? trustedSql(` AND ${privatePagesFilterFragment('pages', opts?.excludePrivate)}`) : sqlFragment``;
     const scopeFragment = sources
       ? sqlFragment` AND source_id = ANY(${sources}::text[])`
       : scalar
@@ -708,19 +709,20 @@ const WANTED_ORIGIN_IS_STALE = sqlFragment`id IN (SELECT w.origin_page_id FROM w
  * knowledge revision. Extraction itself never passes it, so it keeps
  * reconsidering blocked pages.
  */
-function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }) {
+function stalePagesWhere(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; slugs?: readonly string[] }) {
   const version = opts?.versionTs
     ? sqlFragment`(links_extracted_at IS NULL OR links_extracted_at < ${opts.versionTs}::timestamptz OR updated_at > links_extracted_at OR ${WANTED_ORIGIN_IS_STALE})`
     : sqlFragment`(links_extracted_at IS NULL OR updated_at > links_extracted_at OR ${WANTED_ORIGIN_IS_STALE})`;
   const source = opts?.sourceId ? sqlFragment` AND source_id = ${opts.sourceId}` : sqlFragment``;
+  const selection = opts?.slugs !== undefined ? sqlFragment` AND slug = ANY(${[...new Set(opts.slugs)]}::text[])` : sqlFragment``;
   const attendance = opts?.attendance === 'exclude'
     ? sqlFragment` AND links_attendance_blocked_revision IS DISTINCT FROM knowledge_revision`
     : opts?.attendance === 'blocked' ? sqlFragment` AND links_attendance_blocked_revision = knowledge_revision` : sqlFragment``;
   // A quarantined page is hidden from search; it is neither re-extracted nor counted as stale.
-  return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}`;
+  return sqlFragment`deleted_at IS NULL AND ${trustedSql(quarantineFilterFragment('pages'))} AND ${version}${source}${attendance}${selection}`;
 }
 
-export async function countStalePagesForExtraction(exec: ScopedRead, opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number> {
+export async function countStalePagesForExtraction(exec: ScopedRead, opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; slugs?: readonly string[] }): Promise<number> {
     const { text, params } = renderFragment(sqlFragment`SELECT count(*)::int AS count FROM pages WHERE ${stalePagesWhere(opts)}`);
     const { rows } = await exec.unsafe<{ count?: number }>(text, params);
     return Number(rows[0]?.count ?? 0);
@@ -731,6 +733,7 @@ export async function listStalePagesForExtraction(exec: ScopedRead, opts: {
   afterPageId?: number;
   sourceId?: string;
   versionTs?: string;
+  slugs?: readonly string[];
 }): Promise<StalePageRow[]> {
     const afterClause = opts.afterPageId != null ? sqlFragment` AND id > ${opts.afterPageId}` : sqlFragment``;
     // #1768: project a deterministic full-µs UTC string alongside updated_at.
@@ -908,7 +911,7 @@ export async function getVersions<B extends boolean = true>(
   opts?: GetVersionsOpts<B>,
 ): Promise<PageVersionRows<B>> {
     const privacy = opts?.excludePrivate
-      ? trustedSql(`AND ${privatePagesFilterFragment('p')} AND ${privateSnapshotFilterFragment('pv')}`) : sqlFragment``;
+      ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)} AND ${privateSnapshotFilterFragment('pv', opts?.excludePrivate, 'p')}`) : sqlFragment``;
     const scope = opts?.sourceIds && opts.sourceIds.length > 0
       ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
       : opts?.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
@@ -1002,11 +1005,11 @@ export async function resolveSlugWithAliasDetailed(
   exec: LegacyUnscopedRead,
   slug: string,
   sourceOrSources: string | readonly string[],
-  opts?: { excludePrivate?: boolean },
+  opts?: { excludePrivate?: boolean | 'owner-only' },
 ): Promise<{ canonical_slug: string; source_id: string } | null> {
     const sources = Array.isArray(sourceOrSources) ? sourceOrSources : [sourceOrSources];
     if (sources.length === 0) return null;
-    const privacy = opts?.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterFragment('p')})`) : sqlFragment``;
+    const privacy = opts?.excludePrivate ? trustedSql(`AND EXISTS (SELECT 1 FROM pages p WHERE p.slug = slug_aliases.canonical_slug AND p.source_id = slug_aliases.source_id AND p.deleted_at IS NULL AND ${privatePagesFilterFragment('p', opts?.excludePrivate)})`) : sqlFragment``;
     try {
       const { rows } = await exec.run<{ canonical_slug: string; source_id: string }>(sqlFragment`
         SELECT canonical_slug, source_id

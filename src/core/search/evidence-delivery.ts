@@ -1392,7 +1392,7 @@ export interface AssembleEvidenceInput {
   return_window?: number;
   budget_tokens?: number;
   detail?: 'low' | 'medium' | 'high';
-  caller?: { remote?: boolean; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; minTrust?: import('../trust/tier.ts').TrustTier };
+  caller?: { remote?: boolean; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; minTrust?: import('../trust/tier.ts').TrustTier };
   /**
    * Library only (trusted local, never an MCP param): the packing for this
    * call's explicit `auto` budget, winning over search.auto_packing, so an

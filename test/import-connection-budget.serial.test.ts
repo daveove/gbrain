@@ -87,6 +87,8 @@ function fakeEngine(kind: 'postgres' | 'pglite'): BrainEngine {
   return {
     kind,
     executeRaw: async (sql: string) => sql.includes('FROM persistence_brain') ? [{ enabled: false }] : [], // #6482: one well-formed unmanaged row
+    // Empty imports still create and retire their daily-memory live checkpoint.
+    executeRawDirect: async () => [],
     getConfig: async () => null,
   } as unknown as BrainEngine;
 }

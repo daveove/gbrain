@@ -18,6 +18,30 @@ import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { pageBatchChildRequestIds } from './page-batch-id.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 
+/** Canonical source mutations that change membership in the daily owner index. */
+type DailyMutationOperation = 'put_page' | 'edit_page' | 'delete_page' | 'restore_page' | 'capture' | 'revert_version';
+function dailyMutationOperation(row: Partial<Pick<WriteRequest, 'operation' | 'intent'>>): DailyMutationOperation | null {
+  if (row.operation === 'put_page' || row.operation === 'edit_page' || row.operation === 'delete_page'
+    || row.operation === 'restore_page' || row.operation === 'capture' || row.operation === 'revert_version') return row.operation;
+  const kind = row.intent?.kind;
+  if (kind === 'managed_sync_delete' || kind === 'managed_maintenance_chronicle_retire') return 'delete_page';
+  if (kind === 'managed_sync_import' || kind === 'managed_file_import' || kind === 'managed_maintenance_chronicle_event') return 'put_page';
+  return null;
+}
+
+/** Runs under the publisher's page guards, on its transaction (including a one-connection pool). */
+export async function captureDailyMemoryPreimage(tx: BrainEngine, row: WriteRequest, prepared: PreparedMutation): Promise<void> {
+  if (prepared.noop || row.source_id === 'dream' || !dailyMutationOperation(row)) return;
+  const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
+  const { resolveCycleTimeZone } = await import('../cycle/cycle-date.ts');
+  const timezone = await resolveCycleTimeZone(tx);
+  const renamed = row.intent?.renameFrom as { slug?: unknown } | undefined;
+  const slugs = [row.slug];
+  if (typeof renamed?.slug === 'string') slugs.push(renamed.slug);
+  prepared.dailyMemoryTimezone = timezone;
+  prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, slugs, { timezone });
+}
+
 /**
  * `snapshot` is the publication's final read of the page, including deleted rows, in this transaction.
  * A remote put_page/capture/edit_page also queues a `links` effect, in one statement that inserts
@@ -67,6 +91,19 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   if (queued.some(effect => effect.kind === 'links')) {
     if (inserted.some(effect => effect.kind === 'links')) outcome.auto_links = { ...(outcome.auto_links as Record<string, unknown> | undefined), mention_links: 'queued' };
     if (!opts.deferBatchReconcile) await reconcileFinishedBatch(tx, row);
+  }
+  const dailyOperation = dailyMutationOperation(row);
+  if (dailyOperation) {
+    const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
+    const days = await refreshDailyMemoryAfterPageMutation(tx, {
+      sourceId: row.source_id,
+      slug: row.slug,
+      operation: dailyOperation,
+      requestId: row.id,
+      priorDays: prepared?.dailyMemoryPriorDays,
+      timezone: prepared?.dailyMemoryTimezone,
+    });
+    if (days.length) outcome.daily_memory_affected_dates = days;
   }
 }
 

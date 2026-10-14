@@ -48,7 +48,7 @@ const MAX_ALIAS_INJECT = 3;           // cap injected pages per query (collision
 export interface IdentityTierOpts {
   sourceId?: string;
   sourceIds?: string[];
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   requireSafeChunks?: boolean;
   excludeSlugs?: string[];
   excludeSlugPrefixes?: string[];

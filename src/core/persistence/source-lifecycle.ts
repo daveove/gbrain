@@ -125,6 +125,10 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
       {fix:ownerStatusFix(input.sourceId)});
   if(['remove','purge','archive'].includes(input.operation)&&input.sourceId==='default') throw opError('invalid_params','The default source cannot be removed or archived.',
     `The default source holds the brain's primary pages and always stays registered. ${input.operation} a named source instead; the command in fix lists them.`,{fix:sourcesListFix()});
+  if (['archive','purge','remove'].includes(input.operation)) {
+    const { assertSourceNotSystemIndex } = await import('../destructive-guard.ts');
+    await assertSourceNotSystemIndex(engine, input.sourceId);
+  }
   const principal=await topologyPrincipal(engine);
   const intent={...input,requestId:undefined,dryRun:undefined,automaticClaim:undefined};
   const prior=await priorTopologyChange(engine,principal,requestId,intent);
@@ -252,10 +256,17 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
         else await tx.executeRaw('INSERT INTO sources(id,name,local_path,config,incarnation) VALUES($1,$2,$3,$4::text::jsonb,$5::uuid)',
           [input.sourceId,input.name??input.sourceId,root?.source??null,JSON.stringify(input.config??{}),incarnation]);
         if(root){const id=await installTopologyBinding(tx,input.sourceId,incarnation,root,bindings);if(!worktrees.includes(id))worktrees.push(id);}
-      }else if(input.operation==='archive') await tx.executeRaw(`UPDATE sources SET archived=true,archived_at=COALESCE(archived_at,now()),
-        archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:false})]);
-      else if(input.operation==='restore') await tx.executeRaw(`UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL,
-        config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:input.refederate!==false})]);
+      }else if(input.operation==='archive'){
+        await tx.executeRaw(`UPDATE sources SET archived=true,archived_at=COALESCE(archived_at,now()),
+          archive_expires_at=COALESCE(archive_expires_at,now()+interval '72 hours'),config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:false})]);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
+      }else if(input.operation==='restore'){
+        await tx.executeRaw(`UPDATE sources SET archived=false,archived_at=NULL,archive_expires_at=NULL,
+          config=$2::text::jsonb WHERE id=$1`,[input.sourceId,JSON.stringify({...source?.config,federated:input.refederate!==false})]);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
+      }
       else if(input.operation==='rebind'&&relocated){
         // #5914 (P1.3c): the recorded root now resolves through a symlink to the new directory; the worktree keeps its id
         // and its ownership records move to the real path (reservation under the new sha256(root) name, stamp naming it).
@@ -275,6 +286,8 @@ export async function runManagedSourceLifecycle(engine:BrainEngine,input:SourceL
           {fix:readFix('Lists OAuth clients with the source each is bound to.',{argv:['gbrain','auth','clients','--json']})});
         const [impact]=await tx.executeRaw<{count:string}>('SELECT count(*)::text AS count FROM pages WHERE source_id=$1',[input.sourceId]);
         pagesDeleted=Number(impact.count);
+        const { refreshDailyMemoryAfterSourceArchiveChange } = await import('../cycle/daily-memory-followup.ts');
+        await refreshDailyMemoryAfterSourceArchiveChange(tx, input.sourceId);
         await tx.executeRaw('DELETE FROM sources WHERE id=$1 AND incarnation=$2::uuid',[input.sourceId,incarnation]);
         await tx.executeRaw('DELETE FROM persistence_source_bindings WHERE source_id=$1 AND source_incarnation=$2::uuid',[input.sourceId,incarnation]);
       }

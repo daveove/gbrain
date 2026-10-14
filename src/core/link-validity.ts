@@ -346,7 +346,7 @@ export interface EdgeTemporalOpts {
   /** Overlap window [from, until) — "during 2022" is ['2022-01-01','2023-01-01']. */
   during?: { from: string; until: string };
   /** Exclude evidence from private origins (remote callers). */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Read policy off (graph.edge_validity=off): no filtering. */
   disabled?: boolean;
 }
@@ -368,7 +368,7 @@ function dateLiteral(date: string): string {
 export function relationshipFilterSql(linkAlias: string, opts: EdgeTemporalOpts = {}): string {
   const status = opts.status ?? 'live';
   if (opts.disabled || (status === 'all' && !opts.during)) return 'TRUE';
-  const scope = opts.excludePrivate ? 'world' : 'all';
+  const scope = opts.excludePrivate === true ? 'world' : 'all';
   const day = opts.asOf ? dateLiteral(opts.asOf) : `(now() AT TIME ZONE 'UTC')::date`;
   const probe = `lr.from_page_id = ${linkAlias}.from_page_id AND lr.to_page_id = ${linkAlias}.to_page_id
       AND lr.link_type = ${linkAlias}.link_type AND lr.scope = '${scope}'`;
@@ -445,10 +445,10 @@ export interface TemporalAnnotation {
 }
 
 /** LEFT JOIN of a links alias onto its relationship state row for the read scope. */
-export function temporalLinkJoinSql(linkAlias: string, excludePrivate?: boolean): string {
+export function temporalLinkJoinSql(linkAlias: string, excludePrivate?: boolean | 'owner-only'): string {
   return `LEFT JOIN link_relationships lr_t ON lr_t.from_page_id = ${linkAlias}.from_page_id
       AND lr_t.to_page_id = ${linkAlias}.to_page_id AND lr_t.link_type = ${linkAlias}.link_type
-      AND lr_t.scope = '${excludePrivate ? 'world' : 'all'}'`;
+      AND lr_t.scope = '${excludePrivate === true ? 'world' : 'all'}'`;
 }
 
 export const TEMPORAL_LINK_SELECT_SQL = `, lr_t.valid_ranges::text AS temporal_ranges, lr_t.semantics AS temporal_semantics,

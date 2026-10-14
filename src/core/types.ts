@@ -384,7 +384,7 @@ export interface PageFilters {
    * local listing is unchanged. Predicate matches privatePagesFilterFragment
    * (search/private-visibility.ts) in BOTH engines.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * #5154: select only the listing columns (identity, type, title, dates).
    * `compiled_truth` and `timeline` come back as '' and `frontmatter` as {},
@@ -399,7 +399,7 @@ export interface PageReadScope {
   sourceId?: string;
   sourceIds?: string[];
   /** Resolved by the trusted operation layer, never from MCP parameters. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Untrusted chunk reads require a verified protected-body index, even with visibility opt-outs. */
   requireSafeChunks?: boolean;
   /** #5575 read floor (eligibility/policy.ts): only pages at or above this tier; a chunk's tier is its page's. */
@@ -1425,9 +1425,9 @@ export interface SearchOpts extends PageReadPolicy {
    * and synthesized concepts, where it is private). Callers resolve trust + the config gate via
    * `resolveExcludePrivatePages` (search/private-visibility.ts):
    * ctx.remote !== false → true unless the operator opted out. Omitted /
-   * false = pre-fix behavior (trusted local reads see everything).
+   * false = trusted local reads; owner-only = operator opt-out retaining mandatory aggregate protection.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * v0.32.x (search-lite): enable/disable the semantic query cache for this
    * call. When undefined, the cache decision falls back to global config

@@ -10,6 +10,7 @@ import { withFactsAbsorbHaltCooldown } from '../core/minions/llm-halt-cooldown.t
 import type { MinionHandler } from '../core/minions/types.ts';
 import { makeAutopilotCycleHandler } from '../core/minions/handlers/autopilot-cycle.ts';
 import { makeAutopilotGlobalMaintenanceHandler } from '../core/minions/handlers/autopilot-global-maintenance.ts';
+import { runDailyMemoryJob } from '../core/cycle/daily-memory-followup.ts';
 import { makeBacklinksHandler } from '../core/minions/handlers/backlinks.ts';
 import { makeChronicleExtractHandler } from '../core/minions/handlers/chronicle-extract.ts';
 import { makeCyclePhaseHandler } from '../core/minions/handlers/cycle-phase.ts';
@@ -508,6 +509,9 @@ export async function registerBuiltinHandlers(
 
   registerBuiltinJob(worker, engine, 'autopilot-cycle', makeAutopilotCycleHandler(engine));
   registerBuiltinJob(worker, engine, 'autopilot-global-maintenance', makeAutopilotGlobalMaintenanceHandler(engine));
+  worker.register('autopilot-daily-memory', async job => {
+    return runDailyMemoryJob(engine, job);
+  });
 
   // Shell handler is always registered. Runtime guard lives inside the handler
   // so claimed jobs emit a clear rejection log on workers started without

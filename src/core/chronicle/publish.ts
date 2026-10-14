@@ -1,3 +1,5 @@
+import { dailyMemoryDaysForSlugs, refreshDailyMemoryAfterPageMutation } from '../cycle/daily-memory-followup.ts';
+import { resolveCycleTimeZone } from '../cycle/cycle-date.ts';
 /**
  * Life Chronicle event publication (#5876, E5/E8, C4b/C12).
  *
@@ -205,12 +207,16 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
           if (reason) throw supersededError(reason);
           const again = judgeTarget(await tx.readPageSnapshot(ev.slug, { sourceId, includeDeleted: true }), owned);
           if (!again.write) throw supersededError(again.reason);
+          const timezone = await resolveCycleTimeZone(tx);
+          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [ev.slug], { timezone });
           const page = await tx.putPage(ev.slug, { type: 'event', title: ev.title, compiled_truth: ev.compiledTruth,
             frontmatter: { type: 'event', ...ev.frontmatter }, effective_date: safeDate(ev.when) }, { sourceId });
           if (projection) {
             await tx.upsertEventProjection({ depthSlug: pin.slug, eventSlug: ev.slug, date: ev.day, summary: ev.summary, sourceId });
             await recordProjectionFlag(tx, projectionGate, page.id, ev.day, sourceId);
           }
+          await refreshDailyMemoryAfterPageMutation(tx, { sourceId, slug: ev.slug, operation: 'put_page',
+            requestId: `chronicle:${sourceId}:${ev.slug}:${page.content_hash}`, priorDays, timezone });
           return { result: undefined, rows: [{ table: 'pages', id: page.id, sourceId }] };
         });
       }
@@ -247,8 +253,12 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
           if (reason) throw supersededError(reason);
           const live = await tx.readPageSnapshot(event.slug, { sourceId });
           if (!live || !owned.has(String(live.page.content_hash ?? ''))) return;
+          const timezone = await resolveCycleTimeZone(tx);
+          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [event.slug], { timezone });
           await tx.softDeletePage(event.slug, { sourceId });
           await stampRetired(tx, sourceId, event.slug);
+          await refreshDailyMemoryAfterPageMutation(tx, { sourceId, slug: event.slug, operation: 'delete_page',
+            requestId: `chronicle-retire:${sourceId}:${event.slug}:${event.revision}`, priorDays, timezone });
         });
       }
       result.retired.push(event.slug);

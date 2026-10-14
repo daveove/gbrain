@@ -53,11 +53,11 @@ function renderNote(summary: string, edges: NoteEdge[]): string | undefined {
 export async function loadRelationshipNotes(
   engine: RawExec,
   subjects: readonly NoteSubject[],
-  opts: { excludePrivate: boolean },
+  opts: { excludePrivate: boolean | 'owner-only' },
 ): Promise<Map<string, string>> {
   const notes = new Map<string, string>();
   if (subjects.length === 0) return notes;
-  const privacy = opts.excludePrivate ? ` AND ${privatePagesFilterFragment('t')} AND ${privateLinkOriginFilterFragment('l')}` : '';
+  const privacy = opts.excludePrivate ? ` AND ${privatePagesFilterFragment('t', opts.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts.excludePrivate)}` : '';
   const rows = await engine.executeRaw<{ from_slug: string; source_id: string; to_slug: string; to_title: string | null; link_type: string }>(
     `SELECT f.slug AS from_slug, f.source_id, t.slug AS to_slug, t.title AS to_title, l.link_type${TEMPORAL_LINK_SELECT_SQL}
        FROM links l

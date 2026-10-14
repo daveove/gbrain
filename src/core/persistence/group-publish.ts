@@ -49,7 +49,7 @@ import { DEFAULT_PREPARATION_POLICY, preparationBudgetMs, startPreparation, type
 import { setMemberAttribution, withCoordinatedWrite } from './context.ts';
 import { publicationAttribution } from './attribution.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { queuePublicationEffects, queuesMentionLinks, reconcileFinishedBatch } from './effect-journal.ts';
+import { captureDailyMemoryPreimage, queuePublicationEffects, queuesMentionLinks, reconcileFinishedBatch } from './effect-journal.ts';
 import { assertUnboundPublication, classifyUnboundPage } from './unbound-source.ts';
 import { declareDurablePersistence } from './protocol.ts';
 import { bindPublicationTimeouts, boundPublication, publicationLeaseMs, publicationTransaction, type PublicationBound } from './publication-deadline.ts';
@@ -340,6 +340,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
             await seam('after_publication', row);
             if (attribute) await setMemberAttribution(tx, publicationAttribution(row, member.trust));
           }
+          await captureDailyMemoryPreimage(tx, row, member);
           member.postimage = undefined;
           const outcome = await member.apply(tx, snapshot);
           await classifyUnboundPage(tx, row);

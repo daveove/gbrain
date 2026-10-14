@@ -18,6 +18,7 @@ const calendarTimestamp = new Type('tag:yaml.org,2002:timestamp', {
   },
   // An offset-less datetime keeps its wall-clock reading for brain.timezone.
   construct: (data: string) => {
+    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(data)) return data;
     const date = baseTimestamp.construct(data);
     if (/^\d{4}-\d{1,2}-\d{1,2}(?:[Tt]|[ \t]+)\d/.test(data) && !/(?:[Zz]|[+-]\d{1,2}(?::?\d{2})?)\s*$/.test(data)) {
       Object.defineProperty(date, NAIVE_DATETIME, { value: true });

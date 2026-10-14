@@ -21,12 +21,16 @@ identifiers and attribution are available in the pre-removal Git revision
 - Add subscription-only model billing (`ai_billing=subscription` / `GBRAIN_AI_BILLING=subscription`): paid API paths refuse before dispatch, effective billing is reported, workers refresh protected policy, and deferred embedding effects retain their attempts and vector identity. Native `codex-cli:` text generation requires stable Codex CLI 0.162.0+ and a fresh ChatGPT login, isolates tools/configuration/credentials, and never falls back to a paid API.
 - Shared evidence/context assembler and optional host-injected intake reader, with scoped opaque continuation cursors; stock GBrain engines do not create or expose an intake store.
 - Grok Bot digest guide covering confined grants, fenced daily writes, path-scoped Funnel exposure and revision-safe sections shared by multiple bots.
+- Restore complete local agent-session capture and deterministic daily-memory indexes on the current managed publication APIs, including OMP, Pi, OpenCode, and Cursor adapters.
+- Add repository-only nightly launcher helpers and the spend-capped facts runner; reuse current canonical wanted-link wakeups rather than the retired pending-reference registry.
 
 ### Fixed
 
 - Admin Graph recentring draws all new nodes and edges immediately, even when animation frames are paused. A timer settles the layout independently of animation frames.
 - Preserve current foreground embedding/image/OCR cap stops and projection healing while carrying original budget refusals through callbacks and image imports; disable unmetered SDK retries inside tracked calls. Low-to-high retrieval retries retain the same lazily-started query-embedding deadline.
 - Private source exports and retrieval snapshots under `/out/` remain untracked, and secret scanning rejects an invalid Git range before dispatching Gitleaks.
+- Preserve pinned calendar zones, historical affected-date debt, single-worker completion barriers, one-connection nightly pools, and bounded infrastructure connect retries. Timezone lookup failures never advance capture watermarks.
+- Migration v243 upgrades retained daily-job timeouts and adds the resolver's missing `lower(title)` trigram index using the existing online-index builder. Existing v240 slug/name indexes are retained.
 
 ## [0.60.221.0] - 2026-10-14
 

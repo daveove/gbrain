@@ -1,0 +1,120 @@
+{
+  "info": {
+    "id": "ses_fixture0000000000000001",
+    "slug": "quiet-fixture",
+    "projectID": "global",
+    "directory": "/home/alice-example/acme-example",
+    "title": "Fix widget build",
+    "version": "1.18.34",
+    "time": {
+      "created": 1790733600000,
+      "updated": 1790733900000
+    }
+  },
+  "messages": [
+    {
+      "info": {
+        "id": "msg_1",
+        "sessionID": "ses_fixture0000000000000001",
+        "role": "user",
+        "time": {
+          "created": 1790733600000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_1",
+          "type": "text",
+          "text": "Why does the acme-example widget build fail?"
+        },
+        {
+          "id": "prt_1b",
+          "type": "file",
+          "filename": "build.log",
+          "url": "file:///tmp/build.log"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_2",
+        "sessionID": "ses_fixture0000000000000001",
+        "role": "assistant",
+        "time": {
+          "created": 1790733610000,
+          "completed": 1790733700000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_2",
+          "type": "step-start"
+        },
+        {
+          "id": "prt_3",
+          "type": "reasoning",
+          "text": "PRIVATE-REASONING"
+        },
+        {
+          "id": "prt_4",
+          "type": "tool",
+          "tool": "bash",
+          "state": {
+            "status": "completed",
+            "input": {
+              "command": "make"
+            },
+            "output": "TOOL-OUTPUT"
+          }
+        },
+        {
+          "id": "prt_5",
+          "type": "text",
+          "text": "The build fails because the widget config is missing."
+        },
+        {
+          "id": "prt_6",
+          "type": "step-finish"
+        }
+      ]
+    },
+    {
+      "info": {
+        "id": "msg_3",
+        "sessionID": "ses_fixture0000000000000001",
+        "role": "user",
+        "time": {
+          "created": 1790733800000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_7",
+          "type": "text",
+          "synthetic": true,
+          "text": "SYNTHETIC-CONTINUE"
+        }
+      ]
+    },
+    {
+      "broken": true
+    },
+    {
+      "info": {
+        "id": "msg_4",
+        "sessionID": "ses_fixture0000000000000001",
+        "role": "assistant",
+        "time": {
+          "created": 1790733810000
+        }
+      },
+      "parts": [
+        {
+          "id": "prt_8",
+          "type": "text",
+          "text": "Added the config; the build passes."
+        }
+      ]
+    }
+  ]
+}

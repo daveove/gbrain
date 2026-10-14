@@ -57,6 +57,11 @@ function captureRun(args: string[]): Promise<{ logs: string[]; errs: string[]; e
     });
 }
 
+async function seedDreamSource(name: string, config: Record<string,unknown>) {
+  await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES('dream',$1,$2::jsonb) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,config=EXCLUDED.config,archived=false,archived_at=NULL,archive_expires_at=NULL",[name,JSON.stringify(config)]);
+  await engine.putPage('synthetic-note',{type:'note',title:'Synthetic note',compiled_truth:'Synthetic body',frontmatter:{}},{sourceId:'dream'});
+}
+
 describe('#2792 — sources archive is idempotent', () => {
   test('first archive succeeds', async () => {
     const { exit, logs } = await captureRun(['archive', 'arch-idem']);
@@ -78,4 +83,28 @@ describe('#2792 — sources archive is idempotent', () => {
     expect(exit).toBe(4);
     expect(errs.join('\n')).toContain('not found');
   });
+
+  test('ordinary user-owned dream source archives through the public command and retains its pages', async () => {
+    await seedDreamSource('Synthetic ordinary source',{});
+    const {exit} = await captureRun(['archive','dream']);
+    expect(exit).toBeNull();
+    const [source] = await engine.executeRaw<{archived:boolean}>("SELECT archived FROM sources WHERE id='dream'");
+    expect(source!.archived).toBe(true);
+    expect(await engine.getPage('synthetic-note',{sourceId:'dream'})).not.toBeNull();
+    expect((await captureRun(['archive','dream'])).logs.join('\n')).toContain('already archived');
+  });
+
+  for (const owned of [
+    {name:'Synthetic owned index',config:{system_index:true}},
+    {name:'Dream cycle indexes',config:{federated:false}},
+  ]) {
+    test(`owned dream index ${owned.name} stays protected by the ownership-aware archive guard`, async () => {
+      await seedDreamSource(owned.name,owned.config);
+      const {exit,errs}=await captureRun(['archive','dream']);
+      expect(exit).toBe(3);
+      expect(errs.join('\n')).toContain('system index');
+      expect((await engine.executeRaw<{archived:boolean}>("SELECT archived FROM sources WHERE id='dream'"))[0]!.archived).toBe(false);
+      expect(await engine.getPage('synthetic-note',{sourceId:'dream'})).not.toBeNull();
+    });
+  }
 });

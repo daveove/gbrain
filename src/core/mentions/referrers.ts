@@ -60,7 +60,7 @@ export interface ReferrerScope {
   sourceId: string;
   /** Sources a referring page may live in (the caller's read scope). */
   referrerSources: string[];
-  excludePrivate: boolean;
+  excludePrivate: boolean | 'owner-only';
   pack: PackTypes | null;
   /** Visibility kept in previews (world only for untrusted callers). */
   keepVisibility: ('private' | 'world')[];
@@ -95,9 +95,9 @@ async function targetPages(engine: BrainEngine, scope: ReferrerScope): Promise<{
  * costs one hashed membership test per candidate page.
  */
 function referrersCte(scope: ReferrerScope): string {
-  const targetPriv = scope.excludePrivate ? ` AND ${privatePagesFilterFragment('t')}` : '';
-  const linkPriv = scope.excludePrivate ? ` AND ${privateLinkOriginFilterFragment('l')}` : '';
-  const pagePriv = scope.excludePrivate ? ` AND ${privatePagesFilterFragmentFast('f')}` : '';
+  const targetPriv = scope.excludePrivate ? ` AND ${privatePagesFilterFragment('t', scope.excludePrivate)}` : '';
+  const linkPriv = scope.excludePrivate ? ` AND ${privateLinkOriginFilterFragment('l', scope.excludePrivate)}` : '';
+  const pagePriv = scope.excludePrivate ? ` AND ${privatePagesFilterFragmentFast('f', scope.excludePrivate)}` : '';
   const pageTrust = ` AND ${pageEligibleSql('f', scope.eligibility)}${scope.includeQuarantined ? '' : ` AND ${quarantineFilterFragment('f')}`}`;
   return `WITH tgt AS MATERIALIZED (
       SELECT t.id FROM pages t JOIN unnest($1::text[], $2::text[]) AS k(s, g) ON t.source_id = k.s AND t.slug = k.g

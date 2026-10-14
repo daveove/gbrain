@@ -48,6 +48,7 @@ const CONN_PATTERNS = [
   // retry, the checkpoint write (and every other pool-contending write) is
   // dropped during the exact spike #1794's resumable sync must survive.
   /EMAXCONNSESSION/i,
+  /MaxClientsInSessionMode/i,
   // #6340: the socket errnos postgres.js surfaces as "write <ERRNO> host:port" when a
   // session-mode pooler drops the connection mid-statement (ECONNABORTED was the one
   // that ended four managed catch-up runs in one afternoon). Same class as ECONNRESET.
@@ -136,7 +137,7 @@ export function isRetryableConnError(err: unknown): boolean {
   // v0.42.x (#1794): SQLSTATE 53300 too_many_connections — pool/pooler
   // exhaustion. Starts with 53 not 08, so the /^08/ test above misses it.
   // Transient: the spike clears as in-flight queries release connections.
-  if (code === '53300') return true;
+  if (code === '53300' || code === 'EMAXCONNSESSION') return true;
   // v0.41.2.1: typed-shape match for gbrain's own GBrainError
   // (problem === 'No database connection'). Avoids brittle string match
   // when the error wrapper is gbrain-internal.

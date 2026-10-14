@@ -67,6 +67,8 @@ function phaseBlocksStamp(phase: PhaseResult): boolean {
 export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): MinionHandler {
   return async (job) => {
     const { runCycle, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = await import('../../cycle.ts');
+    const { pinDailyMemoryJob, finishFanoutDailyMemory } = await import('../../cycle/daily-memory-followup.ts');
+    const dailyJob = await pinDailyMemoryJob(engine, job);
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
       : (await engine.getConfig('sync.repo_path')) ?? null;
@@ -220,7 +222,11 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
       }
     }
 
+    // Daily indexing is independent of the progressive mixed-phase ledger.
+    // A failed queue/publication handoff must retry instead of being silently stamped complete.
+    const daily = await finishFanoutDailyMemory(engine, dailyJob);
     return {
+      ...daily,
       partial: report.status === 'partial' || report.status === 'failed',
       status: report.status,
       report,

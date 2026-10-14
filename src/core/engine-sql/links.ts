@@ -245,7 +245,7 @@ export async function removeLink(
 
 
 export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadScope): Promise<Link[]> {
-    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f')} AND ${privatePagesFilterFragment('t')} AND ${privateLinkOriginFilterFragment('l')}` : '';
+    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f', opts?.excludePrivate)} AND ${privatePagesFilterFragment('t', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}` : '';
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
@@ -315,7 +315,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
 
 
 export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkReadScope): Promise<Link[]> {
-    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f')} AND ${privatePagesFilterFragment('t')} AND ${privateLinkOriginFilterFragment('l')}` : '';
+    const privacy = opts?.excludePrivate ? `AND ${privatePagesFilterFragment('f', opts?.excludePrivate)} AND ${privatePagesFilterFragment('t', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}` : '';
     const tSel = opts?.temporal ? TEMPORAL_LINK_SELECT_SQL : '';
     const tJoin = opts?.temporal ? temporalLinkJoinSql('l', opts.excludePrivate) : '';
     const finish = (rows: unknown[]) => finishTemporal(rows, opts);
@@ -405,7 +405,7 @@ export async function listLinkSources(
 export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
     sourceId?: string;
     sourceIds?: string[];
-    excludePrivate?: boolean;
+    excludePrivate?: boolean | 'owner-only';
     mode?: 'inbound' | 'islanded';
   }): Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string }>> {
     // Soft-delete filter on BOTH sides:
@@ -436,7 +436,7 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
             FROM links l
             JOIN pages tgt ON tgt.id = l.to_page_id
             WHERE l.from_page_id = p.id
-              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('tgt')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
+              AND tgt.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('tgt', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}`) : sqlFragment``}
           )`
         : sqlFragment``;
     const rows = (await exec.run(sqlFragment`
@@ -448,14 +448,14 @@ export async function findOrphanPages(exec: LegacyUnscopedRead, opts?: {
         (NOT ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}) AS quarantined,
         p.source_id
       FROM pages p
-      WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+      WHERE p.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sqlFragment``}
         ${sourceFilter}
         AND NOT EXISTS (
           SELECT 1
           FROM links l
           JOIN pages src ON src.id = l.from_page_id
           WHERE l.to_page_id = p.id
-            AND src.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('src')} AND ${privateLinkOriginFilterFragment('l')}`) : sqlFragment``}
+            AND src.deleted_at IS NULL ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('src', opts?.excludePrivate)} AND ${privateLinkOriginFilterFragment('l', opts?.excludePrivate)}`) : sqlFragment``}
         )
         ${outboundFilter}
       ORDER BY p.slug
@@ -471,7 +471,7 @@ export async function traverseGraph(
     opts?: TraverseGraphOpts,
   ): Promise<GraphNode[]> {
     const privacy = (page: string, link?: string) => opts?.excludePrivate
-      ? trustedSql(`AND ${privatePagesFilterFragment(page)}${link ? ` AND ${privateLinkOriginFilterFragment(link)}` : ''}`) : sqlFragment``;
+      ? trustedSql(`AND ${privatePagesFilterFragment(page, opts?.excludePrivate)}${link ? ` AND ${privateLinkOriginFilterFragment(link, opts?.excludePrivate)}` : ''}`) : sqlFragment``;
     // v0.34.1 (#861 — P0 leak seal): scope visited nodes to the caller's
     // source(s). Without this, the walk follows edges into pages from
     // foreign sources, leaking topology + page metadata. The filter
@@ -575,7 +575,7 @@ export async function traversePathsDetailed(
     opts?: LinkReadScope & { depth?: number; linkType?: string; direction?: 'in' | 'out' | 'both' },
   ): Promise<{ paths: GraphPath[]; truncated: boolean }> {
     const privacy = (page: string, link?: string) => opts?.excludePrivate
-      ? trustedSql(`AND ${privatePagesFilterFragment(page)}${link ? ` AND ${privateLinkOriginFilterFragment(link)}` : ''}`) : sqlFragment``;
+      ? trustedSql(`AND ${privatePagesFilterFragment(page, opts?.excludePrivate)}${link ? ` AND ${privateLinkOriginFilterFragment(link, opts?.excludePrivate)}` : ''}`) : sqlFragment``;
     const depth = opts?.depth ?? 5;
     const direction = opts?.direction ?? 'out';
     const linkType = opts?.linkType ?? null;

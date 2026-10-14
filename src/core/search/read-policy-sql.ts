@@ -24,7 +24,7 @@ export function pageReadFilter(
     params.push(scope.sourceId);
     clauses.push(`${alias}.source_id = $${params.length}`);
   }
-  if (scope?.excludePrivate) clauses.push(privatePagesFilterFragment(alias));
+  if (scope?.excludePrivate) clauses.push(privatePagesFilterFragment(alias, scope?.excludePrivate));
   if (scope?.minTrust || scope?.suppressFlagged) clauses.push(pageEligibleSql(alias, { floor: scope.minTrust, suppressFlagged: scope.suppressFlagged }));
   if (live) clauses.push(
     `${alias}.deleted_at IS NULL`,

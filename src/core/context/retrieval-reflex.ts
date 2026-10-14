@@ -193,7 +193,7 @@ export interface ResolvePointersOpts {
    * Only a trusted local caller (volunteer_context with remote === false,
    * via resolveExcludePrivatePages) passes false.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /**
    * #5575 (CEO-20, ENG-8): the proactive eligibility the enclosing surface
    * resolved (read floor plus activation control). Absent: the resolver
@@ -231,7 +231,7 @@ export async function resolveEntitiesToPointers(
 
   // v0.46.15: weak-alias + surname arms share one kill switch (default ON).
   const lexicalArms = opts.lexicalArms !== false;
-  const privacySql = opts.excludePrivate === false ? '' : `AND ${privatePagesFilterFragment('p')}`;
+  const privacySql = opts.excludePrivate === false ? '' : `AND ${privatePagesFilterFragment('p', opts.excludePrivate ?? true)}`;
 
   // display lookup keyed by normalized query, so resolved slugs can recover a
   // human surface form for the pointer label.

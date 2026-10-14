@@ -214,14 +214,14 @@ const get_write_attribution: Operation = {
 };
 
 function rowTarget(ctx: OperationContext, pageId: number, slug: string, sourceId: string,
-  ids: { fact?: number; take?: number; timeline?: number }, excludePrivate: boolean): RowTarget | undefined {
+  ids: { fact?: number; take?: number; timeline?: number }, excludePrivate: boolean | 'owner-only'): RowTarget | undefined {
   const cols = `write_request_id::text AS w_req, write_principal_kind AS w_kind, write_principal_id AS w_id, created_at,
     last_write_request_id::text AS l_req, last_write_principal_kind AS l_kind, last_write_principal_id AS l_id, last_written_at,
     trust_tier, write_origin`;
   if (ids.fact !== undefined) {
     return { kind: 'fact', label: `fact #${ids.fact}`, list: { tool: 'recall', arguments: { entity: slug } },
       sql: `SELECT id, ${cols} FROM facts WHERE id = $1 AND source_id = $2 AND (entity_slug = $3 OR source_markdown_slug = $3)
-        ${ctx.remote === false ? '' : "AND visibility = 'world'"} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('facts')}` : ''}`, params: [ids.fact, sourceId, slug] };
+        ${ctx.remote === false ? '' : "AND visibility = 'world'"} ${excludePrivate ? `AND ${privateProvenanceFilterFragment('facts', excludePrivate)}` : ''}`, params: [ids.fact, sourceId, slug] };
   }
   if (ids.take !== undefined) {
     const holders = readHolders(ctx);

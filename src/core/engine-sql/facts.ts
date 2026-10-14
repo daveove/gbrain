@@ -56,8 +56,8 @@ function eligibilityClause(opts: FactListOpts | undefined) {
   return opts?.eligibility ? sqlFragment` AND ${trustedSql(projectionEligibleSql('facts', 'facts', opts.eligibility))}` : sqlFragment``;
 }
 
-function privacyClause(opts: { excludePrivate?: boolean } | undefined) {
-  return opts?.excludePrivate ? sqlFragment` AND ${trustedSql(privateProvenanceFilterFragment('facts'))}` : sqlFragment``;
+function privacyClause(opts: { excludePrivate?: boolean | 'owner-only' } | undefined) {
+  return opts?.excludePrivate ? sqlFragment` AND ${trustedSql(privateProvenanceFilterFragment('facts', opts?.excludePrivate))}` : sqlFragment``;
 }
 
 function grepPattern(opts: FactListOpts | undefined): string | null {
@@ -516,7 +516,7 @@ export async function listFactsBySession(
 export async function listSupersessions(
   exec: LegacyUnscopedRead,
     source_id: string,
-    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[]; eligibility?: import('../engine.ts').FactListOpts['eligibility']; excludePrivate?: boolean },
+    opts?: { since?: Date; limit?: number; visibility?: ('private' | 'world')[]; eligibility?: import('../engine.ts').FactListOpts['eligibility']; excludePrivate?: boolean | 'owner-only' },
   ): Promise<FactRow[]> {
     const limit = clampSearchLimit(opts?.limit, 50, MAX_SEARCH_LIMIT);
     const since = opts?.since ?? null;

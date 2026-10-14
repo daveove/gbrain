@@ -361,7 +361,7 @@ export async function getChunks(
   column: string | ResolvedColumn,
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean },
+  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean | 'owner-only'; requireSafeChunks?: boolean; includeUnsealed?: boolean },
 ): Promise<Chunk[]> {
       const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
       const colId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
@@ -398,7 +398,7 @@ export async function getChunks(
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE p.slug = ${slug} AND ${scopeSql}
-          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sqlFragment``}
           ${opts?.includeUnsealed ? sqlFragment`` : trustedSql(`AND ${currentTextProjectionFilter('p')}`)}
           ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}
         ORDER BY cc.chunk_index
@@ -800,7 +800,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
   const scopeSql = opts.sourceIds && opts.sourceIds.length > 0
     ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
     : opts.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
-  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``;
+  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sqlFragment``;
   const safeSql = requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``;
   const { rows } = await exec.run(sqlFragment`
     WITH req AS (

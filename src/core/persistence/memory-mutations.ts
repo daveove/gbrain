@@ -196,14 +196,14 @@ interface WithdrawalTarget { id: number; entity_slug: string | null; source_mark
  * A caller that cannot read private pages never withdraws an active copy it
  * cannot see: the refusal is then one fixed text that names no fact.
  */
-async function refuseForgetReachingOtherCopies(tx: BrainEngine, sourceId: string, fact: WithdrawalTarget, remote: boolean, excludePrivate: boolean): Promise<void> {
+async function refuseForgetReachingOtherCopies(tx: BrainEngine, sourceId: string, fact: WithdrawalTarget, remote: boolean, excludePrivate: boolean | 'owner-only'): Promise<void> {
   const id = fact.id;
   if (fact.entity_slug === null) {
     const linked = await tx.executeRaw<{ id: number; entity_slug: string }>(`SELECT l.id,l.entity_slug FROM facts u
       JOIN facts l ON l.source_id=u.source_id AND l.visibility=u.visibility AND l.entity_slug IS NOT NULL AND l.id<>u.id
         AND l.expired_at IS NULL AND (l.valid_until IS NULL OR l.valid_until > now())
         AND gbrain_fact_fingerprint(l.fact)=gbrain_fact_fingerprint(u.fact)
-      WHERE u.id=$1 AND u.source_id=$2 AND ($3::boolean=false OR l.visibility='world')${excludePrivate ? ` AND ${privateProvenanceFilterFragment('l')}` : ''}
+      WHERE u.id=$1 AND u.source_id=$2 AND ($3::boolean=false OR l.visibility='world')${excludePrivate ? ` AND ${privateProvenanceFilterFragment('l', excludePrivate)}` : ''}
       ORDER BY l.id LIMIT 5`, [id, sourceId, remote]);
     if (linked.length) {
       const named = linked.map(row => `#${row.id} (${row.entity_slug})`).join(', ');
@@ -259,7 +259,7 @@ export async function submitForgetMutation(ctx: OperationContext, operation: 'fo
       return prior;
     }
     const [fact] = await tx.executeRaw<WithdrawalTarget>(`SELECT id,entity_slug,source_markdown_slug,expired_at,trust_tier FROM facts
-      WHERE id=$1 AND source_id=$2 AND ($3::boolean=false OR visibility='world')${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''} FOR UPDATE`, [id, sourceId, ctx.remote !== false]);
+      WHERE id=$1 AND source_id=$2 AND ($3::boolean=false OR visibility='world')${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', excludePrivate)}` : ''} FOR UPDATE`, [id, sourceId, ctx.remote !== false]);
     if (!fact) throw verbError(operation === 'forget' ? 'not_found' : 'fact_not_found',
       `No fact with id "${rawId}".`, 'Ids come from remember/recall. Recall the entity first to find the right fact.');
     if (ctx.remote !== false && supersessionGuarded('agent_written', fact.trust_tier)) throw remoteForgetRaced(id);

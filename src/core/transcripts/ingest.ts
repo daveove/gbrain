@@ -35,6 +35,7 @@ import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
 import { canonicalJson } from '../remediation-step.ts';
 import type { FileDiagnostics, TranscriptAdapter, TranscriptFormat } from './types.ts';
+import { createTranscriptIngestDailyMemory } from './ingest-daily-memory.ts';
 import { detectAdapter } from './detect.ts';
 import {
   loadImportRedactionPatterns,
@@ -84,6 +85,18 @@ export interface TranscriptsIngestOpts {
   userPatternsPath?: string;
   /** Adapter registry override (tests). */
   adapters?: TranscriptAdapter[];
+  /**
+   * IANA zone for the frontmatter calendar date. The slug stays on the UTC
+   * day. The daily-memory launcher passes Asia/Manila so a session that
+   * starts before 08:00 there is indexed on that Manila day.
+   */
+  dateZone?: string;
+  /**
+   * Legacy checkpoint identity for recovering prior handoff receipts.
+   * Current refresh debt is source-scoped across selected file lists.
+   * Defaults to the sorted input paths for legacy CLI archive receipts.
+   */
+  dailyMemoryRunKey?: string;
   /** Called once per processed file (progress ticks). */
   onFileDone?: (done: number, total: number, path: string) => void;
   /**
@@ -140,6 +153,8 @@ export interface TranscriptsIngestResult {
   slugsTouched: string[];
   /** True ⇔ no file/session errors and no limit truncation: watermark may advance. */
   cleanScan: boolean;
+  /** Accepted session writes need a retry when their daily refresh handoff fails. */
+  dailyMemoryError?: string;
   /** Newest session last-message ISO seen (imported or filtered). */
   maxSessionTs: string;
 }
@@ -201,13 +216,34 @@ export async function runTranscriptsIngest(
   // otherwise repeat thousands of times.
   const redactionPatterns = loadImportRedactionPatterns(opts.userPatternsPath);
   const coordinator = !opts.dryRun && opts.context && await managedPersistenceEnabled(engine) ? opts.context : null;
+  // importFromContent/deletePage bypass publication effects; durable day handoff mirrors standalone import.
+  const dailyMemory = opts.dryRun || coordinator
+    ? undefined
+    : await createTranscriptIngestDailyMemory(engine, {
+      sourceId: opts.sourceId,
+      runKey: opts.dailyMemoryRunKey ?? [...opts.paths].sort().join('\0'),
+    });
+  // Renew about every 10m (1/3 of the 30m peer-adoption window) so a single
+  // long file cannot outlive the lease between per-file renewals.
+  const LEASE_RENEW_EVERY_MS = 10 * 60_000;
+  let lastLeaseRenewAt = Date.now();
+  const maybeRenewDailyMemoryLease = async () => {
+    if (!dailyMemory) return;
+    const now = Date.now();
+    if (now - lastLeaseRenewAt < LEASE_RENEW_EVERY_MS) return;
+    await dailyMemory.renew();
+    lastLeaseRenewAt = now;
+  };
 
+  try {
   const total = opts.paths.length;
   let done = 0;
   let newWorkSessions = 0;
 
   for (const path of opts.paths) {
     if (limitTruncated) break;
+    await dailyMemory?.renew?.();
+    lastLeaseRenewAt = Date.now();
     const fileOutcome: IngestFileOutcome = {
       path,
       sessions: [],
@@ -250,6 +286,7 @@ export async function runTranscriptsIngest(
         const session = step.value;
         result.sessionsSeen++;
         opts.onSession?.(session.meta.sessionId);
+        await maybeRenewDailyMemoryLease();
         const lastTs = lastMessageTs(session.messages);
         if (lastTs && lastTs > result.maxSessionTs) result.maxSessionTs = lastTs;
 
@@ -297,7 +334,7 @@ export async function runTranscriptsIngest(
           });
           outcome.redactions = redacted.redactionCount;
           outcome.imperatives = redacted.imperativesFlagged;
-          const rendered = renderSessionParts(redacted, { sourcePath: path });
+          const rendered = renderSessionParts(redacted, { sourcePath: path, dateZone: opts.dateZone });
           outcome.baseSlug = rendered.baseSlug;
           outcome.parts = rendered.parts.length;
 
@@ -319,18 +356,41 @@ export async function runTranscriptsIngest(
             await adoptExistingBaseSlug(engine, opts.sourceId ?? 'default', rendered);
             outcome.baseSlug = rendered.baseSlug;
             let resolvedBaseSlug = rendered.baseSlug;
+            await dailyMemory?.before(rendered.parts.map((part) => part.slug));
+            await maybeRenewDailyMemoryLease();
             for (const part of rendered.parts) {
               try {
+                // Keep renewing during each in-flight part write; elapsed-time
+                // renewals cannot run until importFromContent returns.
+                let renewInFlight: Promise<void> | undefined;
+                let renewError: unknown;
+                const renewTimer = dailyMemory
+                  ? setInterval(() => {
+                    if (renewInFlight) return renewInFlight;
+                    renewInFlight = dailyMemory.renew()
+                      .then(() => { lastLeaseRenewAt = Date.now(); })
+                      .catch((err: unknown) => { renewError ??= err; })
+                      .finally(() => { renewInFlight = undefined; });
+                    return renewInFlight;
+                  }, LEASE_RENEW_EVERY_MS)
+                  : undefined;
+                let r: Awaited<ReturnType<typeof importFromContent>>;
+                try {
                 await preserveForeignFrontmatter(engine, opts.sourceId ?? 'default', part);
                 const provenance = { source_kind: `transcript:${session.meta.harness}`, source_uri: path, ingested_via: 'cli:transcripts-ingest' };
-                const r = coordinator
+                  r = coordinator
                   ? await submitTranscriptPart(coordinator, engine, opts.sourceId, part, provenance)
                   : await importFromContent(engine, part.slug, part.content, {
                     noEmbed: !opts.embed,
                     sourceId: opts.sourceId,
                     activePack: opts.activePack,
                     ...provenance,
+                    beforeCommit: dailyMemory ? (tx, slug) => dailyMemory.beforeCommit(tx, slug, part.slug) : undefined,
                   });
+                } finally {
+                  if (renewTimer) clearInterval(renewTimer);
+                  await renewInFlight;
+                }
                 outcome.statuses.push(r.status);
                 if (r.status === 'imported') result.pages.imported++;
                 else if (r.status === 'skipped') result.pages.skipped++;
@@ -338,6 +398,13 @@ export async function runTranscriptsIngest(
                 const actualSlug = r.slug || part.slug;
                 if (part.part === 1 && actualSlug) resolvedBaseSlug = actualSlug;
                 result.slugsTouched.push(actualSlug);
+                if (r.status === 'imported' || r.status !== 'error' && actualSlug !== part.slug) {
+                  await dailyMemory?.touched([actualSlug]);
+                }
+                // A single large session can exceed the 30m lease between
+                // session-boundary renewals; refresh inside the part loop.
+                await maybeRenewDailyMemoryLease();
+                if (renewError) throw renewError;
               } catch (err) {
                 if (isPerSessionImportError(err)) throw err; // → per-session catch
                 const e = new Error(
@@ -432,11 +499,35 @@ export async function runTranscriptsIngest(
               const m = /^-p(\d+)$/.exec(suffix);
               const num = m ? Number(m[1]) : NaN;
               if (Number.isFinite(num) && num > rendered.parts.length) {
-                // #5235: on a managed brain the stale part goes through the coordinator like the parts
-                // themselves, bound to its revision; the direct delete is refused there.
-                if (coordinator) await deleteStaleTranscriptPart(coordinator, engine, opts.sourceId, row.slug);
-                else await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                await dailyMemory?.before([row.slug]);
+                await maybeRenewDailyMemoryLease();
+                let renewInFlight: Promise<void> | undefined;
+                let renewError: unknown;
+                const renewTimer = dailyMemory
+                  ? setInterval(() => {
+                    if (renewInFlight) return renewInFlight;
+                    renewInFlight = dailyMemory.renew()
+                      .then(() => { lastLeaseRenewAt = Date.now(); })
+                      .catch((err: unknown) => { renewError ??= err; })
+                      .finally(() => { renewInFlight = undefined; });
+                    return renewInFlight;
+                  }, LEASE_RENEW_EVERY_MS)
+                  : undefined;
+                try {
+                  if (coordinator) await deleteStaleTranscriptPart(coordinator, engine, opts.sourceId, row.slug);
+                  else if (dailyMemory) await dailyMemory.deleteStalePart(row.slug);
+                  else await engine.deletePage(row.slug, { sourceId: opts.sourceId });
+                } finally {
+                  if (renewTimer) clearInterval(renewTimer);
+                  await renewInFlight;
+                }
                 result.partsDeleted++;
+                result.slugsTouched.push(row.slug);
+                if (renewError) {
+                  const error = new Error(`${RUN_ABORT_MARKER}: delete lease renewal failed on ${row.slug}`);
+                  (error as { cause?: unknown }).cause = renewError;
+                  throw error;
+                }
               }
             }
           }
@@ -465,7 +556,20 @@ export async function runTranscriptsIngest(
   }
 
   if (opts.dryRun) result.cleanScan = false; // dry-runs never advance watermarks
+  else if (dailyMemory) {
+    try {
+      await dailyMemory.finish();
+    } catch (error) {
+      // Fail closed: never report a clean ingest when historical indexes were not queued.
+      result.cleanScan = false;
+      result.dailyMemoryError = error instanceof Error ? error.message : String(error);
+    }
+  }
   return result;
+  } finally {
+    // Abort paths never reach finish(); drop the running marker so peers can adopt.
+    await dailyMemory?.release();
+  }
 }
 
 /**

@@ -207,7 +207,7 @@ const ARM_SUFFIX = 2;
  * tie-break; empty without a policy). A batch reads them once.
  */
 export interface EntityLookupScope {
-  excludePrivate: boolean;
+  excludePrivate: boolean | 'owner-only';
   entityTypes: ReadonlySet<string>;
   policy: MentionPolicy | undefined;
   pack: PackTypes | null;
@@ -243,7 +243,7 @@ export async function selectEntityCandidates(
   const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
   // Predicate text lives ONCE (private-visibility.ts) — both card queries
   // below select `FROM pages` unaliased, so qualify with the table name.
-  const privatePredicate = scope.excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : '';
+  const privatePredicate = scope.excludePrivate ? ` AND ${privatePagesFilterFragment('pages', scope.excludePrivate)}` : '';
 
   const norm = normalizeAlias(trimmed);
   const titleLc = trimmed.toLowerCase();
@@ -392,7 +392,7 @@ function exactMatchPreference(row: CardPageRow, exactSlugs: string[], entityType
  * truncated group, and the source's mention coverage. Fail-soft: a failed
  * read leaves the card without them rather than failing the lookup.
  */
-async function cardReferences(engine: BrainEngine, sourceId: string, row: CardPageRow, opts: EntityCardOpts, excludePrivate: boolean,
+async function cardReferences(engine: BrainEngine, sourceId: string, row: CardPageRow, opts: EntityCardOpts, excludePrivate: boolean | 'owner-only',
   entityTypes: ReadonlySet<string>): Promise<Pick<EntityCard, 'referenced_by_count' | 'referenced_by' | 'coverage'>> {
   try {
     const { pack } = await loadLinkableTypes(engine, sourceId);
@@ -419,7 +419,7 @@ async function assembleCard(
   sourceId: string,
   row: CardPageRow,
   remote: boolean,
-  excludePrivate: boolean,
+  excludePrivate: boolean | 'owner-only',
   eligibility: ReadEligibility,
 ): Promise<EntityCard> {
   const pageSlug = row.slug;
@@ -496,7 +496,7 @@ async function assembleCard(
         `SELECT COUNT(*) AS n
            FROM facts
           WHERE source_id = $1 AND entity_slug = ANY($2::text[])
-            AND expired_at IS NULL${remote ? ` AND visibility = 'world'` : ''}${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}`,
+            AND expired_at IS NULL${remote ? ` AND visibility = 'world'` : ''}${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', excludePrivate)}` : ''}`,
         [sourceId, factSlugs],
       )
       .then(rs => Number(rs[0]?.n ?? 0))
@@ -648,7 +648,7 @@ async function nearMissSuggestions(
   engine: BrainEngine,
   sourceId: string,
   name: string,
-  excludePrivate = false,
+  excludePrivate: boolean | 'owner-only' = false,
 ): Promise<EntitySuggestion[]> {
   try {
     const raw = await engine.searchKeyword(name, { limit: SUGGESTION_CAP, sourceId, excludePrivate });
