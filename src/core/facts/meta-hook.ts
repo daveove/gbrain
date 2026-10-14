@@ -139,7 +139,7 @@ export async function getBrainHotMemoryMeta(
   // The operator opt-out (search.remote_private_pages) changes what a world
   // read returns, so it is part of the tier too.
   const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
-  const tier = ctx.remote === false ? 'all' : excludePrivate ? 'world' : 'world+private-pages';
+  const tier = ctx.remote === false ? 'all' : excludePrivate === true ? 'world' : 'world+private-pages';
   // encodeCacheField (F5): source_id / session_id are caller-controlled and
   // may contain the '::' delimiter; percent-encode ':' so bumpHotMemoryCache's
   // split('::') can never mis-slice a component.

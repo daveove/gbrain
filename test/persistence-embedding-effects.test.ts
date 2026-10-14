@@ -13,11 +13,13 @@ import { localHostId, registerLocalWriter } from '../src/core/persistence/identi
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
-import { installPageEmbeddings, installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
+import { installPageEmbeddings, installPageProjection, readProjectionSnapshot, rebuildPendingPageProjections } from '../src/core/page-state/projections.ts';
 import { MAX_RATE_LIMIT_RETRIES } from '../src/core/embed-retry.ts';
 import { AIConfigError } from '../src/core/ai/errors.ts';
 import { EmbeddingZeroNormError } from '../src/core/ai/embedding-guard.ts';
 import { initializeIndependentEmbeddingColumn } from '../src/core/embedding-column-schema.ts';
+import { embeddingColumnSignature } from '../src/core/search/embedding-column.ts';
+import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
 import { embeddingInputHash } from '../src/core/embedding-input-hash.ts';
 import { invokeAI, isAIInvocationPolicyError, withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
 import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
@@ -731,6 +733,69 @@ for (const kind of testBackends()) {
         rmSync(join(scratch, '.gbrain', 'config.json'), { force: true });
       }
     });
+
+    for (const localColumn of [true, false]) check(
+      `subscription idle probe and worker use the live ${localColumn ? 'local' : 'paid'} column, not the inverse gateway policy`, async () => {
+        const f = await fixture();
+        // hasWork probes the whole shared engine. Earlier canonical-edit cases
+        // leave real projection jobs; finish them before isolating effect policy.
+        await rebuildPendingPageProjections(engine);
+        expect(await engine.executeRaw('SELECT slug FROM page_projection_jobs')).toEqual([]);
+        const name = localColumn ? 'embedding_policy_local' : 'embedding_policy_paid';
+        const targetModel = localColumn ? 'ollama:nomic-embed-text' : 'openai:text-embedding-3-large';
+        const gatewayModel = localColumn ? 'openai:text-embedding-3-large' : 'ollama:nomic-embed-text';
+        const previousColumn = await engine.getConfig('search_embedding_column');
+        const previousRegistry = await engine.getConfig('embedding_columns');
+        const column = await initializeIndependentEmbeddingColumn(engine, name, {
+          provider: targetModel, dimensions: 768, type: 'vector', provenance: 'independent',
+        });
+        const consumer = new PersistenceConsumer(engine, { engine: engine.kind, embedding_model: gatewayModel },
+          async () => { throw new Error('no preparation expected'); }, { hostId: localHostId() });
+        const realFetch = globalThis.fetch;
+        let fetches = 0;
+        globalThis.fetch = (async () => { fetches++; throw new Error('no provider may be invoked'); }) as unknown as typeof fetch;
+        configureGateway({ embedding_model: gatewayModel, embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'subscription' });
+        try {
+          await engine.setConfig('search_embedding_column', name);
+          // Complete local provenance lets the real worker claim and finish
+          // without calling a provider or using the embedding test override.
+          if (localColumn) {
+            const projection = (await readProjectionSnapshot(engine, 'page', f.sourceId))!;
+            expect(await installPageEmbeddings(engine, projection, projection.chunks.map(chunk => ({
+              chunk_index: chunk.chunk_index, chunk_source: chunk.chunk_source, chunk_text: chunk.chunk_text,
+              embedding: new Float32Array(768).fill(0.5), model: targetModel,
+            })), embeddingColumnSignature(column))).toBe(true);
+          }
+          // Test-only access to the scheduler's private read-only eligibility probe.
+          const probe = consumer as unknown as { hasWork(): Promise<boolean> };
+          const before = await state(f.effectId);
+          expect(await probe.hasWork()).toBe(localColumn);
+          expect(await state(f.effectId)).toMatchObject({
+            state: before.state, attempts: before.attempts, error_code: before.error_code,
+          });
+          expect(await runPersistenceEffects(engine, { engine: engine.kind }, { hostId: localHostId(), limit: 1 }))
+            .toBe(localColumn ? 1 : 0);
+          expect(await state(f.effectId)).toMatchObject(localColumn
+            ? { state: 'committed', attempts: before.attempts + 1, error_code: null }
+            : { state: 'queued', attempts: before.attempts, error_code: null });
+          expect(await probe.hasWork()).toBe(false);
+          expect(fetches).toBe(0);
+        } finally {
+          await consumer.stop();
+          globalThis.fetch = realFetch;
+          resetGateway();
+          if (previousColumn === null) await engine.executeRaw("DELETE FROM config WHERE key='search_embedding_column'");
+          else await engine.setConfig('search_embedding_column', previousColumn);
+          await engine.executeRaw(`ALTER TABLE content_chunks DROP COLUMN ${name},DROP COLUMN ${name}_model,
+            DROP COLUMN ${name}_embedded_text_hash,DROP COLUMN ${name}_embedding_input_hash,
+            DROP COLUMN ${name}_embedded_at,DROP COLUMN ${name}_pending_since`);
+          await engine.executeRaw(`ALTER TABLE pages DROP COLUMN ${name}_signature`);
+          // Only the disposable test registry bypasses the production removal guard.
+          if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
+          else await engine.executeRaw("UPDATE config SET value=$1 WHERE key='embedding_columns'", [previousRegistry]);
+        }
+      });
 
     check('ai_billing=subscription leaves a paid embedding effect queued, unclaimed, with no request', async () => {
       const f = await fixture();

@@ -28,7 +28,8 @@ const calendarTimestamp = new Type('tag:yaml.org,2002:timestamp', {
     return date;
   },
   instanceOf: Date,
-  represent: baseTimestamp.represent,
+  represent: (data: object) => (data as Date & { [CALENDAR_DATE]?: boolean })[CALENDAR_DATE]
+    ? (data as Date).toISOString().slice(0, 10) : baseTimestamp.represent(data),
 });
 export const FRONTMATTER_SCHEMA = DEFAULT_SCHEMA.extend({ implicit: [calendarTimestamp] });
 
@@ -88,7 +89,7 @@ export function parseDataFrontmatter(input: string): DataFrontmatter {
  * omits the key (conditional spread) or writes null instead.
  */
 export function dumpFrontmatterYaml(data: unknown, opts: { lineWidth?: number } = {}): string {
-  return dump(data, { ...opts, replacer: (key: string, value: unknown) => {
+  return dump(data, { ...opts, schema: FRONTMATTER_SCHEMA, replacer: (key: string, value: unknown) => {
     if (value === undefined) {
       throw new TypeError(`Frontmatter field "${key}" is undefined. Why: YAML has no undefined, so the field would be dropped silently. Fix: omit the key at the write site (\`...(v ? { ${key}: v } : {})\`) or pass null.`);
     }

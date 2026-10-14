@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, expect, setSystemTime, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, symlinkSync, mkdirSync, renameSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,6 +26,18 @@ beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); a
 afterAll(async () => { await engine.disconnect(); for (const dir of roots) rmSync(dir, { recursive: true, force: true }); });
 beforeEach(async () => { await resetPgliteState(engine); if (version) await engine.setConfig('version', version); });
 const batches = () => engine.executeRaw<{ data: { daily_memory_dates: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND data ? 'daily_memory_dates'");
+const prepareDelegatedImport = async (dir: string) => {
+  const clientId = `synthetic-import-${crypto.randomUUID()}`;
+  await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [dir]);
+  await engine.executeRaw("INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, scope, source_id) VALUES ($1, 'synthetic-only', 'Synthetic import', 'admin', 'default')", [clientId]);
+  const ctx: OperationContext = {
+    engine, config: {} as OperationContext['config'], dryRun: false, remote: true, sourceId: 'default',
+    logger: { info() {}, warn() {}, error() {} },
+    auth: { token: 'synthetic-only', clientId,
+      principal: { kind: 'oauth_client', id: clientId }, scopes: ['admin'], sourceId: 'default' },
+  };
+  return prepareRemoteJob(ctx, 'import', {});
+};
 
 
 const expireLiveLeases = async () => {
@@ -138,15 +150,7 @@ test('delegated unchanged import drains small extraction debt inline without sub
   const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
   await withEnv({ GBRAIN_HOME: home }, async () => {
     expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(1);
-    await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [dir]);
-    await engine.executeRaw("INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, scope, source_id) VALUES ('synthetic-import-client', 'synthetic-only', 'Synthetic import', 'admin', 'default')");
-    const ctx: OperationContext = {
-      engine, config: {} as OperationContext['config'], dryRun: false, remote: true, sourceId: 'default',
-      logger: { info() {}, warn() {}, error() {} },
-      auth: { token: 'synthetic-only', clientId: 'synthetic-import-client',
-        principal: { kind: 'oauth_client', id: 'synthetic-import-client' }, scopes: ['admin'], sourceId: 'default' },
-    };
-    const accepted = await prepareRemoteJob(ctx, 'import', {});
+    const accepted = await prepareDelegatedImport(dir);
     const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
     const extraction = spyOn(extractModule, 'extractStaleFromDB');
     try {
@@ -161,6 +165,56 @@ test('delegated unchanged import drains small extraction debt inline without sub
       expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
       expect(await engine.executeRaw("SELECT links_extracted_at::text FROM pages WHERE source_id='default' AND slug='note'"))
         .toEqual([{ links_extracted_at: expect.any(String) }]);
+    } finally { extraction.mockRestore(); }
+  });
+}, 120_000);
+
+test.each([
+  ['stale backlog', 101, false, true],
+  ['full sync', 1, true, true],
+  ['changed files', 101, false, false],
+] as const)('delegated import keeps extraction inline at the %s gate', async (_gate, files, fullSync, seed) => {
+  const dir = root(), home = root();
+  for (let index = 0; index < files; index++) writeFileSync(join(dir, `note-${index}.md`), markdown);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    if (seed) expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(files);
+    const accepted = await prepareDelegatedImport(dir);
+    const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    const extraction = spyOn(extractModule, 'extractStaleFromDB');
+    try {
+      await withSubmissionAuthority(accepted.authority, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'default', fullSync });
+        expect(result.imported).toBe(seed ? 0 : files);
+        expect(result.errors).toBe(0);
+        expect(extraction).toHaveBeenCalledTimes(1);
+        expect(currentSubmissionAuthority()).toEqual(accepted.authority);
+      });
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
+      expect(await engine.countStalePagesForExtraction({ sourceId: 'default' })).toBe(0);
+    } finally { extraction.mockRestore(); }
+  });
+}, 120_000);
+
+test('delegated incomplete inline extraction reports retained debt without attempting a descendant', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(1);
+    const accepted = await prepareDelegatedImport(dir);
+    const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    const actual = extractModule.extractStaleFromDB;
+    const extraction = spyOn(extractModule, 'extractStaleFromDB').mockImplementation(async (...args) => ({
+      ...await actual(...args), staleRemaining: 1,
+    }));
+    try {
+      await withSubmissionAuthority(accepted.authority, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'default' });
+        expect(result.errors).toBe(1);
+        expect(result.failures).toContainEqual({ path: '<link-extraction>',
+          error: 'Delegated link extraction has 1 stale pages left; rerun this import to continue its bounded inline sweep.' });
+        expect(extraction).toHaveBeenCalledTimes(1);
+        expect(currentSubmissionAuthority()).toEqual(accepted.authority);
+      });
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
     } finally { extraction.mockRestore(); }
   });
 }, 120_000);
@@ -418,7 +472,9 @@ test('renew refreshes the live lease stamp and finish still settles', async () =
   const before = await engine.executeRaw<{ path: string }>(
     "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
   expect(before).toHaveLength(1);
-  await daily.renew();
+  // The lease stamp is `live:<ISO ms>` from the JS clock; move it forward so the refreshed stamp is observable.
+  setSystemTime(new Date(Date.now() + 1_000));
+  try { await daily.renew(); } finally { setSystemTime(); }
   const after = await engine.executeRaw<{ path: string }>(
     "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'");
   expect(after).toHaveLength(1);

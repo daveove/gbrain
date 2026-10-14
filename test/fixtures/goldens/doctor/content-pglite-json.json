@@ -15,7 +15,7 @@
       "category_scores": {
         "brain": 60,
         "meta": 100,
-        "ops": 100,
+        "ops": 95,
         "skill": 95
       },
       "checks": [
@@ -733,7 +733,7 @@
             },
             "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
           },
-          "message": "Brain score 36/100 (embed 0/35, links 5/25, timeline density (entity and event pages) 15/15, orphans 6/15, dead-links 10/10)",
+          "message": "Brain score 65/100 (embed 0/35, links 25/25, timeline density (entity and event pages) 15/15, orphans 15/15, dead-links 10/10)",
           "name": "brain_score",
           "status": "warn"
         },
@@ -745,7 +745,7 @@
         },
         {
           "category": "brain",
-          "message": "No by-mention links in this brain.",
+          "message": "Re-derived 5 by-mention link(s) across 5 page(s); all still follow from the current gazetteer.",
           "name": "stale_mentions",
           "status": "ok"
         },
@@ -1435,14 +1435,36 @@
         {
           "category": "ops",
           "details": {
-            "by_queue": {},
-            "depth": 0,
+            "by_queue": {
+              "default": 10
+            },
+            "depth": 10,
             "engine": "pglite",
-            "worker_alive": true
+            "worker_alive": false
           },
-          "message": "PGLite: no jobs waiting for a worker.",
+          "fix": {
+            "actor": "agent",
+            "argv": {},
+            "command": "gbrain jobs work --brain host",
+            "consent": [],
+            "next": "run",
+            "requires_exclusive": true,
+            "verify": {
+              "argv": [
+                "gbrain",
+                "doctor",
+                "--only",
+                "queue_health",
+                "--json",
+                "--brain",
+                "host"
+              ]
+            },
+            "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+          },
+          "message": "no_worker: 10 job(s) are waiting (default=10; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
           "name": "queue_health",
-          "status": "ok"
+          "status": "warn"
         },
         {
           "category": "ops",
@@ -2615,7 +2637,7 @@
       ],
       "db_url_source": null,
       "engine": "pglite",
-      "health_score": 55,
+      "health_score": 50,
       "schema_version": 2,
       "status": "unhealthy",
       "top_issues": [
@@ -2653,7 +2675,7 @@
             },
             "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
           },
-          "fix": "Brain score 36/100 (embed 0/35, links 5/25, timeline density (entity and event pages) 15/15, orphans 6/15, dead-links 10/10)",
+          "fix": "Brain score 65/100 (embed 0/35, links 25/25, timeline density (entity and event pages) 15/15, orphans 15/15, dead-links 10/10)",
           "name": "brain_score",
           "status": "warn",
           "tier": "symptom"
@@ -2731,6 +2753,38 @@
         {
           "fix": "6 of 8 bare wikilinks (75%) would resolve to 2 distinct page(s) under global_basename mode. Enable with: gbrain config set link_resolution.global_basename true",
           "name": "link_resolution_opportunity",
+          "status": "warn",
+          "tier": "symptom"
+        },
+        {
+          "action": {
+            "actor": "agent",
+            "argv": [
+              "gbrain",
+              "jobs",
+              "work",
+              "--brain",
+              "host"
+            ],
+            "command": "gbrain jobs work --brain host",
+            "consent": [],
+            "next": "run",
+            "requires_exclusive": true,
+            "verify": {
+              "argv": [
+                "gbrain",
+                "doctor",
+                "--only",
+                "queue_health",
+                "--json",
+                "--brain",
+                "host"
+              ]
+            },
+            "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+          },
+          "fix": "no_worker: 10 job(s) are waiting (default=10; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+          "name": "queue_health",
           "status": "warn",
           "tier": "symptom"
         },

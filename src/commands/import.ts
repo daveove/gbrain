@@ -1062,11 +1062,12 @@ export async function runImport(
     throwIfInterrupted();
     throw error;
   };
-  // Gate size on imported/changed files, not directory size: a pure no-op
-  // re-import of a large tree must not mint deferred UUID successors.
-  const deferForSize = opts.fullSync === true || imported > INLINE_EXTRACT_CHANGE_LIMIT;
+  // Application imports can hand large work to a durable sweep. Delegated
+  // imports cannot submit descendants, so every size retains the bounded
+  // inline path; an incomplete sweep leaves its checkpoint for the next run.
   const authority = currentSubmissionAuthority();
   const delegatedImport = authority !== undefined && authority.kind !== 'application';
+  const deferForSize = !delegatedImport && (opts.fullSync === true || imported > INLINE_EXTRACT_CHANGE_LIMIT);
   let deferForBacklog = false, inlineNoopRecovery = false;
   if (!opts.noExtract && !deferForSize && allFiles.length > 0) {
     try {
@@ -1083,8 +1084,8 @@ export async function runImport(
         ? (await previewMentionPass(engine, sourceId ?? 'default')).due
         : 0;
       const noopDebt = imported === 0 && (stalePages > 0 || mentionDebt > 0);
-      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT || (noopDebt && !delegatedImport);
-      inlineNoopRecovery = noopDebt && delegatedImport && !deferForBacklog;
+      deferForBacklog = !delegatedImport && (stalePages > INLINE_EXTRACT_CHANGE_LIMIT || noopDebt);
+      inlineNoopRecovery = noopDebt && delegatedImport;
       if (imported === 0 && !deferForBacklog && !inlineNoopRecovery) linkExtractionRecovered = true;
     } catch (e) {
       rethrowIfCancelled(e);
@@ -1131,6 +1132,8 @@ export async function runImport(
       structuralLinks = extracted.linksCreated;
       if (extracted.staleRemaining === 0) {
         linkExtractionRecovered = true;
+      } else if (delegatedImport) {
+        throw new Error(`Delegated link extraction has ${extracted.staleRemaining} stale pages left; rerun this import to continue its bounded inline sweep.`);
       } else {
         const queuedJobId = await queueDeferredStaleSweep(engine, {
           sourceId: sourceId ?? 'default', commit: opts.commit ?? 'import', reason: 'import_inline_incomplete',

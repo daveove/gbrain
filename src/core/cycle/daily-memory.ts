@@ -20,7 +20,11 @@ import { createHash } from 'node:crypto';
 import { effectiveLinkExtractorWatermark } from '../link-extraction-watermark.ts';
 import { maintenancePreflight, publishMaintenancePage } from '../persistence/prepared-maintenance.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
-import { serializeMarkdown } from '../markdown.ts';
+import { parseMarkdown, serializeMarkdown } from '../markdown.ts';
+import { settleContentDisposition } from '../import-screen.ts';
+import { maintenanceTransaction } from '../persistence/attribution.ts';
+import { declareDerivation, derivedWriteTrust } from '../trust/taint.ts';
+import { gateInput } from '../trust/gate-outcomes.ts';
 import { OperationError } from '../ops/contract.ts';
 import { validateSlug } from '../utils.ts';
 import type { BrainEngine } from '../engine.ts';
@@ -58,18 +62,38 @@ function isOwnedDailyMemorySource(
   return config?.federated === false && name === DAILY_MEMORY_SOURCE_NAME;
 }
 
-/** Non-federated system source for brain-wide indexes. Survives visibility opt-outs. */
+/**
+ * Non-federated system source for brain-wide indexes. Survives visibility opt-outs.
+ * A managed brain only admits new sources through writer administration, so the
+ * first creation there is a recorded lifecycle add; a concurrent creator's
+ * source is then verified like any existing one.
+ */
 export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void> {
-  const config = JSON.stringify({ federated: false, system_index: true });
+  const config = { federated: false, system_index: true };
   const existing = await engine.executeRaw<{ config: unknown; name: string | null; archived: boolean }>(
     `SELECT config, name, archived FROM sources WHERE id = $1`,
     [DAILY_MEMORY_SOURCE_ID],
   );
   if (existing.length === 0) {
-    await engine.executeRaw(
-      `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
-      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
-    );
+    if (!await managedPersistenceEnabled(engine)) {
+      await engine.executeRaw(
+        `INSERT INTO sources (id, name, config) VALUES ($1, $2, $3::text::jsonb)`,
+        [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, JSON.stringify(config)],
+      );
+      return;
+    }
+    // Lazy: source-lifecycle reaches back into the daily-memory modules, so a static import would cycle.
+    const { runManagedSourceLifecycle } = await import('../persistence/source-lifecycle.ts');
+    const { assertTopologyCommitted } = await import('../persistence/managed-sources.ts');
+    try {
+      assertTopologyCommitted(await runManagedSourceLifecycle(engine, {
+        operation: 'add', sourceId: DAILY_MEMORY_SOURCE_ID, name: DAILY_MEMORY_SOURCE_NAME, config,
+      }));
+    } catch (error) {
+      // A concurrent creator won: the add sees either the registered ID or a source that appeared mid-preparation.
+      if (!(error instanceof OperationError && (error.code === 'source_id_taken' || error.code === 'source_changed'))) throw error;
+      await ensureDailyMemorySource(engine);
+    }
     return;
   }
   const row = existing[0]!;
@@ -83,7 +107,7 @@ export async function ensureDailyMemorySource(engine: BrainEngine): Promise<void
        SET name = $2,
            config = COALESCE(config, '{}'::jsonb) || $3::text::jsonb
        WHERE id = $1`,
-      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, config],
+      [DAILY_MEMORY_SOURCE_ID, DAILY_MEMORY_SOURCE_NAME, JSON.stringify(config)],
     );
     return;
   }
@@ -257,7 +281,8 @@ function renderNote(day: string, input: RenderInput): string {
     }
   }
 
-  return lines.join('\n');
+  // Match canonical Markdown ingestion so a managed rerun is a true no-op.
+  return lines.join('\n').trimEnd();
 }
 
 // Candidate ownership is checked before applying the shared stale/wanted-link predicate.
@@ -535,7 +560,6 @@ async function putSourceRecordIndex(
     `Entity type: ${escapeMdMeta(record.entity_type)}`,
     `Entity ID: ${escapeMdMeta(record.entity_id)}`,
     `Updated: ${updatedAt}`,
-    '',
   ].join('\n');
   const maxAttempts = 8;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -606,14 +630,33 @@ async function putSourceRecordIndex(
   throw new Error('Source record index write exhausted revision retries');
 }
 
-/** Daily indexes use the same canonical coordinator as other managed maintenance pages. */
+/**
+ * Daily indexes use the canonical coordinator in managed mode. Application
+ * authority is not content trust: external labels/references still use the gate.
+ */
 async function putDailyMemoryIndex(engine: BrainEngine, slug: string,
   page: Parameters<BrainEngine['putPage']>[1], opts: NonNullable<Parameters<BrainEngine['putPage']>[2]>): Promise<void> {
-  if (!await managedPersistenceEnabled(engine)) { await engine.putPage(slug, page, opts); return; }
+  // Labels and record references can originate in arbitrary connector sources.
+  // Application publication authority must not elevate that text to owner trust.
+  const trust = derivedWriteTrust({ channel: 'derive:daily_memory', inputs: [],
+    lowerTo: ['external_untrusted'], projection: true });
+  const content = serializeMarkdown(page.frontmatter ?? {}, page.compiled_truth ?? '', page.timeline ?? '',
+    { type: page.type, title: page.title, tags: [] });
+  if (!await managedPersistenceEnabled(engine)) {
+    const parsed = parseMarkdown(content, slug);
+    const disposition = await settleContentDisposition(engine, parsed, {
+      slug, sourceId: DAILY_MEMORY_SOURCE_ID, stripped: false, writeGate: gateInput(trust, null),
+    });
+    await maintenanceTransaction(engine, async tx => {
+      await tx.putPage(slug, { ...page, compiled_truth: parsed.compiled_truth, frontmatter: parsed.frontmatter }, opts);
+      await disposition.persistReceipt(tx, { existed: opts.expectedRevision !== undefined });
+    }, trust);
+    return;
+  }
   const authority = await maintenancePreflight(engine, DAILY_MEMORY_SOURCE_ID);
   if (!authority) throw new Error('Managed daily memory publication did not obtain maintenance authority');
-  await publishMaintenancePage(engine, authority, slug, serializeMarkdown(page.frontmatter ?? {}, page.compiled_truth ?? '', page.timeline ?? '', { type: page.type, title: page.title, tags: [] }), {
-    expectedRevision: opts.expectedRevision ?? null, file: false,
+  await publishMaintenancePage(engine, authority, slug, content, {
+    expectedRevision: opts.expectedRevision ?? null, file: false, derivation: declareDerivation(trust, []),
   });
 }
 

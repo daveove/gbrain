@@ -266,7 +266,7 @@ export async function listCorePages(exec: RawExec, opts: ListCorePagesOpts = {})
     // Withdrawn facts (forget) are applied by the canonical snapshot read,
     // not by the stored body, so core never shows text get_page withholds.
     if (r.withdrawn) {
-      const snap = await exec.readPageSnapshot(r.slug, { sourceId: r.source_id, ...(opts.excludePrivate ? { excludePrivate: true } : {}) });
+      const snap = await exec.readPageSnapshot(r.slug, { sourceId: r.source_id, excludePrivate: opts.excludePrivate });
       if (!snap) continue;
       compiled = snap.page.compiled_truth ?? '';
     }

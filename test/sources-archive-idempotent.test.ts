@@ -101,7 +101,7 @@ describe('#2792 — sources archive is idempotent', () => {
     test(`owned dream index ${owned.name} stays protected by the ownership-aware archive guard`, async () => {
       await seedDreamSource(owned.name,owned.config);
       const {exit,errs}=await captureRun(['archive','dream']);
-      expect(exit).toBe(3);
+      expect(exit).toBe(2); // Native operation refusal; the protected source and pages stay intact.
       expect(errs.join('\n')).toContain('system index');
       expect((await engine.executeRaw<{archived:boolean}>("SELECT archived FROM sources WHERE id='dream'"))[0]!.archived).toBe(false);
       expect(await engine.getPage('synthetic-note',{sourceId:'dream'})).not.toBeNull();

@@ -15,7 +15,7 @@ import { PROJECTION_RETRY_READY_SQL, rebuildPendingPageProjections } from '../pa
 import { publicationConcurrency } from './pool-capacity.ts';
 import { claimedHeadOrder } from './sync-window.ts';
 import { laneClaim, laneOf, laneRoots, laneTask } from './sync-lanes.ts';
-import { deferredEffectKinds, runPersistenceEffects } from './effects.ts';
+import { deferredEffectKindsFromEngine, runPersistenceEffects } from './effects.ts';
 import { settleNoopEmbeddingEffects, type NoopSettleCursor } from './embedding-noop-settle.ts';
 import { currentEmbeddingSignature } from '../embedding.ts';
 import { PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
@@ -283,8 +283,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     return this.idleDelayMs;
   }
   /**
-   * One statement on one connection that mirrors the selection predicates of
-   * every worker a full tick fans out to. Rows those workers would skip
+   * Two bounded statements on the same reserved probe lane, or sequentially
+   * on the statement route: resolve the live embedding policy, then mirror
+   * every worker's selection predicates. Rows those workers would skip
    * (retrying roots, capacity-blocked requests, failed projection jobs within
    * their retry window, topology recoveries that just failed to finish) do not
    * count, so unprocessable rows back off instead of pinning the fan-out.
@@ -296,7 +297,15 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
     const retryingTopologies = [...this.topologyRetryAfter.keys()];
     // On the direct route the probe needs no reserved pool lane: the direct pool is small and keeps its connections.
     const direct = consumerConnectionRoute(this.engine).lane === 'direct';
-    const [row] = await this.phase('idle_probe', async signal => this.probeQuery<{ work: boolean }>(this.laneInUse || direct ? undefined : await this.acquireIdleLane(signal), `SELECT (
+    const [row] = await this.phase('idle_probe', async signal => {
+      const reserved = this.laneInUse || direct ? undefined : await this.acquireIdleLane(signal);
+      const lane = this.laneInUse ? undefined : reserved;
+      if (lane) this.probeOnLane = true;
+      try {
+        const deferredKinds = await deferredEffectKindsFromEngine({
+          executeRaw: <T>(sql: string, params?: unknown[]) => this.probeQuery<T>(lane, sql, params ?? [], signal),
+        });
+        return await this.probeQuery<{ work: boolean }>(lane, `SELECT (
       EXISTS (SELECT 1 FROM persistence_requests r LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id
         WHERE ${claimableWriteSql(foregroundPrioritySql(), '$5::text[]')}
         AND ($3::boolean OR r.blocked_reason IS DISTINCT FROM 'writer_pool_capacity'))
@@ -322,7 +331,9 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
       OR EXISTS (SELECT 1 FROM persistence_topology_changes c
         JOIN persistence_worktrees w ON w.id=(c.recovery->>'worktreeId')::uuid
         WHERE c.recovery IS NOT NULL AND w.owner_host_id=$1::uuid AND NOT (c.id::text=ANY($4::text[])))
-    ) AS work`, [this.hostId, excluded, publicationConcurrency(this.engine) > 0, retryingTopologies, [...this.laneTasks.keys()], deferredEffectKinds()], signal));
+    ) AS work`, [this.hostId, excluded, publicationConcurrency(this.engine) > 0, retryingTopologies, [...this.laneTasks.keys()], deferredKinds], signal);
+      } finally { if (lane) this.probeOnLane = false; }
+    });
     return row?.work === true;
   }
   /**
@@ -430,9 +441,7 @@ export class PersistenceConsumer implements PersistenceConsumerLike {
   private async probeQuery<T>(lane: ReservedConnection | undefined, sql: string, params: unknown[], signal?: AbortSignal): Promise<T[]> {
     if (!lane) return this.statements.executeRaw<T>(sql, params, { signal });
     if (this.laneInUse) return this.statements.executeRaw<T>(sql, params, { signal });
-    this.probeOnLane = true;
     const query = lane.executeRaw<T>(sql, params);
-    void query.then(() => { this.probeOnLane = false; }, () => { this.probeOnLane = false; });
     if (!signal) return query;
     const aborted = Promise.withResolvers<never>();
     const onAbort = () => aborted.reject(signal.reason ?? new DOMException('aborted', 'AbortError'));

@@ -48,10 +48,10 @@ export async function requireOwnerCapable(ctx: OperationContext, op: string, cli
   const excludePrivate = await resolveExcludePrivatePages(ctx.engine, ctx.remote);
   const restricted = ctx.viaSubagent === true || (ctx.auth?.boundSlugPrefixes?.length ?? 0) > 0
     || ctx.auth?.fenceProjectionDegraded === true || ctx.auth?.grantProjectionDegraded === true;
-  if (excludePrivate || restricted) {
+  if (excludePrivate === true || restricted) {
     throw hostOnlyError(ctx, 'question_owner_only', `${op}: pinned questions are owner-private, and this connection cannot read private pages.`, cli,
       'Pinned questions and their answers are private to the brain owner in this version. This connection is a restricted grant (it cannot read private pages' +
-      `${restricted ? ', or it is slug-fenced or delegated' : ''}), so the owner runs the command on the brain host. An operator who wants this MCP connection to manage pins sets search.remote_private_pages=visible, which also shows it every private page.`);
+      `${restricted ? ', or it is slug-fenced or delegated' : ''}), so the owner runs the command on the brain host. An operator who wants this MCP connection to manage pins sets search.remote_private_pages=visible, which shows ordinary private pages while generated owner aggregates remain host-only.`);
   }
   const scope = sourceScopeOpts(ctx);
   const readable = scope.sourceIds ?? (scope.sourceId !== undefined ? [scope.sourceId] : null);

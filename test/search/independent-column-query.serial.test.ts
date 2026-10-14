@@ -173,7 +173,7 @@ for (const backend of testBackends()) {
           expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
           expect(seen).toEqual([{ model: 'nomic-embed-text', value: 'search_query: Alpha roadmap' }]);
           const fanout = (result._meta?.retrieval as { fanout?: { aliases_searched: Array<{ alias: string }> } } | undefined)?.fanout;
-          expect(fanout?.aliases_searched.map(row => row.alias)).toContain('Zorblax');
+          expect(fanout?.aliases_searched.map(row => row.alias)).toContain('zorblax');
           expect(result.content.map(row => row.text ?? '').join('\n')).toContain('notes/alias-roadmap');
         } finally {
           await engine.deletePage('companies/alpha', { sourceId: 'default' });

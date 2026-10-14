@@ -24,7 +24,7 @@ let root: string;
 let fixtureDir: string;
 let registration: LocalRegistration;
 const auth = { token: 'fixture', clientId: 'fixture-client', scopes: ['read', 'write'], sourceId: 'default', boundSlugPrefixes: ['notes'] };
-const content = (body: string, tags = 'original') => `---\ntitle: Example\ntype: note\ntags: [${tags}]\n---\n\n${body}`;
+const content = (body: string, tags = 'original', date?: string) => `---\ntitle: Example\ntype: note\ntags: [${tags}]\n${date ? `date: "${date}"\n` : ''}---\n\n${body}`;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
@@ -90,6 +90,28 @@ async function embedding(result: Awaited<ReturnType<typeof put>>, expectFailure 
     await Bun.sleep(25);
   }
   throw new Error(`Embedding effect did not settle: ${JSON.stringify(observed)}`);
+}
+async function expectOnlyDailyHandoffs(writes: Array<{ params: Record<string, unknown> }>): Promise<void> {
+  const jobs = await engine.executeRaw<{ id: number; name: string; data: Record<string, unknown>; idempotency_key: string; submission_authority: { kind: string } }>(
+    'SELECT id,name,data,idempotency_key,submission_authority FROM minion_jobs ORDER BY id');
+  // Embeddings belong to persistence_effects, never ordinary minion jobs.
+  expect(jobs).toHaveLength(writes.length * 2);
+  expect(jobs.every(job => job.name === 'autopilot-daily-memory' && job.submission_authority.kind === 'application')).toBe(true);
+  for (const write of writes) {
+    const [request] = await engine.executeRaw<{ id: string }>(
+      'SELECT id FROM persistence_requests WHERE request_id=$1::uuid', [write.params.request_id]);
+    const children = jobs.filter(job => job.idempotency_key.startsWith(
+      `autopilot-daily:2026-01-15:sync:default:page:put_page:${write.params.slug}:${request.id}:`));
+    expect(children).toHaveLength(1);
+    const child = children[0];
+    expect(child.data).toEqual({ daily_memory_only: true, daily_memory_date: '2026-01-15',
+      source_cycle_job_ids: [], daily_memory_timezone: 'UTC' });
+    const batches = jobs.filter(job => job.data.daily_memory_source_job_id === child.id);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].data).toEqual({ daily_memory_date: '2026-01-15', daily_memory_dates: ['2026-01-15'],
+      daily_memory_source_job_id: child.id, daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id],
+      daily_memory_replay_round: 0, daily_memory_timezone: 'UTC' });
+  }
 }
 async function holdRoot() {
   const binding = await getWorktreeBinding(engine, 'default');
@@ -315,6 +337,7 @@ describe('put_page persistence boundary', () => {
 
   test('canonical page is committed before an embedding failure and remains a successful persisted write', async () => {
     const slug = 'notes/embed-failure';
+    await engine.setConfig('cycle.timezone', 'UTC');
     configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test' } });
     let calls = 0;
     let observedCommitted = false;
@@ -325,7 +348,7 @@ describe('put_page persistence boundary', () => {
         && readFileSync(join(root, `${slug}.md`), 'utf8').includes('Survives embedding failure.');
       throw new Error('fixture embedding rejected');
     });
-    const result = await put(slug, content('Survives embedding failure.'));
+    const result = await put(slug, content('Survives embedding failure.', 'original', '2026-01-15'));
     expect(await embedding(result, true)).toMatchObject({ state: 'queued', reason: 'effect_unavailable' });
     expect(calls).toBeGreaterThan(0);
     expect(observedCommitted).toBe(true);
@@ -334,24 +357,25 @@ describe('put_page persistence boundary', () => {
     expect((await replay(result)).payload.state).toBe('committed');
     expect(result.payload.write_through.written).toBe(true);
     expect((await engine.getChunks(slug, { sourceId: 'default' })).every(chunk => chunk.embedding_is_null)).toBe(true);
-    expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+    await expectOnlyDailyHandoffs([result]);
   });
 
   test('successful post-persistence embeddings fill only the written page', async () => {
     const slug = 'notes/embed-success';
-    await put('notes/unrelated', content('Unrelated unembedded body.'));
+    await engine.setConfig('cycle.timezone', 'UTC');
+    const unrelated = await put('notes/unrelated', content('Unrelated unembedded body.', 'original', '2026-01-15'));
     configureGateway({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536, env: { OPENAI_API_KEY: 'sk-test' } });
     __setEmbedTransportForTests(async ({ values }) => {
       expect(readFileSync(join(root, `${slug}.md`), 'utf8')).toContain('Page-scoped enrichment.');
       expect((await engine.getPage(slug, { sourceId: 'default' }))?.compiled_truth).toBe('Page-scoped enrichment.');
       return { values, warnings: [], embeddings: values.map(() => new Array(1536).fill(0.1)), usage: { tokens: 1 } };
     });
-    const result = await put(slug, content('Page-scoped enrichment.'));
+    const result = await put(slug, content('Page-scoped enrichment.', 'original', '2026-01-15'));
     expect(result.response.isError).not.toBe(true);
     expect(await embedding(result)).toMatchObject({ state: 'committed' });
     expect((await engine.getChunks(slug, { sourceId: 'default' })).every(chunk => !chunk.embedding_is_null)).toBe(true);
     expect((await engine.getChunks('notes/unrelated', { sourceId: 'default' })).every(chunk => chunk.embedding_is_null)).toBe(true);
-    expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+    await expectOnlyDailyHandoffs([unrelated, result]);
   });
 
   test('slow optional embedding releases the worktree and cannot overwrite a newer file-backed revision', async () => {

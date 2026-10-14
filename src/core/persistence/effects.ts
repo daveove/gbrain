@@ -534,6 +534,14 @@ export function deferredEffectKinds(opts: Pick<EffectWorkerOptions, 'embedding'>
   return model && !modelApiAllowed(model) ? ['embedding'] : [];
 }
 
+/** Use the same live write-column model for idle eligibility and effect claims. */
+export async function deferredEffectKindsFromEngine(engine: Pick<BrainEngine, 'executeRaw'>,
+  opts: Pick<EffectWorkerOptions, 'embedding'> = {}): Promise<string[]> {
+  if (opts.embedding) return [];
+  const column = await resolveActiveEmbeddingColumnFromEngine(engine);
+  return deferredEffectKinds(opts, column.provenance ? column.embeddingModel : undefined);
+}
+
 /**
  * Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim.
  * Resolves with the number of effects attempted, so a caller can keep draining.
@@ -718,8 +726,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
       [JSON.stringify(recorded.map(effect => ({ id: String(effect.id), token: effect.execution_token }))), JSON.stringify(DURABILITY_NOT_ENABLED)]);
     } catch (error) { for (const effect of recorded) await recordFailure(engine, effect, error, opts.signal); }
   };
-  const liveColumn = opts.embedding ? undefined : await resolveActiveEmbeddingColumnFromEngine(engine);
-  const deferredKinds = deferredEffectKinds(opts, liveColumn?.provenance ? liveColumn.embeddingModel : undefined);
+  const deferredKinds = await deferredEffectKindsFromEngine(engine, opts);
   // A deferred effect that requeues itself (a page walk advancing its cursor,
   // or work unblocked by an earlier effect) is claimable again after the flush.
   for (;;) {

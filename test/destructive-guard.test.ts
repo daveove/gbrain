@@ -480,18 +480,20 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
     // The sweep reads candidates, then deletes one row at a time. Reproduce a
     // stamp flip landing in between: the moment the first DELETE arrives, both
     // rows' stamps degrade to the refusal set — the DELETE itself must refuse.
-    const orig = engine.executeRaw.bind(engine);
+    // Purge now deletes transactionally. Preserve the transaction receiver;
+    // root-bound queries here would wait for their own PGLite transaction.
+    const orig = engine.executeRaw;
     let flipped = false;
-    engine.executeRaw = (async (sql: string, params?: unknown[]) => {
+    engine.executeRaw = (async function (this: BrainEngine, sql: string, params?: unknown[]) {
       if (!flipped && typeof sql === 'string' && sql.includes('DELETE FROM sources')) {
         flipped = true;
-        await orig(
+        await orig.call(this,
           `UPDATE sources SET archive_expires_at = '1970-01-01T00:00:00Z' WHERE id = $1`,
           [flipExpiryId],
         );
-        await orig(`UPDATE sources SET archived_at = NULL WHERE id = $1`, [flipArchId]);
+        await orig.call(this, `UPDATE sources SET archived_at = NULL WHERE id = $1`, [flipArchId]);
       }
-      return orig(sql, params);
+      return orig.call(this, sql, params);
     }) as typeof engine.executeRaw;
     let purged: string[] = [];
     try {
@@ -884,8 +886,11 @@ describe('formatters (display helpers)', () => {
 describe('purgeExpiredSources — clone cleanup containment', () => {
   function purgeStubFor(id: string, localPath: string) {
     return {
+      async getConfig(): Promise<string> { return 'UTC'; },
+      async transaction<T>(work: (tx: BrainEngine) => Promise<T>): Promise<T> { return work(this as unknown as BrainEngine); },
       executeRaw: async (sql: string) => {
         if (sql.includes('FROM persistence_brain')) return [{ enabled: false }]; // #6482: one well-formed unmanaged row
+        if (sql.includes('archive_expires_at IS NULL') || sql.includes('FROM pages')) return [];
         if (sql.trimStart().startsWith('SELECT')) {
           return [{ id, config: { kind: 'github', gh_managed: true }, local_path: localPath }];
         }

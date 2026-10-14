@@ -926,16 +926,15 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     for (const p of MAINTENANCE_PHASES) expect(ranPhases).toContain(p);
     expect(ranPhases).toContain('synthesize');
     expect(ranPhases).toContain('patterns');
-    expect(ranPhases).toContain('consolidate');
-    const consolidate = result.report.phases.find((p: { phase: string }) => p.phase === 'consolidate');
-    expect(consolidate.status).toBe('ok');
-    expect(consolidate.details.takes_written).toBe(0);
+    // Native phase ownership keeps aggregate consolidation out of maintenance.
+    expect(MAINTENANCE_PHASES).not.toContain('consolidate');
+    expect(ranPhases).not.toContain('consolidate');
     expect(ranPhases).not.toContain('sync');
     expect(result.report.phases.some((p: any) => p.status === 'fail')).toBe(true);
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
   }, 60_000);
 
-  test('global maintenance consolidates every source when repoPath matches one source', async () => {
+  test('global maintenance rejects source consolidation while an explicit source cycle stays scoped', async () => {
     const repoPath = mkdtempSync(join(tmpdir(), 'gbrain-consolidate-scope-'));
     await engine.executeRaw(
       `INSERT INTO sources (id, name, local_path) VALUES ('alpha', 'alpha', $1), ('beta', 'beta', NULL)`,
@@ -953,11 +952,12 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     const handlers = await captureHandlers();
     const result = await handlers.get('autopilot-global-maintenance')!({
       id: 6837,
-      data: { repoPath, phases: ['consolidate'] },
+      data: { repoPath, phases: ['orphans', 'consolidate'] },
       signal: undefined,
     });
-    const consolidate = result.report.phases.find((p: { phase: string }) => p.phase === 'consolidate');
-    expect(consolidate.details.buckets_processed).toBe(2);
+    expect(result.report.phases.map((phase: { phase: string }) => phase.phase)).toEqual(['orphans']);
+    expect(result.report.phases[0].details.source_id).toBeUndefined();
+    expect(await engine.executeRaw('SELECT source_id FROM facts WHERE consolidated_at IS NOT NULL')).toEqual([]);
 
     const scoped = await runCycle(engine, {
       brainDir: repoPath,

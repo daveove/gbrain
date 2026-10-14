@@ -428,7 +428,7 @@ async function assembleCard(
   const factSlugs = await factEntitySlugs(engine, sourceId, pageSlug, { excludePrivate }).catch(() => [pageSlug]);
   const { privatePagesFilterFragment, privateLinkOriginFilterFragment, privateProvenanceFilterFragment } = await import('../search/private-visibility.ts');
   const inboundPrivacy = excludePrivate
-    ? ` AND ${privatePagesFilterFragment('f')} AND ${privateLinkOriginFilterFragment('l')}`
+    ? ` AND ${privatePagesFilterFragment('f', excludePrivate)} AND ${privateLinkOriginFilterFragment('l', excludePrivate)}`
     : '';
 
   // Parallel depth-1 reads — every arm individually fail-soft so a partial

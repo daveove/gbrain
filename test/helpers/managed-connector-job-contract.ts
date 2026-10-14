@@ -650,6 +650,7 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
     expect(rerun.result).toMatchObject({ daily_memory_pending: false,
       daily_memory: { written: false, reason: 'unchanged', pages: 1 } });
     expect(await requestCount(dreamState)).toBe(requests);
+    expect((await engine.readPageSnapshot(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.revision).toBe(page?.revision);
   },
 
   async loops_extract_run(state) {

@@ -14,13 +14,14 @@ import { claimPersistenceEffect, publicEffectsForRequest, queueLinksReconcile } 
 import { runPersistenceEffects } from '../../src/core/persistence/effects.ts';
 import type { WriteRequest } from '../../src/core/persistence/model.ts';
 import { withEnv } from './with-env.ts';
+import { REMOTE_PRIVATE_PAGES_KEY, __resetPrivateVisibilityCacheForTests } from '../../src/core/search/private-visibility.ts';
 
 /**
  * Remote mention-links effect contract (#6007), shared by the PGLite unit
  * test and the PostgreSQL E2E wrapper. Each scenario owns its own source and
  * OAuth client, so scenarios can share one database.
  */
-export const remoteLinksCases = ['links', 'other_producers', 'confined', 'config_off', 'superseded', 'restart', 'revoked', 'trusted_local', 'reconcile', 'wanted'] as const;
+export const remoteLinksCases = ['links', 'private_opt_out', 'other_producers', 'confined', 'config_off', 'superseded', 'restart', 'revoked', 'trusted_local', 'reconcile', 'wanted'] as const;
 export type RemoteLinksCase = typeof remoteLinksCases[number];
 
 const config = { engine: 'pglite' as const, embedding_disabled: true };
@@ -100,6 +101,30 @@ export async function exerciseRemoteLinks(engine: BrainEngine, scenario: RemoteL
         expect(await engine.executeRaw("SELECT 1 FROM links l JOIN pages p ON p.id=l.from_page_id WHERE p.source_id=$1 AND l.link_type<>'mentions'", [sourceId])).toEqual([]);
         return;
       }
+      if (scenario === 'private_opt_out') {
+        const previous = await engine.getConfig(REMOTE_PRIVATE_PAGES_KEY);
+        try {
+          await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+          __resetPrivateVisibilityCacheForTests();
+          await write(MENTIONS(sourceId));
+          await runLinks();
+          expect(await links()).toEqual([
+            mention('companies/acme-example'), mention('people/alice-example'), mention('people/secret-example'),
+          ]);
+          const queued = await write(`${MENTIONS(sourceId)}\nSynthetic changed paragraph.\n`);
+          await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+          __resetPrivateVisibilityCacheForTests();
+          await runLinks();
+          expect(await links()).toEqual([mention('companies/acme-example'), mention('people/alice-example')]);
+          expect((await effect(queued)).outcome).toMatchObject({ links: 'committed', removed: 1 });
+        } finally {
+          if (previous === null) await engine.executeRaw('DELETE FROM config WHERE key=$1', [REMOTE_PRIVATE_PAGES_KEY]);
+          else await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, previous);
+          __resetPrivateVisibilityCacheForTests();
+        }
+        return;
+      }
+
 
       if (scenario === 'wanted') {
         const wanted = () => engine.executeRaw<{ target_ref: string; producer: string; link_type: string }>(`SELECT w.target_ref,w.producer,w.link_type

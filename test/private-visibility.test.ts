@@ -180,6 +180,26 @@ describe('entity card (#4352 — covers entity/context_pack/delta)', () => {
     expect(localRes.found).toBe(true);
     expect(localRes.card?.entity.slug).toBe('notes/private-page');
   });
+
+  test('operator opt-out includes ordinary private inbound edges but never generated owner aggregates', async () => {
+    const privateSlug = 'notes/owner-only-edge-private', ownedSlug = 'daily-memory/2026-10-01';
+    await engine.putPage(privateSlug, { type: 'note', title: 'Synthetic private referrer', compiled_truth: 'Synthetic reference', frontmatter: { visibility: 'private' } });
+    await engine.putPage(ownedSlug, { type: 'note', title: 'Synthetic owner aggregate', compiled_truth: 'Synthetic aggregate', frontmatter: { dream_generated: true, visibility: 'world' } });
+    await engine.addLink(privateSlug, 'notes/world-page', 'Synthetic private edge', 'related_to');
+    await engine.addLink(ownedSlug, 'notes/world-page', 'Synthetic owned edge', 'related_to');
+    try {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+      __resetPrivateVisibilityCacheForTests();
+      const result = await buildEntityCard(engine, 'default', 'notes/world-page', { remote: true });
+      expect(result.found).toBe(true);
+      expect(result.card?.edges.filter(edge => edge.direction === 'in').map(edge => edge.slug)).toContain(privateSlug);
+      expect(result.card?.edges.map(edge => edge.slug)).not.toContain(ownedSlug);
+      expect(result.card?.backlink_count).toBeGreaterThan(0);
+    } finally {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+      __resetPrivateVisibilityCacheForTests();
+    }
+  });
 });
 
 describe('page read ops (#4352 remediation — list_pages / get_page / fetch)', () => {

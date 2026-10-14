@@ -14,14 +14,18 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdtempSync, writeFileSync, utimesSync } from 'fs';
+import { mkdtempSync, readFileSync, writeFileSync, utimesSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { computeEffectiveDate, parseDateLoose } from '../src/core/effective-date.ts';
-import { parseMarkdown } from '../src/core/markdown.ts';
+import { computeEffectiveDate, DATE_INSTANT_PROVENANCE, parseDateLoose } from '../src/core/effective-date.ts';
+import { parseMarkdown, serializePageToMarkdown } from '../src/core/markdown.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromFile } from '../src/core/import-file.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { operationsByName } from '../src/core/operations.ts';
+import { fileMatchesSnapshot } from '../src/core/persistence/page-prepare.ts';
+import { isCalendarEffectiveDate } from '../src/core/cycle/daily-memory.ts';
+import { managedBrain } from './helpers/managed-brain.ts';
 
 const iso = (value: unknown) => parseDateLoose(value)?.toISOString() ?? null;
 
@@ -113,3 +117,55 @@ describe('undated pages', () => {
     });
   });
 });
+
+test('managed second puts preserve calendar days and explicit midnight instants without false file drift', async () => managedBrain(async ({ engine, ctx, root }) => {
+  const midnight = '2024-03-01T00:00:00.000Z';
+  for (const [index, timeZone] of ['UTC', 'America/Los_Angeles', 'Pacific/Kiritimati'].entries()) {
+    await engine.setConfig('brain.timezone', timeZone);
+    for (const instant of [false, true]) {
+      const slug = `notes/date-roundtrip-${index}-${instant ? 'instant' : 'calendar'}`;
+      const scalar = instant ? midnight : '2024-03-01';
+      const body = `Synthetic ${slug} observation.`;
+      const content = `---\ntitle: Date roundtrip ${index} ${instant}\ntype: note\ndate: ${scalar}\n---\n\n${body}\n`;
+      expect(await operationsByName.put_page.handler(ctx, { slug, content })).toMatchObject({ state: 'committed' });
+      const first = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
+      expect(first.page.frontmatter.date).toBe(midnight);
+      expect(first.page.frontmatter[DATE_INSTANT_PROVENANCE])
+        .toEqual(instant ? { date: midnight } : undefined);
+      const file = join(root, `${slug}.md`);
+      const published = readFileSync(file, 'utf8');
+      expect(await fileMatchesSnapshot(engine, slug, published, first)).toBe(true);
+      expect(await operationsByName.put_page.handler(ctx, { slug, content, expected_revision: first.revision }))
+        .toMatchObject({ state: 'committed' });
+
+      // Read through JSONB and re-render for the next real edit, rather than
+      // relying only on the original parser's non-enumerable Date marker.
+      const current = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
+      const edited = serializePageToMarkdown({ ...current.page, compiled_truth: `${body} Coordinated edit.` }, current.tags);
+      expect(await operationsByName.put_page.handler(ctx, { slug, content: edited, expected_revision: current.revision }))
+        .toMatchObject({ state: 'committed' });
+      const updated = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
+      expect(updated.page.compiled_truth).toBe(`${body} Coordinated edit.`);
+      expect(updated.page.frontmatter.date).toBe(midnight);
+      expect(updated.page.frontmatter[DATE_INSTANT_PROVENANCE])
+        .toEqual(instant ? { date: midnight } : undefined);
+      expect(parseDateLoose(updated.page.effective_date)?.toISOString()).toBe(midnight);
+      expect(isCalendarEffectiveDate({ source_id: 'default', slug, title: updated.page.title,
+        frontmatter: updated.page.frontmatter, effective_date: updated.page.effective_date!,
+        effective_date_source: updated.page.effective_date_source ?? null })).toBe(!instant);
+      const rendered = readFileSync(file, 'utf8');
+      expect(await fileMatchesSnapshot(engine, slug, rendered, updated)).toBe(true);
+
+      // Real external edits still fail the unchanged drift guard and leave
+      // both the database body and the independently edited file untouched.
+      const external = rendered.replace('Coordinated edit.', 'Uncoordinated file edit.');
+      writeFileSync(file, external);
+      await expect(operationsByName.put_page.handler(ctx, { slug, content: rendered, expected_revision: updated.revision }))
+        .rejects.toMatchObject({ code: 'source_changed' });
+      expect(readFileSync(file, 'utf8')).toBe(external);
+      expect((await engine.readPageSnapshot(slug, { sourceId: 'default' }))!.page.compiled_truth)
+        .toBe(updated.page.compiled_truth);
+      writeFileSync(file, rendered);
+    }
+  }
+}), 180_000);

@@ -12,7 +12,7 @@ export {
   recoverFrontmatter, RECOVERY_VERSION, PROTECTED_FRONTMATTER_KEYS, IDENTITY_FRONTMATTER_KEYS,
   type FrontmatterRecovery, type FrontmatterRecoveryStatus, type FrontmatterRecoveryStep, type RecoveryKind,
 } from './frontmatter-recovery.ts';
-import { withDateInstantProvenance } from './effective-date.ts';
+import { calendarDatesForSerialization, withDateInstantProvenance } from './effective-date.ts';
 
 export type ParseValidationCode =
   | 'MISSING_OPEN'
@@ -1255,7 +1255,7 @@ export function serializePageToMarkdown(
   // #6454: the columns are the page's type, title and tags; a stored reserved key (older imports kept
   // them) never overrides them in the rendered file. A stored `slug` still reaches the #5966 stamp rule, which
   // replaces one that names another identity with the page's slug.
-  const stored = page.frontmatter ?? {};
+  const stored = calendarDatesForSerialization(page.frontmatter ?? {});
   const frontmatter: Record<string, unknown> = {
     ...slugStampedFrontmatter(page.slug, { ...comparableFrontmatter(stored), ...(stored.slug !== undefined ? { slug: stored.slug } : {}) }),
     ...(opts.frontmatterOverrides ?? {}),

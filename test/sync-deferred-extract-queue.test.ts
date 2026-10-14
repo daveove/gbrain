@@ -32,6 +32,7 @@ let repoPath: string;
 // resetPgliteState truncates the config table, wiping the `version` key
 // MinionQueue.ensureSchema gates on — captured once and reseeded per test.
 let schemaVersion: string | null = null;
+const fixtureDay = '2026-01-15';
 
 function git(cmd: string): void { execSync(cmd, { cwd: repoPath, stdio: 'pipe' }); }
 
@@ -47,15 +48,36 @@ async function stampOf(slug: string): Promise<string | null> {
 }
 
 async function staleExtractJobs(): Promise<Array<{ id: number; name: string; status: string; data: Record<string, unknown>; idempotency_key: string | null }>> {
+  const commit = headCommit();
   const rows = await engine.executeRaw<{ id: number; name: string; status: string; data: unknown; idempotency_key: string | null }>(
-    `SELECT id, name, status, data, idempotency_key FROM minion_jobs WHERE name = 'extract'`,
+    `SELECT id, name, status, data, idempotency_key FROM minion_jobs
+      WHERE name IN ('extract', 'extract-stale-links') ORDER BY id`,
   );
   return rows
     .map(r => ({
       ...r,
       data: (typeof r.data === 'string' ? JSON.parse(r.data) : r.data) as Record<string, unknown>,
     }))
-    .filter(r => r.data.stale === true);
+    .filter(r => r.data.stale === true && (r.data.sourceId ?? 'default') === 'default'
+      && r.data.deferred_commit === commit);
+}
+
+async function expectDailyHandoffs(count = 1): Promise<void> {
+  const jobs = await engine.executeRaw<{ id: number; data: Record<string, unknown>; idempotency_key: string; status: string }>(
+    "SELECT id,data,idempotency_key,status FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
+  const children = jobs.filter(job => job.idempotency_key.startsWith(`autopilot-daily:${fixtureDay}:sync:default:${headCommit()}:`));
+  expect(children).toHaveLength(count);
+  for (const child of children) {
+    expect(child.status).toBe('waiting');
+    expect(child.data).toEqual({ daily_memory_only: true, daily_memory_date: fixtureDay,
+      daily_memory_timezone: 'UTC', source_cycle_job_ids: [] });
+    const batches = jobs.filter(job => job.data.daily_memory_source_job_id === child.id);
+    expect(batches).toHaveLength(1);
+    expect(batches[0].status).toBe('waiting');
+    expect(batches[0].data).toEqual({ daily_memory_date: fixtureDay, daily_memory_dates: [fixtureDay],
+      daily_memory_source_job_id: child.id, daily_memory_cursor: 1,
+      daily_memory_day_job_ids: [child.id], daily_memory_replay_round: 0, daily_memory_timezone: 'UTC' });
+  }
 }
 
 /** Seed repo with an initial commit, then add `n` pages that link to people/alice. */
@@ -63,7 +85,7 @@ function writeLinkedPages(n: number): void {
   mkdirSync(join(repoPath, 'notes'), { recursive: true });
   for (let i = 0; i < n; i++) {
     writeFileSync(join(repoPath, `notes/page-${i}.md`), [
-      '---', 'type: concept', `title: Page ${i}`, '---', '',
+      '---', 'type: concept', `title: Page ${i}`, `date: ${fixtureDay}`, '---', '',
       `[Alice](../people/alice.md) appears in note ${i}.`,
     ].join('\n'));
   }
@@ -84,6 +106,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
   beforeEach(async () => {
     await resetPgliteState(engine);
     if (schemaVersion) await engine.setConfig('version', schemaVersion);
+    await engine.setConfig('cycle.timezone', 'UTC');
     await engine.executeRaw(`DELETE FROM minion_jobs`).catch(() => {});
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-defer-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
@@ -91,11 +114,11 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     execSync('git config user.name "T"', { cwd: repoPath, stdio: 'pipe' });
     mkdirSync(join(repoPath, 'people'), { recursive: true });
     writeFileSync(join(repoPath, 'people/alice.md'), [
-      '---', 'type: person', 'title: Alice', '---', '', 'Alice is a founder.',
+      '---', 'type: person', 'title: Alice', `date: ${fixtureDay}`, '---', '', 'Alice is a founder.',
     ].join('\n'));
     git('git add -A && git commit -m "initial"');
     const { performSync } = await import('../src/commands/sync.ts');
-    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, full: true, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
   });
 
   afterEach(() => {
@@ -106,7 +129,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     const { performSync } = await import('../src/commands/sync.ts');
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    const result = await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    const result = await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     expect(['synced', 'first_sync']).toContain(result.status);
 
     // Above the gate: no inline extract, page unstamped (pre-existing, by design).
@@ -118,6 +141,10 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // …bound to the consumed commit so webhook redeliveries coalesce…
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
     expect(jobs[0].data.deferred_commit).toBe(headCommit());
+    expect(jobs[0].name).toBe('extract');
+    // The legacy default-source sync payload is unscoped; the handler resolves default.
+    expect(jobs[0].data.sourceId).toBeUndefined();
+    await expectDailyHandoffs();
     // …and it carries an explicit wall-clock budget covering the sweep.
     const rows = await engine.executeRaw<{ timeout_ms: number | null }>(
       `SELECT timeout_ms FROM minion_jobs WHERE id = $1`, [jobs[0].id],
@@ -130,7 +157,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     const baseCommit = headCommit();
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     expect(await staleExtractJobs()).toHaveLength(1);
     // Rewind the anchor and re-drain the SAME range incrementally: the defer
     // branch fires again with the same pin, the idempotency fast path hands
@@ -142,10 +169,11 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // and never reach the defer branch).
     await engine.setConfig('sync.last_commit', baseCommit);
     await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test', frontmatter = frontmatter || '{"stale_test": true}'::jsonb WHERE slug LIKE 'notes/%'`);
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     const jobs = await staleExtractJobs();
     expect(jobs.length).toBe(1);
     expect(jobs[0].status).toBe('waiting');
+    await expectDailyHandoffs(2);
   }, 120_000);
 
   test('an unrelated waiting extract job does NOT swallow the stale sweep', async () => {
@@ -160,11 +188,12 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     const { performSync } = await import('../src/commands/sync.ts');
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     const jobs = await staleExtractJobs();
     expect(jobs.length).toBe(1);
     expect(jobs[0].status).toBe('waiting');
     expect(jobs[0].idempotency_key).toBe(`extract-stale:default:${headCommit()}`);
+    await expectDailyHandoffs();
   }, 120_000);
 
   test('a completed sweep for the same pin does not strand a re-synced range — a fresh job is queued', async () => {
@@ -172,14 +201,16 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // a COMPLETED row as-is. A re-sync of the same range (checkpoint-resume /
     // blocked-advance) re-imports pages AFTER that sweep's watermark pass, so
     // coalescing onto the finished row leaves them stale forever. The defer
-    // branch must detect the non-live row and queue a fresh sweep under a
-    // run-unique key.
+    // branch must detect the non-live row and queue a fresh successor
+    // for that exact pin, without losing new work.
     const { performSync } = await import('../src/commands/sync.ts');
     const baseCommit = headCommit();
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
-    const [first] = await staleExtractJobs();
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
+    const firstJobs = await staleExtractJobs();
+    expect(firstJobs).toHaveLength(1);
+    const [first] = firstJobs;
     await engine.executeRaw(`UPDATE minion_jobs SET status = 'completed' WHERE id = $1`, [first.id]);
     // Rewind and re-drain the same range (rows diverged from their files force the
     // re-import, mirroring a failed-file retry / checkpoint-resume drain):
@@ -187,37 +218,41 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
     // must exist afterwards.
     await engine.setConfig('sync.last_commit', baseCommit);
     await engine.executeRaw(`UPDATE pages SET content_hash = 'stale-test', frontmatter = frontmatter || '{"stale_test": true}'::jsonb WHERE slug LIKE 'notes/%'`);
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     const jobs = await staleExtractJobs();
     const waiting = jobs.filter(j => j.status === 'waiting');
     expect(waiting.length).toBe(1);
-    // Run-unique key: base key + suffix, never a bare collision with the old row.
+    expect(jobs).toHaveLength(2);
+    expect(waiting[0].id).not.toBe(first.id);
     expect(waiting[0].idempotency_key).toStartWith(`extract-stale:default:${headCommit()}:`);
+    await expectDailyHandoffs(2);
   }, 120_000);
 
   test('sub-gate sync does NOT queue a stale-extract job (inline extract still owns it)', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     writeLinkedPages(3);
     git('git add -A && git commit -m "small drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     expect(await staleExtractJobs()).toHaveLength(0);
     // Inline path stamped the pages (the #1696 contract, unchanged).
     expect(await stampOf('notes/page-0')).not.toBeNull();
+    await expectDailyHandoffs();
   }, 120_000);
 
   test('--no-extract suppresses the queued job too', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true, noExtract: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, noExtract: true, dailyMemoryFollowup: true });
     expect(await staleExtractJobs()).toHaveLength(0);
+    await expectDailyHandoffs();
   }, 120_000);
 
   test('the extract handler consumes { stale: true } jobs via extractStaleFromDB and stamps the pages', async () => {
     const { performSync } = await import('../src/commands/sync.ts');
     writeLinkedPages(101);
     git('git add -A && git commit -m "big drop"');
-    await performSync(engine, { repoPath, noPull: true, noEmbed: true });
+    await performSync(engine, { repoPath, noPull: true, noEmbed: true, dailyMemoryFollowup: true });
     expect(await stampOf('notes/page-7')).toBeNull();
     expect(await engine.getLinks('notes/page-7')).toHaveLength(0);
 
