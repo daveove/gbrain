@@ -9,13 +9,13 @@
  */
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { discoverTranscripts } from '../src/core/cycle/transcript-discovery.ts';
 import { detectAdapter, type HarnessRoot } from '../src/core/transcripts/detect.ts';
 import { buildStatusRows, discoverTranscriptFiles } from '../src/core/transcripts/discover.ts';
 import type { SkippedTranscriptRoot } from '../src/core/transcripts/discover.ts';
-import { runTranscripts } from '../src/commands/transcripts.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -219,29 +219,58 @@ test('legacy harness roots may be symlinks but descendant links remain excluded'
   }
 });
 
-test('status reports rejected new-harness override roots in JSON and text', async () => {
+test('status reports rejected new-harness override roots in JSON and text from an isolated home', () => {
   const root = join(dir, 'linked-root'), store = join(dir, 'store');
   mkdirSync(store); symlinkSync(store, root);
-  await withEnv({
-    GBRAIN_DAILY_MEMORY_PI_ROOT: root, GBRAIN_DAILY_MEMORY_OMP_ROOT: root, GBRAIN_DAILY_MEMORY_CURSOR_ROOT: root,
-  }, async () => {
-    const formats = ['pi', 'omp', 'cursor'] as const;
-    const expected: SkippedTranscriptRoot[] = formats.map(format => ({ format, root, reason: 'symlink' }));
-    const skippedRoots: SkippedTranscriptRoot[] = [];
-    discoverTranscriptFiles(formats.map(format => ({
-      format, root, extension: '.jsonl',
-    })), { skippedRoots });
-    expect(skippedRoots).toEqual(expected);
-    const logs: string[] = [];
-    const logged = spyOn(console, 'log').mockImplementation(value => { logs.push(String(value)); });
-    try {
-      // Source resolution falls back to default; the imported-session query is empty.
-      const engine = { executeRaw: async () => [] } as never;
-      await runTranscripts(engine, ['status', '--json']);
-      expect(JSON.parse(logs.join('\n')).skipped_roots).toEqual(expected);
-      logs.length = 0;
-      await runTranscripts(engine, ['status']);
-      for (const { format } of expected) expect(logs).toContain(`  skipped root (${format}, symlink): ${root}`);
-    } finally { logged.mockRestore(); }
+  const formats = ['pi', 'omp', 'cursor'] as const;
+  const expected: SkippedTranscriptRoot[] = formats.map(format => ({ format, root, reason: 'symlink' }));
+  const skippedRoots: SkippedTranscriptRoot[] = [];
+  discoverTranscriptFiles(formats.map(format => ({ format, root, extension: '.jsonl' })), { skippedRoots });
+  expect(skippedRoots).toEqual(expected);
+  // Bun caches homedir at startup. Do not let default status discovery enumerate
+  // the parent process's legacy stores, even when this test runs outside CI.
+  const child = Bun.spawnSync([process.execPath, '-e', `
+    import { runTranscripts } from './src/commands/transcripts.ts';
+    const logs = [];
+    console.log = (...values) => logs.push(values.join(' '));
+    const engine = { executeRaw: async () => [] };
+    await runTranscripts(engine, ['status', '--json']);
+    const json = JSON.parse(logs.join('\\n'));
+    logs.length = 0;
+    await runTranscripts(engine, ['status']);
+    process.stdout.write(JSON.stringify({ json, text: logs }));
+  `], {
+    cwd: join(import.meta.dir, '..'),
+    env: {
+      HOME: dir, PATH: process.env.PATH ?? '', TMPDIR: tmpdir(), GBRAIN_HOME: join(dir, 'brain'),
+      GBRAIN_DAILY_MEMORY_PI_ROOT: root, GBRAIN_DAILY_MEMORY_OMP_ROOT: root, GBRAIN_DAILY_MEMORY_CURSOR_ROOT: root,
+    },
+    stdout: 'pipe', stderr: 'pipe',
   });
+  expect(child.exitCode).toBe(0);
+  const status = JSON.parse(Buffer.from(child.stdout).toString());
+  expect(status.json.skipped_roots).toEqual(expected);
+  for (const { format } of expected) expect(status.text).toContain(`  skipped root (${format}, symlink): ${root}`);
+});
+
+test('an enumeration-denied root is reported while inaccessible descendants remain skipped', () => {
+  const root = join(dir, 'sessions'), nested = join(root, 'denied');
+  mkdirSync(nested, { recursive: true });
+  const publicFile = join(root, 'public.jsonl'); writeFileSync(publicFile, 'synthetic');
+  const roots: HarnessRoot[] = [{ format: 'codex', root, extension: '.jsonl' }];
+  let denied = root;
+  const original = fs.readdirSync;
+  // Inject the filesystem EACCES boundary: mode bits alone do not deny root on CI.
+  const listing = spyOn(fs, 'readdirSync').mockImplementation(path => {
+    if (path === denied) throw Object.assign(new Error('Synthetic permission denial'), { code: 'EACCES' });
+    return original(path);
+  });
+  try {
+    const skippedRoots: SkippedTranscriptRoot[] = [];
+    expect(discoverTranscriptFiles(roots, { skippedRoots })).toEqual([]);
+    expect(skippedRoots).toEqual([{ format: 'codex', root, reason: 'unreadable' }]);
+    skippedRoots.length = 0; denied = nested;
+    expect(discoverTranscriptFiles(roots, { skippedRoots }).map(file => file.path)).toEqual([publicFile]);
+    expect(skippedRoots).toEqual([]);
+  } finally { listing.mockRestore(); }
 });

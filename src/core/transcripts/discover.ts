@@ -55,13 +55,13 @@ export interface DiscoverOpts {
 }
 
 /** Recursively list regular files under root (lstat: symlinks are skipped). */
-function walk(dir: string, out: string[], depth = 0): void {
-  if (depth > 6) return; // harness layouts are shallow; don't wander
+function walk(dir: string, out: string[], depth = 0): boolean {
+  if (depth > 6) return true; // harness layouts are shallow; don't wander
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return;
+    return false;
   }
   for (const name of entries) {
     const p = join(dir, name);
@@ -75,6 +75,7 @@ function walk(dir: string, out: string[], depth = 0): void {
     if (st.isDirectory()) walk(p, out, depth + 1);
     else if (st.isFile()) out.push(p);
   }
+  return true;
 }
 
 export function discoverTranscriptFiles(roots?: HarnessRoot[], opts: DiscoverOpts = {}): DiscoveredFile[] {
@@ -107,7 +108,10 @@ export function discoverTranscriptFiles(roots?: HarnessRoot[], opts: DiscoverOpt
       continue;
     }
     const files: string[] = [];
-    walk(root, files);
+    if (!walk(root, files)) {
+      opts.skippedRoots?.push({ format, root, reason: 'unreadable' });
+      continue;
+    }
     for (const p of files) {
       if (!p.endsWith(extension)) continue;
       if (isOpenclawCheckpointFile(p)) continue;

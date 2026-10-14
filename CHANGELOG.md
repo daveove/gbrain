@@ -27,7 +27,7 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Fixed
 
 - Grouped publication takes brain counters before daily-memory job locks and queues affected days in global order across members, avoiding same-day group/single handoff deadlocks.
-- Transcript discovery retains symlinked legacy harness roots while rejecting symlinked Pi/OMP/Cursor roots and their nightly overrides; `transcripts status` reports skipped roots in text and JSON.
+- Transcript discovery retains symlinked legacy harness roots while rejecting symlinked Pi/OMP/Cursor roots and their nightly overrides; `transcripts status` reports skipped roots, including unreadable directory listings, in text and JSON.
 - Admin Graph recentring draws all new nodes and edges immediately, even when animation frames are paused. A timer settles the layout independently of animation frames.
 - Preserve current foreground embedding/image/OCR cap stops and projection healing while carrying original budget refusals through callbacks and image imports; disable unmetered SDK retries inside tracked calls. Low-to-high retrieval retries retain the same lazily-started query-embedding deadline.
 - Private source exports and retrieval snapshots under `/out/` remain untracked, and secret scanning rejects an invalid Git range before dispatching Gitleaks.
