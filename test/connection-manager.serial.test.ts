@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from 'bun:test';
 import { withEnv } from './helpers/with-env.ts';
+import { resolveSessionTimeouts } from '../src/core/db.ts';
 import {
   isSupabasePoolerUrl,
   deriveDirectUrl,
@@ -570,4 +571,35 @@ describe('ConnectionManager — session-pooler retry on unreachable direct host 
     expect(attempts.length).toBe(1); // no session retry on operator overrides
     expect(cm.isKillSwitchActive()).toBe(true);
   }, 20000);
+});
+
+describe('DAV-6928 migrate-only startup GUC compatibility', () => {
+  const env = { GBRAIN_CLIENT_CHECK_INTERVAL: undefined, GBRAIN_STATEMENT_TIMEOUT: undefined,
+    GBRAIN_IDLE_TX_TIMEOUT: undefined, GBRAIN_PREPARE: undefined };
+  for (const database_url of [
+    'postgresql://postgres@127.0.0.1:5432/gbrain_test',
+    'postgresql://postgres@fixture.pooler.supabase.com:5432/gbrain_test',
+  ]) {
+    test(`session route enables the scoped disconnect check: ${database_url}`, async () => withEnv(env, () => {
+      expect(resolveSessionTimeouts({ database_url, migrationStatementTimeoutMs: 1_800_000 }))
+        .toMatchObject({ statement_timeout: '1800000', client_connection_check_interval: '1000' });
+    }));
+  }
+  for (const database_url of [
+    'postgresql://postgres@127.0.0.1:6543/gbrain_test',
+    'postgresql://postgres@127.0.0.1:6432/gbrain_test?prepare=false',
+  ]) {
+    test(`transaction route avoids an unsupported startup GUC: ${database_url}`, async () => withEnv(env, () => {
+      const settings = resolveSessionTimeouts({ database_url, migrationStatementTimeoutMs: 1_800_000 });
+      expect(settings.statement_timeout).toBe('1800000');
+      expect(settings).not.toHaveProperty('client_connection_check_interval');
+    }));
+    test(`transaction route preserves the existing explicit opt-in: ${database_url}`, async () =>
+      withEnv({ ...env, GBRAIN_CLIENT_CHECK_INTERVAL: '500' }, () => {
+        expect(resolveSessionTimeouts({ database_url, migrationStatementTimeoutMs: 1_800_000 }).client_connection_check_interval).toBe('500');
+      }));
+  }
+  test('ordinary startup options retain their five-minute budget and opt-in disconnect check', async () => withEnv(env, () => {
+    expect(resolveSessionTimeouts()).toEqual({ statement_timeout: '5min', idle_in_transaction_session_timeout: '5min' });
+  }));
 });

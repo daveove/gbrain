@@ -400,13 +400,7 @@ export class PostgresEngine implements BrainEngine {
       // keep orphan pgbouncer backends from holding locks for hours when the
       // postgres.js client disconnects mid-transaction. See resolveSessionTimeouts
       // in db.ts for context + env var overrides.
-      const timeouts = db.resolveSessionTimeouts();
-      if (config.migrationStatementTimeoutMs !== undefined) {
-        timeouts.statement_timeout = String(config.migrationStatementTimeoutMs);
-        // PG14+: detect closed deadline sockets during long statements, not
-        // merely on the next result write. No separate CancelRequest client.
-        timeouts.client_connection_check_interval = '1000';
-      }
+      const timeouts = db.resolveSessionTimeouts(config);
       const opts: Record<string, unknown> = {
         max: size,
         idle_timeout: 20,

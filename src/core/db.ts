@@ -422,7 +422,7 @@ export function poolHealthOptions(hooks: PoolHealthHooks | undefined, statementT
   };
 }
 
-export function resolveSessionTimeouts(): Record<string, string> {
+export function resolveSessionTimeouts(config?: Pick<EngineConfig, 'database_url' | 'migrationStatementTimeoutMs'>): Record<string, string> {
   const out: Record<string, string> = {};
   const add = (envKey: string, gucKey: string, defaultVal: string) => {
     const raw = process.env[envKey];
@@ -436,6 +436,13 @@ export function resolveSessionTimeouts(): Record<string, string> {
   // managed pooler tiers reject unknown startup parameters. Users can enable
   // it explicitly once they know their Postgres version supports it.
   add('GBRAIN_CLIENT_CHECK_INTERVAL', 'client_connection_check_interval', '');
+  if (config?.migrationStatementTimeoutMs !== undefined) {
+    out.statement_timeout = String(config.migrationStatementTimeoutMs);
+    // Transaction-mode poolers reject this startup parameter unless configured
+    // to ignore it. Preserve their existing explicit opt-in; known session
+    // routes can detect our closed deadline socket during a long statement.
+    if (config.database_url && resolvePrepare(config.database_url) !== false) out.client_connection_check_interval = '1000';
+  }
   return out;
 }
 

@@ -494,11 +494,13 @@ deadline.
 
 On expiry, the runner immediately closes its owned read/direct sockets and
 waits for its migration work to settle before returning failure. PostgreSQL
-14+ `client_connection_check_interval=1000` on these private connections lets
+14+ `client_connection_check_interval=1000` on known direct/session routes lets
 the server notice the closed socket during a long statement, with the SQL
-statement timeout as a backstop. Use a direct or session-mode connection
-(Supabase session pooler port 5432), not transaction pooling that discards
-startup settings. A timeout can leave durable earlier migrations and an
+statement timeout as a backstop. Transaction-mode startup packets preserve the
+existing explicit `GBRAIN_CLIENT_CHECK_INTERVAL` opt-in instead of sending a
+GUC their pooler may reject. Use a direct or session-mode connection (Supabase
+session pooler port 5432), not transaction pooling that discards startup
+settings, for the coordinated server-side deadline. A timeout can leave durable earlier migrations and an
 INVALID concurrent index; rerun the same `init --migrate-only` after the failed
 owned statement has stopped, or use the doctor-named native repair for an
 already-stamped index.
