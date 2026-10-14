@@ -7,6 +7,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { dispatchToolCall } from '../src/mcp/dispatch.ts';
+import { OperationError, type OperationContext } from '../src/core/ops/contract.ts';
+import { rethrowNamingRevisionSource } from '../src/core/ops/put-page-revision-source.ts';
+import { __resetPrivateVisibilityCacheForTests, REMOTE_PRIVATE_PAGES_KEY } from '../src/core/search/private-visibility.ts';
 
 let engine: PGLiteEngine;
 const ctx = { remote: true, transport: 'stdio' as const, sourceId: 'default' };
@@ -40,4 +43,42 @@ test('a missing expected_revision and a stale one report different conflicts', a
     message: 'The page changed after it was read. Read its current revision before retrying.' });
 
   expect(await engine.readPageSnapshot(slug, { sourceId: 'default' })).toEqual(before);
+});
+
+// Owner-only is a readable private-page opt-out, not a blanket private filter.
+// The dispatch conflict test above does not cover cross-source hints. Exercise
+// the existing helper against real snapshots, without another production seam.
+test.each([
+  { slug: 'notes/private-revision-hint', frontmatter: { visibility: 'private' }, visible: true },
+  { slug: 'daily-memory/2026-10-14', frontmatter: { dream_generated: true }, visible: false },
+  { slug: 'source-records/revision-example', frontmatter: { dream_generated: true,
+    source_record_id: 'synthetic-record', source_record_type: 'meeting', source_record_ref: 'synthetic-ref' }, visible: false },
+])('owner-only revision hints disclose only readable sources for $slug', async ({ slug, frontmatter, visible }) => {
+  const previous = await engine.getConfig(REMOTE_PRIVATE_PAGES_KEY);
+  await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+  __resetPrivateVisibilityCacheForTests();
+  try {
+    await engine.putPage(slug, { type: 'note', title: 'Synthetic revision hint', compiled_truth: 'Synthetic body', frontmatter });
+    const snapshot = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
+    const error = new OperationError('revision_conflict', 'Synthetic revision conflict', 'Original suggestion');
+    const hintContext: OperationContext = {
+      engine, remote: true, sourceId: 'revision-write-example', config: { engine: engine.kind }, dryRun: false,
+      logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'synthetic-token', clientId: 'synthetic-revision-client', scopes: ['read'], sourceId: 'revision-write-example',
+        allowedSources: ['revision-write-example', 'default'] },
+    };
+    await expect(rethrowNamingRevisionSource(hintContext, 'revision-write-example',
+      { slug, expected_revision: snapshot.revision }, error)).rejects.toBe(error);
+    if (visible) {
+      expect(error.suggestion).toContain('in source default');
+      expect(error.fix).toMatchObject({ mcp: { tool: 'get_page', arguments: { slug, source_id: 'default', include_content: true } } });
+    } else {
+      expect(error.suggestion).toBe('Original suggestion');
+      expect(error.fix).toBeUndefined();
+    }
+  } finally {
+    if (previous === null) await engine.unsetConfig(REMOTE_PRIVATE_PAGES_KEY);
+    else await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, previous);
+    __resetPrivateVisibilityCacheForTests();
+  }
 });

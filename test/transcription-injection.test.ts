@@ -17,6 +17,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { execFileSync } from 'child_process';
 import { transcribe } from '../src/core/transcription.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 function ffmpegAvailable(): boolean {
   try { execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' });
@@ -41,7 +42,9 @@ describe('transcription — command injection (#245)', () => {
     const evil = join(dir, `clip$(touch ${sentinelName}).mp3`);
     writeFileSync(evil, Buffer.alloc(26 * 1024 * 1024)); // >25MB → large-file path
     try {
-      await transcribe(evil, { apiKey: 'dummy', provider: 'groq' });
+      // Subscription billing would refuse before ffprobe and make this vacuous.
+      await withEnv({ GBRAIN_AI_BILLING: 'api' }, () =>
+        transcribe(evil, { apiKey: 'dummy', provider: 'groq' }));
     } catch {
       // Expected: ffprobe/ffmpeg reject the garbage file, or transcribeFile has
       // no real key. We only care that no shell ran.

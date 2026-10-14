@@ -168,7 +168,7 @@ describe('daily memory refresh on source archive/restore', () => {
     }, { sourceId });
     await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
     const days = await refreshDailyMemoryAfterPageMutation(engine, {
-      sourceId, slug, operation: 'put_page', requestId: '11111111-1111-4111-8111-111111111111',
+      sourceId, slug, operation: 'put_page',
     });
     expect(days).toContain(day);
     const jobs = await engine.executeRaw<{ data: Record<string, unknown> }>(
@@ -178,7 +178,7 @@ describe('daily memory refresh on source archive/restore', () => {
     const rejected = spyOn(MinionQueue.prototype, 'add').mockRejectedValue(new Error('synthetic page refresh outage'));
     try {
       await expect(refreshDailyMemoryAfterPageMutation(engine, {
-        sourceId, slug, operation: 'delete_page', requestId: '22222222-2222-4222-8222-222222222222',
+        sourceId, slug, operation: 'delete_page',
       })).rejects.toThrow('synthetic page refresh outage');
     } finally {
       rejected.mockRestore();
@@ -194,7 +194,7 @@ describe('daily memory refresh on source archive/restore', () => {
     }, { sourceId });
     await engine.executeRaw("UPDATE pages SET effective_date=$1::date::timestamptz,effective_date_source='date' WHERE source_id=$2", [day, sourceId]);
     const days = await refreshDailyMemoryAfterPageMutation(engine, {
-      sourceId, slug, operation: 'put_page', requestId: '33333333-3333-4333-8333-333333333333',
+      sourceId, slug, operation: 'put_page',
       priorDays: ['2026-09-27'], timezone: 'UTC',
     });
     expect(days).toEqual(expect.arrayContaining(['2026-09-27', day]));

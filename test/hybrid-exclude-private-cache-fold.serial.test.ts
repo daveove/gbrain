@@ -35,6 +35,9 @@ const { configureGateway, resetGateway } = await import('../src/core/ai/gateway.
 const { PGLiteEngine } = await import('../src/core/pglite-engine.ts');
 const { importFromContent } = await import('../src/core/import-file.ts');
 const { serializeMarkdown } = await import('../src/core/markdown.ts');
+// Load after the embedding mock: a static import would eagerly load the hybrid
+// dependency graph before mock.module installs this suite's provider boundary.
+const { prepareSemanticCache, resolveCacheSearchMode } = await import('../src/core/search/hybrid/cache-stages.ts');
 
 setDefaultTimeout(30_000);
 
@@ -83,6 +86,21 @@ beforeEach(async () => {
 });
 
 describe('private visibility applies on every fresh wrapper read', () => {
+  // The disabled wrapper never prepares a handle, so directly exercise its
+  // retained key stage: coercing the posture here loses owner-only even when
+  // knobsHash itself is correct. This uses the existing stage, not a new seam.
+  test('cache preparation preserves distinct true, false and owner-only keys', async () => {
+    const { resolvedForCache, knobsHash } = await resolveCacheSearchMode(engine, {});
+    const hashes = [];
+    for (const excludePrivate of [true, false, 'owner-only'] as const) {
+      const handle = await prepareSemanticCache(engine, 'builder', { excludePrivate }, resolvedForCache, knobsHash);
+      hashes.push(handle.cacheKnobsHash);
+    }
+    expect(new Set(hashes).size).toBe(3);
+    const omitted = await prepareSemanticCache(engine, 'builder', {}, resolvedForCache, knobsHash);
+    expect(omitted.cacheKnobsHash).toBe(hashes[1]);
+  });
+
   test('repeated remote-default reads stay uncached and never expose private pages', async () => {
     let firstMeta: HybridSearchMeta | undefined;
     const first = await hybridSearchCached(engine, 'builder', {

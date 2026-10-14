@@ -38,6 +38,29 @@ describe('applyAliasHop', () => {
     expect((await engine.resolveAliases(['revoked alias'], { sourceId: 'default' })).get('revoked alias')?.[0].slug).toBe(page.slug);
   });
 
+  // Owner-only hydration must preserve the opt-out without exposing generated
+  // aggregates. Boolean-only coverage above cannot catch a truthy string filter;
+  // this exercises the existing alias injection path without a new seam.
+  test('owner-only alias injection includes ordinary private pages but hides owner aggregates', async () => {
+    const privateSlug = 'notes/private-alias-example';
+    const aggregateSlug = 'daily-memory/2026-10-14';
+    await engine.putPage(privateSlug, { type: 'note', title: 'Private example',
+      compiled_truth: 'ORDINARY_PRIVATE_ALIAS', frontmatter: { visibility: 'private' } });
+    await engine.putPage(aggregateSlug, { type: 'note', title: 'Owner aggregate example',
+      compiled_truth: 'OWNER_AGGREGATE_ALIAS', frontmatter: { dream_generated: true } });
+    for (const slug of [privateSlug, aggregateSlug]) {
+      await engine.setPageAliases(slug, 'default', ['visibility alias']);
+    }
+
+    const ownerOnly = await applyAliasHop(engine, [], 'visibility alias', { sourceId: 'default', excludePrivate: 'owner-only' });
+    expect(ownerOnly.map(row => row.slug)).toEqual([privateSlug]);
+    expect(ownerOnly[0].alias_hit).toBe(true);
+    expect(ownerOnly[0].chunk_text).toContain('ORDINARY_PRIVATE_ALIAS');
+    expect(await applyAliasHop(engine, [], 'visibility alias', { sourceId: 'default', excludePrivate: true })).toEqual([]);
+    const trusted = await applyAliasHop(engine, [], 'visibility alias', { sourceId: 'default', excludePrivate: false });
+    expect(trusted.map(row => row.slug).sort()).toEqual([aggregateSlug, privateSlug].sort());
+  });
+
   test('alias-injected excerpts strip every protected take fence', async () => {
     await engine.putPage('notes/body-example', { type: 'note', title: 'Public', compiled_truth: '<!--- gbrain:takes:begin -->\nSECRET_ALIAS_TAKE\n<!--- gbrain:takes:end -->\nPUBLIC_ALIAS_EXCERPT' });
     await engine.setPageAliases('notes/body-example', 'default', ['public alias']);

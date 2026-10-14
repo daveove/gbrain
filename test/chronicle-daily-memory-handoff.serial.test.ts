@@ -37,8 +37,8 @@ test('refresh day follows brain timezone rather than event slug or projection UT
   expect((await extract()).events_written).toBe(1);
   const [event] = await events();
   expect(event.slug).toStartWith('life/events/2026-09-20-');
-  expect((await jobs()).some(job => job.data.daily_memory_dates?.includes('2026-09-21'))).toBe(true);
-  expect((await jobs()).some(job => job.data.daily_memory_dates?.includes('2026-09-20'))).toBe(false);
+  expect((await jobs()).some(job => job.data.daily_memory_date === '2026-09-21')).toBe(true);
+  expect((await jobs()).some(job => job.data.daily_memory_date === '2026-09-20')).toBe(false);
   const queue = new MinionQueue(engine);
   const child = await queue.claim('chronicle-day-lock', 60_000, 'default', ['autopilot-daily-memory']);
   if (!child) throw new Error('Expected accepted historical refresh');
@@ -51,19 +51,20 @@ test('rejected settlement rolls back event, projection and accepted child; retry
   const original = MinionQueue.prototype.add;
   let calls = 0;
   const add = spyOn(MinionQueue.prototype, 'add').mockImplementation(async function(this: MinionQueue, ...args: Parameters<MinionQueue['add']>) {
-    if (++calls === 2) throw new Error('synthetic chronicle settlement outage');
-    return original.call(this, ...args);
+    calls++;
+    await original.call(this, ...args);
+    throw new Error('synthetic chronicle settlement outage');
   });
   try { await expect(extract()).rejects.toThrow('synthetic chronicle settlement outage'); }
   finally { add.mockRestore(); }
-  expect(calls).toBe(2);
+  expect(calls).toBe(1);
   expect(await events()).toHaveLength(0);
   expect(await engine.executeRaw('SELECT id FROM timeline_entries WHERE event_page_id IS NOT NULL')).toHaveLength(0);
   expect(await jobs()).toHaveLength(0);
   await extract();
   expect(await events()).toHaveLength(1);
   expect(await engine.executeRaw('SELECT id FROM timeline_entries WHERE event_page_id IS NOT NULL')).toHaveLength(1);
-  expect(await jobs()).toHaveLength(2);
+  expect(await jobs()).toHaveLength(1);
 });
 
 test('re-publication retains an existing event prior day alongside its new effective day', async () => {
@@ -78,7 +79,7 @@ test('re-publication retains an existing event prior day alongside its new effec
     WHERE p.source_id=$1 AND p.slug=$2`, [sourceId, slug, CHRONICLE_EXTRACTOR_VERSION, event.slug]);
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-18T00:00:00Z'::timestamptz WHERE source_id=$1 AND slug=$2", [sourceId, event.slug]);
   expect((await extract()).events_written).toBe(1);
-  expect((await jobs()).some(job => ['2026-09-18', '2026-09-21'].every(day => job.data.daily_memory_dates?.includes(day)))).toBe(true);
+  expect((await jobs()).map(job => job.data.daily_memory_date)).toEqual(expect.arrayContaining(['2026-09-18', '2026-09-21']));
   expect(await events()).toHaveLength(1);
   expect(await engine.executeRaw('SELECT id FROM timeline_entries WHERE event_page_id IS NOT NULL')).toHaveLength(1);
 });

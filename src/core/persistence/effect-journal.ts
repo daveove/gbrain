@@ -40,7 +40,7 @@ export async function captureDailyMemoryPreimage(tx: BrainEngine, row: WriteRequ
   const slugs = [row.slug];
   if (typeof renamed?.slug === 'string') slugs.push(renamed.slug);
   prepared.dailyMemoryTimezone = timezone;
-  prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, slugs, { timezone });
+  prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, slugs, { timezone, recoverHistory: false });
 }
 
 /**
@@ -103,11 +103,10 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
       sourceId: row.source_id,
       slug: row.slug,
       operation: dailyOperation,
-      requestId: row.id,
       priorDays: prepared?.dailyMemoryPriorDays,
       timezone: prepared?.dailyMemoryTimezone,
     }));
-    if (days.length) outcome.daily_memory_affected_dates = days;
+    if (days.length && !row.authority?.remote) outcome.daily_memory_affected_dates = days;
   }
 }
 

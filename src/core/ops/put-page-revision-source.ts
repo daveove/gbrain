@@ -1,7 +1,7 @@
 import { OperationError, type OperationContext } from './contract.ts';
 import { federatedSearchScope } from './context.ts';
 import { readFix } from './op-fix.ts';
-import { isPrivatePage, resolveExcludePrivatePages } from '../search/private-visibility.ts';
+import { isPageHidden, resolveExcludePrivatePages } from '../search/private-visibility.ts';
 
 /**
  * Rethrows a put_page failure. A revision_conflict whose expected_revision is
@@ -23,7 +23,7 @@ export async function rethrowNamingRevisionSource(ctx: OperationContext, writeSo
     for (const { source_id: other } of candidates) {
       try { federatedSearchScope(ctx, other); } catch { continue; }
       const snapshot = await ctx.engine.readPageSnapshot(slug, { sourceId: other, excludePrivate });
-      if (!snapshot || snapshot.revision !== expected || (excludePrivate && isPrivatePage(snapshot.page))) continue;
+      if (!snapshot || snapshot.revision !== expected || isPageHidden(snapshot.page, excludePrivate)) continue;
       error.suggestion = `Page ${slug} is at exactly this expected_revision in source ${other}, so it was probably read there; this write went to source ${writeSource}. `
         + `Re-read it with source_id ${other}; a write to that page must carry source_id ${other} and the revision get_page returns.`;
       error.fix = readFix(`Reads page ${slug} from source ${other}, where its revision matches the one this write sent.`,

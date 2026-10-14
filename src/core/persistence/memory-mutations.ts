@@ -218,7 +218,7 @@ async function refuseForgetReachingOtherCopies(tx: BrainEngine, sourceId: string
       AND (u.entity_slug IS NULL OR l.entity_slug=u.entity_slug)
       AND l.expired_at IS NULL AND (l.valid_until IS NULL OR l.valid_until > now())
       AND gbrain_fact_fingerprint(l.fact)=gbrain_fact_fingerprint(u.fact)
-    WHERE u.id=$1 AND u.source_id=$2 AND NOT (${privateProvenanceFilterFragment('l')}) LIMIT 1`, [id, sourceId]);
+    WHERE u.id=$1 AND u.source_id=$2 AND NOT (${privateProvenanceFilterFragment('l', excludePrivate)}) LIMIT 1`, [id, sourceId]);
   if (!hidden.length) return;
   throw verbError('invalid_params',
     `claim_linked: the same claim as fact #${id} is active elsewhere in this brain. Forgetting #${id} would withdraw it there too, so nothing was forgotten.`,

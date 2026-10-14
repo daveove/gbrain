@@ -8,6 +8,7 @@ import { expect } from 'bun:test';
 import type { BrainEngine } from '../../src/core/engine.ts';
 import { dispatchToolCall } from '../../src/mcp/dispatch.ts';
 import { FACT_WITHDRAWN_MESSAGE } from '../../src/core/facts/withdrawal.ts';
+import { REMOTE_PRIVATE_PAGES_KEY, __resetPrivateVisibilityCacheForTests } from '../../src/core/search/private-visibility.ts';
 
 const CLAIM = 'Acme Example renewed for three years at 40 seats.';
 const ACTIVE = 'Acme Example opened a second office in Lisbon.';
@@ -30,9 +31,9 @@ async function seedPages(engine: BrainEngine): Promise<void> {
 }
 
 /** A fact about a visible entity whose provenance is a private page. */
-async function insertHiddenSourced(engine: BrainEngine, entity: string, sourcePage: string): Promise<number> {
+async function insertHiddenSourced(engine: BrainEngine, entity: string, sourcePage: string, claim = CLAIM): Promise<number> {
   const [row] = await engine.executeRaw<{ id: number }>(`INSERT INTO facts(source_id,fact,kind,visibility,entity_slug,source_markdown_slug,source,confidence,valid_from)
-    VALUES ('default',$1,'fact','world',$2,$3,'meeting notes',1,now()) RETURNING id`, [CLAIM, entity, sourcePage]);
+    VALUES ('default',$1,'fact','world',$2,$3,'meeting notes',1,now()) RETURNING id`, [claim, entity, sourcePage]);
   return Number(row!.id);
 }
 const active = async (engine: BrainEngine, id: number) =>
@@ -80,6 +81,36 @@ export async function linkedForgetKeepsHiddenCopies(engine: BrainEngine): Promis
   const local = await call(engine, 'forget', { id: String(visible.body.id) }, 'local');
   expect(local.isError).toBe(false);
   expect(local.body.expired).toBe(true);
+}
+
+/** Operator opt-out permits ordinary private provenance, never generated owner aggregates. */
+export async function linkedForgetHonorsOwnerOnlyVisibility(engine: BrainEngine): Promise<void> {
+  await seedPages(engine);
+  const hiddenId = await insertHiddenSourced(engine, 'crm/acme-example', 'crm/hidden-co');
+  const visible = await call(engine, 'remember', { fact: CLAIM, entity: 'crm/acme-example', provenance: 'call notes' });
+  await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+  __resetPrivateVisibilityCacheForTests();
+  try {
+    const allowed = await call(engine, 'forget', { id: String(visible.body.id) });
+    expect(allowed.isError).toBe(false);
+    expect(allowed.body.expired).toBe(true);
+    expect(await active(engine, hiddenId)).toBe(false);
+
+    const ownerSlug = 'daily-memory/2026-03-03';
+    await engine.putPage(ownerSlug, { type: 'note', title: 'Synthetic owner aggregate',
+      compiled_truth: 'Synthetic generated aggregate.', frontmatter: { dream_generated: true } });
+    const ownerId = await insertHiddenSourced(engine, 'crm/acme-example', ownerSlug, ACTIVE);
+    const visibleOwnerClaim = await call(engine, 'remember', { fact: ACTIVE, entity: 'crm/acme-example', provenance: 'call notes' });
+    expect(visibleOwnerClaim.body.status).toBe('inserted');
+    const refused = await call(engine, 'forget', { id: String(visibleOwnerClaim.body.id) });
+    expect(refused.body.message).toBe(GENERIC_CLAIM_LINKED(visibleOwnerClaim.body.id));
+    expect(JSON.stringify(refused.body)).not.toContain(ownerSlug);
+    expect(await active(engine, ownerId)).toBe(true);
+    expect(await active(engine, Number(visibleOwnerClaim.body.id))).toBe(true);
+  } finally {
+    await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+    __resetPrivateVisibilityCacheForTests();
+  }
 }
 
 /** 1b: a withdrawal backed only by rows the caller cannot read refuses exactly as a page the caller may not see does. */

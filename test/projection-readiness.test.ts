@@ -180,6 +180,28 @@ describe('projection readiness cache', () => {
     expect(c.probes()).toBe(scopes.length);
   });
 
+  // Boolean folding aliases owner-only to the unrestricted answer. The existing
+  // scope-input test covers only true; use real visible pending rows and the
+  // existing counted probe to prove all three keys and their reused answers.
+  test('true, false and owner-only readiness scopes have separate cached answers', async () => {
+    await seed('markdown', 'source-a', 'ordinary-private', { visibility: 'private' });
+    await seed('markdown', 'default', 'daily-memory/2026-10-14', { dream_generated: true });
+    const c = counted();
+    for (const [sourceId, expected] of [
+      ['source-a', ['ready', 'projection_pending', 'projection_pending']],
+      ['default', ['ready', 'projection_pending', 'ready']],
+    ] as const) {
+      for (let repeat = 0; repeat < 2; repeat++) {
+        const statuses = [];
+        for (const excludePrivate of [true, false, 'owner-only'] as const) {
+          statuses.push((await probeProjectionReadiness(c.engine, { sourceId, excludePrivate })).status);
+        }
+        expect(statuses).toEqual([...expected]);
+      }
+    }
+    expect(c.probes()).toBe(6);
+  });
+
   test('restoring an archived source with pending pages invalidates a cached ready', async () => {
     await seed('markdown', 'source-b', 'pending');
     await engine.executeRaw("UPDATE sources SET archived=true WHERE id='source-b'");

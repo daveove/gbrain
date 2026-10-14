@@ -176,7 +176,7 @@ export async function prepareSemanticCache(
     // serving old-classification rows for the rest of the cache TTL.
     intentPatterns: intentStateForCache.fingerprint,
     // Retained storage-key shape; semantic response reuse is disabled below.
-    excludePrivate: opts?.excludePrivate === true,
+    excludePrivate: opts?.excludePrivate ?? false,
     // v=27 (E5b) — the resolved gate + this query's intent class, classified
     // by the SAME pattern-aware banks bare hybridSearch resolves (above).
     adaptiveReturn: {

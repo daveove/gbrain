@@ -40,6 +40,9 @@ identifiers and attribution are available in the pre-removal Git revision
 - Unchanged standalone imports leave the generation clock untouched. Genuine stale link/mention debt is queued as `extract-stale-links`; the nightly one-shot writer drains only that registered job under bounded job/time caps on its existing connection, preserving deferred work and same-name continuations. Delegated imports retain bounded inline recovery at every size without gaining descendant-submission authority; incomplete sweeps retain debt for a later run.
 - Use the live independent embedding column's billing policy for both idle eligibility and effect claims, keeping paid work unclaimed and local recipes runnable on the same bounded connection route.
 - Gate generated daily indexes through the native external-input trust policy on both managed and unmanaged publication paths; repeat publication compares the canonical rendered content without unnecessary revisions. On a fresh managed brain the daily-memory system index is created through writer administration instead of a raw insert the topology guard refuses, so the first daily job no longer fails and retries.
+- Coalesce unclaimed publication daily-index refreshes by calendar day and pinned timezone, retaining one successor after a render is claimed. Ordinary mutations refresh their guarded preimage and current days without scanning every historical version; import/sync recovery still discovers historical debt.
+- Keep affected daily-index dates out of remote write receipts. Alias resolution, revision hints, search cache identities and forget guards preserve the ordinary-private versus owner-aggregate visibility distinction.
+- Daily drain budget expiry immediately defers unfinished work without consuming attempts or stalls and does not fail the nightly run; genuine job failures and shutdown still propagate.
 
 ## [0.60.221.0] - 2026-10-14
 

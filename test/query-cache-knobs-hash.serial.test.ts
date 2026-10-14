@@ -398,12 +398,33 @@ describe('excludePrivate cache isolation (#4352 follow-up)', () => {
   // (private-excluding) lookup, and vice versa.
   const trustedHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { excludePrivate: false });
   const excludingHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { excludePrivate: true });
+  const ownerOnlyHash = knobsHash(resolveSearchMode({ mode: 'balanced' }), { excludePrivate: 'owner-only' });
 
   test('postures produce different hashes; undefined keys like the trusted (included) default', () => {
-    expect(trustedHash).not.toBe(excludingHash);
-    // Mirrors enforcement's strict `=== true` predicate: legacy callers that
-    // don't thread the posture share the trusted rows.
+    expect(new Set([trustedHash, excludingHash, ownerOnlyHash]).size).toBe(3);
+    // Legacy callers that omit the posture share only the trusted rows.
     expect(knobsHash(resolveSearchMode({ mode: 'balanced' }))).toBe(trustedHash);
+  });
+
+  // Existing boolean isolation does not exercise the owner-only posture. These
+  // real cache writes catch both hash collisions and cross-posture reuse with
+  // no additional production seam.
+  test('owner-only cache rows never cross-serve true or false postures', async () => {
+    const cache = new SemanticQueryCache(engine);
+    const emb = makeEmbedding(12);
+    const hashes = [trustedHash, excludingHash, ownerOnlyHash];
+    for (const [index, hash] of hashes.entries()) {
+      await engine.executeRaw('DELETE FROM query_cache');
+      const results = makeResults(`posture-${index}`, index + 1);
+      await cache.store('synthetic visibility example', emb, results, {
+        vector_enabled: true, detail_resolved: null, expansion_applied: false,
+      }, { knobsHash: hash });
+      for (const candidate of hashes) {
+        const lookup = await cache.lookup(emb, { knobsHash: candidate });
+        expect(lookup.hit).toBe(candidate === hash);
+        if (candidate === hash) expect(lookup.results).toEqual(results);
+      }
+    }
   });
 
   test('private-included (trusted) write is NOT served to a private-excluding lookup', async () => {

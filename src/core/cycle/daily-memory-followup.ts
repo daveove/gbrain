@@ -140,7 +140,7 @@ export async function dailyMemoryDaysForSlugs(
   engine: BrainEngine,
   sourceId: string,
   slugs: string[],
-  opts: { signal?: AbortSignal; timezone?: string } = {},
+  opts: { signal?: AbortSignal; timezone?: string; recoverHistory?: boolean } = {},
 ): Promise<string[]> {
   if (slugs.length === 0) return [];
   const zone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
@@ -189,6 +189,9 @@ export async function dailyMemoryDaysForSlugs(
       if (prior.length < 100) break;
       cursor = prior[prior.length - 1].slug;
     }
+    // Ordinary publications already capture their preimage under page guards.
+    // Only recovery callers need to rediscover unbounded historical versions.
+    if (opts.recoverHistory === false) continue;
     // page_versions keep prior effective days when links were never extracted.
     let versionCursor = 0;
     for (;;) {
@@ -328,7 +331,7 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 /** Accept historical index work inside the page publication transaction. */
 export async function refreshDailyMemoryAfterPageMutation(
   engine: BrainEngine,
-  opts: { sourceId: string; slug: string; operation: string; requestId: string; priorDays?: string[]; timezone?: string },
+  opts: { sourceId: string; slug: string; operation: string; priorDays?: string[]; timezone?: string },
 ): Promise<string[]> {
   if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
   if (!['put_page', 'edit_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(opts.operation)) return [];
@@ -340,12 +343,53 @@ export async function refreshDailyMemoryAfterPageMutation(
   const timezone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
     : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
   const days = [...new Set([...(opts.priorDays ?? []),
-    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone })])].sort();
+    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone, recoverHistory: false })])].sort();
   if (!days.length) return [];
-  await queueStandaloneSyncDailyMemory(engine, {
-    sourceId: opts.sourceId, commit: `page:${opts.operation}:${opts.slug}:${opts.requestId}`, days, timezone,
+  await engine.transaction(async tx => {
+    for (const day of days) await queuePendingDailyMemory(tx, day, timezone);
   });
   return days;
+}
+
+/** Reuse unclaimed day work; claimed/finished renders need a durable successor. */
+async function queuePendingDailyMemory(engine: BrainEngine, day: string, timezone: string): Promise<number> {
+  const queue = new MinionQueue(engine);
+  const data = { daily_memory_only: true, daily_memory_date: day, source_cycle_job_ids: [],
+    daily_memory_timezone: timezone };
+  const key = `autopilot-daily:${day}:${timezone}:pending`;
+  let nextKey = key, locatedTip = false;
+  const visited = new Set<number>();
+  // Bound concurrent claim races, not the lifetime number of prior renders.
+  for (let races = 0; races < 8; races++) {
+    const accepted = await queue.add('autopilot-daily-memory', data, {
+      idempotency_key: nextKey, max_attempts: 2, timeout_ms: DAILY_MEMORY_JOB_TIMEOUT_MS,
+    });
+    if (!accepted || !Number.isSafeInteger(accepted.id) || accepted.id <= 0) break;
+    // Hold the pending row until publication commits. A worker that claimed
+    // between admission and this lock must receive a successor, not stale work.
+    const [job] = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
+      'SELECT id,status,data FROM minion_jobs WHERE id=$1 FOR UPDATE', [accepted.id]);
+    if (!job || !Object.entries(data).every(([field, value]) => JSON.stringify(job.data[field]) === JSON.stringify(value))
+      || !Number.isSafeInteger(job.id) || job.id <= 0) break;
+    if (['waiting', 'delayed'].includes(job.status)) return job.id;
+    if ((!TERMINAL.has(job.status) && job.status !== 'active') || visited.has(job.id)) break;
+    visited.add(job.id);
+    if (!locatedTip) {
+      locatedTip = true;
+      const prefix = `${key}:after:`;
+      const [tip] = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown>; idempotency_key: string }>(
+        `SELECT id,status,data,idempotency_key FROM minion_jobs WHERE name='autopilot-daily-memory'
+          AND (idempotency_key=$1 OR (starts_with(idempotency_key,$2)
+            AND substring(idempotency_key FROM length($2)+1) ~ '^[1-9][0-9]*$'))
+          ORDER BY id DESC LIMIT 1`, [key, prefix]);
+      if (!tip || !Object.entries(data).every(([field, value]) => JSON.stringify(tip.data[field]) === JSON.stringify(value))
+        || !Number.isSafeInteger(tip.id) || tip.id < job.id) break;
+      if (['waiting', 'delayed'].includes(tip.status)) { nextKey = tip.idempotency_key; continue; }
+      if (!TERMINAL.has(tip.status) && tip.status !== 'active') break;
+      nextKey = `${key}:after:${tip.id}`;
+    } else nextKey = `${key}:after:${job.id}`;
+  }
+  throw new Error('Daily memory publication handoff was not accepted');
 }
 
 /** After archive/restore, refresh every day that source still owns or used to own. */

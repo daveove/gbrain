@@ -10,7 +10,7 @@ import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { cardExcerptHidesWithdrawnRows, hiddenWithdrawalRefusesGenerically, linkedForgetKeepsHiddenCopies,
-  unlinkedForgetKeepsHiddenCopies } from './helpers/visibility-withdrawal-scenarios.ts';
+  linkedForgetHonorsOwnerOnlyVisibility, unlinkedForgetKeepsHiddenCopies } from './helpers/visibility-withdrawal-scenarios.ts';
 
 let engine: PGLiteEngine;
 let schemaVersion: string | null;
@@ -32,6 +32,7 @@ beforeEach(async () => {
 describe('remote forget refusals and entity cards respect visibility and withdrawal', () => {
   test('an unlinked forget keeps copies the caller cannot read, with one fixed refusal', () => unlinkedForgetKeepsHiddenCopies(engine));
   test('a linked forget keeps copies the caller cannot read', () => linkedForgetKeepsHiddenCopies(engine));
+  test('owner-only forget permits ordinary private provenance but protects generated owner copies', () => linkedForgetHonorsOwnerOnlyVisibility(engine));
   test('a withdrawal backed only by unreadable rows refuses as an unreadable page does', () => hiddenWithdrawalRefusesGenerically(engine));
   test('the card excerpt carries the withdrawal overlay', () => cardExcerptHidesWithdrawnRows(engine));
 });

@@ -6,6 +6,7 @@ import { extractStaleFromDB, STALE_TIME_BUDGET_MS } from '../src/commands/extrac
 import { dailyMemoryPoolSize, extractOneShotDailyMemory, lookbackRecoveryDays, lookbackWatermarkAfter, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import * as dailyFollowup from '../src/core/cycle/daily-memory-followup.ts';
 
 let engine: PGLiteEngine, version: string | null;
 beforeAll(async () => {
@@ -142,6 +143,37 @@ test('one-shot writer drains queued non-current autopilot-daily-memory jobs', as
   )).toHaveLength(0);
   expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='extract'")).toHaveLength(0);
   expect(extracted).toEqual([['daily-memory/2026-09-28', 'daily-memory/2026-09-30']]);
+});
+
+test('one-shot daily drain budget expiry retains debt and returns success before a later run completes it', async () => {
+  await seed('2026-09-30', 'notes/budget-current');
+  await seed('2026-09-28', 'notes/budget-historical');
+  const queue = new MinionQueue(engine);
+  const job = await queue.add('autopilot-daily-memory', {
+    daily_memory_only: true, daily_memory_date: '2026-09-28', source_cycle_job_ids: [],
+  }, { max_attempts: 2 });
+  const stalled = spyOn(dailyFollowup, 'runDailyMemoryJob').mockImplementation(async (_engine, claimed) => {
+    claimed.signal!.throwIfAborted();
+    await new Promise<void>((_resolve, reject) =>
+      claimed.signal!.addEventListener('abort', () => reject(claimed.signal!.reason), { once: true }));
+    throw new Error('Unreachable after abort');
+  });
+  try {
+    await withEnv({ GBRAIN_DAILY_MEMORY_DRAIN_MS: '1200' }, async () => {
+      const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', { extract: noExtract });
+      expect(result.day).toBe('2026-09-30');
+      expect(result.reason).not.toBe('error');
+    });
+  } finally { stalled.mockRestore(); }
+  const deferred = await queue.getJob(job.id);
+  expect(deferred?.status).toBe('delayed');
+  expect(deferred?.attempts_made).toBe(0);
+  expect(deferred?.stalled_counter).toBe(0);
+  expect(deferred?.lock_token).toBeNull();
+  await runOneShotDailyMemoryWrite(engine, '2026-09-30', { extract: noExtract });
+  expect((await queue.getJob(job.id))?.status).toBe('completed');
+  expect((await engine.getPage('daily-memory/2026-09-28', { sourceId: DAILY_MEMORY_SOURCE_ID }))?.compiled_truth)
+    .toContain('[[default:notes/budget-historical]]');
 });
 
 test('a failed queued day still extracts tonight\'s writes, then fails the run', async () => {

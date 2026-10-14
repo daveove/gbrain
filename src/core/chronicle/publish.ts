@@ -208,7 +208,7 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
           const again = judgeTarget(await tx.readPageSnapshot(ev.slug, { sourceId, includeDeleted: true }), owned);
           if (!again.write) throw supersededError(again.reason);
           const timezone = await resolveCycleTimeZone(tx);
-          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [ev.slug], { timezone });
+          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [ev.slug], { timezone, recoverHistory: false });
           const page = await tx.putPage(ev.slug, { type: 'event', title: ev.title, compiled_truth: ev.compiledTruth,
             frontmatter: { type: 'event', ...ev.frontmatter }, effective_date: safeDate(ev.when) }, { sourceId });
           if (projection) {
@@ -216,7 +216,7 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
             await recordProjectionFlag(tx, projectionGate, page.id, ev.day, sourceId);
           }
           await refreshDailyMemoryAfterPageMutation(tx, { sourceId, slug: ev.slug, operation: 'put_page',
-            requestId: `chronicle:${sourceId}:${ev.slug}:${page.content_hash}`, priorDays, timezone });
+            priorDays, timezone });
           return { result: undefined, rows: [{ table: 'pages', id: page.id, sourceId }] };
         });
       }
@@ -254,11 +254,11 @@ export async function publishChronicleGeneration(engine: BrainEngine, opts: {
           const live = await tx.readPageSnapshot(event.slug, { sourceId });
           if (!live || !owned.has(String(live.page.content_hash ?? ''))) return;
           const timezone = await resolveCycleTimeZone(tx);
-          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [event.slug], { timezone });
+          const priorDays = await dailyMemoryDaysForSlugs(tx, sourceId, [event.slug], { timezone, recoverHistory: false });
           await tx.softDeletePage(event.slug, { sourceId });
           await stampRetired(tx, sourceId, event.slug);
           await refreshDailyMemoryAfterPageMutation(tx, { sourceId, slug: event.slug, operation: 'delete_page',
-            requestId: `chronicle-retire:${sourceId}:${event.slug}:${event.revision}`, priorDays, timezone });
+            priorDays, timezone });
         });
       }
       result.retired.push(event.slug);

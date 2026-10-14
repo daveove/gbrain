@@ -9,7 +9,7 @@ import { isolatedPersistencePostgres } from '../helpers/persistence-postgres.ts'
 import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 import { disposePersistenceConsumer } from '../../src/core/persistence/service.ts';
 import { cardExcerptHidesWithdrawnRows, hiddenWithdrawalRefusesGenerically, linkedForgetKeepsHiddenCopies,
-  unlinkedForgetKeepsHiddenCopies } from '../helpers/visibility-withdrawal-scenarios.ts';
+  linkedForgetHonorsOwnerOnlyVisibility, unlinkedForgetKeepsHiddenCopies } from '../helpers/visibility-withdrawal-scenarios.ts';
 
 const d = hasDatabase() ? describe : describe.skip;
 let engine: PostgresEngine;
@@ -24,6 +24,7 @@ d('remote forget refusals and entity cards respect visibility and withdrawal (Po
 
   test('an unlinked forget keeps copies the caller cannot read, with one fixed refusal', () => unlinkedForgetKeepsHiddenCopies(engine), 60_000);
   test('a linked forget keeps copies the caller cannot read', () => linkedForgetKeepsHiddenCopies(engine), 60_000);
+  test('owner-only forget permits ordinary private provenance but protects generated owner copies', () => linkedForgetHonorsOwnerOnlyVisibility(engine), 60_000);
   test('a withdrawal backed only by unreadable rows refuses as an unreadable page does', () => hiddenWithdrawalRefusesGenerically(engine), 60_000);
   test('the card excerpt carries the withdrawal overlay', () => cardExcerptHidesWithdrawnRows(engine), 60_000);
 });

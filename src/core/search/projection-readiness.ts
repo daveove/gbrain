@@ -24,7 +24,7 @@ export function __resetProjectionReadinessCacheForTests(): void { readinessCache
 /** Every input the probe's SQL reads from the caller, normalized so equal scopes share one key. */
 function scopeKey(scope: ProjectionReadinessScope): string {
   const sorted = (values?: string[]) => values === undefined ? null : [...new Set(values)].sort();
-  return JSON.stringify([scope.sourceId ?? null, sorted(scope.sourceIds), scope.excludePrivate === true, scope.requireSafeChunks === true,
+  return JSON.stringify([scope.sourceId ?? null, sorted(scope.sourceIds), scope.excludePrivate ?? false, scope.requireSafeChunks === true,
     scope.pageKind ?? null, sorted(scope.types), sorted(scope.excludeSlugPrefixes)]);
 }
 

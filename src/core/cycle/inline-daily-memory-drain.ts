@@ -75,7 +75,13 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       // continuation that never received its configured runtime.
       const deadlineExceeded = message === 'Inline daily memory deadline exceeded'
         || abortReason === 'Inline daily memory deadline exceeded';
-      if (shutdown || leaseLost || renewalFailed || deadlineExceeded) throw error;
+      if (deadlineExceeded && !shutdown) {
+        if (!await queue.deferJob(job.id, token, 'Inline daily memory budget expired; debt retained', 0)) {
+          throw new Error('Inline daily memory deferral fence lost', { cause: error });
+        }
+        return processed;
+      }
+      if (shutdown || leaseLost || renewalFailed) throw error;
       const terminal = job.attempts_made + 1 >= job.max_attempts;
       const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));

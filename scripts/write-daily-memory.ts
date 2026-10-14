@@ -217,8 +217,8 @@ export async function runOneShotDailyMemoryWrite(
     drainError ??= error;
   }
   // Extract once after every write so the whole-brain link setup is paid once
-  // and stale generated indexes from earlier nights drain with tonight's. A
-  // failed or timed-out drain still extracts what was written, then fails.
+  // and stale generated indexes drain with tonight's. A failed job still
+  // extracts what was written, then fails; budget-deferred backlog is not failure.
   await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { ...extractDeps, signal: deps.signal });
   if (drainError) throw drainError;
   return result;

@@ -68,7 +68,7 @@ test('consumer bound preserves the remaining accepted jobs and forwards its dead
 });
 
 
-test('consumer deadline aborts without burning an attempt', async () => {
+test('consumer deadline defers debt and returns cleanly without burning an attempt', async () => {
   const queue = new MinionQueue(engine), day = '2026-01-24'; await seed(day);
   await writeDailyMemoryFromSources(engine, { date: day });
   const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2 });
@@ -78,11 +78,14 @@ test('consumer deadline aborts without burning an attempt', async () => {
     supplied = signal;
     signal!.throwIfAborted();
     await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
-  } })).rejects.toThrow('Inline daily memory deadline exceeded');
+  } })).resolves.toBe(0);
   expect(supplied?.aborted).toBe(true);
   const row = await queue.getJob(job.id);
-  expect(row?.status).toBe('active');
+  expect(row?.status).toBe('delayed');
   expect(row?.attempts_made).toBe(0);
+  expect(row?.stalled_counter).toBe(0);
+  expect(row?.lock_token).toBeNull();
+  expect(await drainInlineDailyMemory(engine, { afterWrite: async () => {} })).toBe(1);
   expect(row?.data.daily_memory_date).toBe(day);
 });
 
