@@ -18,12 +18,15 @@ identifiers and attribution are available in the pre-removal Git revision
 - Independent embedding columns keep separate vectors, model/input provenance and page signatures. `embed --embedding-column` stages text with the target model and document prefix without mutating the live embedding space or changing search selection.
 - Independent stale previews distinguish provider work from page-stamp-only restamps. Archived and active chunkless work are classified separately with source, skip and quarantine exclusions; images are excluded. Provider overlength failures never trigger the live model's chunk healing during staging.
 - Admin Graph explorer **Hide hubs** control (off by default; thresholds 500, 1,000 and 2,000). The owner-only neighbourhood API accepts `max_degree=N`, hiding non-center pages whose total stored link-row degree exceeds N, across both directions and all link types. Hubs are rejected server-side before scan, candidate and node caps and are not traversed; the center always stays visible. Degree probes read at most N+1 indexed rows per direction under the existing statement timeout.
+- Add subscription-only model billing (`ai_billing=subscription` / `GBRAIN_AI_BILLING=subscription`): paid API paths refuse before dispatch, effective billing is reported, workers refresh protected policy, and deferred embedding effects retain their attempts and vector identity. Native `codex-cli:` text generation requires stable Codex CLI 0.162.0+ and a fresh ChatGPT login, isolates tools/configuration/credentials, and never falls back to a paid API.
+- Shared evidence/context assembler and optional host-injected intake reader, with scoped opaque continuation cursors; stock GBrain engines do not create or expose an intake store.
+- Grok Bot digest guide covering confined grants, fenced daily writes, path-scoped Funnel exposure and revision-safe sections shared by multiple bots.
 
 ### Fixed
 
 - Admin Graph recentring draws all new nodes and edges immediately, even when animation frames are paused. A timer settles the layout independently of animation frames.
-- Add subscription-only model billing (`ai_billing=subscription` / `GBRAIN_AI_BILLING=subscription`): paid API paths refuse before dispatch, effective billing is reported, workers refresh protected policy, and deferred embedding effects retain their attempts and vector identity. Native `codex-cli:` text generation requires stable Codex CLI 0.162.0+ and a fresh ChatGPT login, isolates tools/configuration/credentials, and never falls back to a paid API.
 - Preserve current foreground embedding/image/OCR cap stops and projection healing while carrying original budget refusals through callbacks and image imports; disable unmetered SDK retries inside tracked calls. Low-to-high retrieval retries retain the same lazily-started query-embedding deadline.
+- Private source exports and retrieval snapshots under `/out/` remain untracked, and secret scanning rejects an invalid Git range before dispatching Gitleaks.
 
 ## [0.60.221.0] - 2026-10-14
 
