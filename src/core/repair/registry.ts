@@ -41,6 +41,7 @@ import { safeChunksRepair } from './safe-chunks.ts';
 import { contextualModeRepair } from './contextual-mode.ts';
 import { connectorCheckpointsRepair } from './connector-checkpoints.ts';
 import { requestIndexesRepair } from './request-indexes.ts';
+import { pageIndexesRepair } from './page-indexes.ts';
 import { connectorFencesRepair } from './connector-fences.ts';
 import { takeSupersessionRepair } from './take-supersession.ts';
 import { orphanBindingsRepair } from './orphan-bindings.ts';
@@ -115,6 +116,11 @@ const SPECS: Record<RepairKind, Omit<RepairKindSpec, 'kind'>> = {
     handler: requestIndexesRepair, embeds: 'none', checks: ['persistence_request_indexes'],
     summary: 'Create a missing managed sync request index, or drop an INVALID one and rebuild it (#5762), so sync checkpoints validate within their '
       + 'statement budget. Postgres builds CONCURRENTLY, one index at a time. No journal admission and no user data changes. Brain-wide.',
+  },
+  'page-indexes': {
+    handler: pageIndexesRepair, embeds: 'none', checks: ['page_indexes'],
+    summary: 'Create missing page name/title lookup indexes or rebuild INVALID leftovers from v240/v243, even on a current schema. '
+      + 'Postgres builds CONCURRENTLY, one index at a time; PGLite builds inline. No journal admission or user data changes. Brain-wide.',
   },
   'connector-fences': {
     handler: connectorFencesRepair, embeds: 'effect', checks: [],

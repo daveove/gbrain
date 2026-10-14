@@ -27,12 +27,12 @@ import { resolveChildCliInvocation } from '../../core/minions/job-isolation.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { buildGatewayConfig } from '../../core/ai/build-gateway-config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
+import { runInitSchemaWithRetry } from '../../core/init-schema-retry.ts';
 
-/** Default wall-clock guard for in-process initSchema. Matches the 600s cap
- *  the old `execSync('gbrain init --migrate-only', { timeout: 600_000 })` used,
- *  so a hung schema bring-up surfaces as a phase failure instead of wedging
- *  the whole cascade. */
-export const MIGRATE_ONLY_TIMEOUT_MS = 600_000;
+/** Migrate-only gets a 30-minute DDL/overall deadline. Ordinary engines retain
+ * their existing startup timeouts; this private engine is closed on expiry. */
+export const MIGRATE_ONLY_TIMEOUT_MS = 30 * 60 * 1000;
+const SUBPROCESS_TIMEOUT_MS = 600_000;
 
 /** Large stderr buffer for captured subprocess output. `execSync`'s default
  *  ~1MB maxBuffer overflows on long backfills (extract/repair) and turns a
@@ -73,15 +73,39 @@ export async function runMigrateOnlyCore(opts?: { timeoutMs?: number }): Promise
   configureGateway(buildGatewayConfig(config));
 
   const timeoutMs = opts?.timeoutMs ?? MIGRATE_ONLY_TIMEOUT_MS;
-  const engine = await createEngine(toEngineConfig(config));
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new MigrateOnlyError('migration deadline must be positive');
+  // A private one-connection read pool plus the existing one-connection DDL
+  // route (and at most one lock diagnostic) preserves the peak <= 3 footprint.
+  const engineConfig = {
+    ...toEngineConfig(config),
+    ...(config.engine === 'postgres' ? { poolSize: 1, migrationStatementTimeoutMs: timeoutMs } : {}),
+  };
+  const engine = await createEngine(engineConfig);
+  const deadline = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  let cancellation: Promise<void> | undefined;
   try {
-    await engine.connect(toEngineConfig(config));
-    const { runInitSchemaWithRetry } = await import('../../core/init-schema-retry.ts');
-    await withTimeout(
-      runInitSchemaWithRetry(engine).then(() => undefined),
-      timeoutMs,
-      `schema init timed out after ${Math.round(timeoutMs / 1000)}s`,
-    );
+    await engine.connect(engineConfig);
+    const work = runInitSchemaWithRetry(engine, { signal: deadline.signal });
+    const expired = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new MigrateOnlyError(`schema init timed out after ${Math.round(timeoutMs / 1000)}s`);
+        deadline.abort(error);
+        cancellation = engine.cancelSchemaInitialization?.() ?? engine.disconnect();
+        // Closing owned sockets, not a non-cancelling Promise.race. Do not
+        // return until the cancellation and the runner itself have settled.
+        cancellation.then(() => reject(error), reject);
+      }, timeoutMs);
+    });
+    try {
+      await Promise.race([work, expired]);
+    } finally {
+      clearTimeout(timer);
+      if (deadline.signal.aborted) {
+        await cancellation;
+        await work.catch(() => {});
+      }
+    }
   } finally {
     try { await engine.disconnect(); } catch { /* best-effort */ }
   }
@@ -131,7 +155,7 @@ export function runGbrainSubprocess(cmd: string, opts?: { timeoutMs?: number }):
     // nosemgrep: javascript.lang.security.detect-child-process.detect-child-process -- cmd is a fixed migration subcommand string from the orchestrators; gbrainChildCommand prefixes the running CLI (#5184)
     const out = execSync(gbrainChildCommand(cmd), {
       stdio: ['inherit', 'pipe', 'pipe'],
-      timeout: opts?.timeoutMs ?? MIGRATE_ONLY_TIMEOUT_MS,
+      timeout: opts?.timeoutMs ?? SUBPROCESS_TIMEOUT_MS,
       env: process.env,
       maxBuffer: SUBPROCESS_MAX_BUFFER,
       encoding: 'utf-8',
@@ -148,16 +172,3 @@ export function runGbrainSubprocess(cmd: string, opts?: { timeoutMs?: number }):
   }
 }
 
-/** Reject `p` if it doesn't settle within `ms`. The original promise keeps
- *  running (best-effort) but the caller sees a clear timeout error. */
-async function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new MigrateOnlyError(message)), ms);
-  });
-  try {
-    return await Promise.race([p, timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}

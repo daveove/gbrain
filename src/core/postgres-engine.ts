@@ -256,8 +256,12 @@ export class PostgresEngine implements BrainEngine {
    */
   connectionManager: ConnectionManager | null = null;
 
+  private _schemaInitializationCancelled = false;
+  get migrationStatementTimeoutMs(): number | undefined { return this._savedConfig?.migrationStatementTimeoutMs; }
+
   // Instance connection (for workers) or fall back to module global (backward compat)
   get sql(): ReturnType<typeof postgres> {
+    if (this._schemaInitializationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
     if (this._sql) return this._sql;
     // issue #1678: an instance-pool engine whose _sql went null (a mid-process
     // disconnect/reconnect, or a reaped socket) must NOT fall through to the
@@ -375,6 +379,7 @@ export class PostgresEngine implements BrainEngine {
 
   // Lifecycle
   async connect(config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager }): Promise<void> {
+    if (this._schemaInitializationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
     this.vectorIterativeScan = undefined;
     this.keywordStatementTimeout = undefined;
     this._savedConfig = config;
@@ -395,7 +400,7 @@ export class PostgresEngine implements BrainEngine {
       // keep orphan pgbouncer backends from holding locks for hours when the
       // postgres.js client disconnects mid-transaction. See resolveSessionTimeouts
       // in db.ts for context + env var overrides.
-      const timeouts = db.resolveSessionTimeouts();
+      const timeouts = db.resolveSessionTimeouts(config);
       const opts: Record<string, unknown> = {
         max: size,
         idle_timeout: 20,
@@ -429,6 +434,8 @@ export class PostgresEngine implements BrainEngine {
         readPoolOwnedExternally: true, // we own _sql; manager just routes
         onpoisoned: this.onPoisoned,
         health: this.poolHealth,
+        migrationStatementTimeoutMs: config.migrationStatementTimeoutMs,
+        directPoolSize: config.migrationStatementTimeoutMs !== undefined ? 1 : undefined,
       });
       this.connectionManager.setReadPool(this._sql);
     } else {
@@ -448,10 +455,25 @@ export class PostgresEngine implements BrainEngine {
           readPoolOwnedExternally: true, // db.ts owns the pool
           onpoisoned: this.onPoisoned,
           health: this.poolHealth,
+          migrationStatementTimeoutMs: config.migrationStatementTimeoutMs,
         });
         this.connectionManager.setReadPool(db.getConnection());
       }
     }
+  }
+
+  async cancelSchemaInitialization(): Promise<void> {
+    if (this.migrationStatementTimeoutMs === undefined || this._connectionStyle !== 'instance') {
+      throw new Error('Schema cancellation requires the private migrate-only engine');
+    }
+    this._schemaInitializationCancelled = true;
+    // Do not drain background work or open a cancellation connection: stop the
+    // existing owned sockets now. The server statement_timeout is a backstop
+    // for intermediaries that do not immediately notice the socket closure.
+    await Promise.all([
+      this.connectionManager?.disconnect({ force: true }),
+      this._sql?.end({ timeout: 0 }),
+    ]);
   }
 
   async disconnect(): Promise<void> {
@@ -676,7 +698,8 @@ export class PostgresEngine implements BrainEngine {
     if (!this._pageTransaction && opts?.route !== 'ordinary' && this.connectionManager?.isDualPoolActive()) {
       try {
         const direct = await this.connectionManager.ddl();
-        releasePermit = tryAcquirePoolLongHold(direct, this.connectionManager.describeMode().direct_pool_size ?? DEFAULT_DIRECT_POOL_SIZE);
+        releasePermit = tryAcquirePoolLongHold(direct, this.connectionManager.describeMode().direct_pool_size ?? DEFAULT_DIRECT_POOL_SIZE,
+          { selfContained: this.migrationStatementTimeoutMs !== undefined && opts?.selfContained });
         if (releasePermit) pool = direct;
       } catch {
         // A disabled direct route falls back to the same bounded ordinary pool.
@@ -2685,7 +2708,8 @@ export class PostgresEngine implements BrainEngine {
 
   // Migration support
   async runMigration(_version: number, sqlStr: string): Promise<void> {
-    const conn = this.sql;
+    const conn = this.migrationStatementTimeoutMs !== undefined && !this._pageTransaction && this.connectionManager
+      ? await this.connectionManager.ddl() : this.sql;
     await conn.unsafe(sqlStr);
   }
 

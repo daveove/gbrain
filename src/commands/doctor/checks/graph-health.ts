@@ -305,6 +305,7 @@ export const timelineHistoryEntry: DoctorEntry = {
     'credential_projection_pending',
     'connector_checkpoints',
     'persistence_request_indexes',
+    'page_indexes',
     'persistence_request_growth',
     'persistence_write_stall',
     'lost_caller_writes',

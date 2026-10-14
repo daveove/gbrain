@@ -26,6 +26,7 @@ import {
   renderSchemaSql,
 } from '../../scripts/build-schema.ts';
 import { PERSISTENCE_DATABASE_PENDING_INDEX_SQL } from '../../src/core/persistence/schema.ts';
+import { PAGES_NAME_LOOKUP_INDEXES, PAGES_TITLE_LOWER_TRGM_INDEX } from '../../src/core/page-indexes.ts';
 
 const REPO = resolve(import.meta.dir, '..', '..');
 // test-reads-source-ok[structural]: generated-file freshness contract.
@@ -67,6 +68,17 @@ describe('fragment regions', () => {
     const idx = PERSISTENCE_DATABASE_PENDING_INDEX_SQL.trim();
     expect(schemaSql).not.toContain(idx);
     expect(renderPgliteTemplateSql(schemaSql)).toContain(idx);
+  });
+
+  test('v240 defers populated Postgres page indexes to online migration; fresh PGLite retains both inline', () => {
+    const out = buildAll(schemaSql);
+    for (const index of PAGES_NAME_LOOKUP_INDEXES) {
+      expect(out[SCHEMA_SQL_PATH]).not.toContain(index.sql);
+      expect(out[EMBEDDED_PATH]).not.toContain(index.sql);
+      expect(out[PGLITE_PATH]).toContain(`${index.sql};`);
+    }
+    // v243 must not become a plain replay build on either engine.
+    for (const text of Object.values(out)) expect(text).not.toContain(PAGES_TITLE_LOWER_TRGM_INDEX.sql);
   });
 
   test('a missing END marker, an unknown fragment, or a missing region fails', () => {

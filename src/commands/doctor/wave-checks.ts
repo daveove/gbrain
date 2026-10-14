@@ -16,6 +16,7 @@
 import type { BrainEngine } from '../../core/engine.ts';
 import type { Check } from '../doctor.ts';
 import { repairForCheck } from '../../core/repair/registry.ts';
+import { pageIndexesCheck } from './checks/page-indexes.ts';
 
 export type WaveResolution = 'repair' | 'operator' | 'unsupported';
 
@@ -103,6 +104,12 @@ export const WAVE_CHECKS: readonly WaveCheckSpec[] = [
     count: d => Number(d.count ?? 0),
     impact: 'A managed sync request index is missing or INVALID, so sync checkpoints can time out on a large request table',
     run: async engine => (await import('./checks/persistence-requests.ts')).requestIndexesCheck(engine),
+  },
+  {
+    id: 'page_indexes', resolution: 'repair', registration: 'wave',
+    count: d => Number(d.count ?? 0),
+    impact: 'A page lookup index is missing or INVALID, so page name and title lookups can scan the whole pages table',
+    run: pageIndexesCheck,
   },
   {
     id: 'persistence_request_growth', resolution: 'operator', registration: 'wave',

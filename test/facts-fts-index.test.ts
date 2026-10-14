@@ -93,6 +93,18 @@ for (const kind of testBackends()) {
       await expectServing('after');
     });
 
+    for (const name of ['idx_facts_fts', 'idx_facts_fts_next']) {
+      test(`a VALID but not READY ${name} is never accepted as current`, async () => {
+        await createAs(name, LANG);
+        await engine.executeRaw(`UPDATE pg_index SET indisready = false WHERE indexrelid = '${name}'::regclass`);
+        expect(await ensure()).toBe('swapped');
+        const [accepted] = await engine.executeRaw<{ valid: boolean; ready: boolean }>(
+          'SELECT indisvalid AS valid, indisready AS ready FROM pg_index WHERE indexrelid = to_regclass($1)', ['idx_facts_fts']);
+        expect(accepted).toEqual({ valid: true, ready: true });
+        expect(await states()).toEqual({ idx_facts_fts: `valid:${LANG}`, idx_facts_fts_next: 'missing', idx_facts_fts_old: 'missing' });
+      });
+    }
+
     test('a valid _next under another language (a reindex interrupted before a second language change) is replaced', async () => {
       await createAs('idx_facts_fts_next', 'simple');
       expect(await ensure()).toBe('swapped');

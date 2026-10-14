@@ -810,6 +810,10 @@ export interface BrainEngine {
    */
   reconnect(ctx?: { error?: unknown }): Promise<void>;
   initSchema(): Promise<void>;
+  /** Internal migrate-only statement budget (ordinary commands leave it unset). */
+  readonly migrationStatementTimeoutMs?: number;
+  /** Postgres migrate-only deadline: close owned sockets immediately, without a CancelRequest client. */
+  cancelSchemaInitialization?(): Promise<void>;
   transaction<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T>;
   /** Short control transaction on the existing direct route; honors nested transaction scope. */
   transactionDirect<T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions): Promise<T>;

@@ -76,6 +76,8 @@ export interface ConnectionManagerOpts {
   onpoisoned?: (pool: 'read' | 'direct', status: string) => void;
   /** #6383: the driver's stuck-connection and build-failure reports, per pool (`onpoisoned` stays separate for its callers). */
   health?: (pool: 'read' | 'direct') => Omit<PoolHealthHooks, 'onpoisoned'>;
+  /** Only migrate-only overrides the existing DDL startup budget. */
+  migrationStatementTimeoutMs?: number;
 }
 
 /** Default direct-pool size (P1 raised from 2 to 3). Override via env. */
@@ -269,6 +271,8 @@ export class ConnectionManager {
   private _readPoolOwnedExternally: boolean;
   private _directInit: Promise<Sql | null> | null = null;
   private _directPool: Sql | null = null;
+  private _directInitializingPool: Sql | null = null;
+  private _migrationCancelled = false;
   private _killSwitch: boolean;
   private _directUrl: string | null;
   private _isSupabase: boolean;
@@ -404,6 +408,7 @@ export class ConnectionManager {
   }
 
   private async getDirectPool(): Promise<Sql> {
+    if (this._migrationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
     if (this._directPool) return this._directPool;
     // A1: cache the Promise so concurrent first callers await the same init.
     if (!this._directInit) {
@@ -420,6 +425,7 @@ export class ConnectionManager {
     try {
       pool = await this._directInit;
     } catch (err) {
+      if (this._migrationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
       // #1641: the derived direct host (db.<ref>.supabase.co) is IPv6-only
       // without Supabase's IPv4 add-on. On IPv4-only networks the direct
       // pool can never connect — permanently fall back to the read pool
@@ -489,6 +495,7 @@ export class ConnectionManager {
   }
 
   private async initDirectPool(): Promise<Sql> {
+    if (this._migrationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
     if (!this._directUrl) {
       throw new Error('connection-manager: cannot init direct pool — no direct URL');
     }
@@ -504,13 +511,16 @@ export class ConnectionManager {
       // here, so the prepare-cache invalidation issue doesn't apply.
       prepare: true,
       onnotice: process.env.GBRAIN_PG_NOTICES === '1' ? undefined : () => {},
-      ...poolHealthOptions({ ...this.opts.health?.('direct'), onpoisoned: (status: string) => this.opts.onpoisoned?.('direct', status) }, String(DDL_STMT_TIMEOUT_MS)),
+      ...poolHealthOptions({ ...this.opts.health?.('direct'), onpoisoned: (status: string) => this.opts.onpoisoned?.('direct', status) }, String(this.opts.migrationStatementTimeoutMs ?? DDL_STMT_TIMEOUT_MS)),
       shared_types: resolveSharedTypes(this._directUrl),
       // Apply DDL session GUCs as connection startup parameters (durable
       // through any intermediary pooling layer, same trick as
       // resolveSessionTimeouts).
       connection: {
-        statement_timeout: String(DDL_STMT_TIMEOUT_MS),
+        statement_timeout: String(this.opts.migrationStatementTimeoutMs ?? DDL_STMT_TIMEOUT_MS),
+        ...(this.opts.migrationStatementTimeoutMs !== undefined && resolvePrepare(this._directUrl) !== false
+          && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== 'off' && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== '0'
+          ? { client_connection_check_interval: '1000' } : {}),
         idle_in_transaction_session_timeout: String(DDL_IDLE_TX_TIMEOUT_MS),
         maintenance_work_mem: BULK_MAINTENANCE_WORK_MEM,
         application_name: gbrainApplicationName(),
@@ -520,8 +530,10 @@ export class ConnectionManager {
     let pool: Sql | null = null;
     try {
       pool = postgres(this._directUrl, traceSqlOptions(opts, 'direct'));
+      this._directInitializingPool = pool;
       // Probe to validate connectivity early.
       await pool`SELECT 1`;
+      if (this._migrationCancelled) throw new DOMException('schema initialization deadline expired', 'AbortError');
       logConnectionEvent({
         pool: 'ddl',
         op: 'init',
@@ -540,6 +552,8 @@ export class ConnectionManager {
         error: { message: err instanceof Error ? err.message : String(err) },
       });
       throw err;
+    } finally {
+      this._directInitializingPool = null;
     }
   }
 
@@ -570,19 +584,21 @@ export class ConnectionManager {
    * Disconnect pools we own. Read pool stays alive if marked externally owned
    * (db.ts singleton path). Direct pool is always ours.
    */
-  async disconnect(): Promise<void> {
+  async disconnect(opts: { force?: boolean } = {}): Promise<void> {
+    if (opts.force) this._migrationCancelled = true;
     // #1972: end both pools concurrently with a gbrain-owned hard bound, so the
     // per-pool drains don't STACK (sequential 2s waits → ~4-6s once the
     // instance/module pool is added downstream) and neither can hang teardown
     // past the CLI's 10s force-exit. endPoolBounded never throws.
     const ends: Promise<void>[] = [];
+    if (opts.force && this._directInitializingPool) ends.push(this._directInitializingPool.end({ timeout: 0 }));
     if (this._directPool) {
-      ends.push(endPoolBounded(this._directPool));
+      ends.push(opts.force ? this._directPool.end({ timeout: 0 }) : endPoolBounded(this._directPool));
       this._directPool = null;
       this._directInit = null;
     }
     if (this._readPool && !this._readPoolOwnedExternally) {
-      ends.push(endPoolBounded(this._readPool));
+      ends.push(opts.force ? this._readPool.end({ timeout: 0 }) : endPoolBounded(this._readPool));
       this._readPool = null;
     }
     await Promise.all(ends);

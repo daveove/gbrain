@@ -1,5 +1,6 @@
 import type { Migration } from './types.ts';
 import { buildIndexOnline, migrationNotice } from './helpers.ts';
+import { PAGES_NAME_LOOKUP_INDEXES, PAGE_INDEXES_REPAIR_COMMAND } from '../page-indexes.ts';
 
 /**
  * Index the name lookups behind `entity` (one name or a `names[]` batch),
@@ -15,12 +16,6 @@ import { buildIndexOnline, migrationNotice } from './helpers.ts';
  * rows come back. Postgres builds each index CONCURRENTLY, one statement per
  * call, after dropping an INVALID leftover; PGLite builds them inline.
  */
-export const PAGES_NAME_LOOKUP_INDEXES = [
-  { name: 'idx_pages_source_title_lower', table: 'pages',
-    sql: 'CREATE INDEX IF NOT EXISTS idx_pages_source_title_lower ON pages (source_id, lower(title))' },
-  { name: 'idx_pages_slug_trgm', table: 'pages',
-    sql: 'CREATE INDEX IF NOT EXISTS idx_pages_slug_trgm ON pages USING GIN (slug gin_trgm_ops)' },
-] as const;
 
 export const v240: Migration = {
   version: 240,
@@ -30,7 +25,7 @@ export const v240: Migration = {
   sql: '',
   handler: async engine => {
     for (const index of PAGES_NAME_LOOKUP_INDEXES) {
-      await buildIndexOnline(engine, 240, index, { notice: migrationNotice });
+      await buildIndexOnline(engine, 240, index, { notice: migrationNotice, repairCommand: PAGE_INDEXES_REPAIR_COMMAND });
     }
   },
 };
