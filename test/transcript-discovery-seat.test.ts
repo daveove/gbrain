@@ -7,13 +7,15 @@
  * Authoring gate: protects the discovery half of the seat contract; the
  * end-to-end stamp test only covers whole-session `.txt` files. No seam.
  */
-import { afterEach, beforeEach, expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { discoverTranscripts } from '../src/core/cycle/transcript-discovery.ts';
 import { detectAdapter, type HarnessRoot } from '../src/core/transcripts/detect.ts';
 import { buildStatusRows, discoverTranscriptFiles } from '../src/core/transcripts/discover.ts';
+import type { SkippedTranscriptRoot } from '../src/core/transcripts/discover.ts';
+import { runTranscripts } from '../src/commands/transcripts.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -197,4 +199,49 @@ test('seat layout exclusions are harness-scoped and reject symlinked discovery r
     expect(discoverTranscriptFiles([{ format, root: link, extension: '.jsonl' }])).toEqual([]);
     expect(discoverTranscriptFiles([{ format, root: store, extension: '.jsonl' }]).map((file) => file.path)).toEqual([path]);
   }
+});
+
+test('legacy harness roots may be symlinks but descendant links remain excluded', () => {
+  for (const format of ['claude-code', 'codex', 'openclaw', 'grok', 'hermes'] as const) {
+    const store = join(dir, `${format}-store`), root = join(dir, `${format}-root`);
+    const relativePath = format === 'hermes' ? 'state.db'
+      : format === 'grok' ? 'project/12345678-1234-1234-1234-123456789abc/chat_history.jsonl'
+      : 'project/public.jsonl';
+    const path = join(store, relativePath);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, 'synthetic');
+    symlinkSync(store, root);
+    symlinkSync(path, join(store, format === 'hermes' ? 'other.db' : 'linked.jsonl'));
+    const skippedRoots: SkippedTranscriptRoot[] = [];
+    expect(discoverTranscriptFiles([{ format, root, extension: format === 'hermes' ? '.db' : '.jsonl' }], { skippedRoots })
+      .map(file => file.path)).toEqual([join(root, relativePath)]);
+    expect(skippedRoots).toEqual([]);
+  }
+});
+
+test('status reports rejected new-harness override roots in JSON and text', async () => {
+  const root = join(dir, 'linked-root'), store = join(dir, 'store');
+  mkdirSync(store); symlinkSync(store, root);
+  await withEnv({
+    GBRAIN_DAILY_MEMORY_PI_ROOT: root, GBRAIN_DAILY_MEMORY_OMP_ROOT: root, GBRAIN_DAILY_MEMORY_CURSOR_ROOT: root,
+  }, async () => {
+    const formats = ['pi', 'omp', 'cursor'] as const;
+    const expected: SkippedTranscriptRoot[] = formats.map(format => ({ format, root, reason: 'symlink' }));
+    const skippedRoots: SkippedTranscriptRoot[] = [];
+    discoverTranscriptFiles(formats.map(format => ({
+      format, root, extension: '.jsonl',
+    })), { skippedRoots });
+    expect(skippedRoots).toEqual(expected);
+    const logs: string[] = [];
+    const logged = spyOn(console, 'log').mockImplementation(value => { logs.push(String(value)); });
+    try {
+      // Source resolution falls back to default; the imported-session query is empty.
+      const engine = { executeRaw: async () => [] } as never;
+      await runTranscripts(engine, ['status', '--json']);
+      expect(JSON.parse(logs.join('\n')).skipped_roots).toEqual(expected);
+      logs.length = 0;
+      await runTranscripts(engine, ['status']);
+      for (const { format } of expected) expect(logs).toContain(`  skipped root (${format}, symlink): ${root}`);
+    } finally { logged.mockRestore(); }
+  });
 });

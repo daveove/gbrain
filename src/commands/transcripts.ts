@@ -22,6 +22,7 @@ import type { CliDispatchContext } from '../cli/command-table.ts';
 import type { RecentTranscript } from '../core/transcripts.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
 import type { TranscriptFormat } from '../core/transcripts/types.ts';
+import type { SkippedTranscriptRoot } from '../core/transcripts/discover.ts';
 import { runTranscriptsIngest, type TranscriptsIngestResult } from '../core/transcripts/ingest.ts';
 import { isOpenclawCheckpointFile } from '../core/transcripts/openclaw.ts';
 import { isGrokSessionSidecarStrict } from '../core/transcripts/grok.ts';
@@ -611,9 +612,10 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
   const { buildStatusRows, discoverTranscriptFiles, indexImportedSessions } = await import(
     '../core/transcripts/discover.ts'
   );
-  const rows = buildStatusRows(discoverTranscriptFiles(), await indexImportedSessions(engine, sourceId));
+  const skippedRoots: SkippedTranscriptRoot[] = [];
+  const rows = buildStatusRows(discoverTranscriptFiles(undefined, { skippedRoots }), await indexImportedSessions(engine, sourceId));
   if (json) {
-    console.log(JSON.stringify({ source_id: sourceId, rows }, null, 2));
+    console.log(JSON.stringify({ source_id: sourceId, rows, skipped_roots: skippedRoots }, null, 2));
     return;
   }
   console.log(`transcripts status (source: ${sourceId})`);
@@ -623,6 +625,9 @@ async function runStatus(engine: BrainEngine, args: string[]): Promise<void> {
     console.log(
       `  ${r.format.padEnd(12)} ${String(r.found).padStart(6)} ${String(r.importedSessions).padStart(12)}        ${gap}`,
     );
+  }
+  for (const skipped of skippedRoots) {
+    console.log(`  skipped root (${skipped.format}, ${skipped.reason}): ${skipped.root}`);
   }
   const totalGap = rows.reduce((n, r) => n + (r.gapFiles ?? 0), 0);
   if (totalGap > 0) {

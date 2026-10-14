@@ -328,27 +328,49 @@ export async function refreshDailyMemoryAfterSourceSync(engine: BrainEngine, job
 }
 
 
+export interface PageMutationDailyMemory {
+  sourceId: string; slug: string; operation: string; priorDays?: string[]; timezone?: string;
+}
+
 /** Accept historical index work inside the page publication transaction. */
 export async function refreshDailyMemoryAfterPageMutation(
   engine: BrainEngine,
-  opts: { sourceId: string; slug: string; operation: string; priorDays?: string[]; timezone?: string },
+  opts: PageMutationDailyMemory,
 ): Promise<string[]> {
-  if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID) return [];
-  if (!['put_page', 'edit_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(opts.operation)) return [];
-  if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
-    throw new Error('Invalid prior daily memory dates');
+  return (await refreshDailyMemoryAfterPageMutations(engine, [opts]))[0]!;
+}
+
+/** Lock day jobs in one global order, not each group member's individual order. */
+export async function refreshDailyMemoryAfterPageMutations(
+  engine: BrainEngine,
+  mutations: PageMutationDailyMemory[],
+): Promise<string[][]> {
+  const affected: string[][] = [];
+  const pending = new Map<string, { day: string; timezone: string }>();
+  for (const opts of mutations) {
+    if (!opts.sourceId || !opts.slug || opts.sourceId === DAILY_MEMORY_SOURCE_ID ||
+      !['put_page', 'edit_page', 'delete_page', 'restore_page', 'capture', 'revert_version'].includes(opts.operation)) {
+      affected.push([]); continue;
+    }
+    if (opts.priorDays !== undefined && (!Array.isArray(opts.priorDays) || !opts.priorDays.every(isDay))) {
+      throw new Error('Invalid prior daily memory dates');
+    }
+    // Prefer the timezone captured with priorDays so a mid-handoff cycle.timezone
+    // flip cannot rewrite old-zone days with new-zone filters.
+    const timezone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
+      : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
+    const days = [...new Set([...(opts.priorDays ?? []),
+      ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone, recoverHistory: false })])].sort();
+    affected.push(days);
+    for (const day of days) pending.set(`${day}:${timezone}`, { day, timezone });
   }
-  // Prefer the timezone captured with priorDays so a mid-handoff cycle.timezone
-  // flip cannot rewrite old-zone days with new-zone filters.
-  const timezone = opts.timezone === undefined ? await resolveCycleTimeZone(engine)
-    : pinnedDailyMemoryTimezone({ daily_memory_timezone: opts.timezone })!;
-  const days = [...new Set([...(opts.priorDays ?? []),
-    ...await dailyMemoryDaysForSlugs(engine, opts.sourceId, [opts.slug], { timezone, recoverHistory: false })])].sort();
-  if (!days.length) return [];
-  await engine.transaction(async tx => {
-    for (const day of days) await queuePendingDailyMemory(tx, day, timezone);
+  if (pending.size) await engine.transaction(async tx => {
+    for (const key of [...pending.keys()].sort()) {
+      const { day, timezone } = pending.get(key)!;
+      await queuePendingDailyMemory(tx, day, timezone);
+    }
   });
-  return days;
+  return affected;
 }
 
 /** Reuse unclaimed day work; claimed/finished renders need a durable successor. */

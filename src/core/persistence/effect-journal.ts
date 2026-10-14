@@ -18,6 +18,22 @@ import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { pageBatchChildRequestIds } from './page-batch-id.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
 import { outsideJobSubmissionAuthority } from '../minions/submission-authority.ts';
+import type { PageMutationDailyMemory } from '../cycle/daily-memory-followup.ts';
+import { refreshDailyMemoryAfterPageMutations } from '../cycle/daily-memory-followup.ts';
+
+export interface PublicationDailyMemory extends PageMutationDailyMemory {
+  outcome: Record<string, unknown>;
+  remote: boolean;
+}
+
+/** One transaction-wide handoff preserves day lock order across all group members. */
+export async function queuePublicationDailyMemory(tx: BrainEngine, pending: PublicationDailyMemory[]): Promise<void> {
+  if (!pending.length) return;
+  const days = await outsideJobSubmissionAuthority(() => refreshDailyMemoryAfterPageMutations(tx, pending));
+  for (let i = 0; i < pending.length; i++) {
+    if (days[i]!.length && !pending[i]!.remote) pending[i]!.outcome.daily_memory_affected_dates = days[i];
+  }
+}
 
 /** Canonical source mutations that change membership in the daily owner index. */
 type DailyMutationOperation = 'put_page' | 'edit_page' | 'delete_page' | 'restore_page' | 'capture' | 'revert_version';
@@ -51,7 +67,7 @@ export async function captureDailyMemoryPreimage(tx: BrainEngine, row: WriteRequ
 export async function queuePublicationEffects(tx: BrainEngine, row: EffectRequest & Partial<Pick<WriteRequest, 'operation' | 'intent' | 'authority' | 'principal_kind' | 'principal_id'>>, snapshot: PageSnapshot | null,
   outcome: Record<string, unknown>, prepared?: PreparedMutation,
   /** A grouped publication completes its members after queueing all of them, then calls `reconcileFinishedBatch` itself. */
-  opts: { deferBatchReconcile?: boolean } = {}): Promise<void> {
+  opts: { deferBatchReconcile?: boolean; dailyMemory?: PublicationDailyMemory[] } = {}): Promise<void> {
   if (prepared?.noop || prepared?.target === 'skill_bundle') return;
   await declarePersistenceProtocol(tx);
   const revision = snapshot?.revision;
@@ -95,18 +111,16 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   }
   const dailyOperation = dailyMutationOperation(row);
   if (dailyOperation) {
-    const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
-    // This fixed owner-index effect is derived from the authorized publication,
-    // not from a delegated job payload. Queue rows share this transaction, so
-    // neither the publication nor its host-owned jobs are visible before commit.
-    const days = await outsideJobSubmissionAuthority(() => refreshDailyMemoryAfterPageMutation(tx, {
-      sourceId: row.source_id,
-      slug: row.slug,
-      operation: dailyOperation,
-      priorDays: prepared?.dailyMemoryPriorDays,
-      timezone: prepared?.dailyMemoryTimezone,
-    }));
-    if (days.length && !row.authority?.remote) outcome.daily_memory_affected_dates = days;
+    // Derive this fixed owner-index effect from the authorized publication,
+    // never a delegated job payload. Groups defer its row locks until counters
+    // are held and every member's dates can be sorted together.
+    const pending: PublicationDailyMemory = {
+      sourceId: row.source_id, slug: row.slug, operation: dailyOperation,
+      priorDays: prepared?.dailyMemoryPriorDays, timezone: prepared?.dailyMemoryTimezone,
+      outcome, remote: !!row.authority?.remote,
+    };
+    if (opts.dailyMemory) opts.dailyMemory.push(pending);
+    else await queuePublicationDailyMemory(tx, [pending]);
   }
 }
 

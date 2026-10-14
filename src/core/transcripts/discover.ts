@@ -1,10 +1,10 @@
 /**
  * discover.ts — harness-root discovery + the status gap table (cathedral-4).
  *
- * Discovery is CONFINED to the static harness roots (detect.ts) — this is
- * the untrusted-enumeration side of the trust split, so symlinks are
- * lstat-rejected and only the expected extensions are picked up. Consumer
- * exports have no canonical root and never appear here.
+ * Discovery is CONFINED to the static harness roots (detect.ts). Descendant
+ * symlinks are skipped; Pi/OMP/Cursor also reject symlinked roots, including
+ * their env overrides. Legacy harnesses retain relocated-root compatibility.
+ * Consumer exports have no canonical root and never appear here.
  *
  * The status table derives its "imported" side from PAGES (one paginated
  * listPages walk, client-side transcript_import filtering, distinct
@@ -16,7 +16,7 @@
  * reported at session granularity only.
  */
 
-import { lstatSync, readdirSync } from 'node:fs';
+import { lstatSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { TranscriptFormat } from './types.ts';
@@ -32,6 +32,12 @@ export interface DiscoveredFile {
   bytes: number;
 }
 
+export interface SkippedTranscriptRoot {
+  format: TranscriptFormat;
+  root: string;
+  reason: 'symlink' | 'not_directory' | 'unreadable';
+}
+
 export interface DiscoverOpts {
   /**
    * #4472 — include gbrain's OWN claude-cli subprocess sessions. The
@@ -44,6 +50,8 @@ export interface DiscoverOpts {
    * escape hatch for deliberately auditing the provider's own calls.
    */
   includeSelf?: boolean;
+  /** Status diagnostics; missing default roots are simply absent, not warnings. */
+  skippedRoots?: SkippedTranscriptRoot[];
 }
 
 /** Recursively list regular files under root (lstat: symlinks are skipped). */
@@ -73,8 +81,19 @@ export function discoverTranscriptFiles(roots?: HarnessRoot[], opts: DiscoverOpt
   const out: DiscoveredFile[] = [];
   for (const { format, root, extension } of harnessRoots(roots)) {
     try {
-      if (!lstatSync(root).isDirectory()) continue; // also reject symlink roots
-    } catch {
+      const st = lstatSync(root);
+      if (st.isSymbolicLink() && (format === 'pi' || format === 'omp' || format === 'cursor')) {
+        opts.skippedRoots?.push({ format, root, reason: 'symlink' });
+        continue;
+      }
+      if (!(st.isSymbolicLink() ? statSync(root) : st).isDirectory()) {
+        opts.skippedRoots?.push({ format, root, reason: 'not_directory' });
+        continue;
+      }
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+        opts.skippedRoots?.push({ format, root, reason: 'unreadable' });
+      }
       continue;
     }
     if (format === 'hermes') {
