@@ -72,6 +72,8 @@ const CREATED_KEYS = ['created', 'created_at', 'date_created', 'date created'];
 
 export const DATE_INSTANT_PROVENANCE = '_gbrain_date_instants';
 const CALENDAR_DATE_RE = /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:[a-z]+,?\s+)?[a-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}|\d{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,9}\.?,?\s+\d{4})$/i;
+/** Preserve a YAML date-only scalar's calendar semantics without changing its native Date type. */
+export const CALENDAR_DATE = Symbol.for('gbrain.calendar-date');
 
 export function isCalendarDateSpelling(value: unknown): boolean {
   return typeof value === 'string' && CALENDAR_DATE_RE.test(value.trim());
@@ -85,7 +87,7 @@ export function withDateInstantProvenance(frontmatter: Record<string, unknown>, 
   let changed = false;
   for (const key of ['event_date', 'date', 'published', ...CREATED_KEYS]) {
     const value = frontmatter[key];
-    if (isCalendarDateSpelling(value)) {
+    if (isCalendarDateSpelling(value) || (value instanceof Date && (value as Date & { [CALENDAR_DATE]?: boolean })[CALENDAR_DATE])) {
       if (key in instants) { delete instants[key]; changed = true; }
       continue;
     }

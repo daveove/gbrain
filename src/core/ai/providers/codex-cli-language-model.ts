@@ -26,7 +26,7 @@
  * `maxOutputTokens` / `temperature` are not settable through `codex exec`
  * and are ignored. Tools, file/image parts and streaming are refused.
  */
-import { spawn } from 'node:child_process';
+import { spawn } from '../../spawn.ts';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

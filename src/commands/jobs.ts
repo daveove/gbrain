@@ -23,6 +23,7 @@ import { makeExtractNerHandler } from '../core/minions/handlers/extract-ner.ts';
 import { makeExtractTakesFromPagesHandler } from '../core/minions/handlers/extract-takes-from-pages.ts';
 import { makeExtractTimelineFromMeetingsHandler } from '../core/minions/handlers/extract-timeline-from-meetings.ts';
 import { makeExtractHandler } from '../core/minions/handlers/extract.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../core/deferred-stale-extract.ts';
 import { makeFactsAbsorbHandler } from '../core/minions/handlers/facts-absorb.ts';
 import { makeImportHandler } from '../core/minions/handlers/import.ts';
 import { integrityAutoHandler } from '../core/minions/handlers/integrity-auto.ts';
@@ -491,6 +492,7 @@ export async function registerBuiltinHandlers(
   registerBuiltinJob(worker, engine, 'sync-retry-failed', makeSyncRetryFailedHandler(engine));
   registerBuiltinJob(worker, engine, 'import', makeImportHandler(engine));
   worker.register('extract', makeExtractHandler(engine));
+  worker.register(IMPORT_STALE_EXTRACT_JOB, makeExtractHandler(engine));
   worker.register('backlinks', makeBacklinksHandler(engine));
   registerBuiltinJob(worker, engine, 'facts-absorb', withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine)));
 

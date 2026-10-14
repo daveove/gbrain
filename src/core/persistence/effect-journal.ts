@@ -17,6 +17,7 @@ import { EXPIRED_PREPARING_CHARGE_SQL } from './claim-phase.ts';
 import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { pageBatchChildRequestIds } from './page-batch-id.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
+import { outsideJobSubmissionAuthority } from '../minions/submission-authority.ts';
 
 /** Canonical source mutations that change membership in the daily owner index. */
 type DailyMutationOperation = 'put_page' | 'edit_page' | 'delete_page' | 'restore_page' | 'capture' | 'revert_version';
@@ -95,14 +96,17 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   const dailyOperation = dailyMutationOperation(row);
   if (dailyOperation) {
     const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
-    const days = await refreshDailyMemoryAfterPageMutation(tx, {
+    // This fixed owner-index effect is derived from the authorized publication,
+    // not from a delegated job payload. Queue rows share this transaction, so
+    // neither the publication nor its host-owned jobs are visible before commit.
+    const days = await outsideJobSubmissionAuthority(() => refreshDailyMemoryAfterPageMutation(tx, {
       sourceId: row.source_id,
       slug: row.slug,
       operation: dailyOperation,
       requestId: row.id,
       priorDays: prepared?.dailyMemoryPriorDays,
       timezone: prepared?.dailyMemoryTimezone,
-    });
+    }));
     if (days.length) outcome.daily_memory_affected_dates = days;
   }
 }

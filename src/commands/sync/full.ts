@@ -116,6 +116,7 @@ export async function performFullSync(
       commit: headCommit,
       strategy: opts.strategy,
       sourceId: opts.sourceId,
+      noExtract: opts.noExtract,
       exclude: opts.exclude,
       includeHidden: opts.includeHidden,
       includeGitignored: opts.includeGitignored,

@@ -1,9 +1,10 @@
 /**
- * `extract` Minion job handler (built-in; registered by registerBuiltinHandlers in src/commands/jobs.ts).
+ * `extract` and stale-only import recovery (registered by registerBuiltinHandlers).
  */
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionHandler } from '../types.ts';
 import { MinionQueue } from '../queue.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../../deferred-stale-extract.ts';
 
 export function makeExtractHandler(engine: BrainEngine): MinionHandler {
   return async (job) => {
@@ -15,7 +16,7 @@ export function makeExtractHandler(engine: BrainEngine): MinionHandler {
     // unscoped, matching what the CLI hint tells a default-brain operator
     // to run). The sweep is checkout-less + idempotent, so retries and
     // overlapping submissions converge.
-    if (job.data.stale === true) {
+    if (job.data.stale === true || job.name === IMPORT_STALE_EXTRACT_JOB) {
       const sourceIdFilter = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
       if (sourceIdFilter === 'dream' && job.data.reason === 'daily_memory_write') {
         const { extractOneShotDailyMemory } = await import('../../cycle/daily-memory-extract.ts');
@@ -42,8 +43,8 @@ export function makeExtractHandler(engine: BrainEngine): MinionHandler {
           // one continuation and the sweep is an idempotent watermark scan,
           // so there is no pile-up to guard against.
           await queue.add(
-            'extract',
-            { ...job.data, continuation_of: job.id },
+            job.name === IMPORT_STALE_EXTRACT_JOB ? IMPORT_STALE_EXTRACT_JOB : 'extract',
+            { ...job.data, stale: true, continuation_of: job.id },
             { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
           );
         }

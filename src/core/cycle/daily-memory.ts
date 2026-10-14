@@ -275,8 +275,11 @@ async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
 }
 
 /** Owned origins only, including durable wanted-link target-arrival wakeups. */
-export async function dailyMemoryExtractTargets(engine: BrainEngine): Promise<string[]> {
-  const rows = await engine.executeRaw<{ slug: string }>(`SELECT slug ${GENERATED_INDEXES} ORDER BY slug`, [DAILY_MEMORY_SOURCE_ID]);
+export async function dailyMemoryExtractTargets(engine: BrainEngine, onlySlugs?: string[]): Promise<string[]> {
+  if (onlySlugs?.length === 0) return [];
+  const rows = await engine.executeRaw<{ slug: string }>(
+    `SELECT slug ${GENERATED_INDEXES}${onlySlugs ? ' AND slug=ANY($2::text[])' : ''} ORDER BY slug`,
+    onlySlugs ? [DAILY_MEMORY_SOURCE_ID, onlySlugs] : [DAILY_MEMORY_SOURCE_ID]);
   if (!rows.length) return [];
   const slugs = rows.map(row => row.slug);
   const selected: string[] = [];
@@ -285,7 +288,7 @@ export async function dailyMemoryExtractTargets(engine: BrainEngine): Promise<st
   for (;;) {
     const stale = await engine.listStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID,
       versionTs, slugs, batchSize: 100, afterPageId });
-    if (!stale.length) return selected;
+    if (!stale.length) return selected.sort();
     selected.push(...stale.map(row => row.slug));
     afterPageId = stale[stale.length - 1]!.id;
   }

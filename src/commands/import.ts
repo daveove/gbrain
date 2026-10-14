@@ -45,7 +45,8 @@ import { estimateCostFromChars, lookupEmbeddingPrice } from '../core/embedding-p
 import { getEmbeddingModel } from '../core/ai/gateway.ts';
 import { managedRootMarkerFor } from '../core/persistence/root-registry.ts';
 import { readManagedMode } from '../core/persistence/ownership.ts';
-import { INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
+import { IMPORT_STALE_EXTRACT_JOB, INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
+import { previewMentionPass } from '../core/mentions/stale.ts';
 
 /** Return a refusal when an import target lies outside every admitted root. */
 export function configuredRootImportError(dir: string, configuredRoots: string[]): string | null {
@@ -1073,7 +1074,13 @@ export async function runImport(
         versionTs: await effectiveLinkExtractorWatermark(engine),
       });
       throwIfInterrupted();
-      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT;
+      // A hash-skipped retry can still owe indexes, but must not mutate the
+      // page generation clock itself. Leave that recovery to the durable sweep.
+      const mentionDebt = imported === 0 && stalePages === 0
+        ? (await previewMentionPass(engine, sourceId ?? 'default')).due
+        : 0;
+      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT || (imported === 0 && (stalePages > 0 || mentionDebt > 0));
+      if (imported === 0 && !deferForBacklog) linkExtractionRecovered = true;
     } catch (e) {
       rethrowIfCancelled(e);
       recordLinkFailure(e instanceof Error ? e.message : String(e));
@@ -1090,6 +1097,7 @@ export async function runImport(
         sourceId: sourceId ?? 'default',
         commit: opts.commit ?? 'import',
         reason,
+        ...(imported === 0 && !opts.fullSync ? { jobName: IMPORT_STALE_EXTRACT_JOB } : {}),
       });
       if (queuedJobId == null) throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
       throwIfInterrupted();
@@ -1099,11 +1107,11 @@ export async function runImport(
     }
     linkExtractionRecovered = queuedJobId != null && !linkExtractionError;
     if (linkExtractionRecovered) console.error(
-      `  Large import: deferring link extraction` +
+      `  Deferring link extraction` +
       (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
       ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
     );
-  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0) {
+  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0 && imported > 0) {
     try {
       throwIfInterrupted();
       const { extractStaleFromDB } = await import('./extract.ts');

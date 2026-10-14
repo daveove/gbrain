@@ -762,7 +762,7 @@ async function runRemove(engine: BrainEngine, args: string[]): Promise<void> {
   }
   const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
   try { await assertSourceNotSystemIndex(engine, id); }
-  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(USAGE_EXIT_CODE); }
 
   const src = await fetchSource(engine, id);
   if (!src) {
@@ -929,7 +929,7 @@ async function runArchive(engine: BrainEngine, args: string[]): Promise<void> {
   }
   const { assertSourceNotSystemIndex } = await import('../core/destructive-guard.ts');
   try { await assertSourceNotSystemIndex(engine, id); }
-  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(3); }
+  catch (e) { console.error(`Error: ${e instanceof Error ? e.message : e}`); process.exit(USAGE_EXIT_CODE); }
 
   // Show impact preview
   const impact = await assessDestructiveImpact(engine, id);

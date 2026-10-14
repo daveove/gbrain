@@ -15,7 +15,7 @@ const PENDING = new Set(['waiting', 'active', 'delayed', 'waiting-children', 'pa
 const DAILY_MEMORY_JOB_TIMEOUT_MS = 10 * 60_000;
 function isDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)
-    && Number.isFinite(Date.parse(day)) && new Date(day).toISOString().slice(0,10) === day;
+    && Number.isFinite(Date.parse(day)) && utcDate(new Date(day)) === day;
 }
 
 function pinnedDailyMemoryTimezone(data: Record<string, unknown>): string | undefined {
@@ -77,7 +77,7 @@ export function previousCalendarDay(day: string): string | null {
   if (!isDay(day)) return null;
   const dt = new Date(`${day}T00:00:00.000Z`);
   dt.setUTCDate(dt.getUTCDate() - 1);
-  const prev = dt.toISOString().slice(0, 10);
+  const prev = utcDate(dt);
   return isDay(prev) ? prev : null;
 }
 

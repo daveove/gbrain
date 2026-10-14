@@ -1,3 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { MinionQueue } from '../src/core/minions/queue.ts';
+import { makeExtractHandler } from '../src/core/minions/handlers/extract.ts';
+import { buildJobContext } from '../src/core/minions/job-context.ts';
+import { authorizeJobExecution, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
+import { calculateBackoff } from '../src/core/minions/backoff.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../src/core/deferred-stale-extract.ts';
 import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
 import { connectWithRetry } from '../src/core/db.ts';
@@ -21,6 +28,74 @@ export function dailyMemoryArgs(day: string | undefined): { date?: string } {
     throw new Error('date must be YYYY-MM-DD');
   }
   return { date: day };
+}
+
+/** Drain only stale-only import recovery; unclaimed and budget-deferred debt survives the night. */
+export async function drainNightlyExtractJobs(engine: BrainEngine, opts: {
+  signal?: AbortSignal; maxJobs?: number; timeBudgetMs?: number;
+} = {}): Promise<number> {
+  const queue = new MinionQueue(engine), handler = makeExtractHandler(engine), names = [IMPORT_STALE_EXTRACT_JOB];
+  const deadline = Date.now() + (opts.timeBudgetMs ?? 60_000);
+  let processed = 0;
+  while (processed < (opts.maxJobs ?? 20) && deadline - Date.now() >= 1_000) {
+    opts.signal?.throwIfAborted();
+    await queue.handleStalled(undefined, { registeredNames: names, queue: 'default' });
+    await queue.promoteDelayed({ registeredNames: names, queue: 'default' });
+    const token = randomUUID(), job = await queue.claim(token, 60_000, 'default', names);
+    if (!job) break;
+    const abort = new AbortController();
+    const forward = () => abort.abort(opts.signal?.reason);
+    opts.signal?.addEventListener('abort', forward, { once: true });
+    if (opts.signal?.aborted) forward();
+    const budgetExpired = new Error('Nightly extraction drain budget exceeded');
+    const jobExpired = new Error('Nightly extraction job timed out');
+    const remaining = deadline - Date.now();
+    const jobRemaining = job.timeout_at ? job.timeout_at.getTime() - Date.now() : remaining;
+    const timer = setTimeout(() => abort.abort(jobRemaining < remaining ? jobExpired : budgetExpired),
+      Math.max(0, Math.min(remaining, jobRemaining)));
+    const lease = job.lock_duration_ms ?? 60_000;
+    let renewal: Promise<void> | undefined, stopped = false;
+    const renewTimer = setInterval(() => {
+      if (stopped || renewal) return;
+      renewal = queue.renewLock(job.id, token, lease, { signal: abort.signal }).then(owned => {
+        if (!owned && !stopped) abort.abort(new Error('Nightly extraction lease lost'));
+      }, error => { if (!stopped) abort.abort(error); }).finally(() => { renewal = undefined; });
+    }, Math.max(250, Math.floor(lease / 3)));
+    try {
+      abort.signal.throwIfAborted();
+      const authority = await authorizeJobExecution(engine, job);
+      const context = buildJobContext(engine, queue, job, token, abort.signal, opts.signal ?? abort.signal);
+      const result = await withSubmissionAuthority(authority, () => handler(context), abort.signal);
+      stopped = true; clearInterval(renewTimer); await renewal;
+      abort.signal.throwIfAborted();
+      if (!await queue.completeJob(job.id, token, result as Record<string, unknown>)) {
+        throw new Error('Nightly extraction completion fence lost');
+      }
+      processed++;
+    } catch (error) {
+      stopped = true; clearInterval(renewTimer); await renewal;
+      // Budget/shutdown/lease interruptions are infrastructure, not failed attempts.
+      if (abort.signal.aborted && abort.signal.reason !== jobExpired) {
+        if (!await queue.deferJob(job.id, token, 'Nightly extraction interrupted; debt retained', 0)) {
+          throw new Error('Nightly extraction deferral fence lost', { cause: error });
+        }
+        if (abort.signal.reason === budgetExpired && !opts.signal?.aborted) return processed;
+        throw error;
+      }
+      const terminal = abort.signal.reason === jobExpired || job.attempts_made + 1 >= job.max_attempts;
+      if (!await queue.failJob(job.id, token, error instanceof Error ? error.message : String(error),
+        terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }))) {
+        throw new Error('Nightly extraction failure fence lost', { cause: error });
+      }
+      throw error;
+    } finally {
+      stopped = true;
+      clearInterval(renewTimer); clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', forward);
+      await renewal;
+    }
+  }
+  return processed;
 }
 
 
@@ -129,6 +204,17 @@ export async function runOneShotDailyMemoryWrite(
   } catch (error) {
     if (deps.signal?.aborted) throw error;
     drainError = error;
+  }
+  // Source recovery sweeps also have no standing worker. Consume only the
+  // registered stale-only name, serially on this writer's existing connection.
+  try {
+    await drainNightlyExtractJobs(engine, {
+      signal: deps.signal, maxJobs: 20,
+      timeBudgetMs: Number(process.env.GBRAIN_DAILY_MEMORY_EXTRACT_DRAIN_MS) || 30 * 60_000,
+    });
+  } catch (error) {
+    if (deps.signal?.aborted) throw error;
+    drainError ??= error;
   }
   // Extract once after every write so the whole-brain link setup is paid once
   // and stale generated indexes from earlier nights drain with tonight's. A

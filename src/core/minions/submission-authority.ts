@@ -50,6 +50,11 @@ export function currentJobSignal(): AbortSignal | undefined { return executionAu
 export function withSubmissionAuthority<T>(authority: SubmissionAuthority, fn: () => T, signal?: AbortSignal): T {
   return executionAuthority.run({ authority, signal }, fn);
 }
+
+/** Publisher-owned effects are not descendants of the delegated job that caused the accepted write. */
+export function outsideJobSubmissionAuthority<T>(fn: () => T): T {
+  return executionAuthority.exit(fn);
+}
 function deny(message: string, suggestion: string): never {
   throw opError('permission_denied', `Queued job authorization: ${message}`, suggestion);
 }

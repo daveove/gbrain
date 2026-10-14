@@ -44,13 +44,14 @@ export async function extractOneShotDailyMemory(
   if (!slugs.length) return;
   let remaining = slugs.length;
   if (budget > 0) {
-    const extracted = await extract(engine, {
+    await extract(engine, {
       dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
       slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
     });
-    // Recount globally: indexes written or rewritten during the minutes-long
-    // extract setup are stale outside the frozen selection's final count.
-    remaining = exact ? extracted.staleRemaining : (await dailyMemoryExtractTargets(engine)).length;
+    // Recount ownership as well as staleness: a human replacement is no longer
+    // index debt. Exact calls stay bounded to their frozen target set; broad
+    // nightly sweeps also discover generated indexes written during setup.
+    remaining = (await dailyMemoryExtractTargets(engine, exact ? slugs : undefined)).length;
   }
   if (remaining > 0) throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
 }

@@ -146,7 +146,7 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
             targets: prior.targets.some(target => target.slug === actualSlug) ? prior.targets
               : [...prior.targets, { slug: actualSlug, revision: null }] };
           await bank([`before:${JSON.stringify(mutationPrior)}`, `slug:${actualSlug}`], true, tx);
-        } else await bank([priorValue], true, tx);
+        }
       };
     },
     async imported(slug: string) {

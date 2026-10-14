@@ -9,8 +9,11 @@ import type { BrainEngine } from './engine.ts';
 /** Same ceiling as incremental sync (`totalChanges <= 100`). */
 export const INLINE_EXTRACT_CHANGE_LIMIT = 100;
 
+/** Stale-only import recovery consumed by the nightly writer without a standing worker. */
+export const IMPORT_STALE_EXTRACT_JOB = 'extract-stale-links';
+
 /**
- * Queue a source-scoped `extract` job with `{ stale: true }`.
+ * Queue a source-scoped extraction job with `{ stale: true }`.
  * The idempotency key is the consumed commit (or another stable pin). A
  * waiting or delayed row for that pin is reused. Active and finished rows
  * may have already counted the backlog, so they need a durable successor.
@@ -18,11 +21,12 @@ export const INLINE_EXTRACT_CHANGE_LIMIT = 100;
  */
 export async function queueDeferredStaleSweep(
   engine: BrainEngine,
-  opts: { sourceId?: string; commit: string; reason: string },
+  opts: { sourceId?: string; commit: string; reason: string; jobName?: 'extract' | typeof IMPORT_STALE_EXTRACT_JOB },
 ): Promise<number | string | null> {
   const { MinionQueue } = await import('./minions/queue.ts');
   const { STALE_TIME_BUDGET_MS } = await import('../commands/extract.ts');
   const queue = new MinionQueue(engine);
+  const jobName = opts.jobName ?? 'extract';
   const payload = {
     stale: true,
     ...(opts.sourceId ? { sourceId: opts.sourceId } : {}),
@@ -34,7 +38,7 @@ export async function queueDeferredStaleSweep(
   const timeoutMs = STALE_TIME_BUDGET_MS + 5 * 60 * 1000;
   // No maxWaiting: an unscoped coalesce matches ANY waiting extract job and
   // would drop this sweep. The idempotency key is the dedup.
-  const key = `extract-stale:${opts.sourceId ?? 'default'}:${opts.commit}`;
+  const key = `${jobName === 'extract' ? 'extract-stale' : jobName}:${opts.sourceId ?? 'default'}:${opts.commit}`;
   const matchesSweep = (job: { data: Record<string, unknown> }): boolean =>
     job.data?.stale === true && job.data.sourceId === payload.sourceId
     && job.data.deferred_commit === opts.commit;
@@ -45,7 +49,7 @@ export async function queueDeferredStaleSweep(
   const visited = new Set<number>();
   // This budget bounds concurrent claim races, never the number of prior generations.
   for (let races = 0; races < 8; races++) {
-    const job = await queue.add('extract', payload, { idempotency_key: nextKey, timeout_ms: timeoutMs });
+    const job = await queue.add(jobName, payload, { idempotency_key: nextKey, timeout_ms: timeoutMs });
     if (!job || !matchesSweep(job) || !Number.isSafeInteger(job.id) || job.id <= 0) return null;
     if (['waiting', 'delayed'].includes(job.status)) return job.id;
     if (!['active', 'completed', 'failed', 'dead', 'cancelled'].includes(job.status)) return null;
@@ -55,10 +59,10 @@ export async function queueDeferredStaleSweep(
       locatedTip = true;
       const prefix = `${key}:after:`;
       const [tip] = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown>; idempotency_key: string }>(
-        `SELECT id,status,data,idempotency_key FROM minion_jobs WHERE name='extract'
+        `SELECT id,status,data,idempotency_key FROM minion_jobs WHERE name=$3
           AND (idempotency_key=$1 OR (starts_with(idempotency_key,$2)
             AND substring(idempotency_key FROM length($2)+1) ~ '^[1-9][0-9]*$'))
-          ORDER BY id DESC LIMIT 1`, [key, prefix]);
+          ORDER BY id DESC LIMIT 1`, [key, prefix, jobName]);
       if (!tip || !matchesSweep(tip) || !Number.isSafeInteger(tip.id) || tip.id < job.id) return null;
       if (['waiting', 'delayed'].includes(tip.status)) {
         nextKey = tip.idempotency_key;

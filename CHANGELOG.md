@@ -32,7 +32,12 @@ identifiers and attribution are available in the pre-removal Git revision
 - Preserve owner-only aggregate exclusion in paged backlinks, drift-conflict audit and fact attribution even when remote ordinary-private-page access is enabled.
 - Report failed daily-memory handoff from transcript recovery in its JSON receipt and CLI exit verdict rather than silently accepting an incomplete refresh.
 - Preserve pinned calendar zones, historical affected-date debt, single-worker completion barriers, one-connection nightly pools, and bounded infrastructure connect retries. Timezone lookup failures never advance capture watermarks.
-- Migration v243 upgrades retained daily-job timeouts and adds the resolver's missing `lower(title)` trigram index using the existing online-index builder. Existing v240 slug/name indexes are retained.
+- Migration v243 upgrades retained daily-job timeouts, adds the resolver's missing `lower(title)` trigram index using the existing online-index builder, and forward-replaces the trust stamp function so date-representation provenance alone never lowers trust. Existing v240 indexes and trust rules for real content changes are retained.
+- Preserve native YAML `Date` scalars while distinguishing calendar-only dates from explicit midnight instants; generated-index identity markers are protected from speculative frontmatter recovery.
+- Publisher-owned daily-index jobs run outside a delegated job's submission scope and commit atomically with the authorized publication. Direct remote descendant submission remains prohibited.
+- Forward `noExtract` through full reconciliation, preserve aborted-cycle reports without attempting publication, and recount exact extraction debt only for still-owned generated indexes.
+- Keep protected-source refusals on native invalid-input exit status 2 rather than reusing status 3, which means human confirmation is required.
+- Unchanged standalone imports leave the generation clock untouched. Genuine stale link/mention debt is queued as `extract-stale-links`; the nightly one-shot writer drains only that registered job under bounded job/time caps on its existing connection, preserving deferred work and same-name continuations.
 
 ## [0.60.221.0] - 2026-10-14
 

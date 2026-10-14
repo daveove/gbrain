@@ -222,6 +222,12 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
       }
     }
 
+    // A stopped cycle keeps its report and pending daily work; it cannot publish
+    // a completion index after cancellation or after losing its cycle lease.
+    if (report.reason === 'aborted' || report.reason === 'lock_stolen') {
+      return { partial: true, status: report.status, report };
+    }
+
     // Daily indexing is independent of the progressive mixed-phase ledger.
     // A failed queue/publication handoff must retry instead of being silently stamped complete.
     const daily = await finishFanoutDailyMemory(engine, dailyJob);
