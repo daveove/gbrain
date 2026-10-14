@@ -518,7 +518,9 @@ export class ConnectionManager {
       // resolveSessionTimeouts).
       connection: {
         statement_timeout: String(this.opts.migrationStatementTimeoutMs ?? DDL_STMT_TIMEOUT_MS),
-        ...(this.opts.migrationStatementTimeoutMs !== undefined && resolvePrepare(this._directUrl) !== false ? { client_connection_check_interval: '1000' } : {}),
+        ...(this.opts.migrationStatementTimeoutMs !== undefined && resolvePrepare(this._directUrl) !== false
+          && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== 'off' && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== '0'
+          ? { client_connection_check_interval: '1000' } : {}),
         idle_in_transaction_session_timeout: String(DDL_IDLE_TX_TIMEOUT_MS),
         maintenance_work_mem: BULK_MAINTENANCE_WORK_MEM,
         application_name: gbrainApplicationName(),

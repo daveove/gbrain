@@ -493,17 +493,27 @@ and connection limits; non-schema migration subprocesses retain their ten-minute
 deadline.
 
 On expiry, the runner immediately closes its owned read/direct sockets and
-waits for its migration work to settle before returning failure. PostgreSQL
-14+ `client_connection_check_interval=1000` on known direct/session routes lets
-the server notice the closed socket during a long statement, with the SQL
-statement timeout as a backstop. Transaction-mode startup packets preserve the
-existing explicit `GBRAIN_CLIENT_CHECK_INTERVAL` opt-in instead of sending a
-GUC their pooler may reject. Use a direct or session-mode connection (Supabase
-session pooler port 5432), not transaction pooling that discards startup
-settings, for the coordinated server-side deadline. A timeout can leave durable earlier migrations and an
-INVALID concurrent index; rerun the same `init --migrate-only` after the failed
-owned statement has stopped, or use the doctor-named native repair for an
-already-stamped index.
+waits for its migration work to settle before returning failure. On direct,
+non-pooled PostgreSQL 14+ connections, `client_connection_check_interval=1000`
+lets the backend notice the closed socket during a long statement, with its
+SQL statement timeout as a backstop. `GBRAIN_CLIENT_CHECK_INTERVAL=off` (or
+`0`) disables that startup parameter even for migrate-only, so self-hosted
+PgBouncer routes classified as session-mode can still connect. Transaction-mode
+startup packets retain the existing explicit opt-in.
+
+Supabase Supavisor's session pooler (:5432) forwards neither the 30-minute
+startup `statement_timeout` nor the disconnect check to the backend. At the
+application deadline Supavisor drops its client handler, but the backend can
+keep running `CREATE INDEX CONCURRENTLY`. Therefore real backend cancellation
+is guaranteed only on direct, non-pooled routes with disconnect checks enabled,
+not merely by selecting session pooling. The next run stays safe: it refuses
+with `OnlineIndexInProgressError` while that build is active.
+
+Operator action: inspect `pg_stat_progress_create_index` read-only, wait until
+the build finishes, then rerun `gbrain init --migrate-only` (or the doctor-named
+native repair for an already-stamped index). Never kill or drop a foreign active
+build. A timeout can also leave durable earlier migrations and an inactive
+INVALID index, which the subsequent online handler can drop and rebuild.
 
 Every online index helper completion requires both `indisvalid` and
 `indisready`. A foreign concurrent build is not completion: the named
@@ -511,6 +521,10 @@ Every online index helper completion requires both `indisvalid` and
 operator to rerun after that builder finishes. The helper neither cancels nor
 drops that active build. A valid, ready index is a no-op; an inactive INVALID
 leftover is dropped and rebuilt online.
+
+Older v014–v187 migration callsites using `dropInvalidConcurrentIndex` are
+unchanged from the fork base; they affect only brains whose starting schema
+version is below v187.
 
 Worked examples:
 

@@ -441,7 +441,9 @@ export function resolveSessionTimeouts(config?: Pick<EngineConfig, 'database_url
     // Transaction-mode poolers reject this startup parameter unless configured
     // to ignore it. Preserve their existing explicit opt-in; known session
     // routes can detect our closed deadline socket during a long statement.
-    if (config.database_url && resolvePrepare(config.database_url) !== false) out.client_connection_check_interval = '1000';
+    if (config.database_url && resolvePrepare(config.database_url) !== false
+        && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== 'off'
+        && process.env.GBRAIN_CLIENT_CHECK_INTERVAL !== '0') out.client_connection_check_interval = '1000';
   }
   return out;
 }

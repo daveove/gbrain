@@ -171,6 +171,24 @@ describe.skipIf(!url)('DAV-6928 disposable PostgreSQL acceptance', () => {
     } finally { await migrated.disconnect(); }
   }, 10_000);
 
+  test('migrate-only explicit off disables disconnect checks on both existing routes', async () => {
+    const migrated = new PostgresEngine();
+    try {
+      await withEnv({ GBRAIN_DIRECT_DATABASE_URL: fixture.databaseUrl, GBRAIN_CLIENT_CHECK_INTERVAL: 'off' }, async () => {
+        await migrated.connect({ database_url: fixture.databaseUrl, poolSize: 1, migrationStatementTimeoutMs: MIGRATE_ONLY_TIMEOUT_MS });
+        const [read] = await migrated.executeRaw<{ interval: string }>(
+          "SELECT current_setting('client_connection_check_interval') AS interval");
+        const direct = await migrated.withReservedConnection(async conn => {
+          const [row] = await conn.executeRaw<{ interval: string }>(
+            "SELECT current_setting('client_connection_check_interval') AS interval");
+          return row;
+        }, { selfContained: true });
+        expect(read.interval).toBe('0');
+        expect(direct.interval).toBe('0');
+      });
+    } finally { await migrated.disconnect(); }
+  }, 10_000);
+
   test('migrate-only deadline cancels a real late statement without an extra client; ordinary timeout stays five minutes', async () => {
     const { engine } = fixture;
     const [ordinary] = await engine.executeRaw<{ statement_timeout: string }>('SHOW statement_timeout');

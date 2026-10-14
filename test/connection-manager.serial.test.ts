@@ -599,6 +599,19 @@ describe('DAV-6928 migrate-only startup GUC compatibility', () => {
         expect(resolveSessionTimeouts({ database_url, migrationStatementTimeoutMs: 1_800_000 }).client_connection_check_interval).toBe('500');
       }));
   }
+  for (const disabled of ['off', '0']) {
+    test(`migrate-only preserves the explicit disconnect-check disable: ${disabled}`, async () =>
+      withEnv({ ...env, GBRAIN_CLIENT_CHECK_INTERVAL: disabled }, () => {
+        for (const database_url of [
+          'postgresql://postgres@127.0.0.1:5432/gbrain_test',
+          'postgresql://postgres@fixture.pooler.supabase.com:5432/gbrain_test',
+        ]) {
+          const settings = resolveSessionTimeouts({ database_url, migrationStatementTimeoutMs: 1_800_000 });
+          expect(settings.statement_timeout).toBe('1800000');
+          expect(settings).not.toHaveProperty('client_connection_check_interval');
+        }
+      }));
+  }
   test('ordinary startup options retain their five-minute budget and opt-in disconnect check', async () => withEnv(env, () => {
     expect(resolveSessionTimeouts()).toEqual({ statement_timeout: '5min', idle_in_transaction_session_timeout: '5min' });
   }));
