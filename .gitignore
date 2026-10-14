@@ -60,6 +60,9 @@ test/fixtures/pglite-snapshot*.tmp
 reports/network-intelligence/
 graphify-out/
 
+# Private source exports and retrieval snapshots are local data, never source.
+/out/
+
 # Coverage lane output (COVERAGE_DIR opt-in in test-shard.sh /
 # run-serial-tests.sh / run-e2e.sh; merged by scripts/merge-lcov.ts)
 .coverage/

@@ -30,14 +30,14 @@ const MAX_CANDIDATES = 3;
  * when `put_page.similar_pages` is not turned on (default off).
  */
 export async function findSimilarPages(engine: Pick<BrainEngine, 'executeRaw'>, input: {
-  sourceId: string; slug: string; title: string; excludePrivate: boolean;
+  sourceId: string; slug: string; title: string; excludePrivate: boolean | 'owner-only';
 }): Promise<{ candidates: SimilarPageCandidate[]; checks_ran: readonly string[] } | null> {
   const title = input.title.trim();
   const basename = input.slug.slice(input.slug.lastIndexOf('/') + 1);
   const dir = input.slug.includes('/') ? input.slug.slice(0, input.slug.indexOf('/')) : '';
   // ILIKE without wildcards is an exact case-insensitive match the title
   // trigram index (idx_pages_trgm) serves; % and _ in the title are escaped.
-  const privacy = input.excludePrivate ? ` AND ${privatePagesFilterFragment('p')}` : '';
+  const privacy = input.excludePrivate ? ` AND ${privatePagesFilterFragment('p', input.excludePrivate)}` : '';
   const rows = await engine.executeRaw<{ slug: string; evidence: SimilarPageEvidence }>(`
     WITH hits AS (
       SELECT NULL::text AS slug, 'page_exists' AS evidence, 0 AS tier, 0::real AS sim FROM pages p

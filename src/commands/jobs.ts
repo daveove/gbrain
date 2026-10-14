@@ -10,6 +10,7 @@ import { withFactsAbsorbHaltCooldown } from '../core/minions/llm-halt-cooldown.t
 import type { MinionHandler } from '../core/minions/types.ts';
 import { makeAutopilotCycleHandler } from '../core/minions/handlers/autopilot-cycle.ts';
 import { makeAutopilotGlobalMaintenanceHandler } from '../core/minions/handlers/autopilot-global-maintenance.ts';
+import { runDailyMemoryJob } from '../core/cycle/daily-memory-followup.ts';
 import { makeBacklinksHandler } from '../core/minions/handlers/backlinks.ts';
 import { makeChronicleExtractHandler } from '../core/minions/handlers/chronicle-extract.ts';
 import { makeCyclePhaseHandler } from '../core/minions/handlers/cycle-phase.ts';
@@ -22,6 +23,7 @@ import { makeExtractNerHandler } from '../core/minions/handlers/extract-ner.ts';
 import { makeExtractTakesFromPagesHandler } from '../core/minions/handlers/extract-takes-from-pages.ts';
 import { makeExtractTimelineFromMeetingsHandler } from '../core/minions/handlers/extract-timeline-from-meetings.ts';
 import { makeExtractHandler } from '../core/minions/handlers/extract.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../core/deferred-stale-extract.ts';
 import { makeFactsAbsorbHandler } from '../core/minions/handlers/facts-absorb.ts';
 import { makeImportHandler } from '../core/minions/handlers/import.ts';
 import { integrityAutoHandler } from '../core/minions/handlers/integrity-auto.ts';
@@ -93,40 +95,8 @@ export async function refreshGatewayForJob(engine: BrainEngine): Promise<void> {
   await reconfigureGatewayWithEngine(engine);
 }
 
-// Job names whose handlers call the LLM gateway: registerBuiltinJob wraps
-// them with refreshGatewayForJob so file-plane keys + DB-plane model config
-// reach a long-lived worker. Drift guard: test/jobs-gateway-refresh-set.test.ts
-// pins this set against the registerBuiltinJob call sites — a gateway-using
-// handler registered via bare worker.register() runs with a stale gateway
-// (the #3387 chronicle_extract silent-no_events class).
-export const GATEWAY_REFRESH_JOB_NAMES = new Set([
-  'embed',
-  'extract-conversation-facts',
-  'enrich',
-  'facts-absorb',
-  'contextual_reindex_per_chunk',
-  'autopilot-cycle',
-  'synthesize',
-  'patterns',
-  'consolidate',
-  'extract_facts',
-  'extract-atoms-drain',
-  'embed-backfill',
-  // connector-sync's PGLite embed kickoff calls runEmbedCore inline (the
-  // embedding gateway), so it must see a refreshed gateway config like the
-  // other embed jobs — otherwise a worker booted before `config set` embeds
-  // nothing on the catch-up.
-  'connector-sync',
-  'extract-takes-from-pages',
-  'embed-catch-up',
-  // #3387: chronicle_extract's judge is a gateway chat call — without the
-  // refresh a worker booted before `config set` never saw the DB-plane chat
-  // model and every extraction silently returned no_events.
-  'chronicle_extract',
-  // Open-loop commitment extraction (google source kind): same judge shape
-  // as chronicle_extract, same stale-gateway failure class.
-  'loops_extract',
-]);
+// AI-using builtins enter through this wrapper so every job sees the current
+// file-plane credentials/billing and DB-plane model configuration.
 
 function registerBuiltinJob(
   worker: MinionWorker,
@@ -134,10 +104,6 @@ function registerBuiltinJob(
   name: string,
   handler: MinionHandler,
 ): void {
-  if (!GATEWAY_REFRESH_JOB_NAMES.has(name)) {
-    worker.register(name, handler);
-    return;
-  }
   worker.register(name, async (job) => {
     await refreshGatewayForJob(engine);
     return await handler(job);
@@ -514,7 +480,7 @@ export async function registerBuiltinHandlers(
   // terminal with "shell handler registered…" lines. The real `jobs work` path
   // omits opts and prints as before.
   const quiet = opts?.quiet === true;
-  worker.register('sync', makeSyncHandler(engine));
+  registerBuiltinJob(worker, engine, 'sync', makeSyncHandler(engine));
   registerBuiltinJob(worker, engine, 'embed', makeEmbedHandler(engine));
   worker.register('lint', makeLintHandler(engine));
   registerBuiltinJob(worker, engine, 'extract-conversation-facts', makeExtractConversationFactsHandler(engine));
@@ -523,9 +489,10 @@ export async function registerBuiltinHandlers(
   registerBuiltinJob(worker, engine, 'enrich', makeEnrichHandler(engine));
   worker.register('lint-fix', makeLintFixHandler(engine));
   worker.register('integrity-auto', integrityAutoHandler);
-  worker.register('sync-retry-failed', makeSyncRetryFailedHandler(engine));
-  worker.register('import', makeImportHandler(engine));
+  registerBuiltinJob(worker, engine, 'sync-retry-failed', makeSyncRetryFailedHandler(engine));
+  registerBuiltinJob(worker, engine, 'import', makeImportHandler(engine));
   worker.register('extract', makeExtractHandler(engine));
+  worker.register(IMPORT_STALE_EXTRACT_JOB, makeExtractHandler(engine));
   worker.register('backlinks', makeBacklinksHandler(engine));
   registerBuiltinJob(worker, engine, 'facts-absorb', withFactsAbsorbHaltCooldown(makeFactsAbsorbHandler(engine)));
 
@@ -543,7 +510,10 @@ export async function registerBuiltinHandlers(
   }
 
   registerBuiltinJob(worker, engine, 'autopilot-cycle', makeAutopilotCycleHandler(engine));
-  worker.register('autopilot-global-maintenance', makeAutopilotGlobalMaintenanceHandler(engine));
+  registerBuiltinJob(worker, engine, 'autopilot-global-maintenance', makeAutopilotGlobalMaintenanceHandler(engine));
+  worker.register('autopilot-daily-memory', async job => {
+    return runDailyMemoryJob(engine, job);
+  });
 
   // Shell handler is always registered. Runtime guard lives inside the handler
   // so claimed jobs emit a clear rejection log on workers started without
@@ -560,16 +530,11 @@ export async function registerBuiltinHandlers(
     }
   }
 
-  // v0.15 subagent handlers: always-on. Unlike shell (which needs an env
-  // flag because of RCE surface), subagent only calls the Anthropic API
-  // with the operator's own ANTHROPIC_API_KEY — no key, the SDK call
-  // fails immediately. Who-can-submit is already gated by
-  // PROTECTED_JOB_NAMES + TrustedSubmitOpts (MCP can't submit subagent
-  // jobs; only the CLI path with allowProtectedSubmit can). No separate
-  // cost-ceremony env flag needed.
+  // Subagent submission remains protected. Refresh billing before execution,
+  // including the legacy raw-Anthropic transport.
   const { makeSubagentHandler } = await import('../core/minions/handlers/subagent.ts');
   const { subagentAggregatorHandler } = await import('../core/minions/handlers/subagent-aggregator.ts');
-  worker.register('subagent', makeSubagentHandler({ engine }));
+  registerBuiltinJob(worker, engine, 'subagent', makeSubagentHandler({ engine }));
   worker.register('subagent_aggregator', subagentAggregatorHandler);
   process.stderr.write('[minion worker] subagent handlers enabled\n');
 
@@ -582,7 +547,7 @@ export async function registerBuiltinHandlers(
   // caller-provided slug).
   // ============================================================
   const { makeIngestCaptureHandler } = await import('../core/minions/handlers/ingest-capture.ts');
-  worker.register('ingest_capture', makeIngestCaptureHandler(engine));
+  registerBuiltinJob(worker, engine, 'ingest_capture', makeIngestCaptureHandler(engine));
 
   // ============================================================
   // v0.36+ brain-health-100 wave: 11 new handlers for autonomous
@@ -596,7 +561,7 @@ export async function registerBuiltinHandlers(
   // recompute_emotional_weight.
   // ============================================================
 
-  worker.register('reindex', makeReindexHandler(engine));
+  registerBuiltinJob(worker, engine, 'reindex', makeReindexHandler(engine));
   worker.register('repair-jsonb', repairJsonbHandler);
   worker.register('orphans', makeOrphansHandler(engine));
   worker.register('integrity', integrityHandler);
@@ -623,7 +588,7 @@ export async function registerBuiltinHandlers(
   });
   // connector-sync: fetch a chat provider's history and ingest it. Fetch+ingest
   // needs no LLM, but the PGLite embed kickoff calls runEmbedCore inline, so
-  // it's in GATEWAY_REFRESH_JOB_NAMES (gateway refresh before the handler).
+  // registerBuiltinJob refreshes the gateway before the handler.
   registerBuiltinJob(worker, engine, 'connector-sync', async (job) => {
     const { makeConnectorSyncHandler } = await import('../core/minions/handlers/connector-sync.ts');
     return await makeConnectorSyncHandler(engine)(job);
@@ -639,7 +604,7 @@ export async function registerBuiltinHandlers(
   // PROTECTED by name so MCP submission rejects (only trusted CLI can
   // submit). Body in skillopt/job.ts: re-resolves the role models and re-runs
   // the strict check at execution time.
-  worker.register('skillopt', async (job) =>
+  registerBuiltinJob(worker, engine, 'skillopt', async (job) =>
     (await import('../core/skillopt/job.ts')).runSkillOptJob(engine, job.data));
 
   process.stderr.write('[minion worker] brain-health-100 handlers registered (12 ops, 4 protected) + embed-backfill (v0.40) + embed-catch-up (v0.42) + unify-types (v0.42) + skillopt (v0.42.0.0, protected)\n');

@@ -38,6 +38,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 const put_page = operations.find(o => o.name === 'put_page') as Operation;
 if (!put_page) throw new Error('put_page op missing');
@@ -83,6 +84,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -92,6 +94,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // Keyless embedding auto-detect: another file in this shard process may
   // have configured the module-global gateway; put_page reads it for noEmbed.
   resetGateway();

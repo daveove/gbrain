@@ -18,6 +18,37 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runCli, runCliBatch, type CliResult } from './helpers/cli-spawn.ts';
 
+// Native bundled names are explicit: counts must not hide a dropped or renamed verb.
+const BASE_PAGE_TYPES = [
+  'writing', 'analysis', 'guide', 'hardware', 'architecture', 'concept', 'person', 'company',
+  'deal', 'yc', 'civic', 'project', 'source', 'media', 'email', 'slack', 'calendar-event',
+  'note', 'meeting', 'conversation', 'atom', 'event', 'diary', 'code', 'image',
+  'synthesis', 'question', 'extract_receipt',
+];
+const BASE_LINK_VERBS = [
+  'attended', 'image_of', 'founded', 'invested_in', 'advises', 'works_at',
+  'yc_partner', 'led_round', 'discussed_in', 'source', 'related_to', 'mentions',
+];
+const V2_PAGE_TYPES = [
+  'person', 'company', 'account', 'media', 'tweet', 'social-digest', 'analysis', 'atom',
+  'concept', 'source', 'deal', 'email', 'slack', 'meeting', 'conversation', 'writing',
+  'project', 'note', 'event', 'diary',
+];
+const V2_LINK_VERBS = [
+  'partner_of', 'relates_to', 'mentions', 'discusses', 'owes_to', 'awaiting_reply_from',
+  'founded', 'works_at', 'invested_in', 'advises', 'sourced_from', 'derived_from',
+  'supersedes', 'redirects_to', 'attended', 'authored', 'attributed_to',
+];
+
+function expectManifestNames(stdout: string, pageTypes: string[], linkVerbs: string[]): void {
+  expect(stdout).toContain(`Page types (${pageTypes.length})`);
+  expect(stdout).toContain(`Link verbs (${linkVerbs.length})`);
+  const [pages, linksAndTakes] = stdout.split('Page types (')[1]!.split('Link verbs (');
+  const links = linksAndTakes!.split('Takes kinds:')[0]!;
+  expect([...pages!.matchAll(/^  (\S+) :: /gm)].map(match => match[1])).toEqual(pageTypes);
+  expect([...links.matchAll(/^  (\S+)(?:\s|$)/gm)].map(match => match[1])).toEqual(linkVerbs);
+}
+
 // Default-isolated GBRAIN_HOME for every batched call. Without this,
 // tests that read `~/.gbrain/config.json` inherit the developer's real
 // brain config — and sibling Conductor worktrees writing to the same
@@ -97,10 +128,9 @@ describe('gbrain schema CLI (Phase C)', () => {
     // unified extract receipt-writer surface (D-EXTRACT-19 belt+suspenders).
     // v0.42.56.0 (#2390): extended to 27 by adding the Life Chronicle
     // `event` + `diary` temporal types (life/events/, life/diary/).
-    expect(r.stdout).toContain('Page types (28)');
+    expectManifestNames(r.stdout, BASE_PAGE_TYPES, BASE_LINK_VERBS);
     expect(r.stdout).toContain('event :: temporal');
     expect(r.stdout).toContain('diary :: temporal');
-    expect(r.stdout).toContain('Link verbs (12)');
     expect(r.stdout).toContain('Takes kinds: fact, take, bet, hunch');
     expect(r.stdout).toContain('person :: entity');
     expect(r.stdout).toContain('company :: entity');
@@ -128,12 +158,9 @@ describe('gbrain schema CLI (Phase C)', () => {
   test('schema show exposes bundled gbrain-base-v2 successor pack', () => {
     const r = cached('schema', 'show', 'gbrain-base-v2');
     expect(r.exitCode).toBe(0);
-    // v1.2.0 (v0.47 open-loop engine): +owes_to +awaiting_reply_from — 15
-    // link verbs became 17. (#2117 history: 14 became 15 with `advises`.)
-    // v1.3.0 (entity recall): +account page type (alias crm).
+    // Native v2 retains the 17 named verbs; no extra count-only allowance.
     expect(r.stdout).toContain('gbrain-base-v2 v1.3.0');
-    expect(r.stdout).toContain('Page types (');
-    expect(r.stdout).toContain('Link verbs (17)');
+    expectManifestNames(r.stdout, V2_PAGE_TYPES, V2_LINK_VERBS);
   });
 
   test('schema active loads configured gbrain-recommended with real types', async () => {

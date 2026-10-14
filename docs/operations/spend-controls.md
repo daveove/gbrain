@@ -13,6 +13,28 @@ the keyless bootstrap posture — see `docs/guides/bootstrap.md` and
 `docs/operations/headless-install.md`), nothing here can spend and none of these
 gates ever fire. This doc applies once you add a key.
 
+## Subscription-only model billing
+
+`gbrain config set ai_billing subscription` or `GBRAIN_AI_BILLING=subscription`
+refuses paid model APIs before a request or budget reservation. Either protected
+file/environment plane selecting subscription wins; the database plane cannot
+re-enable APIs. `gbrain config get ai_billing` reports the effective policy.
+
+Text defaults use `codex-cli:` with a fresh ChatGPT login and stable Codex CLI
+0.162.0 or newer. The adapter forces ChatGPT authentication, ignores user
+configuration and rules, disables tool surfaces and strips provider credentials
+from its child environment. It never falls back to an API. Local inference
+remains available; the legacy Claude CLI adapter is refused because it cannot
+prove subscription billing. No subscription entitlement is inferred for
+embedding, images, OCR, transcription or reranking. Existing vectors and model
+identities stay untouched, and paid embedding effects remain queued without
+consuming attempts.
+
+Long-lived workers refresh protected billing and model configuration before
+AI builtins, and every provider admission rechecks the protected policy.
+Subscription mode does not remove explicit spend caps or authorize paid work.
+
+
 ## `spend.posture` — one switch for "cost is not my constraint"
 
 ```bash
@@ -73,6 +95,23 @@ What authorizes paid work, and the cap it runs under:
   and register them with `gbrain pricing set` (see
   [Registering a model price](#registering-a-model-price)), then retry the
   same command.
+
+### Foreground embedding backfills
+
+`gbrain embed` keeps its approved `--max-usd`/`--max-cost` ceiling across
+foreground embedding, image and OCR work. Requests reserve before dispatch,
+including visual-input ceilings and OCR's bounded output; SDK retries are
+disabled while metered. Measured usage settles the reservation. A cap stop
+preserves installed vectors, leaves unfinished work pending, and reports
+`reason: cost_cap` with the original refusal, spend, cap and resume command.
+The CLI uses its budget-stop exit code, not success.
+
+`--catch-up` removes the wall-clock bound, not the spending cap, and
+`spend.posture=tokenmax` never overrides an explicit cap. A provider can still
+report usage above its estimate on a completed request; that usage is recorded
+and further work stops. Separate invocations have separate caps: subtract
+their measured spend from a shared approval before authorizing another run.
+
 
 ## Queued paid work
 

@@ -9,7 +9,7 @@ import {
   EmbeddingColumnNotRegisteredError,
   EmbeddingColumnConfigError,
 } from '../core/search/embedding-column.ts';
-
+import { activeAIBilling } from '../core/ai/billing-policy.ts';
 import { redactPgUrl } from '../core/url-redact.ts';
 import { PUBLISH_GATE_KEYS } from '../mcp/publish-gates.ts';
 import { isConsentConfigKey, setConsentPreapproval, unsetConsentPreapproval } from '../core/consent-preapproval.ts';
@@ -645,7 +645,7 @@ async function showConfig(engine: BrainEngine): Promise<void> {
     process.exit(1);
   }
   console.log('GBrain config:');
-  const effective: Record<string, { value: unknown; note: string }> = {};
+  const effective: Record<string, { value: unknown; note: string }> = { ai_billing: { value: activeAIBilling(), note: 'protected file/env billing policy; DB ignored' } };
   try {
     effective.schema_pack = await effectiveSchemaPack(engine);
     const disabled = await effectiveEmbeddingDisabled(engine);
@@ -850,7 +850,7 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
       }
       return;
     }
-    if (FILE_PLANE_API_KEYS.includes(key)) {
+    if (FILE_PLANE_API_KEYS.includes(key) || key === 'ai_billing') {
       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
       const cfg = loadConfigFileOnly() as unknown as Record<string, unknown> | null;
       if (cfg && key in cfg) {
@@ -882,8 +882,8 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
   const value = positionals[2];
   if ((action === 'get' || action === 'set') && key) (await import('../core/questions/auto-think-migration.ts')).noteAutoThinkReplacement(key);
 
-  if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack')) {
-    const effective = key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
+  if (action === 'get' && (key === EMBEDDING_DISABLED_KEY || key === 'schema_pack' || key === 'ai_billing')) {
+    const effective = key === 'ai_billing' ? { value: activeAIBilling(), note: 'protected file/env billing policy; DB ignored' } : key === 'schema_pack' ? await effectiveSchemaPack(engine) : await effectiveEmbeddingDisabled(engine);
     if (!effective) {
       console.error(`Config key not found: ${key}`);
       process.exit(1);
@@ -1130,7 +1130,11 @@ export async function runConfig(engine: BrainEngine, args: string[]) {
     // Vendor credentials are file-plane canonical (see FILE_PLANE_API_KEYS).
     // Routed, not refused: unlike embedding_model there is nothing to re-init,
     // so the user's intent is satisfiable exactly as typed.
-    if (FILE_PLANE_API_KEYS.includes(key)) {
+    if (key === 'ai_billing' && value !== 'api' && value !== 'subscription') {
+      console.error('[config] ai_billing must be "api" or "subscription".');
+      process.exit(1);
+    }
+    if (FILE_PLANE_API_KEYS.includes(key) || key === 'ai_billing') {
       const { loadConfigFileOnly, saveConfig } = await import('../core/config.ts');
       const cfg = (loadConfigFileOnly() ?? { engine: 'pglite' }) as Parameters<typeof saveConfig>[0];
       (cfg as unknown as Record<string, unknown>)[key] = value;

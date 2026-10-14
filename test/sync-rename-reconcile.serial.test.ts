@@ -32,6 +32,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const repos: string[] = [];
 // Serial-file requirement: blocked runs write real rows to the sync-failure
 // ledger under the gbrain home — isolate it per test so the operator's
@@ -44,6 +45,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -54,6 +56,7 @@ beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-3056-home-'));
   process.env.GBRAIN_HOME = tmpHome;
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 afterEach(() => {

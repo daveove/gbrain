@@ -25,7 +25,7 @@ import type { WriteTrust } from '../trust/tier.ts';
 import { withFilesystemPublication } from './filesystem-guard.ts';
 import { mayReprepare } from './semantic.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { queuePublicationEffects } from './effect-journal.ts';
+import { captureDailyMemoryPreimage, queuePublicationEffects } from './effect-journal.ts';
 import type { GitCommitNote } from './effect-model.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { withNoRepoWriteThroughWarning } from '../write-through.ts';
@@ -53,6 +53,10 @@ interface PreparedMutationBase {
   /** #5470 screening only: the content is unchanged, but publication still runs (and queues effects). */
   contentUnchanged?: boolean;
   deferEmbedding?: boolean;
+  /** Dates captured under page locks before canonical mutation. */
+  dailyMemoryPriorDays?: string[];
+  /** Timezone used when capturing dailyMemoryPriorDays. */
+  dailyMemoryTimezone?: string;
   /** Why a page write bound to a worktree publishes no file (receipt `write_through.skipped`). */
   databaseOnlyReason?: 'db_only' | 'unbound_source' | 'mirror_read_only' | 'sync_excluded' | 'shared_origin';
   /** #6517: the receipt's `write_through.warning` for a database-only publication, set by `validate` under the publication guards. */
@@ -386,6 +390,7 @@ export async function publishMutation(engine: BrainEngine, row: WriteRequest, pr
         throw new OperationError('source_changed', 'The source became a read-only mirror after this write was prepared; nothing was written to its checkout.',
           'Retry the write with a new request_id; it is now stored database-only.');
       }
+      if (!skill) await captureDailyMemoryPreimage(tx, row, prepared);
       if (recovery) {
         const records = recoveryFiles(recovery);
         for (const record of records) if ((skill ? bundleFileHash(record) : fileHash(record.path)) !== record.beforeHash) {

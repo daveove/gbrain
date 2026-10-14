@@ -19,9 +19,10 @@ export async function assertRetainedEmbeddingRebuildability(tx: BrainEngine, dim
       const parsed = JSON.parse(embeddingColumnsJson);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid embedding registry');
     }
-    const active = resolveWriteColumnFromConfigRows({
+    const activeColumn = resolveWriteColumnFromConfigRows({
       searchEmbeddingColumn: registry.find(row => row.key === 'search_embedding_column')?.value, embeddingColumnsJson,
-    }).name;
+    });
+    const active = activeColumn.name;
     const columns = await tx.executeRaw<{ name: string; type: string }>(`SELECT attname AS name,format_type(atttypid,atttypmod) AS type
       FROM pg_attribute WHERE attrelid='content_chunks'::regclass AND attnum>0 AND NOT attisdropped`);
     if (!Array.isArray(columns) || !columns.some(c => c.name === 'page_id') || columns.some(c => typeof c.name !== 'string' || typeof c.type !== 'string')) throw new Error('Unknown chunk schema');
@@ -81,7 +82,7 @@ export async function assertRetainedEmbeddingRebuildability(tx: BrainEngine, dim
     }
     counts = row;
     if (model !== undefined) archivedWork = await countArchivedEmbeddingWork(tx,
-      { signature: `${model}:${dimensions}`, includeNullSignature: true, includeUnsealed: true }, activeExists ? active : null);
+      { signature: `${model}:${dimensions}`, includeNullSignature: true, includeUnsealed: true }, activeExists ? activeColumn : null);
   } catch {
     throw new Error('retained_vector_check_failed: Cannot determine whether retained vectors can be rebuilt; migration mutations refused. Inspect the selected brain and database/schema access before retrying.');
   }

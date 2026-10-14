@@ -24,11 +24,13 @@ import type { DoctorContext } from '../src/commands/doctor/context.ts';
 import type { Check } from '../src/commands/doctor.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -37,6 +39,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   await engine.executeRaw('DELETE FROM planner_stats_deltas');
   await engine.executeRaw('DELETE FROM planner_stats_state');
   await engine.executeRaw("DELETE FROM config WHERE key LIKE 'planner.%' OR key = 'import.analyze_every_pages'");

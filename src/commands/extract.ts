@@ -99,7 +99,7 @@ import { isQuarantined, quarantinedSlugs } from '../core/quarantine.ts';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
-import { loadAllSources } from '../core/sources-load.ts';
+import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from '../core/sources-load.ts';
 import { plannerStatsForLinkDrain } from '../core/planner-stats.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
@@ -1894,7 +1894,7 @@ async function extractLinksFromDB(
   // feature — an isolated source must not regrow cross-source edges on every
   // sweep. Sources absent from the table (or archived) fail closed to isolated.
   const federatedSourceIds = new Set(
-    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+    (await loadAllSources(engine)).filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id),
   );
   const targetMetadata = new Map((await loadLinkPageMetadata(engine)).map(p => [`${p.source_id}\0${p.slug}`, p]));
   await loadSourceLinkPacks(engine, walkRefs.filter(ref => !typeFilter
@@ -2101,8 +2101,14 @@ export async function extractStaleFromDB(
      * explicit `gbrain extract --stale` command. Ignored when catchUp.
      */
     timeBudgetMs?: number;
+    /** Only these origins may be extracted (including an empty selection). */
+    slugs?: readonly string[];
+    /** Recheck ownership using the publication transaction when one is open. */
+    originGuard?: (snapshot: PageSnapshot, reader: BrainEngine) => Promise<boolean>;
+    signal?: AbortSignal;
   },
 ): Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult }> {
+  opts.signal?.throwIfAborted();
   const { dryRun, jsonMode, sourceIdFilter, catchUp } = opts;
   const includeFrontmatter = opts.includeFrontmatter ?? await resolveIncludeFrontmatter(engine);
   const log = opts.quiet ? (..._args: unknown[]) => {} : console.log;
@@ -2111,9 +2117,9 @@ export async function extractStaleFromDB(
   const versionTs = linkExtractorWatermarkFor(grammar.generation);
 
   // Pre-flight count — cheap indexed COUNT. dry-run reports and returns.
-  const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs });
+  const totalStale = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs, slugs: opts.slugs });
   if (dryRun) {
-    const m = await previewMentionPass(engine, sourceIdFilter);
+    const m = opts.slugs !== undefined ? { due: 0, last_pass_at: null } : await previewMentionPass(engine, sourceIdFilter);
     if (jsonMode && !opts.quiet) {
       process.stdout.write(JSON.stringify({ action: 'extract_stale_dry_run', stale_pages: totalStale, mention_due_pages: m.due, mention_last_pass_at: m.last_pass_at }) + '\n');
     } else {
@@ -2126,7 +2132,8 @@ export async function extractStaleFromDB(
   // (the mention pass runs inside it).
   if (await managedPersistenceEnabled(engine)) {
     const { extractManagedStaleLinks, formatManagedStaleExtraction } = await import('../core/persistence/links-maintenance.ts');
-    const r = await extractManagedStaleLinks(engine, { sourceId: sourceIdFilter, ...(catchUp ? {} : { timeBudgetMs }) });
+    const r = await extractManagedStaleLinks(engine, { sourceId: sourceIdFilter, slugs: opts.slugs, onlySlugs: opts.slugs !== undefined,
+      originGuard: opts.originGuard, signal: opts.signal, mentions: opts.slugs === undefined, ...(catchUp ? {} : { timeBudgetMs }) });
     if (!jsonMode) log(formatManagedStaleExtraction(r, false, false));
     else if (!opts.quiet) process.stdout.write(formatManagedStaleExtraction(r, false, true) + '\n');
     return { linksCreated: r.created, timelineCreated: r.timeline, pagesProcessed: r.pages, staleRemaining: r.remaining + (r.mentions?.remaining ?? 0),
@@ -2167,7 +2174,7 @@ export async function extractStaleFromDB(
   // #3478: mirrors extractLinksFromDB — only federated sources keep the
   // cross-source 'default' fallback; absent/archived rows fail closed.
   const federatedSourceIds = new Set(
-    (await loadAllSources(engine, { federatedOnly: true })).map(source => source.id),
+    (await loadAllSources(engine)).filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id),
   );
   const targetMetadata = new Map((totalStale ? await loadLinkPageMetadata(engine) : []).map(p => [`${p.source_id}\0${p.slug}`, p]));
 
@@ -2194,9 +2201,10 @@ export async function extractStaleFromDB(
   const wantedEnabled = await isWantedPagesEnabled(engine);
   const plannerTick = await plannerStatsForLinkDrain(engine, async () => totalStale);
   for (;;) {
+    opts.signal?.throwIfAborted();
     await plannerTick(pagesProcessed);
     const rows = await engine.listStalePagesForExtraction({
-      batchSize: STALE_BATCH_SIZE, afterPageId, sourceId: sourceIdFilter, versionTs,
+      batchSize: STALE_BATCH_SIZE, afterPageId, sourceId: sourceIdFilter, versionTs, slugs: opts.slugs,
     });
     if (rows.length === 0) break;
     await loadSourceLinkPacks(engine, rows.map(page => page.source_id), packs);
@@ -2224,6 +2232,8 @@ export async function extractStaleFromDB(
         }
         const snapshot = await engine.readPageSnapshot(page.slug, { sourceId: page.source_id });
         if (!snapshot) { skippedConcurrentWrite++; continue; } // deleted since the stale scan: nothing to stamp
+        opts.signal?.throwIfAborted();
+        if (opts.originGuard && !await opts.originGuard(snapshot, engine)) continue;
         const fullContent = snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
         const linkRows: LinkBatchInput[] = [];
         if (!resolvers.has(page.source_id)) resolvers.set(page.source_id, makeResolver(engine, { mode: 'batch', sourceId: page.source_id }));
@@ -2313,11 +2323,11 @@ export async function extractStaleFromDB(
 
   progress.finish();
   if (packUnavailable) throw new Error('Cannot extract links: active schema pack is unavailable.');
-  const mentions = await runMentionPass(engine, { sourceId: sourceIdFilter, ...(catchUp ? {} : { deadline: startMs + timeBudgetMs }) });
-  const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs }) + mentions.remaining;
+  const mentions = opts.slugs !== undefined ? undefined : await runMentionPass(engine, { sourceId: sourceIdFilter, signal: opts.signal, ...(catchUp ? {} : { deadline: startMs + timeBudgetMs }) });
+  const staleRemaining = await engine.countStalePagesForExtraction({ sourceId: sourceIdFilter, versionTs, slugs: opts.slugs }) + (mentions?.remaining ?? 0);
 
   if (!jsonMode) {
-    const mentionLine = formatMentionSummary(mentions);
+    const mentionLine = mentions ? formatMentionSummary(mentions) : null;
     if (totalStale === 0 && !mentionLine) log('No stale pages — extraction is up to date.');
     else log(`Extract --stale: ${linksCreated} link(s) + ${timelineCreated} timeline entr(ies) from ${pagesProcessed} page(s).`);
     if (mentionLine) log(mentionLine);
@@ -2339,7 +2349,7 @@ export async function extractStaleFromDB(
       pages_processed: pagesProcessed, stale_remaining: staleRemaining, budget_hit: budgetHit,
       skipped_missing_target: skippedMissingTarget, skipped_cross_source: skippedCrossSource,
       ...(skippedAttendanceIncomplete ? { skipped_attendance_incomplete: skippedAttendanceIncomplete } : {}), ...(skippedChanged ? { skipped_changed: skippedChanged } : {}),
-      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}), ...mentionJsonFields(mentions),
+      ...(skippedConcurrentWrite ? { skipped_concurrent_write: skippedConcurrentWrite } : {}), ...(mentions ? mentionJsonFields(mentions) : {}),
     }) + '\n');
   }
   return { linksCreated, timelineCreated, pagesProcessed, staleRemaining, skippedMissingTarget, skippedCrossSource,

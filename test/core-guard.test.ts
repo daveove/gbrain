@@ -19,16 +19,18 @@ import { coreLockSources, lockCoreSources } from '../src/core/persistence/core-g
 import { listCorePages } from '../src/core/core-memory.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let fixture: string;
 let remoteRegistration: LocalRegistration;
 let cliRegistration: LocalRegistration;
 const remoteAuth = { token: 'fixture', clientId: 'fixture-client', scopes: ['read', 'write'], sourceId: 'default' };
 
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 120_000);
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 120_000);
 afterAll(async () => { await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   _resetWriteThroughCacheForTest();
   fixture = mkdtempSync(join(tmpdir(), 'gb-core-guard-'));
   mkdirSync(join(fixture, 'brain'));

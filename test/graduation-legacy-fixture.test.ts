@@ -11,6 +11,8 @@
  * rows, collation-sensitive text keys). A schema or handler change that
  * silently stops producing one of those states would turn those tests
  * vacuous; this file fails first and names the state.
+ * Required daily-memory barriers and continuations from the managed writes
+ * remain in the queue; the byte-heavy lease is checked by its fixture identity.
  * Regression it catches: a migration that changes a trigger the fixture
  * relies on (fact withdrawal stamping, generation bumps, projection queue),
  * activation absorbing the orphan states, or the target checker passing an
@@ -52,6 +54,25 @@ describe('graduation legacy fixture', () => {
     expect(await legacySourceMismatches(engine)).toEqual([]);
   });
 
+  test('byte checks select the heavy stale lease and the target checker rejects a changed payload', async () => {
+    const before = await snapshotLegacySource(engine);
+    const [original] = await engine.executeRaw<{ data: Record<string, unknown>; bytes: number }>(
+      'SELECT data,octet_length(data::text)::int AS bytes FROM minion_jobs WHERE id=$1', [fixture.staleJobId]);
+    expect(original.data.fixture).toBe('stale-lease');
+    expect(original.bytes).toBeGreaterThanOrEqual(loadLegacyExpected().source.bytes.minion_data_min);
+    try {
+      await engine.executeRaw("UPDATE minion_jobs SET data=jsonb_set(data,'{payload}','{}'::jsonb) WHERE id=$1", [fixture.staleJobId]);
+      const source = await legacySourceMismatches(engine);
+      expect(source.filter(message => message.startsWith('bytes minion_data:'))).toHaveLength(1);
+      const provider = new GBrainOAuthProvider({ sql: sqlQueryForEngine(engine) });
+      const target = await legacyTargetMismatches(engine, before, token => provider.verifyAccessToken(token));
+      expect(target).toContain(`target minion payload ${fixture.staleJobId}: missing or changed`);
+    } finally {
+      await engine.executeRaw('UPDATE minion_jobs SET data=$2::text::jsonb WHERE id=$1',
+        [fixture.staleJobId, JSON.stringify(original.data)]);
+    }
+  });
+
   test('the queued admission is recorded with its caller intent for a cross-process replay probe', () => {
     expect(existsSync(join(root, 'queued-admission.json'))).toBe(true);
     const recorded = readQueuedAdmission(root);
@@ -66,7 +87,8 @@ describe('graduation legacy fixture', () => {
     const mismatches = await legacyTargetMismatches(engine, before, token => provider.verifyAccessToken(token));
     const labels = mismatches.map(m => m.split(':')[0]).sort();
     expect(labels).toEqual([
-      'target count gbrain_cycle_locks', 'target count pages', 'target effect orphan_running', 'target gbrain_cycle_locks discarded',
+      'target count gbrain_cycle_locks', 'target count minion_jobs', 'target count pages', 'target daily jobs',
+      'target effect orphan_running', 'target gbrain_cycle_locks discarded',
       'target queued request', 'target stale job', 'target worktree heartbeat',
     ]);
   });

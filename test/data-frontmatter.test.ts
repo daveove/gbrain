@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { parseDataFrontmatter, stringifyDataFrontmatter } from '../src/core/data-frontmatter.ts';
 import { parseMarkdown } from '../src/core/markdown.ts';
+import { CALENDAR_DATE, DATE_INSTANT_PROVENANCE, NAIVE_DATETIME, parseDateLoose } from '../src/core/effective-date.ts';
 
 describe('frontmatter data and serialization compatibility', () => {
   test('preserves independently specified field order, scalar types and quoting', () => {
@@ -10,6 +11,29 @@ describe('frontmatter data and serialization compatibility', () => {
     const parsed = parseDataFrontmatter(expected);
     expect(parsed.data).toEqual(data);
     expect(parsed.content).toBe('# Body\n\n---\nend\n');
+  });
+
+  test('tagged calendar Dates dump as date-only scalars, ordinary midnight Dates remain timestamps', () => {
+    const calendar = parseDataFrontmatter('---\ndate: 2024-02-29\n---\nbody\n');
+    const text = stringifyDataFrontmatter(calendar.content, calendar.data);
+    expect(text).toContain('\ndate: 2024-02-29\n');
+    expect(text).not.toContain('T00:00:00');
+    const parsed = parseMarkdown(text, 'notes/calendar.md');
+    expect((parsed.frontmatter.date as Date & { [CALENDAR_DATE]?: boolean })[CALENDAR_DATE]).toBe(true);
+    expect(parsed.frontmatter[DATE_INSTANT_PROVENANCE]).toBeUndefined();
+    expect(JSON.stringify(parsed.frontmatter)).toBe(JSON.stringify(calendar.data));
+
+    const instant = stringifyDataFrontmatter('body\n', { date: new Date('2024-02-29T00:00:00.000Z') });
+    expect(instant).toContain('\ndate: 2024-02-29T00:00:00.000Z\n');
+    expect(parseMarkdown(instant, 'notes/instant.md').frontmatter[DATE_INSTANT_PROVENANCE])
+      .toEqual({ date: '2024-02-29T00:00:00.000Z' });
+  });
+
+  test('offset-less YAML datetimes retain their brain-zone interpretation', () => {
+    const data = parseDataFrontmatter('---\ndate: 2024-03-01T00:30:00\n---\nbody\n').data;
+    expect((data.date as Date & { [NAIVE_DATETIME]?: boolean })[NAIVE_DATETIME]).toBe(true);
+    expect(parseDateLoose(data.date, 'Asia/Tokyo')?.toISOString()).toBe('2024-02-29T15:30:00.000Z');
+    expect(parseDateLoose(data.date, 'America/Los_Angeles')?.toISOString()).toBe('2024-03-01T08:30:00.000Z');
   });
 
   test('preserves empty metadata/body and final-newline conventions', () => {

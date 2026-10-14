@@ -11,9 +11,9 @@
  * trust+config resolver:
  *
  *   ctx.remote === false          → see everything (trusted local CLI)
- *   GBRAIN_REMOTE_PRIVATE_PAGES=1 → operator escape hatch, see everything
+ *   GBRAIN_REMOTE_PRIVATE_PAGES=1 → operator opt-out, retain owner aggregate protection
  *   config search.remote_private_pages ∈ {visible,true,1}
- *                                 → operator opt-out, see everything
+ *                                 → operator opt-out, retain owner aggregate protection
  *   otherwise                     → exclude private pages (FAIL-CLOSED default)
  *
  * The SQL predicate itself lives in buildVisibilityClause (sql-ranking.ts)
@@ -43,8 +43,22 @@ function derivedPageSql(pageAlias: string): string {
  * relational-arm hydrate, and get_page's fuzzy-candidate filter. `pageAlias`
  * is a code-provided literal, never user input.
  */
-export function privatePagesFilterFragment(pageAlias: string): string {
-  return `(${privateSnapshotFilterFragment(pageAlias)}
+export type PageVisibilityFilter = boolean | 'owner-only';
+
+function ownerAggregateFilterFragment(pageAlias: string, identityAlias = pageAlias): string {
+  return `NOT COALESCE((${pageAlias}.frontmatter @> '{"dream_generated":true}'::jsonb
+    AND ${identityAlias}.source_id IN ('default', 'dream')
+    AND (${identityAlias}.slug ~ '^daily-memory/[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+      OR (${identityAlias}.slug LIKE 'source-records/%'
+        AND ${pageAlias}.frontmatter ? 'source_record_id'
+        AND ${pageAlias}.frontmatter ? 'source_record_type'
+        AND ${pageAlias}.frontmatter ? 'source_record_ref'))), false)`;
+}
+
+export function privatePagesFilterFragment(pageAlias: string, filter: PageVisibilityFilter = true, identityAlias = pageAlias): string {
+  if (!filter) return 'TRUE';
+  if (filter === 'owner-only') return ownerAggregateFilterFragment(pageAlias, identityAlias);
+  return `(${privateSnapshotFilterFragment(pageAlias, filter, identityAlias)}
     AND NOT ${derivedOriginPrivateSql(pageAlias)}
     AND NOT ${declaredLineagePrivateSql(pageAlias)})`;
 }
@@ -55,10 +69,11 @@ export function privatePagesFilterFragment(pageAlias: string): string {
  * is visible by every rule above, so only the remaining pages run the full
  * check. For scans over thousands of candidate pages (an entity's referrers).
  */
-export function privatePagesFilterFragmentFast(pageAlias: string): string {
-  return `((${pageAlias}.frontmatter->'visibility' IS NULL AND ${pageAlias}.frontmatter->'derived_from' IS NULL
+export function privatePagesFilterFragmentFast(pageAlias: string, filter: PageVisibilityFilter = true): string {
+  if (filter !== true) return privatePagesFilterFragment(pageAlias, filter);
+  return `(${ownerAggregateFilterFragment(pageAlias)} AND ((${pageAlias}.frontmatter->'visibility' IS NULL AND ${pageAlias}.frontmatter->'derived_from' IS NULL
       AND ${pageAlias}.type NOT IN ('atom', 'concept', 'event'))
-    OR ${privatePagesFilterFragment(pageAlias)})`;
+    OR ${privatePagesFilterFragment(pageAlias)}))`;
 }
 
 /**
@@ -87,9 +102,12 @@ function declaredLineagePrivateSql(p: string): string {
  * `pinned_question` marker is private whatever its `visibility` says (pinned
  * questions are owner-private, src/core/questions/pages.ts).
  */
-export function privateSnapshotFilterFragment(alias: string): string {
+export function privateSnapshotFilterFragment(alias: string, filter: PageVisibilityFilter = true, identityAlias = alias): string {
+  if (!filter) return 'TRUE';
+  if (filter === 'owner-only') return ownerAggregateFilterFragment(alias, identityAlias);
   return `(COALESCE(${alias}.frontmatter->>'visibility', CASE WHEN ${derivedPageSql(alias)} THEN 'private' ELSE 'world' END) <> 'private'
-    AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false))`;
+    AND NOT COALESCE(${alias}.frontmatter ? 'pinned_question', false)
+    AND ${ownerAggregateFilterFragment(alias, identityAlias)})`;
 }
 
 /**
@@ -145,21 +163,39 @@ export function strictestVisibility(values: Iterable<Visibility>): Visibility {
   return 'world';
 }
 
+/** Reserved owner-aggregate source+slug identities, independent of page metadata. */
+export function isReservedOwnerAggregateIdentity(sourceId: string, slug: string): boolean {
+  if (!['default', 'dream'].includes(sourceId)) return false;
+  return /^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(slug)
+    || slug.startsWith('source-records/');
+}
+
+export function isOwnerAggregate(page: { type?: string | null; source_id: string; slug: string; frontmatter: Record<string, unknown> }): boolean {
+  if (page.frontmatter.dream_generated !== true || !isReservedOwnerAggregateIdentity(page.source_id, page.slug)) return false;
+  return /^daily-memory\/[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(page.slug)
+    || ['source_record_id', 'source_record_type', 'source_record_ref'].every(key => Object.hasOwn(page.frontmatter, key));
+}
+
+export function isPageHidden(page: { type?: string | null; source_id: string; slug: string; frontmatter: Record<string, unknown> },
+  filter: PageVisibilityFilter): boolean {
+  return !!filter && (isOwnerAggregate(page) || (filter === true && isPrivatePage(page)));
+}
+
 /** Check the actual origin, independently of joins that redact its source. */
-export function privateLinkOriginFilterFragment(linkAlias: string): string {
+export function privateLinkOriginFilterFragment(linkAlias: string, filter: PageVisibilityFilter = true): string {
   return `(${linkAlias}.origin_page_id IS NULL OR EXISTS (
     SELECT 1 FROM pages origin_private
     WHERE origin_private.id = ${linkAlias}.origin_page_id
-      AND ${privatePagesFilterFragment('origin_private')}
+      AND ${privatePagesFilterFragment('origin_private', filter)}
   ))`;
 }
 
 /** A projection's private event must stay hidden even when its join is source-redacted. */
-export function privateTimelineEventFilterFragment(timelineAlias: string): string {
+export function privateTimelineEventFilterFragment(timelineAlias: string, filter: PageVisibilityFilter = true): string {
   return `(${timelineAlias}.event_page_id IS NULL OR EXISTS (
     SELECT 1 FROM pages event_private
     WHERE event_private.id = ${timelineAlias}.event_page_id
-      AND ${privatePagesFilterFragment('event_private')}
+      AND ${privatePagesFilterFragment('event_private', filter)}
   ))`;
 }
 
@@ -172,9 +208,9 @@ export function privateTimelineEventFilterFragment(timelineAlias: string): strin
  * consulted — fail-open for cross-source provenance, acceptable under source
  * isolation because ontology_propose stamps the fact with ctx.sourceId.
  */
-export function privateProvenanceFilterFragment(factAlias: string): string {
+export function privateProvenanceFilterFragment(factAlias: string, filter: PageVisibilityFilter = true): string {
   return `NOT EXISTS (SELECT 1 FROM pages pp WHERE pp.source_id = ${factAlias}.source_id ` +
-    `AND pp.slug = ${factAlias}.source_markdown_slug AND NOT (${privatePagesFilterFragment('pp')}))`;
+    `AND pp.slug = ${factAlias}.source_markdown_slug AND NOT (${privatePagesFilterFragment('pp', filter)}))`;
 }
 
 /**
@@ -182,6 +218,7 @@ export function privateProvenanceFilterFragment(factAlias: string): string {
  * (get_page / fetch read one row by slug; re-querying just to filter would
  * be a second round-trip). Same semantics: an explicit 'private' hides a
  * page, and an absent value hides only derived atoms and concepts.
+ * Generated owner aggregates stay hidden independently of private-page opt-out.
  */
 export function isPrivatePage(page: { type?: string | null; frontmatter?: unknown }): boolean {
   const frontmatter = typeof page.frontmatter === 'object' && page.frontmatter !== null
@@ -206,7 +243,7 @@ export async function findPrivateOnlySlugs(
   engine: BrainEngine,
   slugs: string[],
   scope: { sourceId?: string; sourceIds?: string[] } = {},
-  opts: { includeDeleted?: boolean } = {},
+  opts: { includeDeleted?: boolean; excludePrivate?: PageVisibilityFilter } = {},
 ): Promise<Set<string>> {
   if (slugs.length === 0) return new Set();
   const params: unknown[] = [slugs];
@@ -224,7 +261,7 @@ export async function findPrivateOnlySlugs(
         ${opts.includeDeleted ? '' : 'AND p.deleted_at IS NULL'}
         ${scopeClause}
       GROUP BY p.slug
-      HAVING bool_and(NOT (${privatePagesFilterFragment('p')}))`,
+      HAVING bool_and(NOT (${privatePagesFilterFragment('p', opts.excludePrivate ?? true)}))`,
     params,
   );
   return new Set(rows.map(r => r.slug));
@@ -247,9 +284,9 @@ export function __resetPrivateVisibilityCacheForTests(): void {
 export async function resolveExcludePrivatePages(
   engine: BrainEngine,
   remote: boolean | undefined,
-): Promise<boolean> {
+): Promise<PageVisibilityFilter> {
   if (remote === false) return false; // trusted local CLI sees everything
-  if (process.env.GBRAIN_REMOTE_PRIVATE_PAGES === '1') return false; // incident escape hatch
+  if (process.env.GBRAIN_REMOTE_PRIVATE_PAGES === '1') return 'owner-only'; // incident escape hatch
   const hit = cache.get(engine);
   let expose: boolean;
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) {
@@ -263,5 +300,5 @@ export async function resolveExcludePrivatePages(
     }
     cache.set(engine, { at: Date.now(), expose });
   }
-  return !expose;
+  return expose ? 'owner-only' : true;
 }

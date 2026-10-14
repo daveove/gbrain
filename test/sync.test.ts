@@ -408,6 +408,7 @@ describe('buildSyncManifest — C-style-quoted paths', () => {
 
 describe('performSync dry-run never writes', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   let repoPath: string;
 
   // One PGLite per file — beforeEach wipes data only. Each test still gets a
@@ -416,6 +417,7 @@ describe('performSync dry-run never writes', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
 
   afterAll(async () => {
@@ -424,6 +426,7 @@ describe('performSync dry-run never writes', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-sync-dryrun-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
     execSync('git config user.email "test@test.com"', { cwd: repoPath, stdio: 'pipe' });
@@ -989,12 +992,14 @@ describe('sync auto-embed arguments', () => {
 // fallback), F-C (rename-to-unsyncable deletes the old page).
 describe('#1970: unreachable last_commit bookmark recovery', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   const repos: string[] = [];
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
 
   afterAll(async () => {
@@ -1003,6 +1008,7 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
   });
 
   afterEach(() => {
@@ -1222,12 +1228,14 @@ describe('#1970: unreachable last_commit bookmark recovery', () => {
 
 describe('v0.42.52.0: 0-changes sync bumps last_sync_at heartbeat (D4 invariant preserved)', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   const repos: string[] = [];
 
   beforeAll(async () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
 
   afterAll(async () => {
@@ -1236,6 +1244,7 @@ describe('v0.42.52.0: 0-changes sync bumps last_sync_at heartbeat (D4 invariant 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
   });
 
   afterEach(() => {

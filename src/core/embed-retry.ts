@@ -78,6 +78,9 @@ export const RATE_LIMIT_JITTER = 0.3;
 
 export interface EmbedBatchWithBackoffOpts {
   abortSignal?: AbortSignal;
+  /** Explicit `provider:model` and width of a staging target; absent routes to the configured model. */
+  embeddingModel?: string;
+  dimensions?: number;
 }
 
 /**
@@ -220,7 +223,11 @@ export async function embedBatchWithBackoff(
       // D4a + D8: maxRetries:0 disables the SDK's stacked retries (so this
       // wrapper is the single source of truth) and abortSignal threads
       // through to the gateway so an in-flight HTTP request cancels mid-fetch.
-      const out = await embedBatch(texts, { maxRetries: 0, ...(signal && { abortSignal: signal }) });
+      const out = await embedBatch(texts, {
+        maxRetries: 0,
+        ...(signal && { abortSignal: signal }),
+        ...(opts.embeddingModel !== undefined && { embeddingModel: opts.embeddingModel, dimensions: opts.dimensions }),
+      });
       // #4599: every SETTLED embed attempt ticks the stall watchdog's
       // liveness clock (T6 — API-response grain, successes here, errors in
       // the catch). Liveness is diagnostic; the stall TRIGGER stays keyed on
@@ -249,7 +256,7 @@ export async function embedBatchWithBackoff(
     }
   }
   // Unreachable, but TypeScript needs it.
-  return embedBatch(texts);
+  return embedBatch(texts, opts);
 }
 
 /**

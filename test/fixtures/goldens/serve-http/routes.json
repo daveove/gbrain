@@ -461,6 +461,51 @@
         "<inline>"
       ],
       "method": "get",
+      "path": "/admin/api/graph/search",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/admin/api/graph/neighbourhood",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/admin/api/graph/page",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/admin/api/graph/sources",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
+      "path": "/admin/api/graph/sources/:id/top",
+      "when": []
+    },
+    {
+      "handlers": [
+        "requireAdmin",
+        "<inline>"
+      ],
+      "method": "get",
       "path": "/admin/events",
       "when": []
     },

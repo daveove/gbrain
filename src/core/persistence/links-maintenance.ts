@@ -66,7 +66,8 @@ export const MANAGED_LINK_EXTRACTION_WIDTH = 4;
  * PGLite owner delegation all run it, in the process that owns the brain.
  */
 export async function extractManagedStaleLinks(engine: BrainEngine,
-  opts: { sourceId?: string; slugs?: readonly string[]; maxPages?: number; timeBudgetMs?: number; signal?: AbortSignal; mentions?: boolean } = {}): Promise<ManagedLinkExtraction> {
+  opts: { sourceId?: string; slugs?: readonly string[]; maxPages?: number; timeBudgetMs?: number; signal?: AbortSignal; mentions?: boolean; onlySlugs?: boolean;
+    originGuard?: (snapshot: import('../engine.ts').PageSnapshot, reader: BrainEngine) => Promise<boolean> } = {}): Promise<ManagedLinkExtraction> {
   const result: ManagedLinkExtraction = { pages: 0, created: 0, removed: 0, timeline: 0, skipped: 0, remaining: 0 };
   const startMs = Date.now();
   const withMentions = opts.mentions !== false;
@@ -85,11 +86,14 @@ export async function extractManagedStaleLinks(engine: BrainEngine,
     done.add(`${sourceId}\0${slug}`);
     const snapshot = await engine.readPageSnapshot(slug, { sourceId });
     if (!snapshot || isQuarantined(snapshot.page.frontmatter)) return;
+    if (opts.originGuard && !await opts.originGuard(snapshot, engine)) return;
     const prepared = await prepareAutomaticLinks(settings, slug, snapshot.page, sourceId);
     const outcome = await engine.transaction(async tx => withCoordinatedWrite(tx, [sourceId], async () => {
       await tx.lockPageKeys(prepared.pageKeys);
       const current = await tx.readPageSnapshot(slug, { sourceId });
       if (current?.revision !== snapshot.revision) return null;
+      opts.signal?.throwIfAborted();
+      if (opts.originGuard && !await opts.originGuard(current, tx)) return null;
       if (!prepared.attendanceComplete) {
         await tx.markPagesAttendanceBlocked([{ slug, source_id: sourceId, revision: current.revision }]);
         return null;
@@ -126,17 +130,17 @@ export async function extractManagedStaleLinks(engine: BrainEngine,
     }));
   };
   const plannerTick = await plannerStatsForLinkDrain(engine, async () =>
-    Math.min(maxPages, await engine.countStalePagesForExtraction({ sourceId: opts.sourceId, versionTs })));
+    Math.min(maxPages, await engine.countStalePagesForExtraction({ sourceId: opts.sourceId, versionTs, ...(opts.onlySlugs ? { slugs: opts.slugs ?? [] } : {}) })));
   if (opts.slugs?.length && opts.sourceId) await each([...new Set(opts.slugs)], slug => derive(slug, opts.sourceId!));
   let afterPageId = 0;
-  while (budget()) {
+  while (!opts.onlySlugs && budget()) {
     const rows = await engine.listStalePagesForExtraction({ batchSize: 25, afterPageId, sourceId: opts.sourceId, versionTs });
     if (!rows.length) break;
     afterPageId = rows[rows.length - 1]!.id;
     await each(rows.filter(row => !done.has(`${row.source_id}\0${row.slug}`)),
       row => derive(row.slug, row.source_id, row.updated_at.getTime() >= Date.parse(versionTs) ? row.updated_at_iso : versionTs));
   }
-  result.remaining = await engine.countStalePagesForExtraction({ sourceId: opts.sourceId, versionTs });
+  result.remaining = await engine.countStalePagesForExtraction({ sourceId: opts.sourceId, versionTs, ...(opts.onlySlugs ? { slugs: opts.slugs ?? [] } : {}) });
   if (withMentions) {
     result.mentions = await runMentionPass(engine, { sourceId: opts.sourceId, signal: opts.signal,
       ...(opts.timeBudgetMs === undefined ? {} : { deadline: startMs + opts.timeBudgetMs }) });

@@ -94,14 +94,15 @@ export async function runLinksEffect(engine: BrainEngine, effect: PersistenceEff
     if (!current || current.state !== 'running' || current.execution_token !== effect.execution_token) return;
     const live = await tx.readPageSnapshot(snapshot.page.slug, { sourceId });
     if (!live || live.page.id !== snapshot.page.id || live.revision !== snapshot.revision) { await skip(tx, 'superseded'); return; }
-    const hidePrivate = row.authority.remote && ((row.authority.excludePrivate ?? true) || await excludesPrivateWrites(tx, true));
-    const existing = targets.size ? await tx.executeRaw<{ slug: string; visible: boolean }>(`SELECT p.slug,(${privatePagesFilterFragment('p')}) AS visible
+    const visibilityFilter = !row.authority.remote ? false
+      : (row.authority.excludePrivate ?? true) === true || await excludesPrivateWrites(tx, true) ? true : 'owner-only';
+    const existing = targets.size ? await tx.executeRaw<{ slug: string; visible: boolean }>(`SELECT p.slug,(${privatePagesFilterFragment('p', visibilityFilter)}) AS visible
       FROM pages p WHERE p.source_id=$1 AND p.slug=ANY($2::text[]) AND p.deleted_at IS NULL`, [sourceId, [...targets.keys()]]) : [];
     const visible = new Map(existing.map(page => [page.slug, page.visible]));
     const granted = await targetGrant(tx, row.authority);
     const wanted = new Map<string, string>();
     for (const [slug, context] of targets) {
-      const reason = !visible.has(slug) ? 'missing' : hidePrivate && !visible.get(slug) ? 'not_visible' : !granted(slug) ? 'outside_grant' : null;
+      const reason = !visible.has(slug) ? 'missing' : !visible.get(slug) ? 'not_visible' : !granted(slug) ? 'outside_grant' : null;
       if (reason) skipped.push({ slug, reason });
       else wanted.set(slug, context);
     }

@@ -6,6 +6,7 @@ import type { MinionHandler } from '../types.ts';
 import { resolveJobPull } from './job-pull.ts';
 import { isConnectorSourceKind } from '../../persistence/connector-identity.ts';
 import { CONNECTOR_SOURCE_PHASES } from '../../cycle/phase-scope.ts';
+import { refreshDailyMemoryAfterSourceSync } from '../../cycle/daily-memory-followup.ts';
 
 /**
  * Autopilot-cycle handler: delegates to runCycle. Shares the exact same
@@ -159,6 +160,16 @@ export function makeAutopilotCycleHandler(engine: BrainEngine): MinionHandler {
         await new Promise<void>(r => setImmediate(r));
       },
     });
+
+    let handoffSource = sourceId ?? report.source_id;
+    if (!handoffSource && !connectorSource && effectiveBrainDir
+      && report.phases.some(phase => phase.phase === 'sync' && phase.status !== 'skipped')) {
+      const { resolveSourceForDir } = await import('../../cycle.ts');
+      handoffSource = await resolveSourceForDir(engine, effectiveBrainDir) ?? 'default';
+    }
+    if (report.reason !== 'aborted' && report.reason !== 'lock_stolen') {
+      await refreshDailyMemoryAfterSourceSync(engine, job, handoffSource, report);
+    }
 
     return {
       partial: report.status === 'partial' || report.status === 'failed',

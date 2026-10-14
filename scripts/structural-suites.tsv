@@ -202,14 +202,11 @@ test/init-mode-picker.test.ts	cost matrix: newest models, priced from model-pric
 test/integrations-install.test.ts	installRecipeIntoHostRepo — happy path	6	readFileSync
 test/integrations.test.ts	CLI integration	3	source-surface-helper
 test/jobs-embed-background-parity.serial.test.ts	embed job background parity (D7)	2	readFileSync,source-surface-helper
-test/jobs-gateway-refresh-set.test.ts	#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ registerBuiltinJob call sites	5	source-surface-helper
 test/jobs-list-get-json.serial.test.ts	help advertises --json on list/get/stats (#3685)	2	source-surface-helper
 test/jobs-thin-client-date-rehydration.test.ts	thin-client unpack sites route through rehydrateJobDates (source audit)	2	source-surface-helper
 test/jobs-worker-startup-recovery.test.ts	work-handler recovery placement (structural)	1	source-surface-helper
 test/link-source-check-repair.test.ts	regex literal drift guard (#4613)	1	readFileSync
 test/longmemeval-embed-cache.test.ts	EmbeddingCache — canonical hash	4	readFileSync
-test/loops-extract-wiring.test.ts	jobs.ts wiring	2	source-surface-helper
-test/loops-extract-wiring.test.ts	relational edge vocabulary	2	readFileSync,source-surface-helper
 test/mcp-registration.test.ts	every stdio registration path builds from REGISTRATION_SURFACE	4	readFileSync
 test/meeting-ingestion-attendance-template.test.ts	(file-level)	3	readFileSync
 test/migrate-stdout-clean.test.ts	migration output stays off stdout	2	source-surface-helper
@@ -380,14 +377,12 @@ test/think-embed-question-wiring.serial.test.ts	#3734 — CRAG think escalation 
 test/think-embed-question-wiring.serial.test.ts	#3734 — synthesize verb wires embedQuestion into runThink	1	readFileSync
 test/timing-safe.test.ts	extraction contract	1	source-surface-helper
 test/title-fuzzy-index.test.ts	findByTitleFuzzy indexed threshold	2	source-surface-helper
-test/transcription-injection.test.ts	transcription — command injection (#245)	2	readFileSync
 test/trust-write-gate-drift.test.ts	(file-level)	1	readFileSync
 test/upgrade.serial.test.ts	detectInstallMethod — package-install classification (in-process)	4	readFileSync
 test/upgrade.serial.test.ts	runUpgrade target verification (#4366)	8	readFileSync
 test/v0_37_fix_wave.serial.test.ts	v0.37 Lane A — defaults sweep	8	source-surface-helper
 test/v0_37_fix_wave.serial.test.ts	v0.37 Lane B — init paths	3	source-surface-helper
 test/v0_37_fix_wave.serial.test.ts	v0.37 Lane C.3 — Voyage key reaches buildGatewayConfig	2	source-surface-helper
-test/v0_37_fix_wave.serial.test.ts	v0.37 Lane D.2 — embed pre-flight dim mismatch	1	source-surface-helper
 test/v0_37_fix_wave.serial.test.ts	v0.37 Lane D.4 — sync --help dispatch	1	source-surface-helper
 test/v0_37_fix_wave.serial.test.ts	v0.37 deferred TODO shipped — gbrain reinit-pglite	2	source-surface-helper
 test/v0_37_gap_fill.serial.test.ts	Lane A.7 — chunk-row INSERT default tracks the gateway-resolved model	1	source-surface-helper

@@ -24,6 +24,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let repoPath: string;
 // runSync records the monthly backup check under GBRAIN_HOME; a file-local home keeps that
 // (and every other state file sync writes) out of the shared per-run test home.
@@ -44,6 +45,7 @@ describe('#1434 — runSync auto-routes to sole_non_default source', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -53,6 +55,7 @@ describe('#1434 — runSync auto-routes to sole_non_default source', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-snd-routing-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
     execSync('git config user.email "t@t.com"', { cwd: repoPath, stdio: 'pipe' });

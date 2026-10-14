@@ -7,10 +7,9 @@
  *
  * Architecture (per CEO + eng review + Codex outside voice):
  *
- *   - Per-source iteration HERE. The outer cycle scheduler now uses
- *     PHASE_SCOPE for fanout admission, while this legacy wrapper still
- *     enumerates `listSources(engine)` and loops over per-source core
- *     invocations directly.
+ *   - Per-source iteration HERE. PHASE_SCOPE is `mixed`: the daily
+ *     maintenance job runs this wrapper once, and the wrapper enumerates
+ *     `listSources(engine)`. A per-source freshness job must not.
  *
  *   - Brain-wide BudgetTracker created ONCE per phase tick and passed
  *     into every per-source invocation via `opts.budgetTracker`. The

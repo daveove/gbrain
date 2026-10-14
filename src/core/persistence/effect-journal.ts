@@ -17,6 +17,31 @@ import { EXPIRED_PREPARING_CHARGE_SQL } from './claim-phase.ts';
 import { refreshFenceClear } from './worktree-refresh-schema.ts';
 import { pageBatchChildRequestIds } from './page-batch-id.ts';
 import { EFFECT_FAULT_POINTS, faultPoint } from './fault-points.ts';
+import { outsideJobSubmissionAuthority } from '../minions/submission-authority.ts';
+
+/** Canonical source mutations that change membership in the daily owner index. */
+type DailyMutationOperation = 'put_page' | 'edit_page' | 'delete_page' | 'restore_page' | 'capture' | 'revert_version';
+function dailyMutationOperation(row: Partial<Pick<WriteRequest, 'operation' | 'intent'>>): DailyMutationOperation | null {
+  if (row.operation === 'put_page' || row.operation === 'edit_page' || row.operation === 'delete_page'
+    || row.operation === 'restore_page' || row.operation === 'capture' || row.operation === 'revert_version') return row.operation;
+  const kind = row.intent?.kind;
+  if (kind === 'managed_sync_delete' || kind === 'managed_maintenance_chronicle_retire') return 'delete_page';
+  if (kind === 'managed_sync_import' || kind === 'managed_file_import' || kind === 'managed_maintenance_chronicle_event') return 'put_page';
+  return null;
+}
+
+/** Runs under the publisher's page guards, on its transaction (including a one-connection pool). */
+export async function captureDailyMemoryPreimage(tx: BrainEngine, row: WriteRequest, prepared: PreparedMutation): Promise<void> {
+  if (prepared.noop || row.source_id === 'dream' || !dailyMutationOperation(row)) return;
+  const { dailyMemoryDaysForSlugs } = await import('../cycle/daily-memory-followup.ts');
+  const { resolveCycleTimeZone } = await import('../cycle/cycle-date.ts');
+  const timezone = await resolveCycleTimeZone(tx);
+  const renamed = row.intent?.renameFrom as { slug?: unknown } | undefined;
+  const slugs = [row.slug];
+  if (typeof renamed?.slug === 'string') slugs.push(renamed.slug);
+  prepared.dailyMemoryTimezone = timezone;
+  prepared.dailyMemoryPriorDays = await dailyMemoryDaysForSlugs(tx, row.source_id, slugs, { timezone, recoverHistory: false });
+}
 
 /**
  * `snapshot` is the publication's final read of the page, including deleted rows, in this transaction.
@@ -67,6 +92,21 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   if (queued.some(effect => effect.kind === 'links')) {
     if (inserted.some(effect => effect.kind === 'links')) outcome.auto_links = { ...(outcome.auto_links as Record<string, unknown> | undefined), mention_links: 'queued' };
     if (!opts.deferBatchReconcile) await reconcileFinishedBatch(tx, row);
+  }
+  const dailyOperation = dailyMutationOperation(row);
+  if (dailyOperation) {
+    const { refreshDailyMemoryAfterPageMutation } = await import('../cycle/daily-memory-followup.ts');
+    // This fixed owner-index effect is derived from the authorized publication,
+    // not from a delegated job payload. Queue rows share this transaction, so
+    // neither the publication nor its host-owned jobs are visible before commit.
+    const days = await outsideJobSubmissionAuthority(() => refreshDailyMemoryAfterPageMutation(tx, {
+      sourceId: row.source_id,
+      slug: row.slug,
+      operation: dailyOperation,
+      priorDays: prepared?.dailyMemoryPriorDays,
+      timezone: prepared?.dailyMemoryTimezone,
+    }));
+    if (days.length && !row.authority?.remote) outcome.daily_memory_affected_dates = days;
   }
 }
 
@@ -121,21 +161,25 @@ async function embeddingDisabled(tx: BrainEngine): Promise<boolean> {
   return (await tx.getConfig('embedding_disabled')) === 'true';
 }
 
-/** Claims release their database connection before waiting for a filesystem lock/provider. Nothing on a refresh-fenced worktree is claimed. */
-export async function claimPersistenceEffect(engine: BrainEngine, hostId: string): Promise<PersistenceEffect | null> {
+/**
+ * Claims release their database connection before waiting for a filesystem lock/provider. Nothing on a refresh-fenced worktree is claimed.
+ * `deferKinds` are never claimed: they stay queued with their attempts untouched.
+ */
+export async function claimPersistenceEffect(engine: BrainEngine, hostId: string, deferKinds: readonly string[] = []): Promise<PersistenceEffect | null> {
   return engine.transactionDirect(async tx => {
     await declarePersistenceProtocol(tx);
     const [candidate] = await tx.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e
       LEFT JOIN persistence_worktrees w ON w.id=e.worktree_id
       WHERE (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
       AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid) AND (e.worktree_id IS NULL OR ${refreshFenceClear('e')})
+      AND NOT (e.kind = ANY($2::text[]))
       AND e.recovery IS NULL AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
       AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
         WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed'))
-      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId]);
+      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId, [...deferKinds]]);
     if (!candidate) return null;
     const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
       claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 RETURNING *`, [candidate.id, randomUUID()]);

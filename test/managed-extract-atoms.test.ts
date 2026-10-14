@@ -12,13 +12,15 @@ import { withEnv } from './helpers/with-env.ts';
 import { atomContractCases, exerciseManagedAtoms, atomBatchCases, exerciseManagedAtomBatch, atomAuthorityCases, exerciseManagedAtomAuthority, exerciseManagedAtomReconciliation, atomRetirementCases, exerciseManagedAtomRetirement } from './helpers/managed-atoms-contract.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 beforeAll(async () => {
   configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: {} });
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
-beforeEach(async () => { await stopPersistenceConsumer(engine); await resetPgliteState(engine); });
+beforeEach(async () => { await stopPersistenceConsumer(engine); await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); });
 afterAll(async () => { await engine.disconnect(); resetGateway(); });
 
 for (const scenario of atomContractCases) test(`managed atom ${scenario}`, () => exerciseManagedAtoms(engine, scenario), 60_000);

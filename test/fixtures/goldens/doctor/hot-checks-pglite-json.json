@@ -16,7 +16,7 @@
         "category_scores": {
           "brain": 45,
           "meta": 100,
-          "ops": 100,
+          "ops": 95,
           "skill": 95
         },
         "checks": [
@@ -735,7 +735,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -747,7 +747,7 @@
           },
           {
             "category": "brain",
-            "message": "No by-mention links in this brain.",
+            "message": "Re-derived 2 by-mention link(s) across 2 page(s); all still follow from the current gazetteer.",
             "name": "stale_mentions",
             "status": "ok"
           },
@@ -1538,14 +1538,36 @@
           {
             "category": "ops",
             "details": {
-              "by_queue": {},
-              "depth": 0,
+              "by_queue": {
+                "default": 40
+              },
+              "depth": 40,
               "engine": "pglite",
-              "worker_alive": true
+              "worker_alive": false
             },
-            "message": "PGLite: no jobs waiting for a worker.",
+            "fix": {
+              "actor": "agent",
+              "argv": {},
+              "command": "gbrain jobs work --brain host",
+              "consent": [],
+              "next": "run",
+              "requires_exclusive": true,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "queue_health",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+            },
+            "message": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
-            "status": "ok"
+            "status": "warn"
           },
           {
             "category": "ops",
@@ -1750,7 +1772,7 @@
           },
           {
             "category": "brain",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "message": "Extraction lag not applicable (20 pages — too few to assess)",
             "name": "links_extraction_lag",
             "status": "ok"
           },
@@ -2887,7 +2909,7 @@
         ],
         "db_url_source": null,
         "engine": "pglite",
-        "health_score": 40,
+        "health_score": 35,
         "schema_version": 2,
         "status": "unhealthy",
         "top_issues": [
@@ -2925,7 +2947,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -3069,6 +3091,38 @@
             "tier": "symptom"
           },
           {
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "jobs",
+                "work",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain jobs work --brain host",
+              "consent": [],
+              "next": "run",
+              "requires_exclusive": true,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "queue_health",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+            },
+            "fix": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "name": "queue_health",
+            "status": "warn",
+            "tier": "symptom"
+          },
+          {
             "fix": "64 new built-in skill(s) available that this workspace hasn't installed: academic-verify, archive-crawler, article-enrichment, ask-user, blog-ingest, book-mirror, brain-ingest-gate, brain-link-discipline, … +56 more. Add them with `gbrain skillpack sync`.",
             "name": "skill_currency",
             "status": "warn",
@@ -3135,7 +3189,7 @@
         "category_scores": {
           "brain": 45,
           "meta": 100,
-          "ops": 100,
+          "ops": 95,
           "skill": 95
         },
         "checks": [
@@ -3854,7 +3908,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -3866,7 +3920,7 @@
           },
           {
             "category": "brain",
-            "message": "No by-mention links in this brain.",
+            "message": "Re-derived 2 by-mention link(s) across 2 page(s); all still follow from the current gazetteer.",
             "name": "stale_mentions",
             "status": "ok"
           },
@@ -4657,14 +4711,36 @@
           {
             "category": "ops",
             "details": {
-              "by_queue": {},
-              "depth": 0,
+              "by_queue": {
+                "default": 40
+              },
+              "depth": 40,
               "engine": "pglite",
-              "worker_alive": true
+              "worker_alive": false
             },
-            "message": "PGLite: no jobs waiting for a worker.",
+            "fix": {
+              "actor": "agent",
+              "argv": {},
+              "command": "gbrain jobs work --brain host",
+              "consent": [],
+              "next": "run",
+              "requires_exclusive": true,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "queue_health",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+            },
+            "message": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
-            "status": "ok"
+            "status": "warn"
           },
           {
             "category": "ops",
@@ -4869,7 +4945,7 @@
           },
           {
             "category": "brain",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "message": "Extraction lag not applicable (20 pages — too few to assess)",
             "name": "links_extraction_lag",
             "status": "ok"
           },
@@ -6006,7 +6082,7 @@
         ],
         "db_url_source": null,
         "engine": "pglite",
-        "health_score": 40,
+        "health_score": 35,
         "schema_version": 2,
         "status": "unhealthy",
         "top_issues": [
@@ -6044,7 +6120,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -6184,6 +6260,38 @@
             },
             "fix": "8 file(s) in Git sources are held and not imported; the rest of each sync continues. notes: 8 held (0 page(s) keep an older revision, 8 file(s) have no page), first: fences/llm.md [invalid_fence/no_header], fences/manual.md [invalid_fence/takes_kind_unsupported], fm/dash-line.md [invalid_frontmatter/needs_interpretation], fm/duplicate-key.md [invalid_frontmatter/needs_interpretation], fm/indented-close.md [invalid_frontmatter/yaml_parse]. A page whose newer file is held is read-only for put_page until the file is repaired, so do not retry a refused write. Inspect with gbrain sources status notes; then notes: preview the frontmatter and other fixes with gbrain repair frontmatter --source notes (writes nothing until a hash-bound apply); nothing repairs the fence and slug-conflict holds by itself (no maintenance run is active), so preview the content repairs with gbrain repair content --source notes (read-only, no model call: it lists each held file with its planned repair or the exact edit, kind by kind, and prints the apply command with --expect <hash>[,<hash>]), then run the apply command it prints.",
             "name": "git_held_files",
+            "status": "warn",
+            "tier": "symptom"
+          },
+          {
+            "action": {
+              "actor": "agent",
+              "argv": [
+                "gbrain",
+                "jobs",
+                "work",
+                "--brain",
+                "host"
+              ],
+              "command": "gbrain jobs work --brain host",
+              "consent": [],
+              "next": "run",
+              "requires_exclusive": true,
+              "verify": {
+                "argv": [
+                  "gbrain",
+                  "doctor",
+                  "--only",
+                  "queue_health",
+                  "--json",
+                  "--brain",
+                  "host"
+                ]
+              },
+              "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
+            },
+            "fix": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "name": "queue_health",
             "status": "warn",
             "tier": "symptom"
           },

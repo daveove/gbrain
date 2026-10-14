@@ -20,7 +20,8 @@ import {
   _resetOcrRunBudgetForTests,
   _getOcrRunBudgetForTests,
 } from '../src/core/import-file.ts';
-import { configureGateway, resetGateway, __setGenerateTextTransportForTests } from '../src/core/ai/gateway.ts';
+import { configureGateway, resetGateway, __setGenerateTextTransportForTests, withBudgetTracker } from '../src/core/ai/gateway.ts';
+import { BudgetExhausted, BudgetTracker } from '../src/core/budget/budget-tracker.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -144,6 +145,36 @@ describe('image OCR opt-in through importImageFile', () => {
     expect(ocrCalls).toBe(1);
   });
 });
+
+describe('foreground spend cap through image import', () => {
+  test('OCR admission stops before OCR or visual embedding without swallowing the refusal', async () => {
+    const img = writeImage();
+    const cap = new BudgetTracker({ maxCostUsd: 0, label: 'image-cap', auditPath: join(dir, 'audit.jsonl') });
+    let notified: BudgetExhausted | undefined;
+    cap.onExhausted(error => { notified = error; });
+    let refusal: unknown;
+    try { await withBudgetTracker(cap, () => importWith('true', img)); } catch (error) { refusal = error; }
+    expect(refusal).toBeInstanceOf(BudgetExhausted);
+    expect(refusal).toBe(notified);
+    expect(ocrCalls).toBe(0);
+    expect(embedCalls).toBe(0);
+    expect((await stored(img.rel)).page).toBeNull();
+  });
+
+  test('visual admission stops before the request and preserves the original cap refusal', async () => {
+    const img = writeImage();
+    const cap = new BudgetTracker({ maxCostUsd: 0, label: 'visual-cap', auditPath: join(dir, 'audit.jsonl') });
+    let notified: BudgetExhausted | undefined;
+    cap.onExhausted(error => { notified = error; });
+    let refusal: unknown;
+    try { await withBudgetTracker(cap, () => importWith(undefined, img)); } catch (error) { refusal = error; }
+    expect(refusal).toBeInstanceOf(BudgetExhausted);
+    expect(refusal).toBe(notified);
+    expect(embedCalls).toBe(0);
+    expect((await stored(img.rel)).page).toBeNull();
+  });
+});
+
 
 describe('per-run OCR budget gate (#3973)', () => {
   test('over the default image cap: skips OCR, bumps ocr_skipped_budget, never counts an attempt', async () => {

@@ -52,7 +52,7 @@ export interface RelationalArmOpts extends PageReadPolicy {
    * (resolveExcludePrivatePages) here, same as the keyword/vector arms;
    * without it a remote relational query leaked private titles + snippets.
    */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Multi-relation questions walk typed hop chains (search.relational_planner). */
   planner?: boolean;
   /** Typed one-hop walks also read edges written on the other page (search.relational_orient_onehop). */

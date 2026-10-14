@@ -12,6 +12,7 @@
 import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { MinionWorker } from '../src/core/minions/worker.ts';
+import type { MinionJob } from '../src/core/minions/types.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
 import { configureGateway, getChatModel, resetGateway } from '../src/core/ai/gateway.ts';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
@@ -68,7 +69,7 @@ describe('autopilot-cycle handler — partial failure does NOT throw', () => {
 
     const result = await handler({
       data: { repoPath: '/definitely-does-not-exist-for-autopilot-test' },
-      signal: { aborted: false } as any,
+      signal: new AbortController().signal,
       job: { id: 1, name: 'autopilot-cycle' } as any,
     });
 
@@ -110,7 +111,7 @@ describe('autopilot-cycle handler — partial failure does NOT throw', () => {
       const handler = (worker as any).handlers.get('autopilot-cycle');
       const result = await handler({
         data: { repoPath: dir },
-        signal: { aborted: false } as any,
+        signal: new AbortController().signal,
         job: { id: 2, name: 'autopilot-cycle' } as any,
       });
       // The handler MUST return a result object, never throw, regardless
@@ -140,7 +141,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
     try {
       const result = await handler({
         data: { phases: ['orphans'], pull: false },
-        signal: { aborted: false } as any,
+        signal: new AbortController().signal,
         job: { id: 9, name: 'autopilot-cycle' } as any,
       });
 
@@ -170,7 +171,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
     try {
       await expect(handler({
         data: {},
-        signal: { aborted: false } as any,
+        signal: new AbortController().signal,
         job: { id: 10, name: 'enrich' } as any,
       })).rejects.toThrow('enrich Minion job requires data.sourceId');
 
@@ -201,7 +202,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
       // Request only lint and sync — embed should NOT appear
       const result = await handler({
         data: { repoPath: dir, phases: ['lint', 'sync'] },
-        signal: { aborted: false } as any,
+        signal: new AbortController().signal,
         job: { id: 10, name: 'autopilot-cycle' } as any,
       });
 
@@ -237,7 +238,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
       // Mix valid and bogus names — only 'lint' should survive filtering
       const result = await handler({
         data: { repoPath: dir, phases: ['lint', 'BOGUS', 'rm -rf /'] },
-        signal: { aborted: false } as any,
+        signal: new AbortController().signal,
         job: { id: 11, name: 'autopilot-cycle' } as any,
       });
 
@@ -258,7 +259,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
     // now an honest skip.
     const result = await handler({
       data: { repoPath: '/definitely-does-not-exist-for-phase-test', phases: [] },
-      signal: { aborted: false } as any,
+      signal: new AbortController().signal,
       job: { id: 12, name: 'autopilot-cycle' } as any,
     });
 
@@ -272,7 +273,7 @@ describe('autopilot-cycle handler — phase passthrough', () => {
     // String instead of array — should be ignored
     const result = await handler({
       data: { repoPath: '/definitely-does-not-exist-for-phase-test', phases: 'lint' },
-      signal: { aborted: false } as any,
+      signal: new AbortController().signal,
       job: { id: 13, name: 'autopilot-cycle' } as any,
     });
 
@@ -303,7 +304,9 @@ describe('backlinks handler — empty payload checks, never rewrites pages', () 
     try {
       const before = readFileSync(join(dir, 'companies/acme-example.md'), 'utf8');
       const handler = (worker as any).handlers.get('backlinks');
-      const result = await handler({ data: { dir }, signal: { aborted: false } as any, job: { id: 20, name: 'backlinks' } as any });
+      // This legacy direct-handler fixture consumes only the job identity.
+      const job = { id: 20, name: 'backlinks' } as unknown as MinionJob;
+      const result = await handler({ data: { dir }, signal: new AbortController().signal, job });
       expect(result.action).toBe('check');
       expect(result.gaps_found).toBe(1);
       expect(result.fixed).toBe(0);
@@ -317,7 +320,9 @@ describe('backlinks handler — empty payload checks, never rewrites pages', () 
     const dir = makeBrainWithGap();
     try {
       const handler = (worker as any).handlers.get('backlinks');
-      const result = await handler({ data: { dir, action: 'fix' }, signal: { aborted: false } as any, job: { id: 21, name: 'backlinks' } as any });
+      // This legacy direct-handler fixture consumes only the job identity.
+      const job = { id: 21, name: 'backlinks' } as unknown as MinionJob;
+      const result = await handler({ data: { dir, action: 'fix' }, signal: new AbortController().signal, job });
       expect(result.action).toBe('fix');
       expect(result.fixed).toBe(1);
       expect(readFileSync(join(dir, 'companies/acme-example.md'), 'utf8')).toContain('alice-example');

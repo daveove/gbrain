@@ -55,6 +55,7 @@ import { emptyHome, withEnv } from './helpers/with-env.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let home: string;
 
 beforeAll(async () => {
@@ -65,6 +66,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -84,6 +86,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // This suite's default contract is keyless. A previous file (or one of the
   // deterministic-embedder cases below) must not leave fake credentials active
   // after the transport seam is cleared. Individual cases opt in explicitly.

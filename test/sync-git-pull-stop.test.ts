@@ -110,6 +110,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   rmSync(silentPidFile, { force: true });
   useRemote(silentRemote);
 });
@@ -233,8 +234,6 @@ describe('performSync stop routes during the pull', () => {
   test('a signal-owned worker shutdown hands the sync job back without an attempt and frees the sync lock', async () => {
     await performSync(engine, { ...syncOpts, noPull: true });
     const anchorBefore = await syncAnchor();
-    // The worker refuses to claim without a schema version; resetPgliteState clears config.
-    await engine.setConfig('version', schemaVersion!);
     const queue = new MinionQueue(engine);
     const job = await queue.add('sync', { repoPath: brain, sourceId: 'default', pull: true, auto_embed_backfill: false });
     const worker = new MinionWorker(engine, { pollInterval: 20, healthCheckInterval: 0, stalledInterval: 600_000 });

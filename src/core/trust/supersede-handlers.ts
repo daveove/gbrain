@@ -109,8 +109,8 @@ export async function forgetRequiresOwner(engine: BrainEngine, input: { sourceId
 }
 
 /** Pre-admission check for a remote forget: a guarded target becomes a `forget` proposal and the verb error. */
-export async function guardRemoteForget(engine: BrainEngine, input: { sourceId: string; factId: number; principal: Principal; reason: string | null; excludePrivate?: boolean }): Promise<void> {
-  const [fact] = await engine.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM facts WHERE id = $1 AND source_id = $2 AND visibility = 'world'${input.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}`, [input.factId, input.sourceId]);
+export async function guardRemoteForget(engine: BrainEngine, input: { sourceId: string; factId: number; principal: Principal; reason: string | null; excludePrivate?: boolean | 'owner-only' }): Promise<void> {
+  const [fact] = await engine.executeRaw<{ trust_tier: string }>(`SELECT trust_tier FROM facts WHERE id = $1 AND source_id = $2 AND visibility = 'world'${input.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', input.excludePrivate)}` : ''}`, [input.factId, input.sourceId]);
   if (!fact || !supersessionGuarded('agent_written', fact.trust_tier)) return;
   throw await forgetRequiresOwner(engine, { ...input, factTier: storedTrustTier(fact.trust_tier), writerTier: 'agent_written' });
 }

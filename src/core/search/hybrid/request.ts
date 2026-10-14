@@ -9,7 +9,7 @@ import type { BrainEngine } from '../../engine.ts';
 import { perArmPoolLimit } from '../eval-pool-depth.ts';
 import type { DegradedStageEntry, HybridSearchMeta, SearchOpts, SearchResult } from '../../types.ts';
 import { type GBrainConfig, loadConfigWithEngine } from '../../config.ts';
-import { type HybridSearchOpts, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
+import { type HybridSearchOpts, type QueryEmbedDeadline, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
 import type { IdentityTierOpts } from '../alias-hop.ts';
 import { type IntentWeights, applyAliasMentionBoost, applyExactMatchBoost, applyTitleMentionBoost, weightsForIntent } from '../intent-weights.ts';
 import { type QuerySuggestions, classifyQueryWithBrainPatterns } from '../query-intent.ts';
@@ -57,6 +57,8 @@ export interface HybridRequest {
   engine: BrainEngine;
   query: string;
   opts: HybridSearchOpts | undefined;
+  /** One lazy provider deadline shared by cache, vector arms and detail retries. */
+  queryEmbedDeadline?: () => QueryEmbedDeadline;
   modeInput: ResolveSearchModeInput;
   resolvedMode: ResolvedSearchKnobs;
   cfgForColumn: GBrainConfig | null;
@@ -92,6 +94,12 @@ export interface HybridRequest {
   relationalPlan?: import('../relational-recall.ts').RelationalPlanMeta;
   /** The op's stage-timing collector (`opts._timings`), or the no-op timer. */
   timer: StageTimer;
+  /**
+   * Vector arms the configuration would run that this request's embedding
+   * column rules out: unified multimodal routing would replace an
+   * independent column's own model space with the multimodal one.
+   */
+  omittedVectorArms?: NonNullable<HybridSearchMeta['omitted_vector_arms']>;
 }
 
 const DEBUG = process.env.GBRAIN_SEARCH_DEBUG === '1';
@@ -315,6 +323,7 @@ export async function resolveHybridRequest(
 
   const req: HybridRequest = {
     engine, query, opts, modeInput, resolvedMode, cfgForColumn, resolvedCol, limit, offset,
+    queryEmbedDeadline: opts?._queryEmbedDeadline,
     suggestions, intentWeightingOn, intentWeights, detail, detailResolved, ctBoost,
     searchOpts, identityTierOpts, aliasHopOpts, degraded,
     vectorPoolUnderfill: undefined,
@@ -323,6 +332,9 @@ export async function resolveHybridRequest(
     lastRank1Score: undefined,
     timer: opts?._timings ?? UNTIMED,
   };
+  if (resolvedMode.unified_multimodal === true && resolvedCol.provenance) {
+    req.omittedVectorArms = [{ arm: 'unified_multimodal', reason: 'independent_embedding_column' }];
+  }
   if (decide) req.decide = decide;
   return req;
 }
@@ -359,7 +371,8 @@ export async function applyIdentityBoosts(req: HybridRequest, list: SearchResult
   // never waits.
 export function emitHybridMeta(req: HybridRequest, armMeta: HybridSearchMeta): void {
   const { engine, opts } = req;
-  const rawMeta = req.keywordCandidates ? { ...armMeta, keyword_candidates: req.keywordCandidates } : armMeta;
+  const baseMeta = req.keywordCandidates ? { ...armMeta, keyword_candidates: req.keywordCandidates } : armMeta;
+  const rawMeta = req.omittedVectorArms ? { ...baseMeta, omitted_vector_arms: req.omittedVectorArms } : baseMeta;
   const decide = decideMetaFor(req.decide);
   const answerability = req.decide?.answerability;
   const meta: HybridSearchMeta = decide || req.rerankMeta || answerability || req.relationalPlan

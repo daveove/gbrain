@@ -33,7 +33,7 @@ export async function prepareFactEmbedding(fact: string, signal?: AbortSignal, d
  * `excludePrivate`: the caller cannot read private pages. A withdrawal whose withdrawn rows all sit on pages it
  * cannot read is refused exactly as a page it may not see is, so the refusal never confirms a claim it cannot see.
  */
-export async function assertFactNotWithdrawn(engine: BrainEngine, sourceId: string, input: SingleFactIntent, opts: { excludePrivate?: boolean } = {}): Promise<void> {
+export async function assertFactNotWithdrawn(engine: BrainEngine, sourceId: string, input: SingleFactIntent, opts: { excludePrivate?: boolean | 'owner-only' } = {}): Promise<void> {
   await assertFactNotPurged(engine, sourceId, input);
   if (await isFactWithdrawn(engine, sourceId, input.visibility, input.fact, input.entity_slug)) throw await factWithdrawnRefusal(engine, sourceId, input, opts);
 }
@@ -43,11 +43,11 @@ export async function assertFactNotWithdrawn(engine: BrainEngine, sourceId: stri
  * the most specific subject first, then the newest withdrawal, among withdrawals the caller can see the withdrawn rows of
  * (or that no row backs). It covers the exact normalized claim only.
  */
-export async function factWithdrawnRefusal(engine: BrainEngine, sourceId: string, input: SingleFactIntent, opts: { excludePrivate?: boolean } = {}): Promise<OperationError> {
+export async function factWithdrawnRefusal(engine: BrainEngine, sourceId: string, input: SingleFactIntent, opts: { excludePrivate?: boolean | 'owner-only' } = {}): Promise<OperationError> {
   if (opts.excludePrivate) {
     const [backing] = await engine.executeRaw<{ visible: boolean; hidden: boolean }>(`SELECT
-        COALESCE(bool_or(${privateProvenanceFilterFragment('f')}), false) AS visible,
-        COALESCE(bool_or(NOT (${privateProvenanceFilterFragment('f')})), false) AS hidden
+        COALESCE(bool_or(${privateProvenanceFilterFragment('f', opts.excludePrivate)}), false) AS visible,
+        COALESCE(bool_or(NOT (${privateProvenanceFilterFragment('f', opts.excludePrivate)})), false) AS hidden
       FROM facts f JOIN fact_withdrawals w ON w.source_id=f.source_id AND w.visibility=f.visibility
         AND w.fact_hash IN (gbrain_fact_fingerprint(f.fact),gbrain_fact_fingerprint_v1(f.fact))
         AND (w.subject='*' OR w.subject=COALESCE(f.entity_slug,'*'))
@@ -62,9 +62,9 @@ export async function factWithdrawnRefusal(engine: BrainEngine, sourceId: string
     WHERE w.source_id=$1 AND w.visibility=$2 AND w.fact_hash IN (gbrain_fact_fingerprint($3),gbrain_fact_fingerprint_v1($3))
       AND (w.subject='*' OR w.subject=$4::text)
     GROUP BY w.subject,w.visibility,w.withdrawn_at
-    HAVING $5::boolean=false OR COALESCE(bool_or(${privateProvenanceFilterFragment('f')}), false) OR NOT COALESCE(bool_or(f.id IS NOT NULL), false)
+    HAVING $5::boolean=false OR COALESCE(bool_or(${privateProvenanceFilterFragment('f', opts.excludePrivate)}), false) OR NOT COALESCE(bool_or(f.id IS NOT NULL), false)
     ORDER BY (w.subject<>'*') DESC, w.withdrawn_at DESC LIMIT 1`,
-  [sourceId, input.visibility, input.fact, input.entity_slug, opts.excludePrivate === true]);
+  [sourceId, input.visibility, input.fact, input.entity_slug, Boolean(opts.excludePrivate)]);
   const error = verbError('invalid_params', FACT_WITHDRAWN_MESSAGE, FACT_WITHDRAWN_SUGGESTION);
   if (row) error.withdrawn = { at: new Date(row.withdrawn_at).toISOString(), subject: row.subject === '*' ? 'all_entities' : row.subject, visibility: row.visibility };
   return error;
@@ -101,17 +101,17 @@ export async function listSupersessionCandidates(engine: BrainEngine, sourceId: 
  * SQL-only, so publication can verify the semantic decision under its guard.
  * `lane` is the writer's `facts.source`: capture lanes never drop by cosine (#5888).
  */
-export async function decideSingleFact(engine: BrainEngine, sourceId: string, input: SingleFactIntent, embedding: Float32Array | null, embeddingModel?: string | null, lane?: string | null, opts: { excludePrivate?: boolean } = {}): Promise<FactDecision> {
+export async function decideSingleFact(engine: BrainEngine, sourceId: string, input: SingleFactIntent, embedding: Float32Array | null, embeddingModel?: string | null, lane?: string | null, opts: { excludePrivate?: boolean | 'owner-only' } = {}): Promise<FactDecision> {
   const [exact] = await engine.executeRaw<FactCandidate>(`SELECT * FROM facts WHERE source_id=$1
     AND entity_slug IS NOT DISTINCT FROM $2 AND visibility=$3 AND expired_at IS NULL
     AND (valid_until IS NULL OR valid_until>now()) AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($4)
-    AND ($5::text IS NULL OR attributed_to IS NULL OR attributed_to=$5)${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}
+    AND ($5::text IS NULL OR attributed_to IS NULL OR attributed_to=$5)${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', opts.excludePrivate)}` : ''}
     ORDER BY id LIMIT 1`, [sourceId, input.entity_slug, input.visibility, input.fact, input.attributed_to ?? null]);
   if (exact) return { status: 'duplicate', candidate: { ...exact, id: Number(exact.id) } };
   if (embedding && input.entity_slug) {
     const candidates = await listSupersessionCandidates(engine, sourceId, input.entity_slug, input.fact, embedding, embeddingModel, undefined, input.attributed_to ?? null);
     const metadata = await engine.executeRaw<{ id: number; source_markdown_slug: string | null; row_num: number | null; trust_tier: FactRow['trust_tier'] }>(
-      `SELECT id,source_markdown_slug,row_num,trust_tier FROM facts WHERE source_id=$1 AND id=ANY($2::int[])${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}`,
+      `SELECT id,source_markdown_slug,row_num,trust_tier FROM facts WHERE source_id=$1 AND id=ANY($2::int[])${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', opts.excludePrivate)}` : ''}`,
       [sourceId, candidates.map(c => c.id)]);
     let candidate: FactCandidate | null = null;
     let score = -1;
@@ -141,14 +141,14 @@ export async function decideSingleFact(engine: BrainEngine, sourceId: string, in
  * duplicate. `lock` takes the target row lock inside the publishing transaction.
  */
 export async function decideReplacement(engine: BrainEngine, sourceId: string, input: SingleFactIntent, targetId: number,
-  opts: { pageSlug: string; remote: boolean; lock?: boolean; excludePrivate?: boolean; slugPrefixes?: string[] | null }): Promise<FactDecision> {
+  opts: { pageSlug: string; remote: boolean; lock?: boolean; excludePrivate?: boolean | 'owner-only'; slugPrefixes?: string[] | null }): Promise<FactDecision> {
   const notFound = () => verbError('not_found', `No fact with id "${targetId}" to replace.`,
     'Pass the fact_id of an active fact from recall (facts[].fact_id) about the same entity, or omit replaces to save a new fact.');
   const [target] = await engine.executeRaw<FactCandidate & { withdrawn: boolean }>(`SELECT f.*,
       EXISTS (SELECT 1 FROM fact_withdrawals w WHERE w.source_id=f.source_id AND w.visibility=f.visibility
         AND w.fact_hash IN (gbrain_fact_fingerprint(f.fact),gbrain_fact_fingerprint_v1(f.fact))
         AND (w.subject='*' OR w.subject=COALESCE(f.entity_slug,'*'))) AS withdrawn
-    FROM facts f WHERE f.id=$1 AND f.source_id=$2${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('f')}` : ''}${opts.lock ? ' FOR UPDATE OF f' : ''}`, [targetId, sourceId]);
+    FROM facts f WHERE f.id=$1 AND f.source_id=$2${opts.excludePrivate ? ` AND ${privateProvenanceFilterFragment('f', opts.excludePrivate)}` : ''}${opts.lock ? ' FOR UPDATE OF f' : ''}`, [targetId, sourceId]);
   if (!target || (opts.remote && target.visibility !== 'world')) throw notFound();
   if (target.visibility !== input.visibility) throw notFound();
   // #5913 [R2]: a slug-bound writer learns nothing about a fact outside its prefixes; the answer is the missing-id one.

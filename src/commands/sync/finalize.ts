@@ -33,7 +33,7 @@ import type { SyncPlan, SyncRun } from './sync-run.ts';
 
 export async function finishWithoutChanges(
   engine: BrainEngine,
-  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'lastCommit' | 'pin' | 'pullFailed' | 'ckpt' | 'malformedSkipped' | 'totalChanges' | 'holds'>,
+  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'lastCommit' | 'pin' | 'pullFailed' | 'ckpt' | 'malformedSkipped' | 'totalChanges' | 'holds' | 'dailyFollowup'>,
   swept: number,
 ): Promise<SyncResult | undefined> {
   const { opts, company, gitContextRoot, lastCommit, pin, pullFailed, ckpt, malformedSkipped, totalChanges } = plan;
@@ -65,10 +65,12 @@ export async function finishWithoutChanges(
     // (#1794): advance to the PINNED target, and clear any checkpoint (a resume
     // whose remaining range turned out to have no syncable changes still
     // completes cleanly here).
+    await plan.dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await plan.dailyFollowup?.clear();
     // A commit whose ONLY changes are malformed filenames lands here with
     // totalChanges === 0 — the anchor advances past those files forever, so
     // this early return must surface the skips too (structured-review P2).
@@ -265,7 +267,7 @@ function verifyPinnedHead(run: SyncRun, plan: Pick<SyncPlan, 'company' | 'gitCon
 
 async function applyBookmarkGate(
   run: SyncRun,
-  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'anchorPath' | 'lastCommit' | 'pin' | 'ckpt' | 'filtered' | 'holds'>,
+  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'anchorPath' | 'lastCommit' | 'pin' | 'ckpt' | 'filtered' | 'holds' | 'dailyFollowup'>,
   headVerificationSucceeded: boolean,
 ): Promise<{ done: SyncResult } | { gate: Awaited<ReturnType<typeof applySyncFailureGate>> }> {
   const { engine, succeededPaths, failedFiles, pagesAffected } = run;
@@ -288,11 +290,13 @@ async function applyBookmarkGate(
     // "fresh". The checkpoint rows clear here — CONVERGENCE CONTRACT: sync
     // convergence == IMPORT convergence; downstream extract/facts/embed is
     // decoupled (its own resumable stale sweeps).
+    await plan.dailyFollowup?.accept();
     await writeSyncAnchor(engine, opts.sourceId, 'last_commit', pin, commitTimeMs(gitContextRoot, pin), gitContextRoot);
     await engine.setConfig('sync.last_run', new Date().toISOString());
     await writeSyncAnchor(engine, opts.sourceId, 'repo_path', anchorPath);
     await writeChunkerVersion(engine, opts.sourceId, chunkerStamp());
     if (!company) { await clearOpCheckpoint(engine, ckpt.paths); await clearOpCheckpoint(engine, ckpt.target); }
+    await plan.dailyFollowup?.clear();
   };
 
   // issue #1939 adversarial finding #1: a file that failed to parse (open ledger
@@ -632,7 +636,7 @@ async function embedAffectedPages(
       await runEmbedCore(engine, embedOpts);
       embedded = embedSlugs.length;
     } catch (e: unknown) {
-      const { EmbeddingDimMismatchError } = await import('../embed.ts');
+      const { EmbeddingDimMismatchError } = await import('../embed-setup.ts');
       if (e instanceof EmbeddingDimMismatchError) {
         serr('\n' + e.recipeMessage + '\n');
         serr(`Tip: pass --no-embed to sync without embedding, then`);

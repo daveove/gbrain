@@ -60,10 +60,10 @@ function outcome(id: number, status: 'inserted' | 'duplicate' | 'superseded', en
 }
 
 /** The newest active fact in this source and visibility that states the same normalized claim without an entity. */
-async function activeUnlinkedCopy(engine: BrainEngine, sourceId: string, input: SingleFactIntent, excludePrivate: boolean): Promise<number | null> {
+async function activeUnlinkedCopy(engine: BrainEngine, sourceId: string, input: SingleFactIntent, excludePrivate: boolean | 'owner-only'): Promise<number | null> {
   const [row] = await engine.executeRaw<{ id: number }>(`SELECT id FROM facts
     WHERE source_id=$1 AND visibility=$2 AND entity_slug IS NULL AND expired_at IS NULL
-      AND (valid_until IS NULL OR valid_until > now()) AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($3)${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts')}` : ''}
+      AND (valid_until IS NULL OR valid_until > now()) AND gbrain_fact_fingerprint(fact)=gbrain_fact_fingerprint($3)${excludePrivate ? ` AND ${privateProvenanceFilterFragment('facts', excludePrivate)}` : ''}
     ORDER BY id DESC LIMIT 1`, [sourceId, input.visibility, input.fact]);
   return row ? Number(row.id) : null;
 }

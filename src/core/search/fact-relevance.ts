@@ -64,7 +64,7 @@ export interface FactPoolScope {
   /** #5575 read floor and activation control, applied in the pool SQL like every retrieval arm. */
   minTrust?: TrustTier; suppressFlagged?: boolean;
   /** Hide facts whose provenance page is private (resolveExcludePrivatePages for the caller). */
-  excludePrivate: boolean;
+  excludePrivate: boolean | 'owner-only';
 }
 
 /** recall's fact filters, applied inside every arm before its LIMIT. */
@@ -126,7 +126,7 @@ function poolPredicate(scope: FactPoolScope, filters: FactPoolFilters | undefine
     filters?.includeExpired ? 'f.source != ALL($2::text[])' : '(f.valid_until IS NULL OR f.valid_until > now()) AND f.source != ALL($2::text[])',
     quarantinedProvenanceFilterFragment('f'),
     ...(scope.remote ? [`f.visibility = 'world'`] : []),
-    ...(scope.excludePrivate ? [privateProvenanceFilterFragment('f')] : []),
+    ...(scope.excludePrivate ? [privateProvenanceFilterFragment('f', scope.excludePrivate)] : []),
     projectionEligibleSql('facts', 'f', { floor: scope.minTrust, suppressFlagged: scope.suppressFlagged }),
   ];
   if (filters?.entities) {

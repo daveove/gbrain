@@ -33,6 +33,9 @@ export function makeEmbedHandler(engine: BrainEngine): MinionHandler {
       includeNullSignature: !!job.data.includeNullSignature,
       batchSize: typeof job.data.batchSize === 'number' ? job.data.batchSize : undefined,
       priority: job.data.priority === 'recent' ? 'recent' : undefined,
+      // Explicit staging into an independent column: dropping it would embed
+      // the live column instead, so it rides the payload like every knob.
+      embeddingColumn: typeof job.data.embeddingColumn === 'string' ? job.data.embeddingColumn : undefined,
       // CX1+CX5: pace overrides ride in the job payload as explicit overrides
       // only; runEmbedCore re-resolves env > config > bundle at execution so
       // GBRAIN_PACE_* still wins during an incident.

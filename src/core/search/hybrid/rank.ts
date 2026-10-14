@@ -152,9 +152,12 @@ export async function fuseArms(
   // always pulled from `embedding` and silently corrupted alt-column ranks.
   if (queryEmbedding) {
     // Unified routing embedded the query with the multimodal model, so the
-    // rescore must hydrate the multimodal column, not the text column.
+    // rescore must hydrate the multimodal column, not the text column. An
+    // independent column hydrates through its descriptor so the engine
+    // applies that space's own model and text-hash proof.
     fused = await cosineReScore(
-      engine, fused, queryEmbedding, unifiedDone ? 'embedding_multimodal' : resolvedCol.name,
+      engine, fused, queryEmbedding,
+      unifiedDone ? 'embedding_multimodal' : resolvedCol,
       imageQueryEmbedding && !unifiedDone ? { queryEmbedding: imageQueryEmbedding, column: 'embedding_image' } : undefined,
       attribute,
     );

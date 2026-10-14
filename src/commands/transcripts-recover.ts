@@ -8,6 +8,8 @@
 import type { BrainEngine } from '../core/engine.ts';
 import type { CliDispatchContext } from '../cli/command-table.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { resolveSourceWithTier } from '../core/source-resolver.ts';
+import { planCodexRecovery, applyCodexRecovery } from '../core/transcripts/recover.ts';
 
 export const TRANSCRIPTS_RECOVER_HELP = `Usage:
   gbrain transcripts recover codex [<rollout>...] [--apply] [--source-id S] [--json]
@@ -45,14 +47,16 @@ export async function runTranscriptsRecover(engine: BrainEngine, args: string[],
     if (a.startsWith('--')) continue;
     paths.push(a);
   }
-  const { resolveSourceWithTier } = await import('../core/source-resolver.ts');
   const sourceId = (await resolveSourceWithTier(engine, source)).source_id;
-  const { planCodexRecovery, applyCodexRecovery } = await import('../core/transcripts/recover.ts');
   const plan = await planCodexRecovery(engine, { sourceId, rolloutPaths: paths.length ? paths : undefined });
   const context = apply ? await dispatch.makeContext?.(engine, { source: sourceId }) : undefined;
   const result = apply ? await applyCodexRecovery(engine, plan, { context }) : null;
+  if (result?.dailyMemoryError !== undefined) {
+    console.error(`daily-memory refresh requires retry: ${result.dailyMemoryError}`);
+    setCliExitVerdict(1);
+  }
   if (json) {
-    console.log(JSON.stringify({ plan, applied: apply, ...(result ? { ingest: { pages: result.pages, sessions_imported: result.sessionsImported, sessions_errored: result.sessionsErrored } } : {}) }, null, 2));
+    console.log(JSON.stringify({ plan, applied: apply, ...(result ? { ingest: { pages: result.pages, sessions_imported: result.sessionsImported, sessions_errored: result.sessionsErrored, ...(result.dailyMemoryError !== undefined ? { dailyMemoryError: result.dailyMemoryError } : {}) } } : {}) }, null, 2));
     if (result && (result.sessionsErrored > 0 || result.erroredFiles > 0)) setCliExitVerdict(1);
     return;
   }

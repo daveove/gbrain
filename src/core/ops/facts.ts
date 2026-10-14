@@ -1354,7 +1354,7 @@ async function recallKeywordOnlyReason(ctx: OperationContext): Promise<string | 
  * path, which runs keyword + title + the relational chain (zero LLM).
  */
 async function keylessRecallRows(
-  ctx: OperationContext, queryText: string, limit: number, excludePrivate: boolean,
+  ctx: OperationContext, queryText: string, limit: number, excludePrivate: boolean | 'owner-only',
   searchScope: { sourceId?: string; sourceIds?: string[]; minTrust?: TrustTier },
   rankCutOpts: Pick<HybridSearchOpts, 'pageRankCut'> = {},
 ): Promise<SearchResult[]> {

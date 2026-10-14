@@ -38,6 +38,7 @@ import { ALL_PHASES, SOURCE_FRESHNESS_PHASES } from '../src/core/cycle.ts';
 // ─── Shared fixtures (built once; reset per test) ──────────────────
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let fixture: GitFixture;
 let repo: string;
 
@@ -45,6 +46,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
   repo = mkdtempSync(join(tmpdir(), 'gbrain-dream-repo-'));
   fixture = await makeGitFixture(repo);
 }, 300_000); // OAuth v25 + git init; needs breathing room under full-suite + parallel-agent load
@@ -56,6 +58,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // Keyless by choice: a full cycle must not reach a real embedding provider,
   // and since a failed phase now exits 1 (E4) an unkeyed provider would end
   // the in-process run. The embed phase reports skipped(embedding_disabled).

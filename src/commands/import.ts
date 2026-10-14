@@ -45,6 +45,9 @@ import { estimateCostFromChars, lookupEmbeddingPrice } from '../core/embedding-p
 import { getEmbeddingModel } from '../core/ai/gateway.ts';
 import { managedRootMarkerFor } from '../core/persistence/root-registry.ts';
 import { readManagedMode } from '../core/persistence/ownership.ts';
+import { IMPORT_STALE_EXTRACT_JOB, INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
+import { previewMentionPass } from '../core/mentions/stale.ts';
+import { currentSubmissionAuthority } from '../core/minions/submission-authority.ts';
 
 /** Return a refusal when an import target lies outside every admitted root. */
 export function configuredRootImportError(dir: string, configuredRoots: string[]): string | null {
@@ -213,6 +216,8 @@ export interface RunImportResult {
   errors: number;
   chunksCreated: number;
   failures: Array<{ path: string; error: string }>;
+  /** Set when the post-import link sweep threw. Pages are imported; edges are not. */
+  linkExtractionError?: string;
   /** Files dropped by the malformed-filename gate (walker + per-file defense). */
   malformedSkipped?: number;
   /** Aggregated alias/undeclared explicit-type warnings (schema.type_warnings). */
@@ -258,6 +263,10 @@ export async function runImport(
     heldPaths?: ReadonlySet<string>;
     /** #5988: each file's outcome (a throw arrives as `{ status: 'error', error }`); `'held'` = the caller held it, not a failure. */
     onFileResult?: (path: string, filePath: string, result: Pick<ImportResult, 'status' | 'error' | 'refusal' | 'frontmatter_recovery' | 'fences_normalized' | 'fence_issues'>) => Promise<'held' | undefined>;
+    /** Full sync imports the whole tree. Never drain the stale sweep inline. */
+    fullSync?: boolean;
+    /** Preserve the caller's explicit extraction opt-out. */
+    noExtract?: boolean;
     /**
      * #753/#774: glob patterns to exclude from the import (same semantics as
      * `isSyncable`'s `exclude` — matched against the dir-relative path).
@@ -702,6 +711,14 @@ export async function runImport(
   // never plans against the empty tables it started with (O-CEO-17).
   const analyzeEvery = await importAnalyzeEveryPages(engine);
 
+  const dailyMemory = opts.managedBookmark || managedImport ? undefined : await (await import('../core/import-daily-memory.ts')).createImportDailyMemory(engine, {
+    sourceId: sourceId ?? 'default', dir, commit: opts.commit, signal,
+    protect: company ? key => company.protect([{ ...key, kind: 'content' }]) : undefined,
+  });
+  // Abort/worker-failure paths skip finish(); always drop the live lease so a
+  // clean retry can adopt before: debt instead of waiting out the 30m TTL.
+  try {
+
   async function processFile(eng: BrainEngine, filePath: string, settled?: PromiseSettledResult<ImportResult>) {
     if (!settled && signal?.aborted) return;
     const relativePath = singleFile ? basename(filePath) : relative(dir, filePath);
@@ -716,16 +733,36 @@ export async function runImport(
     // forever — without this, the agent can't see which file.
     const _fileT0 = Date.now();
     try {
-      // v0.27.1 (F2): dispatch image extensions to importImageFile when
-      // multimodal is enabled. The walker (collectMarkdownFiles) only picks
-      // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
-      // unreachable when the gate is off; defense-in-depth check anyway.
-      if (settled?.status === 'rejected') throw settled.reason;
-      const result = settled ? settled.value : company ? await importCompanyBrainFile(eng, filePath, sourceId!) : managedImport
-        ? await importManagedFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, signal, slugRoot: opts.slugRoot })
-        : isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
-        ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId })
-        : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, firstCommitAt: firstCommits?.get(filePath) });
+      const beforeCommit = await dailyMemory?.before(filePath, importRelPath);
+      // Renew about every 10m (1/3 of the 30m peer-adoption window) so a single
+      // long file cannot outlive the lease between before/imported renewals.
+      const LEASE_RENEW_EVERY_MS = 10 * 60_000;
+      let renewInFlight: Promise<void> | undefined;
+      let renewError: unknown;
+      const renewTimer = dailyMemory
+        ? setInterval(() => {
+          if (renewInFlight) return;
+          renewInFlight = dailyMemory.renew()
+            .catch((err: unknown) => { renewError ??= err; })
+            .finally(() => { renewInFlight = undefined; });
+        }, LEASE_RENEW_EVERY_MS)
+        : undefined;
+      let result: Awaited<ReturnType<typeof importFile>>;
+      try {
+        // v0.27.1 (F2): dispatch image extensions to importImageFile when
+        // multimodal is enabled. The walker (collectMarkdownFiles) only picks
+        // up images when GBRAIN_EMBEDDING_MULTIMODAL=true so this branch is
+        // unreachable when the gate is off; defense-in-depth check anyway.
+        if (settled?.status === 'rejected') throw settled.reason;
+        result = settled ? settled.value : company ? await importCompanyBrainFile(eng, filePath, sourceId!) : managedImport
+          ? await importManagedFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, signal, slugRoot: opts.slugRoot })
+          : isImageFilePath(relativePath) && process.env.GBRAIN_EMBEDDING_MULTIMODAL === 'true'
+          ? await importImageFile(eng, filePath, importRelPath, { noEmbed, sourceId, beforeCommit })
+          : await importFile(eng, filePath, importRelPath, { noEmbed, sourceId, activePack: importActivePack, firstCommitAt: firstCommits?.get(filePath), beforeCommit });
+      } finally {
+        if (renewTimer) clearInterval(renewTimer);
+        await renewInFlight;
+      }
       // An import that landed while cancellation arrived is still complete.
       // Account for it before stopping, so resume never loses a successful path.
       noteTypeWarning((result as { type_warning?: Parameters<typeof noteTypeWarning>[0] }).type_warning); fenceTally.note(importRelPath, result);
@@ -737,10 +774,10 @@ export async function runImport(
         skipped++;
         completed.add(relativePath);
       } else if (result.status === 'imported') {
+        await dailyMemory?.imported(result.slug);
         imported++;
         chunksCreated += result.chunks;
         importedSlugs.push(result.slug);
-        // v0.33.2: path-based checkpoint — record only on success.
         completed.add(relativePath);
         succeededPaths.push(importRelPath); // #3839
       } else {
@@ -770,6 +807,8 @@ export async function runImport(
           succeededPaths.push(importRelPath); // #3839
         }
       }
+      // Report renewals after committed progress; banked before: debt remains recoverable.
+      if (renewError) throw renewError;
     } catch (e: unknown) {
       if (signal?.aborted) {
         // Do not turn an unrelated infrastructure failure into a timeout.
@@ -992,6 +1031,135 @@ export async function runImport(
     }
   }
 
+  // Link extraction runs before success bookkeeping. A count or sweep
+  // failure has to be visible to the ingest log, sync.last_commit, source
+  // freshness, and the resume checkpoint — advancing those first lets the
+  // next sync treat the commit as current while its edges are missing.
+  // A small import with a small stale backlog drains the sweep here, scoped
+  // to the source this import wrote. A full sync, more than 100 imported
+  // changes, or a larger stale backlog queues the durable sweep: the inline
+  // budget is about 30 minutes. Directory size alone does not defer — a
+  // content-hash no-op of a large tree must not enqueue. Quiet: `import
+  // --json` must stay one stdout document. A thrown sweep still returns
+  // (pages are imported) but counts as an import error in `errors` and
+  // `failures`. Cancellation is checked before the sweep and between stale
+  // batches, then rethrown.
+  let structuralLinks = 0;
+  let linkExtractionError: string | undefined;
+  let dailyMemoryRefreshRecovered = false, linkExtractionRecovered = false;
+  const recordLinkFailure = (message: string): void => {
+    preserveCompletedPaths();
+    linkExtractionError = message;
+    errors++;
+    failures.push({ path: '<link-extraction>', error: message });
+    console.error(`  Link extraction skipped: ${message}`);
+  };
+  const rethrowIfCancelled = (error: unknown): void => {
+    const aborted = signal?.aborted
+      || error instanceof ImportAbortError
+      || (error instanceof Error && error.name === 'AbortError');
+    if (!aborted) return;
+    throwIfInterrupted();
+    throw error;
+  };
+  // Application imports can hand large work to a durable sweep. Delegated
+  // imports cannot submit descendants, so every size retains the bounded
+  // inline path; an incomplete sweep leaves its checkpoint for the next run.
+  const authority = currentSubmissionAuthority();
+  const delegatedImport = authority !== undefined && authority.kind !== 'application';
+  const deferForSize = !delegatedImport && (opts.fullSync === true || imported > INLINE_EXTRACT_CHANGE_LIMIT);
+  let deferForBacklog = false, inlineNoopRecovery = false;
+  if (!opts.noExtract && !deferForSize && allFiles.length > 0) {
+    try {
+      throwIfInterrupted();
+      const { effectiveLinkExtractorWatermark } = await import('../core/link-extraction-watermark.ts');
+      const stalePages = await engine.countStalePagesForExtraction({
+        sourceId: sourceId ?? 'default',
+        versionTs: await effectiveLinkExtractorWatermark(engine),
+      });
+      throwIfInterrupted();
+      // Application-owned hash-skipped retries leave recovery to a durable sweep.
+      // Delegated imports cannot submit descendants; keep their bounded inline path.
+      const mentionDebt = imported === 0 && stalePages === 0
+        ? (await previewMentionPass(engine, sourceId ?? 'default')).due
+        : 0;
+      const noopDebt = imported === 0 && (stalePages > 0 || mentionDebt > 0);
+      deferForBacklog = !delegatedImport && (stalePages > INLINE_EXTRACT_CHANGE_LIMIT || noopDebt);
+      inlineNoopRecovery = noopDebt && delegatedImport;
+      if (imported === 0 && !deferForBacklog && !inlineNoopRecovery) linkExtractionRecovered = true;
+    } catch (e) {
+      rethrowIfCancelled(e);
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (!opts.noExtract && !linkExtractionError && (deferForSize || deferForBacklog)) {
+    const reason = opts.fullSync
+      ? 'import_full_sync'
+      : (imported > INLINE_EXTRACT_CHANGE_LIMIT ? 'import_size_gate' : 'import_stale_backlog');
+    let queuedJobId: number | string | null = null;
+    try {
+      throwIfInterrupted();
+      queuedJobId = await queueDeferredStaleSweep(engine, {
+        sourceId: sourceId ?? 'default',
+        commit: opts.commit ?? 'import',
+        reason,
+        ...(imported === 0 && !opts.fullSync ? { jobName: IMPORT_STALE_EXTRACT_JOB } : {}),
+      });
+      if (queuedJobId == null) throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
+      throwIfInterrupted();
+    } catch (e) {
+      rethrowIfCancelled(e);
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
+    }
+    linkExtractionRecovered = queuedJobId != null && !linkExtractionError;
+    if (linkExtractionRecovered) console.error(
+      `  Deferring link extraction` +
+      (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
+      ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
+    );
+  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0 && (imported > 0 || inlineNoopRecovery)) {
+    try {
+      throwIfInterrupted();
+      const { extractStaleFromDB } = await import('./extract.ts');
+      const extracted = await extractStaleFromDB(engine, {
+        dryRun: false,
+        jsonMode: false,
+        sourceIdFilter: sourceId ?? 'default',
+        catchUp: false,
+        quiet: true,
+        signal,
+      });
+      structuralLinks = extracted.linksCreated;
+      if (extracted.staleRemaining === 0) {
+        linkExtractionRecovered = true;
+      } else if (delegatedImport) {
+        throw new Error(`Delegated link extraction has ${extracted.staleRemaining} stale pages left; rerun this import to continue its bounded inline sweep.`);
+      } else {
+        const queuedJobId = await queueDeferredStaleSweep(engine, {
+          sourceId: sourceId ?? 'default', commit: opts.commit ?? 'import', reason: 'import_inline_incomplete',
+        });
+        if (queuedJobId == null) throw new Error('Deferred link extraction did not obtain a live stale-sweep job');
+        linkExtractionRecovered = true;
+        console.error(`  Queued stale-sweep job #${queuedJobId} to finish link extraction.`);
+      }
+    } catch (e) {
+      rethrowIfCancelled(e);
+      recordLinkFailure(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  if (dailyMemory && !signal?.aborted) {
+    try { await dailyMemory.finish(); dailyMemoryRefreshRecovered = true; }
+    catch (e) {
+      rethrowIfCancelled(e);
+      preserveCompletedPaths();
+      const message = e instanceof Error ? e.message : String(e);
+      errors++;
+      failures.push({ path: '<daily-memory-refresh>', error: message });
+      console.error(`  Daily-memory refresh skipped: ${message}`);
+    }
+  }
+
   // Log the ingest. #3969: skip the row when the run changed nothing
   // (imported=0, errors=0, chunks=0) unless --log-noop — see shouldLogIngest.
   // `sourceId ?? 'default'` mirrors the fallback `processFile` itself uses
@@ -1051,11 +1219,18 @@ export async function runImport(
     // success list regardless of whether this SAME run also had failures,
     // so a stale row from an earlier run gets cleared even if today's run
     // is only partially clean.
-    if (succeededPaths.length > 0) {
+    // Clear healed file paths and a recovered transient <link-extraction>
+    // sentinel (it starts with `<`, so --skip-failed never acknowledges it).
+    const healedPaths = [
+      ...succeededPaths,
+      ...(linkExtractionRecovered ? ['<link-extraction>'] as const : []),
+      ...(dailyMemoryRefreshRecovered ? ['<daily-memory-refresh>'] as const : []),
+    ];
+    if (healedPaths.length > 0) {
       const { clearFailures } = await import('../core/sync.ts');
       // #3838: keyed by the resolved source, matching recordFailures above —
       // a row recorded under the resolved source must clear under it too.
-      clearFailures(sourceId ?? 'default', succeededPaths);
+      clearFailures(sourceId ?? 'default', healedPaths);
     }
 
     // #2114 guard: the global sync.* keys describe THE brain repo (the
@@ -1091,30 +1266,12 @@ export async function runImport(
     // this import's to move (its sync anchors live on the `sources` row).
   }
 
-  // #1691: a named source registered with `local_path` but fed only via
-  // `gbrain import` (never `gbrain sync`) never got `sources.last_sync_at`
-  // touched, so doctor's `sync_freshness` read it as permanently
-  // "never synced". Stamp it on a clean run only (mirrors the bookmark
-  // gate above). `!opts.managedBookmark` excludes performFullSync's call —
-  // that path stamps its own, more-authoritative `last_sync_at` via
-  // writeSyncAnchor AFTER its full gate (applySyncFailureGate) decides the
-  // sync actually advanced; stamping here too would race ahead of that
-  // decision. remote_url sources are excluded too: autopilot's freshness
-  // dispatcher (autopilot.ts) reads last_sync_at to decide when to queue a
-  // real `git pull` for those, and a plain import never pulls. A git-tracked
-  // local_path is excluded too (scoped to #1691's actual "non-git local
-  // source" case): `gbrain import` never advances the source's own
-  // `last_commit`, so stamping last_sync_at for a git checkout would mask
-  // real commit-level staleness that `gbrain sync` (not `import`) is the
-  // correct pipeline to detect. Detection reuses sync's own
-  // `discoverGitRoot` (rev-parse --show-toplevel, walks UP) rather than a
-  // bare `.git`-at-local_path probe, so a source anchored at a SUBDIR of a
-  // git checkout (the #753/#774 monorepo shape) is excluded too — that is
-  // exactly the shape sync's git-root slug anchoring exists for.
-  // Malformed-filename exclusions/skips (tallied into `totalMalformed`
-  // below, NOT into `failures`) count toward the clean-run gate too — a run
-  // that silently dropped files isn't "clean" for freshness purposes even
-  // with zero recorded failures.
+  // Clean standalone imports refresh named, non-git local sources only.
+  // Managed sync owns its anchor gate; remote and git-backed sources need
+  // their own pull/commit evidence. discoverGitRoot also catches monorepo
+  // subdirectories, so importing one cannot conceal commit staleness.
+  // Malformed exclusions and per-file skips count against freshness even
+  // when the failure ledger is empty.
   const totalMalformed = malformedExcluded.length + malformedFileSkips;
   if (sourceId && failures.length === 0 && totalMalformed === 0 && !opts.managedBookmark && !managedImport) {
     try {
@@ -1169,6 +1326,7 @@ export async function runImport(
 
   throwIfInterrupted();
   // Only a fully completed run removes resume state, including async metadata.
+  // Link-extraction failures already incremented `errors`, so this stays.
   if (errors === 0 && !company) clearCheckpoint(checkpointPath);
   else if (existsSync(checkpointPath)) info(`  Checkpoint preserved (${errors} errors). Run again to retry failed files.`);
 
@@ -1176,6 +1334,7 @@ export async function runImport(
   const resealSummary = resealed.pages > 0
     ? { pages: resealed.pages, pending_chunks: resealed.pendingChunks, embedding_usd: resealEmbeddingUsd(resealed.pendingChars) }
     : null;
+  const fileFailures = failures.filter((f) => !f.path.startsWith('<')).length;
   if (jsonOutput) {
     // `skipped` includes every per-file failure importFile RETURNS (invalid
     // frontmatter, oversize, symlink, slug mismatch) as well as content-hash
@@ -1185,24 +1344,28 @@ export async function runImport(
     // importing a scratch directory has no other channel. Emit the per-file
     // list so state can be gated per file.
     await writeJsonDocument(JSON.stringify({
-      status: errors > 0 ? 'partial' : 'success', duration_s: parseFloat(totalTime),
+      status: linkExtractionError ? 'link_extraction_failed' : (errors > 0 ? 'partial' : 'success'), duration_s: parseFloat(totalTime),
       imported, skipped, errors, chunks: chunksCreated,
       ...(resealSummary ? { resealed: resealSummary } : {}), ...fenceTally.fields(),
       total_files: allFiles.length,
-      unchanged: skipped - failures.length - malformedFileSkips,
+      unchanged: skipped - fileFailures - malformedFileSkips,
       malformed_skipped: malformedFileSkips,
       failures,
+      ...(linkExtractionError ? { link_extraction_error: linkExtractionError } : {}),
       // Effective destination — same expression as the import-file write (import-file.ts) and the ingest_log row below.
       source_id: sourceId ?? 'default',
     }));
   } else {
     slog(`\nImport complete (${totalTime}s):`);
     slog(`  ${imported} pages imported`);
-    slog(`  ${skipped} pages skipped (${skipped - failures.length - malformedFileSkips} unchanged, ${errors} errors, ${malformedFileSkips} malformed filenames)`);
+    slog(`  ${skipped} pages skipped (${skipped - fileFailures - malformedFileSkips} unchanged, ${errors} errors, ${malformedFileSkips} malformed filenames)`);
     slog(`  ${chunksCreated} chunks created`); for (const line of fenceTally.lines()) slog(line);
     if (resealSummary) {
       slog(`  ${resealSummary.pages} unchanged page(s) re-sealed for remote search; ${resealSummary.pending_chunks} chunk(s) need embedding`
         + `${resealSummary.embedding_usd === null ? '' : ` (~$${resealSummary.embedding_usd.toFixed(4)})`}${noEmbed ? ' — run gbrain embed --stale' : ''}`);
+    }
+    if (structuralLinks > 0) {
+      slog(`  ${structuralLinks} links created`);
     }
   }
 
@@ -1210,11 +1373,15 @@ export async function runImport(
   return {
     imported, skipped, errors, chunksCreated, failures,
     ...(resealSummary ? { resealed: resealSummary } : {}), ...fenceTally.fields(),
+    ...(linkExtractionError ? { linkExtractionError } : {}),
     ...(totalMalformed > 0 ? { malformedSkipped: totalMalformed } : {}),
     ...(typeWarningCounts.size > 0 && typeWarningsEnabled
       ? { type_warnings: [...typeWarningCounts.values()] }
       : {}),
   };
+  } finally {
+    try { await dailyMemory?.release(); } catch { /* prefer prior error */ }
+  }
 }
 
 /**

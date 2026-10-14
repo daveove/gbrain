@@ -3,9 +3,9 @@
  * `currentSpaceChunkPredicate` (embedding-invalidation.ts), because engine-sql
  * composes with sqlFragment and bans hand-numbered `$n`
  * (docs/designs/refactor-wave-1/w1-inventory.md, chunks). This pins the two
- * texts together so an edit to one cannot silently leave the other behind:
- * the fragment rendered at its placeholder positions must equal the shared
- * builder's text, and bind exactly (model, dims). It also pins
+ * SQL together so an edit to one cannot silently leave the other behind:
+ * ignoring blank template-interpolation lines, the fragment must equal the
+ * shared builder's text, and bind exactly (model, dims). It also pins
  * `decodeVectorSend` (getEmbeddingsByChunkIds' binary vector decoder) to
  * `tryParseEmbedding` of the same rows' text literal on a real engine, for
  * vector and halfvec columns at real width, and to null on malformed input.
@@ -13,19 +13,37 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { currentSpaceChunkPredicate } from '../src/core/embedding-invalidation.ts';
-import { quoteIdentifier } from '../src/core/search/embedding-column.ts';
+import { quoteIdentifier, resolveEmbeddingColumn } from '../src/core/search/embedding-column.ts';
 import { currentSpaceChunkFragment, decodeVectorSend } from '../src/core/engine-sql/chunks.ts';
 import { tryParseEmbedding } from '../src/core/utils.ts';
 import { renderFragment } from '../src/core/engine-sql/fragment.ts';
 
 describe('engine-sql chunks: currentSpaceChunkFragment', () => {
   for (const column of ['embedding', 'embedding_voyage']) {
-    test(`renders currentSpaceChunkPredicate's exact text for ${column}`, () => {
+    test(`renders currentSpaceChunkPredicate's exact nonblank SQL for ${column}`, () => {
       const { text, params } = renderFragment(currentSpaceChunkFragment(column, 'voyage:voyage-4', 1024));
-      expect(text).toBe(currentSpaceChunkPredicate(quoteIdentifier(column), 1, 2));
+      // Independent provenance adds an optional fragment; an empty fragment
+      // leaves a blank line, but must not change any legacy predicate token.
+      expect(text.replace(/^[ \t]*\n/gm, '')).toBe(currentSpaceChunkPredicate(quoteIdentifier(column), 1, 2));
       expect(params).toEqual(['voyage:voyage-4', 1024]);
     });
   }
+
+  test('independent provenance uses its own registered model, hashes and width', () => {
+    const column = resolveEmbeddingColumn({ embeddingColumn: 'embedding_voyage' }, {
+      engine: 'pglite',
+      embedding_columns: {
+        embedding_voyage: { provider: 'voyage:voyage-4', dimensions: 1024, type: 'halfvec', provenance: 'independent' },
+      },
+    });
+    const { text, params } = renderFragment(currentSpaceChunkFragment(column, 'ignored:legacy', 1536));
+    expect(text).toBe(`COALESCE(cc."embedding_voyage" IS NOT NULL
+              AND cc."embedding_voyage_model" = $1
+              AND cc."embedding_voyage_embedded_text_hash" = md5(cc.chunk_text)
+              AND cc."embedding_voyage_embedding_input_hash" IS NOT NULL
+              AND vector_dims(cc."embedding_voyage") = $2::int, false)`);
+    expect(params).toEqual(['voyage:voyage-4', 1024]);
+  });
 });
 
 describe('engine-sql chunks: decodeVectorSend', () => {

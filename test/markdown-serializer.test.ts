@@ -36,7 +36,11 @@ import type { Page } from '../src/core/types.ts';
 import {
   resolvePageFilePath,
   serializePageToMarkdown,
+  parseMarkdown,
 } from '../src/core/markdown.ts';
+import { computeEffectiveDate, DATE_INSTANT_PROVENANCE, dayInZone } from '../src/core/effective-date.ts';
+import { isCalendarEffectiveDate } from '../src/core/cycle/daily-memory.ts';
+import { digest } from '../src/core/persistence/digest.ts';
 
 function buildPage(overrides: Partial<Page> = {}): Page {
   return {
@@ -162,6 +166,93 @@ describe('serializePageToMarkdown — DRY extract for dream + put_page write-thr
       frontmatterOverrides: { ingested_via: 'put_page' },
     });
     expect(md).toMatch(/ingested_via:\s*put_page/);
+  });
+});
+
+describe('stored calendar frontmatter survives markdown roundtrips', () => {
+  const keys = ['event_date', 'date', 'published', 'created', 'created_at', 'date_created', 'date created'];
+  const jsonFrontmatter = (frontmatter: Record<string, unknown>): Record<string, unknown> => JSON.parse(JSON.stringify(frontmatter));
+
+  test('every known unquoted calendar field survives JSON storage without provenance or day drift', () => {
+    for (const day of ['2024-02-29', '2024-12-31']) {
+      for (const key of keys) {
+        const parsed = parseMarkdown(`---\ntitle: Calendar\ntype: note\n${key}: ${day}\n---\nCalendar body.\n`, 'notes/calendar.md');
+        const stored = jsonFrontmatter(parsed.frontmatter);
+        const page = buildPage({ slug: parsed.slug, title: parsed.title, type: parsed.type, frontmatter: stored,
+          compiled_truth: parsed.compiled_truth });
+        const text = serializePageToMarkdown(page, []);
+        expect(text).toContain(`\n${key}: ${day}\n`);
+        const reparsed = parseMarkdown(text, 'notes/calendar.md', { validate: true });
+        expect(reparsed.errors).toEqual([]);
+        expect(reparsed.frontmatter[DATE_INSTANT_PROVENANCE]).toBeUndefined();
+        expect(digest(reparsed.frontmatter)).toBe(digest(stored));
+        const roundtripped = jsonFrontmatter(reparsed.frontmatter);
+        expect(roundtripped).toEqual(stored);
+        expect(serializePageToMarkdown({ ...page, frontmatter: roundtripped }, [])).toBe(text);
+        for (const timeZone of ['UTC', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+          const result = computeEffectiveDate({ slug: page.slug, frontmatter: roundtripped, timeZone,
+            createdAt: page.created_at, updatedAt: page.updated_at });
+          expect(result.date?.toISOString()).toBe(`${day}T00:00:00.000Z`);
+          expect(isCalendarEffectiveDate({ source_id: 'default', slug: page.slug, title: page.title,
+            frontmatter: roundtripped, effective_date: result.date, effective_date_source: result.source })).toBe(true);
+        }
+        expect(stored[key]).toBe(`${day}T00:00:00.000Z`);
+      }
+    }
+  });
+
+  test('legacy unmarked ISO midnight is reconstructed only for known top-level date fields', () => {
+    const midnight = '2024-02-29T00:00:00.000Z';
+    const stored = { date: midnight, custom_date: midnight, nested: { date: midnight } };
+    const text = serializePageToMarkdown(buildPage({ frontmatter: stored }), []);
+    const reparsed = parseMarkdown(text, 'notes/legacy.md');
+    expect(text).toContain('\ndate: 2024-02-29\n');
+    expect(reparsed.frontmatter[DATE_INSTANT_PROVENANCE]).toBeUndefined();
+    expect(reparsed.frontmatter.custom_date).toBe(midnight);
+    expect(reparsed.frontmatter.nested).toEqual({ date: midnight });
+    expect(digest(reparsed.frontmatter)).toBe(digest(stored));
+    expect(stored.date).toBe(midnight);
+  });
+
+  test('explicit midnight timestamps keep their instant provenance through JSON and rendering', () => {
+    for (const key of keys) {
+      for (const scalar of ['2024-03-01T00:00:00Z', "'2024-03-01T00:00:00.000Z'", "'2024-03-01T02:00:00+02:00'"]) {
+        const parsed = parseMarkdown(`---\n${key}: ${scalar}\n---\nbody\n`, 'notes/instant.md');
+        const stored = jsonFrontmatter(parsed.frontmatter);
+        const page = buildPage({ frontmatter: stored });
+        const text = serializePageToMarkdown(page, []);
+        const reparsed = parseMarkdown(text, 'notes/instant.md');
+        expect(reparsed.frontmatter[DATE_INSTANT_PROVENANCE]).toEqual({ [key]: '2024-03-01T00:00:00.000Z' });
+        expect(digest(reparsed.frontmatter)).toBe(digest(stored));
+        const frontmatter = jsonFrontmatter(reparsed.frontmatter);
+        const result = computeEffectiveDate({ slug: page.slug, frontmatter, createdAt: page.created_at, updatedAt: page.updated_at });
+        expect(isCalendarEffectiveDate({ source_id: 'default', slug: page.slug, title: page.title,
+          frontmatter, effective_date: result.date, effective_date_source: result.source })).toBe(false);
+        expect(dayInZone(result.date!, 'America/Los_Angeles')).toBe('2024-02-29');
+        expect(dayInZone(result.date!, 'Pacific/Kiritimati')).toBe('2024-03-01');
+      }
+    }
+  });
+
+  test('fresh timestamp overrides still acquire instant provenance, including explicit midnight', () => {
+    const text = serializePageToMarkdown(buildPage({ frontmatter: { date: '2024-03-01T00:00:00.000Z' } }), [], {
+      frontmatterOverrides: { date: '2024-03-01T00:00:00.000Z' },
+    });
+    expect(parseMarkdown(text, 'notes/override.md').frontmatter[DATE_INSTANT_PROVENANCE])
+      .toEqual({ date: '2024-03-01T00:00:00.000Z' });
+  });
+
+  test('non-midnight and naive strings remain timestamps, not reconstructed calendar dates', () => {
+    for (const date of ['2024-02-29T23:30:00.000Z', '2024-03-01T00:30:00']) {
+      const parsed = parseMarkdown(`---\ndate: '${date}'\n---\nbody\n`, 'notes/timestamp.md');
+      const stored = jsonFrontmatter(parsed.frontmatter);
+      const reparsed = parseMarkdown(serializePageToMarkdown(buildPage({ frontmatter: stored }), []), 'notes/timestamp.md');
+      expect(reparsed.frontmatter.date).toBe(date);
+      expect(digest(reparsed.frontmatter)).toBe(digest(stored));
+      expect(computeEffectiveDate({ slug: 'notes/timestamp', frontmatter: reparsed.frontmatter, timeZone: 'Asia/Tokyo',
+        createdAt: new Date('2025-01-01'), updatedAt: new Date('2025-01-01') }).date?.toISOString())
+        .toBe(date.endsWith('Z') ? date : '2024-02-29T15:30:00.000Z');
+    }
   });
 });
 

@@ -6,8 +6,14 @@
  * to the query embedding and the query-cache key; keyword search and stored
  * document vectors never see it, and the gateway's global state is untouched.
  * There is no default: nothing is guessed from the model id at query time.
+ *
+ * An independent embedding column (`provenance: 'independent'` in
+ * `embedding_columns`) is its own model space. Its query embedding uses the
+ * column's declared model, dimensions and `queryPrefix`, never the brain-wide
+ * `embedding_query_prefix`, which belongs to the primary space.
  */
 import type { BrainEngine } from '../engine.ts';
+import type { ResolvedColumn } from '../types.ts';
 
 export const EMBEDDING_QUERY_PREFIX_KEY = 'embedding_query_prefix';
 
@@ -18,6 +24,35 @@ export async function loadEmbeddingQueryPrefix(engine: BrainEngine): Promise<str
   } catch {
     return '';
   }
+}
+
+export interface QueryEmbedOptions {
+  embeddingModel?: string;
+  dimensions?: number;
+  queryPrefix?: string;
+}
+
+/**
+ * Query-embed routing for one resolved column. An independent column always
+ * embeds with its own model, dimensions and prefix (the resolver requires an
+ * explicit provider:model for it), whatever the live `embedding_model` and
+ * `embedding_query_prefix` say. Every other column keeps the existing routing:
+ * the column's model when the resolver named one (empty means the gateway
+ * default), plus the brain prefix.
+ */
+export function queryEmbedOptionsForColumn(column: ResolvedColumn, brainQueryPrefix: string | undefined): QueryEmbedOptions | undefined {
+  if (column.provenance) {
+    return {
+      embeddingModel: column.embeddingModel,
+      dimensions: column.dimensions,
+      ...(column.queryPrefix ? { queryPrefix: column.queryPrefix } : {}),
+    };
+  }
+  if (!column.embeddingModel && !brainQueryPrefix) return undefined;
+  return {
+    ...(column.embeddingModel ? { embeddingModel: column.embeddingModel, dimensions: column.dimensions } : {}),
+    ...(brainQueryPrefix ? { queryPrefix: brainQueryPrefix } : {}),
+  };
 }
 
 /** Model families whose model cards ask for a query instruction, with the documented value. */

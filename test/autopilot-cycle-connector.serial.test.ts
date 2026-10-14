@@ -10,7 +10,7 @@ const calls: Array<Record<string, unknown>> = [];
 const cycle = await import('../src/core/cycle.ts');
 mock.module('../src/core/cycle.ts', () => ({
   ...cycle,
-  runCycle: async (_engine: unknown, opts: Record<string, unknown>) => { calls.push(opts); return { status: 'ok' }; },
+  runCycle: async (_engine: unknown, opts: Record<string, unknown>) => { calls.push(opts); return { status: 'ok', phases: [] }; },
 }));
 const { makeAutopilotCycleHandler } = await import('../src/core/minions/handlers/autopilot-cycle.ts');
 const { CONNECTOR_SOURCE_PHASES } = await import('../src/core/cycle/phase-scope.ts');

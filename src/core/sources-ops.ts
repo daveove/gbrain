@@ -945,6 +945,14 @@ export async function removeSource(
     );
   }
 
+  const { assertSourceNotSystemIndex } = await import('./destructive-guard.ts');
+  try {
+    await assertSourceNotSystemIndex(engine, opts.id);
+  } catch (error) {
+    if ((error as { code?: string })?.code !== 'system_index_source') throw error;
+    throw new SourceOpError('protected_id', error instanceof Error ? error.message : String(error));
+  }
+
   if(await managedPersistenceEnabled(engine)){
     const {runManagedSourceLifecycle}=await import('./persistence/source-lifecycle.ts');
     const result=await runManagedSourceLifecycle(engine,{operation:'remove',sourceId:opts.id,confirmDestructive:opts.confirmDestructive||opts.yes,
@@ -983,7 +991,8 @@ export async function removeSource(
     );
   }
 
-  // Decide whether we own the clone dir before removing the row.
+  // Validate clone ownership before the row delete; remove the checkout only
+  // after the transaction commits so a failed refresh handoff cannot orphan it.
   const remoteUrl = getRemoteUrl(src.config);
   const ghCfg = (typeof src.config === 'string' ? JSON.parse(src.config) : (src.config ?? {})) as Record<string, unknown>;
   // v0.46: github-kind mirrors at the default clone location are owned by
@@ -1010,8 +1019,7 @@ export async function removeSource(
           `Refusing to delete clone at ${src.local_path}: path is a symlink.`,
         );
       }
-      rmSync(src.local_path, { recursive: true, force: true });
-      cloneRemoved = true;
+      // Cleanup is delayed until the source deletion and refresh handoff commit.
     } catch (e) {
       if (e instanceof SourceOpError) throw e;
       // Don't fail the whole remove if rmSync had a permission hiccup — log
@@ -1022,7 +1030,30 @@ export async function removeSource(
     }
   }
 
-  await deleteSourceRow(engine, opts.id);
+  await engine.transaction(async (tx) => {
+    const { refreshDailyMemoryAfterSourceArchiveChange } = await import('./cycle/daily-memory-followup.ts');
+    await refreshDailyMemoryAfterSourceArchiveChange(tx, opts.id);
+    await deleteSourceRow(tx, opts.id);
+  });
+
+  if (!opts.keepStorage && src.local_path && (remoteUrl || ghManaged || gManaged)
+    && isPathContained(src.local_path, cloneRoot)) {
+    try {
+      // Repeat confinement after commit: never follow a replaced clone symlink.
+      // Post-commit refusal is cleanup-only — the source row is already gone, so
+      // throwing would report failure with no retryable cleanup state.
+      if (lstatSync(src.local_path).isSymbolicLink()) {
+        console.error(
+          `[gbrain] WARN: clone cleanup at ${src.local_path} refused: path is a symlink.`,
+        );
+      } else {
+        rmSync(src.local_path, { recursive: true, force: true });
+        cloneRemoved = true;
+      }
+    } catch (error) {
+      console.error(`[gbrain] WARN: clone cleanup at ${src.local_path} failed: ${(error as Error).message}`);
+    }
+  }
 
   return {
     id: opts.id,

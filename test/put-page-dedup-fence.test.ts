@@ -33,6 +33,7 @@ import { withEnv } from './helpers/with-env.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-dedup-fence-'));
 let victimRevision: string;
 
@@ -102,6 +103,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -111,6 +113,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,scope,source_id,federated_read,bound_slug_prefixes,bound_tools,delegated_slug_prefixes,bound_source_id,bound_max_concurrent)
     VALUES('gbrain_cl_dedup_fence','Example dedup client','read write agent','default',$1,$2,$3,$4,'default',1)`,
   [['default'], ['emp-bob/'], ['put_page'], ['emp-bob/*']]);

@@ -57,11 +57,14 @@ async function withBrain<T>(home: string, fn: (engine: PGLiteEngine) => Promise<
   try { return await fn(engine); } finally { await engine.disconnect(); }
 }
 
-/** Brain state an unauthorized run must leave alone. The agent-contract event log (E11) and audit trail record the refusal by design. */
+/** Brain state an unauthorized run must leave alone. Refusal logs and Bun's macOS bytecode cache are not user state. */
 async function brainState(home: string): Promise<BrainSnapshot> {
   const snap = await snapshotBrain(home, brainPath(home));
   for (const key of Object.keys(snap.files)) {
     if (/(^|\/)\.gbrain\/(agent-contract|audit)(\/|$)/.test(key)) delete snap.files[key];
+    // Bun creates these while loading a previously unused CLI module. Keep
+    // every other HOME file, including config, source notes and protections.
+    if (/^Library\/Caches\/bun(\/|$)/.test(key)) delete snap.files[key];
   }
   return snap;
 }
@@ -201,9 +204,27 @@ for (const stdin of ['devnull', 'silent'] as StdinMode[]) {
     }, 300_000);
 
     test('after import and remediation: doctor --json health >= 90 with capped_by; every WARN has a fix', async () => {
+      // PGLite drains runnable work, not future daily-index continuations.
+      // Doctor's queue_health counts waiting jobs, not scheduled delayed jobs.
+      const drained = await cli(['jobs', 'work']);
+      expect(drained.exitCode, drained.stdout + drained.stderr).toBe(0);
       const r = await cli(['doctor', '--json']);
       expect(r.exitCode, r.stderr).toBe(0);
       expectHealthy(oneDocument(r, 'doctor --json (after import)') as DoctorReport, 'after import');
+      await withBrain(home, async engine => {
+        const pending = await engine.executeRaw<{
+          id: number; name: string; status: string; queue: string; scheduled: boolean; attempts_made: number; error_text: string | null;
+        }>(
+          "SELECT id,name,status,queue,delay_until IS NOT NULL AS scheduled,attempts_made,error_text FROM minion_jobs WHERE status IN ('waiting','active','delayed','waiting-children','paused')");
+        for (const job of pending) {
+          expect(job, `job ${job.id}: only scheduled daily-index work remains, not a failed retry\n${drained.stderr}`).toMatchObject({
+            name: 'autopilot-daily-memory', status: 'delayed', queue: 'default', scheduled: true, attempts_made: 0,
+          });
+        }
+        const failed = await engine.executeRaw(
+          "SELECT id,name,status,error_text FROM minion_jobs WHERE status IN ('failed','dead','cancelled')");
+        expect(failed, 'offline import followups have no failures or cancellations').toEqual([]);
+      });
     }, 150_000);
   });
 }

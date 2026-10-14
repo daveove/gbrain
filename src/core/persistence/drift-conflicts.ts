@@ -133,7 +133,7 @@ export interface ConflictAuditAccess {
   /** Slug prefixes this caller is fenced to (undefined: unfenced). */
   slugPrefixes?: string[];
   /** Hide pages private to this caller. */
-  excludePrivate: boolean;
+  excludePrivate: boolean | 'owner-only';
 }
 
 export interface ConflictRow extends Record<string, unknown> {
@@ -216,7 +216,7 @@ export async function auditDriftConflicts(engine: BrainEngine, sourceId: string,
     where.push(`(${alternatives.join(' OR ')})`);
   }
   if (!access.trusted || access.excludePrivate) {
-    where.push(`EXISTS (SELECT 1 FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug AND p.deleted_at IS NULL${access.excludePrivate ? ` AND ${privatePagesFilterFragment('p')}` : ''})`);
+    where.push(`EXISTS (SELECT 1 FROM pages p WHERE p.source_id=r.source_id AND p.slug=r.slug AND p.deleted_at IS NULL${access.excludePrivate ? ` AND ${privatePagesFilterFragment('p', access.excludePrivate)}` : ''})`);
   }
   const filtered = where.join(' AND ');
   const [totals] = await engine.executeRaw<{ slugs: number; receipts: number }>(

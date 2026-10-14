@@ -116,3 +116,44 @@ exact fix line (`test/scripts/postgres-lane-coverage.test.ts`, 10 cases).
 | `autopilot-operator-pause` pins | disable worker gate 1 (`worker.ts:830`), gate 2 (`:894`), shadow the daemon's `autopilotPaused` | pin passes each time (blind) | in-process worker parks then runs after resume; released-un-run job claimed as the pause lands; spawned daemon reports the pause and resumes | each fails under its probe |
 | `embed-concurrency-pool-clamp` pins | `workers: Number(process.env.GBRAIN_EMBED_CONCURRENCY ?? 20)` at `embed.ts:1378` and `:2100` | pin passes 4/4 (blind) | `embed.serial` #5183 case (pool 3, both loops) | fails under each |
 | `consent` source pin (~195) | extra argv on the post-upgrade `applyMigrations` call | pin passes (blind) | `upgrade-no-autopilot.serial` › "post-upgrade passes the opt-out to migrations"; the pin became a direct consent-matrix assertion | fails |
+
+## Consolidation identity accounting
+
+This section records source-inspection evidence, not executed probes or new
+test results. Ten meaningful identities are restored with their original
+file/title/describe hierarchy: seven loops wiring/config/vocabulary/operations
+pins, the chronicle builtin-wrapper pin, the default SDK messages-client case,
+and the embedding mismatch error kind/name/recipe pin (now imported from
+`src/commands/embed-setup.ts`). They are not retirements. Six exact renames or
+behavioral retargets are declared as moves in `expected-deltas.tsv`.
+
+### Retiring a test: consolidation mechanism and vacuous pins
+
+Each row is one exact retirement, not a file-wide exemption. The set predicates
+protect a mechanism removed from `src/commands/jobs.ts`: `registerBuiltinJob`
+now unconditionally awaits `refreshGatewayForJob(engine)` before invoking the
+handler. The chronicle and loops callsite contracts remain important and have
+their own restored assertions.
+
+| Retired file and exact identity | Evidence case and individual rationale | Public source evidence / surviving owner | Verification attribution |
+|---|---|---|---|
+| `test/jobs-gateway-refresh-set.test.ts` › `#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ registerBuiltinJob call sites > chronicle_extract is in the refresh set (the #3387 regression)` | Abandoned mechanism: chronicle no longer needs membership in a selective refresh-name set. | `src/commands/jobs.ts` › `registerBuiltinJob` refreshes unconditionally; `registerBuiltinHandlers` registers chronicle through it. The same file's restored `chronicle_extract is registered via registerBuiltinJob, not bare worker.register` owns that callsite. | Source inspection only; no probe or test run in this change. |
+| `test/jobs-gateway-refresh-set.test.ts` › `#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ registerBuiltinJob call sites > every set entry has a registerBuiltinJob call site (no dead entries)` | Abandoned mechanism: there are no refresh-set entries whose reachability needs policing. | `src/commands/jobs.ts` › `registerBuiltinJob` has no selective set lookup; `test/jobs-handler-registry-golden.test.ts` owns registered handler names, not refresh-set equality. | Source inspection only; no probe or test run in this change. |
+| `test/jobs-gateway-refresh-set.test.ts` › `#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ registerBuiltinJob call sites > every registerBuiltinJob name is in the set (no silently-unwrapped registrations)` | Abandoned mechanism: a builtin-wrapper registration can no longer silently miss refreshing because its name is absent from a set. | `src/commands/jobs.ts` › every `registerBuiltinJob` invocation uses the same unconditional refresh wrapper. Restored chronicle and loops source-contract tests forbid bare registration of those two extractors. | Source inspection only; no probe or test run in this change. |
+| `test/jobs-gateway-refresh-set.test.ts` › `#3387 — GATEWAY_REFRESH_JOB_NAMES ⇔ registerBuiltinJob call sites > set entries are unique` | Abandoned mechanism: uniqueness of a deleted refresh-name literal is not a runtime contract. | `src/commands/jobs.ts` › no refresh-name set exists; the unconditional wrapper does not depend on set cardinality or duplicate literals. | Source inspection only; no probe or test run in this change. |
+| `test/loops-extract-wiring.test.ts` › `jobs.ts wiring > GATEWAY_REFRESH_JOB_NAMES contains 'loops_extract'` | Abandoned mechanism: loops extraction no longer requires selective-set membership to refresh. | `src/commands/jobs.ts` › `registerBuiltinJob` refreshes unconditionally. The same test file's restored `'loops_extract' is registered via registerBuiltinJob, never bare worker.register` owns the live wiring contract. | Source inspection only; no probe or test run in this change. |
+| `test/transcription-injection.test.ts` › `transcription — command injection (#245) > source uses execFileSync arg-arrays, never shell execSync` | Retained contract, implementation-text pin superseded by a behavioral sentinel: command substitutions in an audio filename must not execute. No claim of an executed discriminating mutation is made here. | Same-file `transcription — command injection (#245) > a $(...) payload in the audio path does not spawn a shell` calls `transcribe` on a synthetic large audio path containing `$(touch ...)` and asserts that no sentinel appears. This case requires ffmpeg/ffprobe and returns early if they are absent; source presence is not proof that those assertions executed. | Source inspection only; no probe or test run in this change. |
+| `test/transcription.test.ts` › `transcription > supported audio extensions are comprehensive` | Vacuous assertion: the removed test compared a local seven-element array's length to five and never read product behavior; a routing regression cannot change that constant comparison. | `test/files.test.ts` › `getMimeType > every extension transcription.ts accepts routes as media` checks real `getMimeType` output for all nine supported extensions (`.mp3`, `.mp4`, `.mpeg`, `.mpga`, `.m4a`, `.wav`, `.webm`, `.ogg`, `.flac`). | Source inspection only; no probe or test run in this change. |
+
+### Bootstrap setup-abort identities remain unchanged
+
+The six identities under `test/bootstrap-hook-under-serve.serial.test.ts` ›
+`bootstrap hook under a live serve (serial e2e) [A7]` are unchanged declarations:
+`serve is live`, `Pin 1`, `Pin 2`, `Pin 3`, `Pin 3b (cathedral 5)`, and `Pin 4`.
+The original canonical comparison's branch serial receipt emitted one unnamed
+file-level failure after `beforeAll` aborted with
+`OperationError: The canonical file contains an uncoordinated local edit.`
+That explains absent individual identities in that receipt; it is not deletion,
+rename, movement, or retirement. No delta rows are added for them, and this
+accounting change neither edits that file nor claims a new execution result.
+

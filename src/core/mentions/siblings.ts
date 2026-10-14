@@ -64,7 +64,7 @@ export interface IdentitySiblings {
  * candidate (untrusted callers).
  */
 export async function readIdentitySiblings(engine: BrainEngine, sourceId: string, page: { slug: string; title: string | null },
-  opts: { excludePrivate: boolean; excludeQuarantined?: boolean; policy?: MentionPolicy; pack?: PackTypes | null }): Promise<IdentitySiblings> {
+  opts: { excludePrivate: boolean | 'owner-only'; excludeQuarantined?: boolean; policy?: MentionPolicy; pack?: PackTypes | null }): Promise<IdentitySiblings> {
   const subject = normalizeAlias(titleName(page.title ?? ''));
   if (!subject) return { pages: [], capped: false, verdict: 'subject_mismatch' };
   try {
@@ -74,7 +74,7 @@ export async function readIdentitySiblings(engine: BrainEngine, sourceId: string
     const types = linkableTypesFor(pack, policy);
     const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
     const { quarantineFilterFragment } = await import('../quarantine.ts');
-    const privacy = (opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : '')
+    const privacy = (opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages', opts.excludePrivate)}` : '')
       + (opts.excludeQuarantined ? ` AND ${quarantineFilterFragment('pages')}` : '');
     const like = `%: ${subject.replace(/[\\%_]/g, m => `\\${m}`)}`;
     const rows = await engine.executeRaw<{ slug: string; title: string | null; type: string | null; identity: unknown }>(
@@ -100,7 +100,7 @@ export async function readIdentitySiblings(engine: BrainEngine, sourceId: string
  * name both siblings claim ("Telostra Robotics" for its account sheet and
  * CRM record) resolves instead of falling back to a slug no page has.
  */
-export async function siblingCanonical(engine: BrainEngine, sourceId: string, slugs: string[], opts: { excludePrivate?: boolean } = {}): Promise<string | null> {
+export async function siblingCanonical(engine: BrainEngine, sourceId: string, slugs: string[], opts: { excludePrivate?: boolean | 'owner-only' } = {}): Promise<string | null> {
   const unique = [...new Set(slugs)].sort();
   if (unique.length < 2 || unique.length > SIBLING_GROUP_CAP) return null;
   try {
@@ -109,7 +109,7 @@ export async function siblingCanonical(engine: BrainEngine, sourceId: string, sl
     const { privatePagesFilterFragment } = await import('../search/private-visibility.ts');
     const rows = await engine.executeRaw<{ slug: string; title: string | null; type: string | null; identity: unknown }>(
       `SELECT slug, title, type, frontmatter->>'identity' AS identity FROM pages
-        WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])${opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages')}` : ''}`,
+        WHERE source_id = $1 AND deleted_at IS NULL AND slug = ANY($2::text[])${opts.excludePrivate ? ` AND ${privatePagesFilterFragment('pages', opts.excludePrivate)}` : ''}`,
       [sourceId, unique]);
     if (rows.length !== unique.length) return null;
     const pack = await loadSourcePack(engine, sourceId);
@@ -127,7 +127,7 @@ export async function siblingCanonical(engine: BrainEngine, sourceId: string, sl
  * by name got before its siblings resolved). The entity card and recall read
  * all of them, so a saved fact shows up whichever sibling a reader asks for.
  */
-export async function factEntitySlugs(engine: BrainEngine, sourceId: string, slug: string, opts: { excludePrivate?: boolean } = {}): Promise<string[]> {
+export async function factEntitySlugs(engine: BrainEngine, sourceId: string, slug: string, opts: { excludePrivate?: boolean | 'owner-only' } = {}): Promise<string[]> {
   const [page] = await engine.executeRaw<{ title: string | null }>(
     'SELECT title FROM pages WHERE source_id = $1 AND slug = $2 AND deleted_at IS NULL', [sourceId, slug]).catch(() => []);
   if (!page) return [slug];

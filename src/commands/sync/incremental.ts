@@ -1,3 +1,4 @@
+import { prepareSyncDailyMemory } from '../../core/sync-daily-memory.ts';
 /**
  * Incremental (git-diff) sync: `performSyncInner` (refactor wave 1, W4 sync).
  * The phases run in order — preflight, the un-syncable sweep, deletes,
@@ -28,7 +29,16 @@ export async function performSyncInner(engine: BrainEngine, opts: SyncOpts): Pro
 async function runSyncPhases(engine: BrainEngine, opts: SyncOpts, holds: LegacyHolds | null): Promise<SyncResult> {
   const pre = await preflightIncrementalSync(engine, opts, holds);
   if ('done' in pre) return pre.done;
-  const { plan } = pre;
+  const initialPlan = pre.plan;
+  const { filtered, manifest, modePath, company } = initialPlan;
+  const dailyFollowup = initialPlan.opts.dailyMemoryFollowup ? await prepareSyncDailyMemory(engine, {
+    ownerJobId: initialPlan.opts.dailyMemoryOwnerJobId,
+    sourceId: initialPlan.opts.sourceId ?? 'default', commit: initialPlan.pin, scope: '', signal: initialPlan.opts.signal,
+    paths: [...filtered.added, ...manifest.modified, ...filtered.deleted,
+      ...filtered.renamed.flatMap(row => [row.from, row.to])].map(modePath),
+    protect: company ? key => company.protect([key]) : undefined,
+  }) : undefined;
+  const plan = { ...initialPlan, dailyFollowup };
   const { totalChanges, ckpt, pin } = plan;
   opts = plan.opts;
 

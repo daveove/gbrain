@@ -35,7 +35,7 @@ import { z } from 'zod';
 
 import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
 export { splitByTokenBudget, capBatchItems, NO_BATCH_CAP_SUB_BATCH_ITEMS } from './embed-batch-plan.ts';
-import { BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
+import { BudgetExhausted, BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
 import { failedCallUsage, recordOnTracker } from './budget-record.ts';
 import { estimateChatInputTokens } from './chat-input-estimate.ts';
 import { chatWithFallback, normalizeChatFallbackChain } from './chat-fallback.ts';
@@ -68,7 +68,7 @@ import { embeddingModelNotFoundHint, gatewayModelNotFoundHint } from './model-no
 import { fitMatryoshkaPrefix, isEmbeddingZeroNormError, screenAlignedEmbeddings, screenEmbeddings, sendableEmbeddingInputs } from './embedding-guard.ts';
 import { getProviderCapabilities } from './capabilities.ts';
 import { runGuardrails, hasGuardrails, type GuardrailHook } from '../guardrails.ts';
-import { loadConfig } from '../config.ts';
+import { loadConfig, loadConfigFileOnly } from '../config.ts';
 import type { GBrainConfig } from '../config.ts';
 import { mergedProviderEnv } from './provider-env.ts';
 import { redactProviderKeys } from './key-redact.ts';
@@ -79,6 +79,8 @@ import { invokeAI, sdkInvocationUsage, responseInvocationUsage, hasAIInvocationG
 import { installAICallLogFromEnv } from './call-log.ts';
 import { cachedQueryEmbedding, clearQueryEmbedCache, queryEmbedCacheKey, queryEmbedGeneration, storeQueryEmbedding } from './query-embed-cache.ts';
 import { createGuardedGeneration, chatInvocation } from './guarded-generation.ts';
+import { activeAIBilling, assertModelApiAllowed, paidModelApiBlocked, resolveAIBilling, setActiveAIBilling } from './billing-policy.ts';
+
 installAiSdkWarningWriter();
 const guardedGeneration = createGuardedGeneration(() => DEFAULT_MAX_OUTPUT_TOKENS);
 
@@ -478,8 +480,10 @@ export function configureGateway(config: AIGatewayConfig): void {
     base_urls: config.base_urls,
     provider_chat_options: config.provider_chat_options,
     env: config.env,
+    ai_billing: resolveAIBilling(config, process.env) === 'subscription' ? 'subscription' : resolveAIBilling(loadConfigFileOnly(), config.env),
   };
   stashGatewayAnthropicKeyFromEnv(config.env); // #2119: filter + rationale in anthropic-key.ts
+  setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
   clearQueryEmbedCache();
   _shrinkState.clear();
@@ -491,12 +495,11 @@ export function configureGateway(config: AIGatewayConfig): void {
 }
 
 /**
- * Re-fold ONLY the provider-key env from the file plane + process env into the
- * LIVE gateway config, leaving models/base_urls/chat-options untouched. For
- * long-lived workers: a key added to ~/.gbrain/config.json reaches the gateway
- * at the next job without clobbering the DB-plane-merged fields the worker's
- * boot fold installed (a full configureGateway(buildGatewayConfig(loadConfig()))
- * here would reset those to file-plane-only values). No-op before configure.
+ * Re-fold provider keys and billing from the file/env plane into the LIVE
+ * gateway, leaving models/base_urls/chat-options untouched. Long-lived workers
+ * pick up a billing opt-out at the next job without clobbering DB-merged model
+ * fields. A missing file policy preserves the configured mode; an explicit
+ * file policy can change it, subject to the process subscription-only setting.
  */
 export function refreshGatewayEnvFromFilePlane(): void {
   if (!_config) return;
@@ -511,7 +514,9 @@ export function refreshGatewayEnvFromFilePlane(): void {
   // boot fold installed from provider_base_urls.{anthropic,openai}. File-plane
   // only (cfg is loadConfig() here), preserving the mount-safety rule that
   // DB-plane base_urls never steer native keys.
-  _config = { ..._config, env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
+  _config = { ..._config, ai_billing: cfg?.ai_billing === undefined ? activeAIBilling() : resolveAIBilling(cfg, process.env),
+    env: foldNativeBaseUrlsFromFilePlane(cfg, mergedProviderEnv(cfg, process.env)) };
+  setActiveAIBilling(_config.ai_billing ?? 'api');
   _modelCache.clear();
   clearQueryEmbedCache();
 }
@@ -553,7 +558,7 @@ let _discovery: Promise<void> | null = null;
  * key. Fail-open.
  */
 async function discoverBeforeOpenAICall(modelStr: string | undefined): Promise<void> {
-  if (!modelStr) return;
+  if (!modelStr || activeAIBilling() === 'subscription') return;
   try { if (resolveRecipe(modelStr).recipe.id !== 'openai') return; } catch { return; }
   _discovery ??= (async () => {
     try {
@@ -570,8 +575,7 @@ async function discoverBeforeOpenAICall(modelStr: string | undefined): Promise<v
 }
 
 async function resolveGatewayModels(engine: BrainEngine): Promise<AIGatewayConfig> {
-  const cfg = requireConfig();
-
+  const cfg = { ...requireConfig(), ai_billing: activeAIBilling() };
   // The two resolutions below each walk a 5-tier precedence chain that reads
   // up to 4 config keys, plus alias expansion. Against the engine that is
   // many sequential round trips before the CLI does any work — seconds of
@@ -613,7 +617,9 @@ async function resolveGatewayModels(engine: BrainEngine): Promise<AIGatewayConfi
       fileCfg = null;
     }
   }
-  const env = cfg.env ?? process.env;
+  const env = cfg.ai_billing === 'subscription'
+    ? { ...(cfg.env ?? process.env), GBRAIN_AI_BILLING: 'subscription' }
+    : cfg.env ?? process.env;
   const chatEffective = needsFileCfg(chatDetailed.source) ? resolveEffectiveChatModel(fileCfg, env) : null;
   const expansionEffective = needsFileCfg(expansionDetailed.source) ? resolveEffectiveExpansionModel(fileCfg, env) : null;
   const newChat = chatEffective?.model ?? chatDetailed.model;
@@ -712,6 +718,7 @@ function clearGatewayState(): void {
   _config = null;
   _discoveryEngine = null;
   _discovery = null;
+  setActiveAIBilling(null);
   clearGatewayModelSources();
   stashGatewayAnthropicKeyFromEnv(undefined); // gateway-owned snapshot dies with the config
   _modelCache.clear();
@@ -928,7 +935,8 @@ export type EmbeddingDiagnosis =
   | { ok: false; reason: 'unknown_provider'; model: string; provider: string; message: string }
   | { ok: false; reason: 'no_touchpoint'; model: string; provider: string; recipeId: string }
   | { ok: false; reason: 'user_provided_dims_unset'; model: string; provider: string; recipeId: string }
-  | { ok: false; reason: 'missing_env'; model: string; provider: string; recipeId: string; missingEnvVars: string[] };
+  | { ok: false; reason: 'missing_env'; model: string; provider: string; recipeId: string; missingEnvVars: string[] }
+  | { ok: false; reason: 'paid_api_disabled'; model: string; provider: string; recipeId: string };
 
 export function diagnoseEmbedding(modelOverride?: string): EmbeddingDiagnosis {
   if (_config?.embedding_identity_unverified && !modelOverride) {
@@ -969,6 +977,11 @@ export function diagnoseEmbedding(modelOverride?: string): EmbeddingDiagnosis {
     };
   }
 
+  // ai_billing=subscription refuses paid embedding APIs before any request;
+  // the configured embedding identity and stored vectors stay untouched.
+  if (paidModelApiBlocked(recipe)) {
+    return { ok: false, reason: 'paid_api_disabled', model: modelStr, provider: parsed.providerId, recipeId: recipe.id };
+  }
   const tp = recipe.touchpoints.embedding;
   if (!tp) {
     return {
@@ -1074,6 +1087,7 @@ export function isAvailable(touchpoint: TouchpointKind, modelOverride?: string):
         : null;
     if (!modelStr) return false;
     const { recipe } = resolveRecipe(modelStr);
+    if (paidModelApiBlocked(recipe)) return false;
 
     // Recipe must actually support the requested touchpoint.
     // Anthropic declares only expansion + chat (no embedding model); requesting
@@ -1474,8 +1488,9 @@ function instantiateEmbedding(recipe: Recipe, modelId: string, cfg: AIGatewayCon
         `Anthropic has no embedding model. Use openai or google for embeddings.`,
       );
     case 'claude-cli':
+    case 'codex-cli':
       throw new AIConfigError(
-        `claude-cli has no embedding model. Use openai or google for embeddings.`,
+        `${recipe.id} has no embedding model; a chat subscription is not an embedding entitlement.`,
       );
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
@@ -1604,6 +1619,7 @@ export async function embed(texts: string[], opts?: EmbedOpts): Promise<Float32A
   // global default. resolveEmbeddingProvider validates the override at the
   // recipe layer — bad model strings throw AIConfigError with a clear hint.
   const resolveTarget = opts?.embeddingModel ?? getEmbeddingModel();
+  assertModelApiAllowed(resolveTarget); // before any budget reservation or client
   const tracker = __budgetStore.getStore() ?? null;
   const { model, recipe, modelId } = await resolveEmbeddingProvider(resolveTarget);
   const truncated = truncateEmbedInputs(texts);
@@ -1775,7 +1791,7 @@ async function embedSubBatch(
       // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
       // deadline) — shorter wins.
       abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
-      ...(hasAIInvocationGuard() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
+      ...(hasAIInvocationGuard() || getCurrentBudgetTracker() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
     }), sdkInvocationUsage, err => isTokenLimitError(err) || isUnbilledEmbeddingRejection(recipe.id, err) ? { inputTokens: 0, outputTokens: 0 } : null);
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —
@@ -1898,6 +1914,7 @@ export async function embedMultimodal(
   const tracker = __budgetStore.getStore() ?? null;
   if (!tracker) return embedMultimodalUnmetered(inputs, opts);
   const modelStr = requireConfig().embedding_multimodal_model ?? getEmbeddingModel();
+  assertModelApiAllowed(modelStr); // refusal must precede even a $0 budget reservation
   const { parsed, recipe } = resolveRecipe(modelStr);
   const mmModelId = `${recipe.id}:${parsed.modelId}`;
   const charsPerToken = Math.max(recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN, 1);
@@ -1928,6 +1945,7 @@ async function embedMultimodalUnmetered(
   // text embeddings can route multimodal to Voyage without changing the
   // primary embedding_model. Falls back to embedding_model for single-model setups.
   const modelStr = cfg.embedding_multimodal_model ?? getEmbeddingModel();
+  assertModelApiAllowed(modelStr);
   const { parsed, recipe } = resolveRecipe(modelStr);
   const touchpoint = recipe.touchpoints.embedding;
   if (!touchpoint?.supports_multimodal) {
@@ -2406,6 +2424,10 @@ function instantiateExpansion(recipe: Recipe, modelId: string, cfg: AIGatewayCon
       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
       return new ClaudeCliLanguageModel(modelId);
     }
+    case 'codex-cli': {
+      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
+      return new CodexCliLanguageModel(modelId);
+    }
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
       const auth = applyResolveAuth(recipe, cfg, 'expansion');
@@ -2553,7 +2575,7 @@ export async function expand(query: string): Promise<string[]> {
       return parseExpansionResponse(textResult.text) ?? [];
     };
 
-    if (recipe.implementation === 'claude-cli') {
+    if (recipe.implementation === 'claude-cli' || recipe.implementation === 'codex-cli') {
       // claude-cli is NOT structured-output capable, despite being a 'native'
       // tier recipe. ClaudeCliLanguageModel.doGenerate ignores
       // `options.responseFormat` entirely (it renders prompt → `claude
@@ -2690,6 +2712,9 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
   // touchpoint, or unkeyed): '' rather than silently OCRing with the
   // expansion model.
   if (!isAvailable('expansion', ocrModel)) return '';
+  // Codex's CLI adapter accepts text only. Keep text expansion available,
+  // but treat OCR as unavailable before resolving a model or reserving spend.
+  if (resolveRecipe(ocrModel).recipe.implementation === 'codex-cli') return '';
   const { model, recipe, modelId } = await resolveExpansionProvider(ocrModel);
   const base64 = imageBytes.toString('base64');
   const systemPrompt = [
@@ -2717,6 +2742,7 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
     result = await guardedGeneration(ocrModelId, _generateTextTransport, {
       model,
       maxOutputTokens: OCR_MAX_OUTPUT_TOKENS,
+      ...(tracker ? { maxRetries: 0 } : {}),
       // v0.42.20.0 (codex) — OCR is a 5th unbounded generateText entry point.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
       messages: [
@@ -2736,8 +2762,10 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
         },
       ],
     });
+    recordOcr('gateway.ocr', normalizeSdkUsage(result.usage));
+    return (result.text ?? '').trim();
   } catch (err) {
-    if (isAIInvocationPolicyError(err)) throw err;
+    if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
     recordOcr('gateway.ocr.failed', failedCallUsage(err, {
       inputTokens: estimatedOcrInputTokens,
       outputTokens: OCR_MAX_OUTPUT_TOKENS,
@@ -2745,9 +2773,9 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
     // Throw-to-caller contract unchanged: importImageFile routes this to
     // ocr_failed_other. A cap breach surfaces there as a real import failure.
     throw err;
+  } finally {
+    tracker?.release(reservation);
   }
-  recordOcr('gateway.ocr', normalizeSdkUsage(result.usage));
-  return (result.text ?? '').trim();
 }
 
 // ---- BudgetTracker scope (TX5) ----
@@ -3142,12 +3170,11 @@ export interface ChatOpts {
   cacheSystem?: boolean;
   /**
    * JSON Schema the reply must conform to (#4863). Honored ONLY on
-   * openai-compatible recipes that declare `supports_structured_outputs` —
-   * backends that enforce `response_format: json_schema` server-side
-   * (Ollama's grammar-constrained decoding). Every other lane ignores the
-   * field, so native / claude-cli calls are byte-identical with or without
-   * it, and the reply still arrives as `text`: callers keep parsing and
-   * validating it themselves (see `jsonSchemaOutput`).
+   * recipes declaring `supports_structured_outputs`: openai-compatible
+   * backends enforce `response_format: json_schema`; Codex CLI uses its
+   * supported `--output-schema`. Other lanes ignore the field (including
+   * claude-cli), and every reply still arrives as `text`: callers keep parsing
+   * and validating it themselves (see `jsonSchemaOutput`).
    */
   responseSchema?: { name: string; description?: string; schema: Record<string, unknown> };
   /** Caller purpose (`skillopt.judge`, …) stamped on the BudgetTracker ledger row. */
@@ -3323,6 +3350,11 @@ function instantiateChat(recipe: Recipe, modelId: string, cfg: AIGatewayConfig):
       // openai-compatible path below. No env-var switch, no global flag.
       const { ClaudeCliLanguageModel } = require('./providers/claude-cli-language-model.ts');
       return new ClaudeCliLanguageModel(modelId);
+    }
+    case 'codex-cli': {
+      // `codex exec` under the user's ChatGPT login (see the provider).
+      const { CodexCliLanguageModel } = require('./providers/codex-cli-language-model.ts');
+      return new CodexCliLanguageModel(modelId);
     }
     case 'openai-compatible': {
       // D12=A: unified auth via Recipe.resolveAuth (or default).
@@ -3536,6 +3568,7 @@ export async function chat(opts: ChatOpts): Promise<ChatResult> {
   if (fallbackChain?.length) return chatWithFallback(opts, opts.model ?? getChatModel(), fallbackChain, chat, { onRefusal: _config?.chat_fallback_on_refusal !== false });
   const tracker = __budgetStore.getStore() ?? null;
   const modelStrEarly = opts.model ?? getChatModel();
+  assertModelApiAllowed(modelStrEarly); // before guardrails, budget reservation or client
 
   // Guardrail seam: classify ONLY the latest user message before provider
   // inference. Observe-only / fail-open; no-op without a registered guardrail.
@@ -3733,7 +3766,7 @@ async function chatAdmitted(opts: ChatOpts, admitted: {
   // expand() keeps — so the caller's own retry lanes don't re-pay the
   // rejection and turn every call into a permanent provider_error.
   const output = opts.responseSchema
-    && recipe.implementation === 'openai-compatible'
+    && (recipe.implementation === 'openai-compatible' || recipe.implementation === 'codex-cli')
     && recipeSupportsStructuredOutputs(recipe)
     && !_structuredOutputRejectedRecipes.has(recipe.id)
     ? jsonSchemaOutput(opts.responseSchema)
@@ -4309,6 +4342,7 @@ export async function rerank(input: RerankInput): Promise<RerankResult[]> {
     input.model ??
     getRerankerModel() ??
     DEFAULT_RERANKER_MODEL;
+  assertModelApiAllowed(modelStr);
 
   const tracker = __budgetStore.getStore() ?? null;
   const { parsed, recipe } = resolveRecipe(modelStr);

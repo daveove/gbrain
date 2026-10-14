@@ -13,10 +13,11 @@ import { relationshipFilterSql, parseMultirange } from '../src/core/link-validit
 
 setDefaultTimeout(30_000);
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); });
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); });
 afterAll(async () => { await engine.disconnect(); resetGateway(); });
-beforeEach(async () => { await resetPgliteState(engine); resetGateway(); });
+beforeEach(async () => { await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); resetGateway(); });
 
 const ctx = (): OperationContext => ({
   engine, config: { engine: 'pglite' as const }, logger: { info: () => {}, warn: () => {}, error: () => {} },

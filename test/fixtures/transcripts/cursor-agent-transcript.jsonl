@@ -1,0 +1,9 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<manually_attached_skills>\nSKILL-PREAMBLE\n</manually_attached_skills>\n<timestamp>Wednesday, Sep 30, 2026, 9:15 AM (UTC+8)</timestamp>\n<user_query>\nSummarize the acme-example roadmap.\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Checking the roadmap doc."},{"type":"tool_use","name":"Read","input":{"path":"ROADMAP.md"}}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"Shell","input":{"command":"TOOL-INPUT"}}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<available_subagent_types>\nINJECTED-CATALOG\n</available_subagent_types>"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Sep 30, 2026, 9:20 AM (UTC+8)</timestamp>"}]}}
+{"type":"turn_ended","status":"success"}
+{"role":"assistant",
+{"role":"assistant","message":{"content":[{"type":"text","text":"Q4 focuses on the widget launch."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Sep 30, 2026, 9:25 PM (UTC+8)</timestamp>\n<user_query>Thanks.</user_query>"}]}}

@@ -1,23 +1,9 @@
 /**
- * loops-extract wiring — static assertions pinning the cross-file plumbing
- * around the open-loop LLM extractor:
- *
- *   1. jobs.ts registers 'loops_extract' via registerBuiltinJob AND lists it
- *      in GATEWAY_REFRESH_JOB_NAMES (the #3387 stale-gateway class: the
- *      extractor's judge is a gateway chat call, so a worker booted before
- *      `gbrain config set` must refresh before running it).
- *   2. The kill switch key 'loops.extraction_enabled' is a known config key.
- *   3. The relational vocabulary knows the two edge verbs the extractor
- *      writes ('owes_to', 'awaiting_reply_from') — both in KNOWN_LINK_TYPES
- *      and declared as link_types in the gbrain-base-v2 schema pack.
- *   4. The loops ops (open_loops / loops_close / loops_mute) exist on the
- *      contract with area 'loops', read/write scopes, and no localOnly on
- *      open_loops (approved remote posture D4-A).
- *
- * Source-text reads mirror the repo's guard-test style
- * (test/jobs-gateway-refresh-set.test.ts).
+ * Open-loop extractor plumbing: gateway-refresh registration, kill-switch key,
+ * edge vocabulary, and the public operations' area/read/write/remote posture.
+ * The obsolete refresh-name set is not part of the contract: every builtin
+ * wrapper now refreshes unconditionally.
  */
-
 import { describe, test, expect } from 'bun:test';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -32,14 +18,6 @@ const REPO = path.join(import.meta.dir, '..');
 
 describe('jobs.ts wiring', () => {
   const src = surfaceFileSource('jobs', 'src/commands/jobs.ts');
-
-  test("GATEWAY_REFRESH_JOB_NAMES contains 'loops_extract'", () => {
-    const m = src.match(/const GATEWAY_REFRESH_JOB_NAMES = new Set\(\[([\s\S]*?)\]\);/);
-    expect(m).not.toBeNull();
-    const body = m![1]!.split('\n').map((l) => l.replace(/\/\/.*$/, '')).join('\n');
-    const names = [...body.matchAll(/'([^']+)'/g)].map((x) => x[1]!);
-    expect(names).toContain('loops_extract');
-  });
 
   test("'loops_extract' is registered via registerBuiltinJob, never bare worker.register", () => {
     const registered = [

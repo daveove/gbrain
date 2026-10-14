@@ -1,6 +1,6 @@
 {
   "golden": {
-    "count": 237,
+    "count": 238,
     "gaps": [
       17,
       18,
@@ -29,6 +29,7 @@
       "PERSISTENCE_SYNC_WATERMARK_INDEX": "93523954a30e8483717f07ec97a3e0cd062b15d8a60cc759281054b06c23bb40",
       "TOKEN_TTL_MAX_SECONDS": "f4a45bec6ec0bacc859dc57732ceb76cec7eb72f242b5a6c89d47190d0525ab4",
       "TOKEN_TTL_MIN_SECONDS": "441d8ce6bd21f753de90abd3013eaa9992a469ea60c590f1005533618199aa25",
+      "TRUST_STAMP_TIER_FUNCTION_SQL": "0cd92defda770304d097edb6c3bfb4f7be03f4fb12b4713bcc0a243fc37e622c",
       "backfillChunkVectors": "1c8cc09a28aa3e906fe2f112b71cd3aa61f750a99984e35a029cff9458272aa1",
       "backfillPageVectors": "a325a5eee3bab49723af311f21b38a1ee4a0eaff1fb3c7e1539aa4dcb287ed66",
       "buildIndexOnline": "ed5378b90f24f7d662e02865cf73af4248e348002661f8fbfd8ee1087c60a3e5",
@@ -54,7 +55,7 @@
       "sqlQueryForEngine": "71fb1ccec1b22cdc1662876dbd8c17ed81e9ab83485c6965cdf5caa4fc4a4ab5",
       "verifyProjectionStatistics": "0d231b04ecfbc5a4109d6fca9567bf4e8c9e9db6c3fbbb35212e026579ed6f67"
     },
-    "latest": 242,
+    "latest": 243,
     "records": [
       {
         "handler": {
@@ -3385,8 +3386,8 @@
         "idempotent": true,
         "name": "trust_tiers",
         "sql": {
-          "length": 21064,
-          "sha256": "e970169acfdd98bfc4b51d361522f0137341b67988d0db3cf4b1c0f7f9433eca"
+          "length": 21112,
+          "sha256": "7e47b29047bf86543f1418414e3b03b9ff37086d60b4466c64bbf6979096aad6"
         },
         "sqlFor": "absent",
         "transaction": "absent",
@@ -3684,6 +3685,29 @@
         "transaction": "absent",
         "verify": "absent",
         "version": 242
+      },
+      {
+        "handler": {
+          "form": "arrow",
+          "helpers": [
+            "TRUST_STAMP_TIER_FUNCTION_SQL",
+            "buildIndexOnline",
+            "dropInvalidConcurrentIndex",
+            "migrationNotice",
+            "quietMigrationNotices"
+          ],
+          "sha256": "3926f85c4076ec2038a28b5644d3611687427956a7a90f2ff6788dc28791c7e3"
+        },
+        "idempotent": true,
+        "name": "nightly_memory_dependencies",
+        "sql": {
+          "length": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "sqlFor": "absent",
+        "transaction": false,
+        "verify": "absent",
+        "version": 243
       }
     ],
     "versions": [
@@ -3923,7 +3947,8 @@
       239,
       240,
       241,
-      242
+      242,
+      243
     ]
   },
   "normalizer": "migrations-record-v1"

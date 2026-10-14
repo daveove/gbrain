@@ -22,6 +22,8 @@ import {
   resolveExcludePrivatePages,
   __resetPrivateVisibilityCacheForTests,
   REMOTE_PRIVATE_PAGES_KEY,
+  isReservedOwnerAggregateIdentity,
+  isOwnerAggregate,
 } from '../src/core/search/private-visibility.ts';
 import { buildEntityCard } from '../src/core/verbs/entity-card.ts';
 import { operationsByName } from '../src/core/operations.ts';
@@ -96,20 +98,44 @@ describe('resolveExcludePrivatePages gate (#4352)', () => {
     expect(await resolveExcludePrivatePages(engine, undefined)).toBe(true);
   });
 
-  test('config opt-out disables enforcement', async () => {
+  test('config opt-out retains owner aggregate enforcement', async () => {
     await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
     __resetPrivateVisibilityCacheForTests();
-    expect(await resolveExcludePrivatePages(engine, true)).toBe(false);
+    expect(await resolveExcludePrivatePages(engine, true)).toBe('owner-only');
     await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
     __resetPrivateVisibilityCacheForTests();
     expect(await resolveExcludePrivatePages(engine, true)).toBe(true);
   });
 
-  test('GBRAIN_REMOTE_PRIVATE_PAGES=1 env escape hatch disables enforcement', async () => {
+  test('GBRAIN_REMOTE_PRIVATE_PAGES=1 retains owner aggregate enforcement', async () => {
     __resetPrivateVisibilityCacheForTests();
     await withEnv({ GBRAIN_REMOTE_PRIVATE_PAGES: '1' }, async () => {
-      expect(await resolveExcludePrivatePages(engine, true)).toBe(false);
+      expect(await resolveExcludePrivatePages(engine, true)).toBe('owner-only');
     });
+  });
+});
+
+describe('reserved owner-aggregate identity', () => {
+  test('daily-memory dates and source-records under default/dream are reserved', () => {
+    expect(isReservedOwnerAggregateIdentity('dream', 'daily-memory/2026-10-01')).toBe(true);
+    expect(isReservedOwnerAggregateIdentity('default', 'daily-memory/2026-10-01')).toBe(true);
+    expect(isReservedOwnerAggregateIdentity('dream', 'source-records/gmail/x')).toBe(true);
+    expect(isReservedOwnerAggregateIdentity('other', 'daily-memory/2026-10-01')).toBe(false);
+    expect(isReservedOwnerAggregateIdentity('dream', 'daily-memory/not-a-date')).toBe(false);
+    expect(isReservedOwnerAggregateIdentity('dream', 'notes/ordinary')).toBe(false);
+  });
+
+  test('isOwnerAggregate still requires dream_generated markers', () => {
+    expect(isOwnerAggregate({ source_id: 'dream', slug: 'daily-memory/2026-10-01', frontmatter: {} })).toBe(false);
+    expect(isOwnerAggregate({ source_id: 'dream', slug: 'daily-memory/2026-10-01', frontmatter: { dream_generated: true } })).toBe(true);
+    expect(isOwnerAggregate({
+      source_id: 'dream', slug: 'source-records/gmail/x',
+      frontmatter: { dream_generated: true, source_record_id: 'x', source_record_type: 'gmail', source_record_ref: 'x' },
+    })).toBe(true);
+    expect(isOwnerAggregate({
+      source_id: 'dream', slug: 'source-records/gmail/x',
+      frontmatter: { dream_generated: true },
+    })).toBe(false);
   });
 });
 
@@ -153,6 +179,26 @@ describe('entity card (#4352 — covers entity/context_pack/delta)', () => {
     const localRes = await buildEntityCard(engine, 'default', 'Zebra Widget Private', { remote: false });
     expect(localRes.found).toBe(true);
     expect(localRes.card?.entity.slug).toBe('notes/private-page');
+  });
+
+  test('operator opt-out includes ordinary private inbound edges but never generated owner aggregates', async () => {
+    const privateSlug = 'notes/owner-only-edge-private', ownedSlug = 'daily-memory/2026-10-01';
+    await engine.putPage(privateSlug, { type: 'note', title: 'Synthetic private referrer', compiled_truth: 'Synthetic reference', frontmatter: { visibility: 'private' } });
+    await engine.putPage(ownedSlug, { type: 'note', title: 'Synthetic owner aggregate', compiled_truth: 'Synthetic aggregate', frontmatter: { dream_generated: true, visibility: 'world' } });
+    await engine.addLink(privateSlug, 'notes/world-page', 'Synthetic private edge', 'related_to');
+    await engine.addLink(ownedSlug, 'notes/world-page', 'Synthetic owned edge', 'related_to');
+    try {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+      __resetPrivateVisibilityCacheForTests();
+      const result = await buildEntityCard(engine, 'default', 'notes/world-page', { remote: true });
+      expect(result.found).toBe(true);
+      expect(result.card?.edges.filter(edge => edge.direction === 'in').map(edge => edge.slug)).toContain(privateSlug);
+      expect(result.card?.edges.map(edge => edge.slug)).not.toContain(ownedSlug);
+      expect(result.card?.backlink_count).toBeGreaterThan(0);
+    } finally {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+      __resetPrivateVisibilityCacheForTests();
+    }
   });
 });
 

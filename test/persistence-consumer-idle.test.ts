@@ -1,10 +1,11 @@
-/** #5370: an idle consumer probes once per tick, backs off to its cap, and wakes on same-process admission. */
+/** #5370: an idle consumer probes once per tick, with a live-policy read, backs off to its cap, and wakes on same-process admission. */
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
 import { admitWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { disposePersistenceConsumer, startPersistenceConsumer, waitForWrite } from '../src/core/persistence/service.ts';
@@ -51,7 +52,58 @@ async function settled(consumer: PersistenceConsumer): Promise<void> {
   await Promise.all(['projectionWorker', 'effectsWorker', 'topologyWorker', 'maintenanceWorker'].map(name => workers[name]));
 }
 
-test('an idle tick runs one probe statement instead of the worker fan-out', async () => withEnv(env, async () => {
+for (const route of ['reserved', 'direct', 'pool1'] as const) test(
+  `live-policy and work probes share the ${route} route with one peak connection`, async () => withEnv(
+    { GBRAIN_CONSUMER_DIRECT_LANE: '1' }, async () => {
+      let held = 0, peak = 0, reservations = 0;
+      const calls: { route: string; sql: string; signal?: AbortSignal }[] = [];
+      const poolMax = route === 'reserved' ? 3 : 1;
+      const query = async (kind: string, sql: string, opts?: { signal?: AbortSignal }) => {
+        const checkout = kind !== 'reserved';
+        if (checkout) { held++; peak = Math.max(peak, held); }
+        try {
+          calls.push({ route: kind, sql, signal: opts?.signal });
+          await Promise.resolve();
+          return sql.includes('AS work') ? [{ work: false }] : [];
+        } finally { if (checkout) held--; }
+      };
+      // This routing fixture implements only the read-only probe's engine surface.
+      const target = {
+        kind: 'postgres',
+        sql: { options: { max: poolMax } },
+        connectionManager: { isDualPoolActive: () => route === 'direct', describeMode: () => ({}) },
+        getPoolDiagnostics: () => ({ poolMax, tracked: {} }),
+        executeRaw: (sql: string, _params?: unknown[], opts?: { signal?: AbortSignal }) => query('pool', sql, opts),
+        executeRawDirect: (sql: string, _params?: unknown[], opts?: { signal?: AbortSignal }) => query('direct', sql, opts),
+        async withReservedConnection(run: (conn: unknown) => Promise<void>) {
+          reservations++;
+          held++; peak = Math.max(peak, held);
+          try { await run({ executeRaw: (sql: string) => query('reserved', sql) }); }
+          finally { held--; }
+        },
+      } as unknown as BrainEngine;
+      const consumer = new PersistenceConsumer(target, { engine: 'postgres' },
+        async () => { throw new Error('no preparation expected'); }, { hostId: randomUUID() });
+      // Test-only access to the scheduler's private read-only eligibility probe.
+      const probe = consumer as unknown as { hasWork(): Promise<boolean> };
+      try {
+        expect(await probe.hasWork()).toBe(false);
+        expect(calls).toHaveLength(2);
+        expect(calls[0].sql).toContain("key IN ('search_embedding_column', 'embedding_columns')");
+        expect(calls[1].sql).toContain('AS work');
+        const expectedRoute = route === 'pool1' ? 'pool' : route;
+        expect(calls.map(call => call.route)).toEqual([expectedRoute, expectedRoute]);
+        expect(reservations).toBe(route === 'reserved' ? 1 : 0);
+        expect(peak).toBe(1);
+        if (route !== 'reserved') {
+          expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+          expect(calls[1].signal).toBe(calls[0].signal);
+        }
+      } finally { await consumer.stop(); }
+      expect(held).toBe(0);
+    }));
+
+test('an idle tick runs a policy read and one work probe instead of the worker fan-out', async () => withEnv(env, async () => {
   const { proxy, statements } = counting(engine);
   const consumer = new PersistenceConsumer(proxy, { engine: 'pglite' }, async () => { throw new Error('no work expected'); },
     { hostId: config.hostId, onError: () => {} });
@@ -62,7 +114,8 @@ test('an idle tick runs one probe statement instead of the worker fan-out', asyn
     await settled(consumer);
     statements.length = 0;
     for (let i = 0; i < 5; i++) { await consumer.tick(); await settled(consumer); }
-    expect(statements.length).toBe(5);
+    expect(statements.length).toBe(10);
+    expect(statements.filter(sql => sql.startsWith('SELECT key, value FROM config')).length).toBe(5);
   } finally { await consumer.stop(); }
 }));
 
@@ -80,7 +133,7 @@ test('a queued request behind another process\'s running head does not trigger t
     await settled(consumer);
     statements.length = 0;
     for (let i = 0; i < 3; i++) { await consumer.tick(); await settled(consumer); }
-    expect(statements.length).toBe(3);
+    expect(statements.length).toBe(6);
   } finally {
     await consumer.stop();
     await engine.executeRaw(`UPDATE persistence_requests SET state='cancelled', execution_token=NULL, claim_expires_at=NULL
@@ -97,7 +150,7 @@ test('idle polling backs off to the cap, then a wake runs a full tick immediatel
   try {
     await Bun.sleep(2_000);
     // 20 ms polling for 2 s would be ~100 ticks; doubling to a 160 ms cap is ~15.
-    const ticks = statements.length;
+    const ticks = statements.filter(sql => sql.includes('AS work')).length;
     expect(ticks).toBeLessThan(40);
     const full = refreshes();
     consumer.wake();

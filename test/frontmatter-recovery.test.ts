@@ -142,6 +142,13 @@ describe('protected keys are never guessed', () => {
     expect(hold(parse(doc('derived_from: notes/a\nnotes/b\ntitle: x')))).toMatchObject({ reason: 'ambiguous_protected_key', key: 'derived_from' });
   });
 
+  test('owner-aggregate identity markers are held rather than guessed or swallowed', () => {
+    for (const key of ['dream_generated', 'source_record_id', 'source_record_type', 'source_record_ref']) {
+      expect(hold(parse(doc(`${key}: true\ntitle: a\n${key}: false`)))).toMatchObject({ reason: 'ambiguous_protected_key', key });
+      expect(hold(parse(doc(`title: "Hello\n${key}: true\nsummary: x"`)))).toMatchObject({ reason: 'ambiguous_protected_key', key });
+    }
+  });
+
   test('every frontmatter key the access-control and provenance readers use is protected', () => {
     const readers = ['src/core/search/private-visibility.ts', 'src/core/repair/visibility.ts', 'src/core/persistence/connector-sync.ts'];
     const keys = new Set<string>();

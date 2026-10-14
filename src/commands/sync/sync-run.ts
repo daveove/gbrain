@@ -36,6 +36,7 @@ export type SyncProgress = ReturnType<typeof createProgress>;
 
 /** Immutable result of preflight: what this run drains and how. */
 export interface SyncPlan {
+  readonly dailyFollowup?: Awaited<ReturnType<typeof import('../../core/sync-daily-memory.ts').prepareSyncDailyMemory>>;
   /** Caller options after the persisted `sync.exclude` / `sync.include_hidden` unions. */
   readonly opts: SyncOpts;
   readonly company: ReturnType<typeof currentCompanyBrainSync>;

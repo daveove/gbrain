@@ -8,10 +8,10 @@
  * source whose pages exercise fenced and inline code, HTML comments, inline
  * citations, timeline bullets, bare wikilinks, CRLF lines and a broken
  * frontmatter file left untracked after the import, then pins `doctor --json`
- * and the human `doctor` output plus their exit codes. Captured on master
- * before the doctor CPU fixes (the citation reader's no-citation exit, the
- * doctor-scoped `git ls-files` memo, the per-source Git scope in
- * undeclared_db_only_pages), so those fixes must reproduce it.
+ * and the human `doctor` output plus their exit codes. The original capture
+ * predates the doctor CPU fixes. Import now intentionally extracts small
+ * batches inline and queues daily-index work: retain its improved graph and
+ * the honest pending-queue warning in both captures, without draining jobs.
  *
  * Same hermetic env and normalizer as the W0 goldens; every capture runs
  * twice from independent fresh homes and must normalize identically.
@@ -103,6 +103,13 @@ describe('gbrain doctor goldens on a brain with content (PGLite)', () => {
   test('doctor --json and human doctor match the master capture', async () => {
     const c = await expectNormalizerStable(capture, ALL);
     expect(c.json.json).not.toBeNull();
+    const report = c.json.json as { checks: Array<{ name: string; status: string; details?: { depth?: number; worker_alive?: boolean }; fix?: { argv?: string[] } }> };
+    const queue = report.checks.find(check => check.name === 'queue_health');
+    expect(queue).toMatchObject({
+      status: 'warn', details: { worker_alive: false },
+      fix: { argv: expect.arrayContaining(['gbrain', 'jobs', 'work']) },
+    });
+    expect(queue?.details?.depth).toBeGreaterThan(0);
     expectGolden('doctor/content-pglite-json', c.json, DOCTOR);
     expectGolden('doctor/content-pglite-human', c.human, DOCTOR);
   }, 300_000);

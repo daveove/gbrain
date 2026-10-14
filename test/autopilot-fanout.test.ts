@@ -11,12 +11,14 @@
  * No engine; queue + engine are stubbed.
  */
 import { describe, test, expect } from 'bun:test';
+import { createHash } from 'node:crypto';
 import {
   readLastFullCycleAt,
   isSourceStale,
   selectSourcesForDispatch,
   resolveFanoutMax,
   dispatchPerSource,
+  type FanoutResult,
 } from '../src/commands/autopilot-fanout.ts';
 import {
   autopilotRemediationIdempotencyKey,
@@ -224,13 +226,14 @@ describe('resolveFanoutMax', () => {
 describe('dispatchPerSource — integration with stubbed engine + queue', () => {
   type AddedJob = { name: string; data: unknown; opts: Record<string, unknown> };
 
-  function makeStubs(sources: SourceRow[], opts?: { listThrows?: boolean; listError?: unknown }) {
+  function makeStubs(sources: SourceRow[], opts?: { listThrows?: boolean; listError?: unknown; cycleTimezone?: string }) {
     const added: AddedJob[] = [];
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
       // An unmanaged brain with no worktree bindings: automatic pull follows remote_url (#5463).
       executeRaw: async (sql: string) => (sql.includes('FROM persistence_brain') ? [{ enabled: false }] : []),
+      getConfig: async (key: string) => key === 'cycle.timezone' ? opts?.cycleTimezone ?? null : null,
       listAllSources: async () => {
         if (opts?.listError) throw opts.listError;
         if (opts?.listThrows) throw new Error('sources table missing');
@@ -240,7 +243,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     const queue = {
       add: async (name: string, data: unknown, addOpts: Record<string, unknown>) => {
         added.push({ name, data, opts: addOpts });
-        return { id: nextId++ };
+        return { id: nextId++, status: 'waiting', data, coalesced: false };
       },
     } as unknown as Parameters<typeof dispatchPerSource>[1];
     const events: string[] = [];
@@ -257,30 +260,105 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     };
     return { engine, queue, added, events, logs, fanoutOpts };
   }
+  const legacyNow = () => new Date('2026-05-22T17:30:00.000Z');
 
-  test('empty sources list falls back to legacy single-job dispatch', async () => {
-    const { engine, queue, added, fanoutOpts } = makeStubs([]);
-    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+  function expectLegacyDailyJobs(added: AddedJob[], result: FanoutResult) {
+    expect(result.source_job_ids).toEqual([100]);
+    // Manila is already on May 23 while both UTC and the dispatch slot remain May 22.
+    expect(result.daily_memory_date).toBe('2026-05-23');
+    expect(result.daily_memory_timezone).toBe('Asia/Manila');
+    const dependencies = createHash('sha256').update(JSON.stringify([[100], 'Asia/Manila'])).digest('hex').slice(0, 20);
+    expect(added).toEqual([
+      {
+        name: 'autopilot-cycle',
+        data: { repoPath: '/tmp/brain' },
+        opts: {
+          queue: 'default',
+          idempotency_key: 'autopilot-cycle:2026-05-22T12:00:00.000Z',
+          max_attempts: 2,
+          timeout_ms: 600_000,
+          maxPending: 1,
+        },
+      },
+      ...[
+        { day: '2026-05-23', suffix: '' },
+        { day: '2026-05-22', suffix: ':lookback1' },
+      ].map(({ day, suffix }) => ({
+        name: 'autopilot-daily-memory',
+        data: {
+          daily_memory_only: true,
+          daily_memory_date: day,
+          daily_memory_timezone: 'Asia/Manila',
+          source_cycle_job_ids: [100],
+        },
+        opts: {
+          idempotency_key: `autopilot-daily:${day}:legacy:2026-05-22T12:00:00.000Z${suffix}:${dependencies}`,
+          delay: 0,
+          max_attempts: 2,
+          timeout_ms: 600_000,
+        },
+      })),
+    ]);
+  }
+
+
+  test('fanout pins the calendar day before submitting its source jobs', async () => {
+    const { engine, queue, fanoutOpts } = makeStubs([src('repo-a')]);
+    engine.getConfig = async key => key === 'cycle.timezone' ? 'Asia/Manila' : null;
+    const result = await dispatchPerSource(engine, queue, { ...fanoutOpts, now: () => new Date('2026-09-30T15:59:00Z') });
+    expect(result.daily_memory_date).toBe('2026-09-30');
+    expect(result.source_job_ids).toEqual([100]);
+  });
+
+  test('fanout derives day and timezone from one cycle.timezone snapshot', async () => {
+    // 02:00Z is 2026-09-30 in Asia/Manila and 2026-09-29 in America/Los_Angeles.
+    const { engine, queue, fanoutOpts } = makeStubs([src('repo-a')]);
+    let reads = 0;
+    engine.getConfig = async key => {
+      if (key !== 'cycle.timezone') return null;
+      reads += 1;
+      return reads === 1 ? 'Asia/Manila' : 'America/Los_Angeles';
+    };
+    const result = await dispatchPerSource(engine, queue, {
+      ...fanoutOpts,
+      now: () => new Date('2026-09-30T02:00:00Z'),
+    });
+    expect(result.daily_memory_date).toBe('2026-09-30');
+    expect(result.daily_memory_timezone).toBe('Asia/Manila');
+    expect(reads).toBe(1);
+  });
+
+  test('empty sources list falls back to one legacy cycle plus current and previous-day daily jobs', async () => {
+    const { engine, queue, added, fanoutOpts } = makeStubs([], { cycleTimezone: 'Asia/Manila' });
+    const result = await dispatchPerSource(engine, queue, { ...fanoutOpts, now: legacyNow });
     expect(result.legacy_fallback).toBe(true);
-    expect(added.length).toBe(1);
-    expect(added[0].name).toBe('autopilot-cycle');
+    expect(result.source_job_ids).toEqual([100]);
+    expect(result.daily_memory_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
     expect((added[0].data as Record<string, unknown>).source_id).toBeUndefined();
     expect(added[0].opts.idempotency_key).toBe('autopilot-cycle:2026-05-22T12:00:00.000Z');
+    const daily = added[1].data as Record<string, unknown>;
+    expect(daily.daily_memory_only).toBe(true);
+    expect(daily.daily_memory_date).toBe(result.daily_memory_date);
+    expect(daily.source_cycle_job_ids).toEqual([100]);
+    expectLegacyDailyJobs(added, result);
   });
 
   test('listAllSources throwing also falls back to legacy', async () => {
-    const { engine, queue, added, fanoutOpts } = makeStubs([], { listThrows: true });
-    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+    const { engine, queue, added, fanoutOpts } = makeStubs([], { listThrows: true, cycleTimezone: 'Asia/Manila' });
+    const result = await dispatchPerSource(engine, queue, { ...fanoutOpts, now: legacyNow });
     expect(result.legacy_fallback).toBe(true);
-    expect(added.length).toBe(1);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
+    expect(result.source_job_ids).toEqual([100]);
+    expectLegacyDailyJobs(added, result);
   });
 
   test('missing sources table (Postgres 42P01) falls back to legacy', async () => {
     const err = Object.assign(new Error('relation "sources" does not exist'), { code: '42P01' });
-    const { engine, queue, added, fanoutOpts } = makeStubs([], { listError: err });
-    const result = await dispatchPerSource(engine, queue, fanoutOpts);
+    const { engine, queue, added, fanoutOpts } = makeStubs([], { listError: err, cycleTimezone: 'Asia/Manila' });
+    const result = await dispatchPerSource(engine, queue, { ...fanoutOpts, now: legacyNow });
     expect(result.legacy_fallback).toBe(true);
-    expect(added.length).toBe(1);
+    expectLegacyDailyJobs(added, result);
   });
 
   test('transient connection error skips the tick instead of the legacy repo-root cycle', async () => {
@@ -485,6 +563,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     let nextId = 100;
     const engine = {
       kind: 'postgres' as const,
+      getConfig: async () => null,
       listAllSources: async () => sources,
     } as unknown as BrainEngine;
     const queue = {
@@ -538,7 +617,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
   test('legacy fallback submit passes maxPending: 1 (cross-slot single-flight) and no maxWaiting', async () => {
     const { engine, queue, added, fanoutOpts } = makeStubs([]);
     await dispatchPerSource(engine, queue, fanoutOpts);
-    expect(added.length).toBe(1);
+    expect(added.map(j => j.name)).toEqual(['autopilot-cycle', 'autopilot-daily-memory', 'autopilot-daily-memory']);
     expect(added[0].opts.maxPending).toBe(1);
     expect(added[0].opts.maxWaiting).toBeUndefined();
   });
@@ -568,6 +647,8 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
     });
     expect(result.dispatched).toEqual(['a']);
     expect(result.coalesced).toEqual(['b']);
+    expect(result.source_job_ids).toEqual([200, 201]);
+    expect(result.daily_memory_date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const kinds = events.map(e => JSON.parse(e).event);
     expect(kinds).toContain('dispatched');
     expect(kinds).toContain('dispatch_coalesced');

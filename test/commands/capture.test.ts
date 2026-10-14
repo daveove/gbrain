@@ -20,6 +20,7 @@ import { configureGateway, resetGateway } from '../../src/core/ai/gateway.ts';
 import { currentExitCode, setCliExitVerdict, _resetCliExitVerdictForTests } from '../../src/core/cli-force-exit.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 let brainDir: string;
 
@@ -33,6 +34,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -42,6 +44,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-capture-'));
   brainDir = path.join(tmpRoot, 'brain');
   fs.mkdirSync(brainDir, { recursive: true });

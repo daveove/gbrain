@@ -57,18 +57,21 @@
  *   3. Field validation at load (type/dims/provider) — bad config refuses
  *      to load instead of silently ignoring entries.
  *
- * Future write-path PR (`gbrain embed --column X --model Y`, deferred per
- * D1 out-of-scope list) MUST also consume this resolver — never compute a
- * column→provider mapping by hand. This is the canonical seam.
+ * Independent spaces derive their own provenance columns. Read and write
+ * paths share this resolver; a staged space never aliases another model's
+ * scalar metadata or page signature.
  */
 
 import type {
   EmbeddingColumnConfig,
+  EmbeddingProvenanceColumns,
   ResolvedColumn,
   SearchOpts,
 } from '../types.ts';
+import { createHash } from 'node:crypto';
 import type { GBrainConfig } from '../config.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from '../ai/defaults.ts';
+import { EMBED_MAX_CHARS } from '../embedding-input-cap.ts';
 
 // ---- Constants ---------------------------------------------------------
 
@@ -99,6 +102,68 @@ export const DEFAULT_COLUMN_NAME = 'embedding';
  *  get correct routing. */
 const BUILTIN_KEYS = ['embedding', 'embedding_image'] as const;
 type BuiltinKey = (typeof BUILTIN_KEYS)[number];
+
+const LEGACY_PROVENANCE: EmbeddingProvenanceColumns = Object.freeze({
+  model: 'model',
+  textHash: 'embedded_text_hash',
+  inputHash: 'embedding_input_hash',
+  embeddedAt: 'embedded_at',
+  pendingSince: 'embedding_pending_since',
+  pageSignature: 'embedding_signature',
+});
+const PROVENANCE_SUFFIXES = Object.freeze({
+  model: '_model',
+  textHash: '_embedded_text_hash',
+  inputHash: '_embedding_input_hash',
+  embeddedAt: '_embedded_at',
+  pendingSince: '_pending_since',
+  pageSignature: '_signature',
+});
+const PROVENANCE_KEYS = Object.keys(PROVENANCE_SUFFIXES) as (keyof EmbeddingProvenanceColumns)[];
+const PREFIX_KEYS = ['documentPrefix', 'queryPrefix'] as const;
+
+/** Fields are derived once at resolution and reused by every read/write arm. */
+export function getEmbeddingProvenanceColumns(column: ResolvedColumn): EmbeddingProvenanceColumns {
+  return column.provenance ?? LEGACY_PROVENANCE;
+}
+
+function validateIndependentColumn(key: string): void {
+  validateColumnKey(key);
+  if (key === 'embedding' || key === 'embedding_image' || key === 'embedding_multimodal' || key.length > 42) {
+    throw new EmbeddingColumnConfigError(key, 'provenance', 'independent spaces require a new column name of at most 42 ASCII characters');
+  }
+}
+
+function independentProvenance(key: string): EmbeddingProvenanceColumns {
+  validateIndependentColumn(key);
+  return Object.freeze({
+    model: key + PROVENANCE_SUFFIXES.model,
+    textHash: key + PROVENANCE_SUFFIXES.textHash,
+    inputHash: key + PROVENANCE_SUFFIXES.inputHash,
+    embeddedAt: key + PROVENANCE_SUFFIXES.embeddedAt,
+    pendingSince: key + PROVENANCE_SUFFIXES.pendingSince,
+    pageSignature: key + PROVENANCE_SUFFIXES.pageSignature,
+  });
+}
+
+function validateResolvedProvenance(column: ResolvedColumn): void {
+  if (column.provenance !== undefined) {
+    validateIndependentColumn(column.name);
+    if (!column.provenance || typeof column.provenance !== 'object' || !isParseableProviderModel(column.embeddingModel)) {
+      throw new EmbeddingColumnConfigError(column.name, 'provenance', 'independent descriptor requires its own fields and explicit provider:model');
+    }
+    for (const key of PROVENANCE_KEYS) {
+      if (column.provenance[key] !== column.name + PROVENANCE_SUFFIXES[key]) {
+        throw new EmbeddingColumnConfigError(column.name, 'provenance', `independent ${key} must be derived from its vector column`);
+      }
+    }
+  }
+  for (const key of PREFIX_KEYS) {
+    if (column[key] !== undefined && typeof column[key] !== 'string') {
+      throw new EmbeddingColumnConfigError(column.name, key, 'must be a string');
+    }
+  }
+}
 
 // ---- Errors -----------------------------------------------------------
 
@@ -133,7 +198,7 @@ export class EmbeddingColumnNotRegisteredError extends Error {
 export class EmbeddingColumnConfigError extends Error {
   readonly code = 'embedding_column_config_invalid';
   readonly columnKey: string;
-  readonly field: 'key' | 'type' | 'dimensions' | 'provider' | 'shape';
+  readonly field: 'key' | 'type' | 'dimensions' | 'provider' | 'shape' | 'provenance' | 'documentPrefix' | 'queryPrefix' | 'registry';
 
   constructor(
     columnKey: string,
@@ -223,6 +288,15 @@ export function validateColumnConfig(
       'type',
       `must be one of: ${[...ALLOWED_COLUMN_TYPES].join(', ')}`,
     );
+  }
+  if (e.provenance !== undefined && e.provenance !== 'independent') {
+    throw new EmbeddingColumnConfigError(key, 'provenance', 'must be independent when supplied');
+  }
+  if (e.provenance === 'independent') validateIndependentColumn(key);
+  for (const field of PREFIX_KEYS) {
+    if (e[field] !== undefined && typeof e[field] !== 'string') {
+      throw new EmbeddingColumnConfigError(key, field, 'must be a string');
+    }
   }
 }
 
@@ -411,6 +485,7 @@ export function resolveEmbeddingColumn(
     ) {
       throw new EmbeddingColumnConfigError(r.name, 'dimensions', `descriptor.dimensions must be an integer in [1, ${MAX_DIMENSIONS}] (got: ${String(r.dimensions)})`);
     }
+    validateResolvedProvenance(r);
     return r;
   }
 
@@ -450,6 +525,9 @@ export function resolveEmbeddingColumn(
     type: entry.type,
     dimensions: entry.dimensions,
     embeddingModel: entry.provider,
+    ...(entry.provenance === 'independent' && { provenance: independentProvenance(requestedName) }),
+    ...(entry.documentPrefix !== undefined && { documentPrefix: entry.documentPrefix }),
+    ...(entry.queryPrefix !== undefined && { queryPrefix: entry.queryPrefix }),
   };
 }
 
@@ -549,7 +627,9 @@ export function normalizeEngineColumn(
     !Array.isArray(embeddingColumn) &&
     typeof (embeddingColumn as ResolvedColumn).name === 'string'
   ) {
-    return embeddingColumn as ResolvedColumn;
+    const resolved = embeddingColumn as ResolvedColumn;
+    validateResolvedProvenance(resolved);
+    return resolved;
   }
 
   // Default + legacy 'embedding' literal.
@@ -709,4 +789,70 @@ export async function resolveActiveEmbeddingColumnFromEngine(
     if (opts?.fallbackToLegacy) return normalizeEngineColumn(undefined);
     throw err;
   }
+}
+
+/** Resolve the persisted named target without changing the live search selector. */
+export async function resolveRegisteredEmbeddingColumnFromEngine(engine: RawQueryEngine, name: string): Promise<ResolvedColumn> {
+  const rows = await engine.executeRaw<{ key: string; value: string }>(
+    "SELECT key,value FROM config WHERE key IN ('embedding_columns','embedding_model','embedding_dimensions','embedding_multimodal_model')");
+  // This is a projection of the actual DB configuration, not an alternate profile.
+  const cfg = {} as GBrainConfig;
+  for (const row of rows) {
+    if (row.key === 'embedding_columns') {
+      let parsed: unknown;
+      try { parsed = JSON.parse(row.value); } catch {
+        throw new EmbeddingColumnConfigError(name, 'registry', 'persisted embedding_columns is not valid JSON');
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new EmbeddingColumnConfigError(name, 'registry', 'persisted embedding_columns must be an object');
+      }
+      cfg.embedding_columns = parsed as Record<string, EmbeddingColumnConfig>;
+    } else if (row.key === 'embedding_model') cfg.embedding_model = row.value;
+    else if (row.key === 'embedding_dimensions') cfg.embedding_dimensions = Number(row.value);
+    else if (row.key === 'embedding_multimodal_model') cfg.embedding_multimodal_model = row.value;
+  }
+  return resolveEmbeddingColumn({ embeddingColumn: name }, cfg);
+}
+
+/** A page stamp belongs to the stored document space, not a global chat/search profile. */
+export function embeddingColumnSignature(column: ResolvedColumn): string {
+  return `embedding-space-v1:${createHash('sha256').update(JSON.stringify([column.name, column.embeddingModel, column.dimensions, column.documentPrefix ?? '', EMBED_MAX_CHARS])).digest('hex')}`;
+}
+
+/** Physical independent spaces retain DB identity when a file declares legacy columns. */
+export function mergeEmbeddingColumnRegistries(file: Record<string, EmbeddingColumnConfig> | undefined,
+  persisted: Record<string, EmbeddingColumnConfig>): Record<string, EmbeddingColumnConfig> {
+  if (!file) return persisted;
+  let combined: Record<string, EmbeddingColumnConfig> | undefined;
+  for (const [name, entry] of Object.entries(persisted)) {
+    if (entry?.provenance !== 'independent') continue;
+    combined ??= { ...file };
+    Object.defineProperty(combined, name, { value: entry, enumerable: true, configurable: true, writable: true });
+  }
+  return combined ?? file;
+}
+
+/** Completed own-space publication, including the exact canonical page revision. */
+export function independentEmbeddingReadFilter(column: ResolvedColumn, bind: (value: string) => string, chunkAlias = 'cc', pageAlias = 'p'): string {
+  const checked = normalizeEngineColumn(column);
+  if (!checked.provenance || !checked.embeddingModel) throw new Error('Independent read proof requires an independent model space');
+  const proof = getEmbeddingProvenanceColumns(checked);
+  const cc = quoteIdentifier(chunkAlias);
+  const p = quoteIdentifier(pageAlias);
+  return `${cc}.${quoteIdentifier(proof.model)} = ${bind(checked.embeddingModel)}
+    AND ${cc}.${quoteIdentifier(proof.textHash)} = md5(${cc}.chunk_text)
+    AND ${cc}.${quoteIdentifier(proof.inputHash)} IS NOT NULL
+    AND ${p}.${quoteIdentifier(proof.pageSignature)} = ${bind(embeddingColumnSignature(checked))} || ':' || ${independentPageProofContextSql(pageAlias)}`;
+}
+
+/** Canonical and projection changes invalidate a completed page's own-space stamp. */
+export function independentPageProofContextSql(pageAlias = 'p', sourceAlias?: string): string {
+  const p = quoteIdentifier(pageAlias);
+  const incarnation = sourceAlias ? `${quoteIdentifier(sourceAlias)}.incarnation::text`
+    : `(SELECT incarnation::text FROM sources WHERE id=${p}.source_id AND NOT archived)`;
+  return `${p}.knowledge_revision::text || ':' || md5(${p}.title)
+    || ':' || COALESCE(${p}.contextual_retrieval_mode,'none')
+    || ':' || COALESCE(${p}.corpus_generation,'')
+    || ':' || COALESCE(${p}.chunker_version::text,'')
+    || ':' || ${incarnation}`;
 }

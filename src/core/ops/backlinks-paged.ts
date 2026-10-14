@@ -61,8 +61,8 @@ async function referrerScope(ctx: OperationContext, slug: string, policy: PageRe
   const sourceId = await targetSource(ctx, slug, sources);
   if (!sourceId) return null;
   const pack = await loadSourcePack(ctx.engine, sourceId);
-  const excludePrivate = policy.excludePrivate === true;
-  return { sources, scope: { slug, sourceId, referrerSources: sources, excludePrivate, pack, keepVisibility: excludePrivate ? ['world'] : ['private', 'world'] } };
+  const excludePrivate = policy.excludePrivate ?? false;
+  return { sources, scope: { slug, sourceId, referrerSources: sources, excludePrivate, pack, keepVisibility: excludePrivate === true ? ['world'] : ['private', 'world'] } };
 }
 
 async function assertKnownType(ctx: OperationContext, scope: ReferrerScope, type: string): Promise<void> {

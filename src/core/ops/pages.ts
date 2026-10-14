@@ -24,7 +24,7 @@ import { sanitizeRemoteBody } from '../remote-body.ts';
 import { getContentFlag } from '../quarantine.ts';
 import { fileHeldField, readHeldPages } from '../persistence/held-reads.ts';
 import { bumpLastRetrievedAt } from '../last-retrieved.ts';
-import { resolveExcludePrivatePages, isPrivatePage, findPrivateOnlySlugs } from '../search/private-visibility.ts';
+import { resolveExcludePrivatePages, isPageHidden, findPrivateOnlySlugs, type PageVisibilityFilter } from '../search/private-visibility.ts';
 import { LIST_PAGES_DESCRIPTION, CAPTURE_DESCRIPTION } from '../operations-descriptions.ts';
 import { listPagesPagination, listingTruncatedNotice } from './list-pages-pagination.ts';
 import { OperationError, opError, type Operation, type OperationContext } from './contract.ts';
@@ -59,9 +59,9 @@ async function dropPrivateSlugs(
   engine: BrainEngine,
   candidates: string[],
   scope: { sourceId?: string; sourceIds?: string[] },
-  includeDeleted: boolean,
+  includeDeleted: boolean, excludePrivate: PageVisibilityFilter,
 ): Promise<string[]> {
-  const hidden = await findPrivateOnlySlugs(engine, candidates, scope, { includeDeleted });
+  const hidden = await findPrivateOnlySlugs(engine, candidates, scope, { includeDeleted, excludePrivate });
   return candidates.filter(c => !hidden.has(c));
 }
 
@@ -129,7 +129,7 @@ const get_page: Operation = {
 
     let snapshot = await ctx.engine.readPageSnapshot(slug, { includeDeleted, excludePrivate, ...sourceOpts, resolveAlias: true });
     let page = snapshot?.page ?? null;
-    if (page && excludePrivate && isPrivatePage(page)) page = null;
+    if (page && excludePrivate && isPageHidden(page, excludePrivate)) page = null;
     let resolved_slug: string | undefined = page && page.slug !== slug ? page.slug : undefined;
 
     if (!page && fuzzy) {
@@ -137,13 +137,13 @@ const get_page: Operation = {
         await tx.executeRaw('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
         let candidates = await tx.resolveSlugs(slug, { ...fuzzyScope, excludePrivate });
         if (excludePrivate && candidates.length > 0) {
-          candidates = await dropPrivateSlugs(tx, candidates, fuzzyScope, includeDeleted);
+          candidates = await dropPrivateSlugs(tx, candidates, fuzzyScope, includeDeleted, excludePrivate);
         }
         return { candidates, snapshot: candidates.length === 1
           ? await tx.readPageSnapshot(candidates[0], { includeDeleted, excludePrivate, ...sourceOpts }) : null };
       });
       if (fallback.candidates.length > 1) return { error: 'ambiguous_slug', candidates: fallback.candidates };
-      if (fallback.snapshot && !(excludePrivate && isPrivatePage(fallback.snapshot.page))) {
+      if (fallback.snapshot && !(excludePrivate && isPageHidden(fallback.snapshot.page, excludePrivate))) {
         snapshot = fallback.snapshot;
         page = snapshot.page;
         resolved_slug = page.slug;
@@ -162,7 +162,7 @@ const get_page: Operation = {
           // gbrain-allow-unscoped-getpage: read-only diagnostic existence probe —
           // deliberately spans all sources to name where the slug lives.
           const elsewhere = await ctx.engine.getPage(slug, { includeDeleted });
-          if (elsewhere && !(excludePrivate && isPrivatePage(elsewhere))) {
+          if (elsewhere && !(excludePrivate && isPageHidden(elsewhere, excludePrivate))) {
             elsewhereSource = elsewhere.source_id;
           }
         } catch {
@@ -269,7 +269,7 @@ const fetch_page: Operation = {
       throw error;
     }
     const page = snapshot?.page;
-    if (!page || (excludePrivate && isPrivatePage(page))) throw missing();
+    if (!page || (excludePrivate && isPageHidden(page, excludePrivate))) throw missing();
     const readable = await pageTrustForRead(ctx, page, p.min_trust); // #5575: below the read floor reads as missing
     if (!readable) throw missing();
     bumpLastRetrievedAt(ctx.engine, [page.id]);

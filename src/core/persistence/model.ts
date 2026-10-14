@@ -7,7 +7,7 @@ export interface WriteAuthority {
   principal: Principal;
   remote: boolean;
   /** Original page-visibility ceiling; current policy can only narrow it. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   databaseOnlyReason?: 'subagent_sandbox' | 'disabled_by_config' | 'no_repo_configured' | 'connector_database' | 'unbound_source';
   autoLinkTrusted?: boolean;
   restrictedNamespace?: boolean;

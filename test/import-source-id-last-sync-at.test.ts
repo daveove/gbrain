@@ -26,11 +26,13 @@ import { withEnv } from './helpers/with-env.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -39,6 +41,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 async function lastSyncAt(sourceId: string): Promise<Date | string | null> {

@@ -38,7 +38,7 @@ export interface InferSubjectInput {
   /** `write` (remember, backstop) accepts identity arms only; `relink` also accepts the same-name trigram arm. */
   mode: 'write' | 'relink';
   /** Remote callers: private pages never resolve and never count toward uniqueness. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
 }
 
 /** The note separator every fact context annotation uses ("<page slug> — <note>"). */
@@ -168,8 +168,8 @@ function isNonName(query: string): boolean {
   return isCommonCapitalizedWord(query) || ROLE_AND_TERM_TOKENS.has(query.toLowerCase());
 }
 
-async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean): Promise<string | null> {
-  const privacy = excludePrivate ? `AND ${privatePagesFilterFragment('p')}` : '';
+async function liveFactEntityPage(engine: BrainEngine, sourceId: string, slug: string, excludePrivate?: boolean | 'owner-only'): Promise<string | null> {
+  const privacy = excludePrivate ? `AND ${privatePagesFilterFragment('p', excludePrivate)}` : '';
   const [row] = await engine.executeRaw<{ slug: string; type: string | null }>(
     `SELECT p.slug, p.type FROM pages p WHERE p.source_id = $1 AND p.slug = $2 AND p.deleted_at IS NULL ${privacy} LIMIT 1`,
     [sourceId, slug],

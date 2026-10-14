@@ -4,7 +4,14 @@ import { exerciseRemoteLinks, remoteLinksCases } from './helpers/remote-links-co
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); await resetPgliteState(engine); }, 60_000);
+beforeAll(async () => {
+  engine = new PGLiteEngine();
+  await engine.connect({});
+  await engine.initSchema();
+  const schemaVersion = await engine.getConfig('version');
+  await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
+}, 60_000);
 afterAll(async () => { await engine.disconnect(); });
 
 describe('remote mention-links effect (#6007)', () => {

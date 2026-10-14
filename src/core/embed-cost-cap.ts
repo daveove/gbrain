@@ -36,16 +36,10 @@ export function embedCostCap(capUsd: number | null | undefined, capSource: CapSo
   const controller = new AbortController();
   let refusal: BudgetExhausted | null = null;
   // The refusal itself (cost, or a model with no price under a user cap) is kept for the verdict.
-  const reserve = tracker.reserve.bind(tracker);
-  tracker.reserve = estimate => {
-    try { return reserve(estimate); } catch (err) { if (err instanceof BudgetExhausted) refusal ??= err; throw err; }
-  };
-  tracker.onExhausted(() => controller.abort());
+  tracker.onExhausted(error => { refusal ??= error; controller.abort(); });
   return {
     signal: controller.signal,
-    hit: () => refusal ?? (controller.signal.aborted
-      ? new BudgetExhausted(`embed reached its $${capUsd.toFixed(2)} cost cap`, { reason: 'cost', spent: tracker.totalSpent, cap: capUsd })
-      : null),
+    hit: () => refusal,
     metered: fn => withBudgetTracker(tracker, fn),
   };
 }

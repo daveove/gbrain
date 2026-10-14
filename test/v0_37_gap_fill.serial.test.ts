@@ -266,7 +266,8 @@ describe('Lane D.2 — embed pre-flight catches dim mismatch before worker pool'
       throw new Error('Pre-flight should have caught the mismatch before this fires');
     });
 
-    const { runEmbedCore, EmbeddingDimMismatchError } = await import('../src/commands/embed.ts');
+    const { runEmbedCore } = await import('../src/commands/embed.ts');
+    const { EmbeddingDimMismatchError } = await import('../src/commands/embed-setup.ts');
     let caught: unknown = null;
     try {
       await runEmbedCore(engine, { all: true });

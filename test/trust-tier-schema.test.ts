@@ -22,7 +22,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
-import { TRUST_CONTENT_COLUMNS, TRUST_EPHEMERAL_FRONTMATTER_KEYS, TRUST_TABLES, TRUST_TIER_TRIGGER, TRUST_TIER_TRIGGER_PREDECESSORS } from '../src/core/trust/schema.ts';
+import { TRUST_CONTENT_COLUMNS, TRUST_EPHEMERAL_FRONTMATTER_KEYS, TRUST_STAMP_TIER_FUNCTION_SQL, TRUST_TABLES, TRUST_TIER_TRIGGER, TRUST_TIER_TRIGGER_PREDECESSORS } from '../src/core/trust/schema.ts';
 import { WRITE_ATTRIBUTION_CONTENT_COLUMNS } from '../src/core/persistence/attribution-schema.ts';
 import { PAGE_STATE_SCHEMA_SQL } from '../src/core/page-state/schema.ts';
 import { HASH_EPHEMERAL_FRONTMATTER_KEYS } from '../src/core/utils.ts';
@@ -36,6 +36,7 @@ import { effectiveWriteTrust, type TaintInput, type TrustTier, type WriteTrust }
 import { operationsByName } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import type { WriteAttribution } from '../src/core/persistence/attribution.ts';
+import { runMigrations } from '../src/core/migrate.ts';
 
 describe('TRUST_CONTENT_COLUMNS (ENG-2)', () => {
   test('facts, takes and timeline content is attribution content; the rest of attribution content is lifecycle or placement', () => {
@@ -304,3 +305,32 @@ for (const backendName of testBackends()) {
     });
   });
 }
+
+test('v243 forward upgrade preserves trust for calendar provenance but still resets real content changes', async () => {
+  const engine = new PGLiteEngine();
+  await engine.connect({});
+  try {
+    await engine.initSchema();
+    // Reinstall the pinned v242 trigger semantics, then take the real forward path.
+    expect(TRUST_STAMP_TIER_FUNCTION_SQL.match(/'_gbrain_date_instants',/g)).toHaveLength(2);
+    await engine.executeRaw(`${TRUST_STAMP_TIER_FUNCTION_SQL.replaceAll("'_gbrain_date_instants',", '')};`);
+    await engine.setConfig('version', '242');
+    const priorFunction = await engine.executeRaw<{ definition: string }>(
+      "SELECT pg_get_functiondef('gbrain_stamp_trust_tier()'::regprocedure) AS definition");
+    expect(priorFunction[0].definition).not.toContain('_gbrain_date_instants');
+    const target = await newPage(engine, trust('operator_curated'), { date: '2026-09-24T00:00:00.000Z' });
+    const before = await page(engine, target.slug);
+    expect(before.trust_tier).toBe('operator_curated');
+    expect(await runMigrations(engine)).toEqual({ applied: 1, current: 243 });
+    const currentFunction = await engine.executeRaw<{ definition: string }>(
+      "SELECT pg_get_functiondef('gbrain_stamp_trust_tier()'::regprocedure) AS definition");
+    expect(currentFunction[0].definition).toContain('_gbrain_date_instants');
+    await engine.executeRaw(`UPDATE pages SET frontmatter=frontmatter || $2::jsonb WHERE id=$1`,
+      [target.id, JSON.stringify({ _gbrain_date_instants: { date: '2026-09-24T00:00:00.000Z' } })]);
+    expect(await page(engine, target.slug)).toEqual(before);
+    await engine.executeRaw("UPDATE pages SET compiled_truth='A genuinely changed synthetic observation.' WHERE id=$1", [target.id]);
+    expect((await page(engine, target.slug)).trust_tier).toBe('unknown');
+  } finally {
+    await engine.disconnect();
+  }
+}, 120_000);

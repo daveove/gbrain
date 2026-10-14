@@ -37,6 +37,7 @@
  */
 
 import type { EffectiveDateSource } from './types.ts';
+import type { BrainEngine } from './engine.ts';
 
 export interface EffectiveDateResult {
   date: Date | null;
@@ -68,6 +69,83 @@ const FILENAME_FIRST_PREFIXES = ['daily/', 'meetings/'];
 
 /** Creation-date keys Obsidian and Notion exports carry; a content date after the others. */
 const CREATED_KEYS = ['created', 'created_at', 'date_created', 'date created'];
+const FRONTMATTER_DATE_KEYS = ['event_date', 'date', 'published', ...CREATED_KEYS];
+
+export const DATE_INSTANT_PROVENANCE = '_gbrain_date_instants';
+const CALENDAR_DATE_RE = /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|(?:[a-z]+,?\s+)?[a-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}|\d{1,2}(?:st|nd|rd|th)?\s+[a-z]{3,9}\.?,?\s+\d{4})$/i;
+/** Preserve a YAML date-only scalar's calendar semantics without changing its native Date type. */
+export const CALENDAR_DATE = Symbol.for('gbrain.calendar-date');
+
+export function isCalendarDateSpelling(value: unknown): boolean {
+  return typeof value === 'string' && CALENDAR_DATE_RE.test(value.trim());
+}
+
+/**
+ * JSON erases YAML calendar Date markers, leaving an unmarked ISO midnight.
+ * Restore only stored, known date fields for rendering: their date-only YAML
+ * scalar parses back to the same JSON without acquiring instant provenance.
+ * Explicit timestamp markers and fresh caller overrides are not calendar dates.
+ */
+export function calendarDatesForSerialization(frontmatter: Record<string, unknown>): Record<string, unknown> {
+  const provenance = frontmatter[DATE_INSTANT_PROVENANCE];
+  const instants = provenance && typeof provenance === 'object' && !Array.isArray(provenance)
+    ? provenance as Record<string, unknown> : {};
+  let rendered = frontmatter;
+  for (const key of FRONTMATTER_DATE_KEYS) {
+    const value = frontmatter[key];
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(value) || instants[key] === value) continue;
+    const date = parseDateLoose(value);
+    if (!date || date.toISOString() !== value) continue;
+    Object.defineProperty(date, CALENDAR_DATE, { value: true });
+    if (rendered === frontmatter) rendered = { ...frontmatter };
+    rendered[key] = date;
+  }
+  return rendered;
+}
+
+/** Preserve known fresh timestamp input before JSON erases YAML Date types. */
+export function withDateInstantProvenance(frontmatter: Record<string, unknown>, freshStrings = false): Record<string, unknown> {
+  const previous = frontmatter[DATE_INSTANT_PROVENANCE];
+  const instants: Record<string, string> = previous && typeof previous === 'object' && !Array.isArray(previous)
+    ? { ...previous as Record<string, string> } : {};
+  let changed = false;
+  for (const key of FRONTMATTER_DATE_KEYS) {
+    const value = frontmatter[key];
+    if (isCalendarDateSpelling(value) || (value instanceof Date && (value as Date & { [CALENDAR_DATE]?: boolean })[CALENDAR_DATE])) {
+      if (key in instants) { delete instants[key]; changed = true; }
+      continue;
+    }
+    if (!(value instanceof Date) && !(freshStrings && typeof value === 'string' && DATETIME_RE.test(value.trim()))) continue;
+    const date = parseDateLoose(value);
+    if (!date) continue;
+    instants[key] = date.toISOString();
+    changed = true;
+  }
+  return changed ? { ...frontmatter, [DATE_INSTANT_PROVENANCE]: instants } : frontmatter;
+}
+
+/** New explicit ISO-midnight inputs are instants; untouched legacy rows are not relabelled. */
+export async function dateProvenanceForWrite(engine: Pick<BrainEngine, 'executeRaw'>, sourceId: string,
+  slug: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const frontmatter = withDateInstantProvenance(input);
+  const marked = frontmatter[DATE_INSTANT_PROVENANCE] as Record<string, unknown> | undefined;
+  const ambiguous = FRONTMATTER_DATE_KEYS.filter(key =>
+    typeof frontmatter[key] === 'string' && /^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(frontmatter[key] as string)
+      && marked?.[key] !== frontmatter[key]);
+  if (!ambiguous.length) return frontmatter;
+  const [prior] = await engine.executeRaw<{ frontmatter: Record<string, unknown> }>(
+    'SELECT frontmatter FROM pages WHERE source_id=$1 AND slug=$2', [sourceId, slug]);
+  const previousMarker = prior?.frontmatter?.[DATE_INSTANT_PROVENANCE];
+  const previousInstants = previousMarker && typeof previousMarker === 'object' && !Array.isArray(previousMarker)
+    ? previousMarker as Record<string, unknown> : {};
+  const fresh = ambiguous.filter(key => prior?.frontmatter?.[key] !== frontmatter[key]
+    || previousInstants[key] === frontmatter[key]);
+  if (!fresh.length) return frontmatter;
+  return { ...frontmatter, [DATE_INSTANT_PROVENANCE]: {
+    ...(marked && typeof marked === 'object' && !Array.isArray(marked) ? marked : {}),
+    ...Object.fromEntries(fresh.map(key => [key, frontmatter[key]])),
+  } };
+}
 
 /**
  * The fallback anchor for an undated page: a page that already fell back

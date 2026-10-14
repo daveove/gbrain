@@ -43,6 +43,7 @@ import { withEnv } from './helpers/with-env.ts';
 import { withoutAnthropicKey } from './helpers/no-anthropic-key.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let home: string;
 
 beforeAll(async () => {
@@ -51,6 +52,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -61,6 +63,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   __setChatTransportForTests(null);
   __setEmbedTransportForTests(null);
 });

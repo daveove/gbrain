@@ -1,5 +1,5 @@
 import { load, dump, Type, DEFAULT_SCHEMA } from 'js-yaml';
-import { NAIVE_DATETIME } from './effective-date.ts';
+import { CALENDAR_DATE, NAIVE_DATETIME } from './effective-date.ts';
 
 // js-yaml's timestamp type builds `2024-02-30` as March 1 (Date.UTC rolls the
 // day over). A calendar-invalid timestamp stays the string the author wrote,
@@ -19,13 +19,17 @@ const calendarTimestamp = new Type('tag:yaml.org,2002:timestamp', {
   // An offset-less datetime keeps its wall-clock reading for brain.timezone.
   construct: (data: string) => {
     const date = baseTimestamp.construct(data);
+    if (/^\d{4}-\d{1,2}-\d{1,2}$/.test(data)) {
+      Object.defineProperty(date, CALENDAR_DATE, { value: true });
+    }
     if (/^\d{4}-\d{1,2}-\d{1,2}(?:[Tt]|[ \t]+)\d/.test(data) && !/(?:[Zz]|[+-]\d{1,2}(?::?\d{2})?)\s*$/.test(data)) {
       Object.defineProperty(date, NAIVE_DATETIME, { value: true });
     }
     return date;
   },
   instanceOf: Date,
-  represent: baseTimestamp.represent,
+  represent: (data: object) => (data as Date & { [CALENDAR_DATE]?: boolean })[CALENDAR_DATE]
+    ? (data as Date).toISOString().slice(0, 10) : baseTimestamp.represent(data),
 });
 export const FRONTMATTER_SCHEMA = DEFAULT_SCHEMA.extend({ implicit: [calendarTimestamp] });
 
@@ -85,7 +89,7 @@ export function parseDataFrontmatter(input: string): DataFrontmatter {
  * omits the key (conditional spread) or writes null instead.
  */
 export function dumpFrontmatterYaml(data: unknown, opts: { lineWidth?: number } = {}): string {
-  return dump(data, { ...opts, replacer: (key: string, value: unknown) => {
+  return dump(data, { ...opts, schema: FRONTMATTER_SCHEMA, replacer: (key: string, value: unknown) => {
     if (value === undefined) {
       throw new TypeError(`Frontmatter field "${key}" is undefined. Why: YAML has no undefined, so the field would be dropped silently. Fix: omit the key at the write site (\`...(v ? { ${key}: v } : {})\`) or pass null.`);
     }

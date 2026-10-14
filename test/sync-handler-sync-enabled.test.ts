@@ -18,9 +18,11 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 const workdir = mkdtempSync(join(tmpdir(), 'gbrain-sync-enabled-'));
 const brain = join(workdir, 'brain');
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
   mkdirSync(brain, { recursive: true });
   const repo = await makeGitFixture(brain);
   writeFileSync(join(brain, 'note.md'), '---\ntitle: Note\ntype: note\n---\n\nA short note.\n');
@@ -29,6 +31,7 @@ beforeAll(async () => {
 afterAll(async () => { await engine.disconnect(); rmSync(workdir, { recursive: true, force: true }); });
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   await engine.executeRaw("UPDATE sources SET local_path=$1, config=jsonb_set(COALESCE(config,'{}'::jsonb),'{syncEnabled}','false'::jsonb) WHERE id='default'", [brain]);
 });
 

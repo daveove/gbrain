@@ -7,6 +7,7 @@ import { loadConfigSnapshot } from './config-snapshot.ts';
 import { loadGbrainEnvFile } from './gbrain-env-file.ts';
 import { dotenvValuesForKey } from './env-trust.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from './search/private-visibility.ts';
+import { mergeEmbeddingColumnRegistries } from './search/embedding-column.ts';
 
 /**
  * Where is the active DB URL coming from? Pure introspection, no connection
@@ -144,6 +145,13 @@ export interface GBrainConfig {
    * or the other, never both.
    */
   embedding_disabled?: boolean;
+  /**
+   * Paid model API policy (src/core/ai/billing-policy.ts). `subscription`
+   * refuses every per-token provider API before a request is built and makes
+   * text tiers default to `codex-cli:` (ChatGPT login). File plane + env
+   * (`GBRAIN_AI_BILLING`) only; either selecting `subscription` wins.
+   */
+  ai_billing?: 'api' | 'subscription';
   expansion_model?: string;
   /**
    * Default chat model for `gateway.chat()` callers (v0.27+).
@@ -973,11 +981,11 @@ export async function loadConfigWithEngine(
       merged.provider_base_urls = next;
     }
   }
-  if (merged.embedding_columns === undefined && dbEmbeddingColumns !== undefined) {
+  if (dbEmbeddingColumns !== undefined) {
     try {
       const parsed = JSON.parse(dbEmbeddingColumns);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        merged.embedding_columns = parsed as Record<string, EmbeddingColumnConfig>;
+        merged.embedding_columns = mergeEmbeddingColumnRegistries(merged.embedding_columns, parsed);
       } else {
         console.warn('[gbrain] config: embedding_columns DB value is not a JSON object; ignoring');
       }
@@ -1257,6 +1265,7 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'embedding_model',
   'embedding_dimensions',
   'embedding_disabled',
+  'ai_billing',
   'expansion_model',
   'chat_model',
   'chat_fallback_chain',

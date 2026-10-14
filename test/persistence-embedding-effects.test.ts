@@ -13,10 +13,17 @@ import { localHostId, registerLocalWriter } from '../src/core/persistence/identi
 import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
-import { installPageEmbeddings, installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
+import { installPageEmbeddings, installPageProjection, readProjectionSnapshot, rebuildPendingPageProjections } from '../src/core/page-state/projections.ts';
 import { MAX_RATE_LIMIT_RETRIES } from '../src/core/embed-retry.ts';
 import { AIConfigError } from '../src/core/ai/errors.ts';
+import { EmbeddingZeroNormError } from '../src/core/ai/embedding-guard.ts';
+import { initializeIndependentEmbeddingColumn } from '../src/core/embedding-column-schema.ts';
+import { embeddingColumnSignature } from '../src/core/search/embedding-column.ts';
+import { PersistenceConsumer } from '../src/core/persistence/consumer.ts';
+import { embeddingInputHash } from '../src/core/embedding-input-hash.ts';
 import { invokeAI, isAIInvocationPolicyError, withAIInvocationGuard } from '../src/core/ai/invocation-guard.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { saveConfig } from '../src/core/config.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -144,6 +151,85 @@ for (const kind of testBackends()) {
       expect(chunks[0].embedding?.[0]).toBeCloseTo(0.1);
       expect(chunks[1].embedding?.[0]).toBe(0.75);
       expect((await engine.executeRaw<{ embedded_at: string }>('SELECT embedded_at::text FROM content_chunks WHERE page_id=$1 AND chunk_index=0', [f.snapshot.page.id]))[0].embedded_at).toBe(before.embedded_at);
+    });
+
+    // CLI staging never claims a durable effect. This case protects the effect's
+    // partial-refusal publication: a target refusal must clear its stale vector
+    // and proof, install the usable sibling and preserve every primary byte.
+    // Uses the existing embed seam; no provider request or new production seam.
+    check('an independent target zero-norm refusal clears only its own vector and provenance', async () => {
+      const f = await fixture();
+      const name = 'embedding_refusal_effect';
+      const targetModel = 'ollama:nomic-embed-text';
+      const previousColumn = await engine.getConfig('search_embedding_column');
+      const previousRegistry = await engine.getConfig('embedding_columns');
+      const prepared = (await readProjectionSnapshot(engine, 'page', f.sourceId))!;
+      await installPageProjection(engine, prepared, [
+        { chunk_index: 0, chunk_source: 'compiled_truth', chunk_text: 'Current', embedding: vectors()[0], model },
+        { chunk_index: 1, chunk_source: 'compiled_truth', chunk_text: 'Missing', embedding: new Float32Array(1536).fill(0.2), model },
+      ], { seal: true, signature });
+      const primary = () => engine.executeRaw(`SELECT cc.id,cc.chunk_index,cc.chunk_source,cc.chunk_text,
+          cc.embedding::text AS vector,cc.model,cc.embedded_text_hash,cc.embedding_input_hash,
+          cc.embedded_at::text AS embedded_at,cc.embedding_pending_since::text AS pending_since,
+          p.embedding_signature,p.contextual_retrieval_mode,p.text_projection_revision::text AS projection,p.chunker_version
+        FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1 ORDER BY cc.chunk_index`, [f.snapshot.page.id]);
+      const before = await primary();
+      const column = await initializeIndependentEmbeddingColumn(engine, name, { provider: targetModel, dimensions: 768,
+        type: 'vector', provenance: 'independent', documentPrefix: 'search_document: ' });
+      try {
+        await engine.setConfig('search_embedding_column', name);
+        const target = (await readProjectionSnapshot(engine, 'page', f.sourceId))!;
+        expect(await installPageEmbeddings(engine, target, target.chunks.map(chunk => ({ chunk_index: chunk.chunk_index,
+          chunk_source: chunk.chunk_source, chunk_text: chunk.chunk_text, embedding: new Float32Array(768).fill(0.5),
+          model: targetModel })), 'target-seed')).toBe(true);
+        const [seed] = await engine.executeRaw<{ vectors: number; stamped: boolean }>(
+          `SELECT count(cc.${name})::int AS vectors,bool_and(p.${name}_signature IS NOT NULL) AS stamped
+            FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1`, [f.snapshot.page.id]);
+        expect(seed).toEqual({ vectors: 2, stamped: true });
+        // The old target vectors must be replaced or cleared, not mistaken for
+        // current work simply because the primary space remains fully embedded.
+        await engine.executeRaw(`UPDATE content_chunks SET ${name}_embedding_input_hash='obsolete-input'
+          WHERE page_id=$1`, [f.snapshot.page.id]);
+        let calls = 0;
+        await run(async (texts, options) => {
+          calls++;
+          expect(texts).toEqual(['search_document: Current', 'search_document: Missing']);
+          expect(options).toMatchObject({ embeddingModel: targetModel, dimensions: column.dimensions, maxRetries: 0 });
+          throw new EmbeddingZeroNormError([{ index: 0, reason: 'zero_norm' }],
+            [null, new Float32Array(768).fill(0.75)], targetModel);
+        });
+        expect(calls).toBe(1);
+        expect(await state(f.effectId)).toMatchObject({ state: 'failed', attempts: 1, error_code: 'embedding_zero_norm' });
+        const rows = await engine.executeRaw(`SELECT cc.chunk_index,cc.${name}::text AS vector,
+            vector_dims(cc.${name}) AS dims,cc.${name}_model AS model,
+            cc.${name}_embedded_text_hash AS text_hash,cc.${name}_embedding_input_hash AS input_hash,
+            cc.${name}_embedded_at IS NOT NULL AS stamped,cc.${name}_pending_since IS NOT NULL AS pending,
+            p.${name}_signature AS signature
+          FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.id=$1 ORDER BY cc.chunk_index`, [f.snapshot.page.id]);
+        expect(rows).toHaveLength(2);
+        expect(rows[0]).toEqual({ chunk_index: 0, vector: null, dims: null, model: targetModel,
+          text_hash: null, input_hash: null, stamped: false, pending: true, signature: null });
+        expect(rows[1]).toMatchObject({ chunk_index: 1, dims: 768, model: targetModel,
+          stamped: true, pending: false, signature: null });
+        expect(rows[1]!.vector).toBe(`[${Array(768).fill(0.75).join(',')}]`);
+        expect(rows[1]!.text_hash).toMatch(/^[0-9a-f]{32}$/);
+        expect(rows[1]!.input_hash).toBe(embeddingInputHash({ column: name, model: targetModel, dimensions: 768,
+          title: 'Example', corpusGeneration: null, bodyHash: '', documentPrefix: 'search_document: ', independent: true },
+        'none', { chunk_text: 'Missing', chunk_source: 'compiled_truth' }));
+        expect(await primary()).toEqual(before);
+        expect((await getWriteRequestById(engine, f.row.id))!.state).toBe('committed');
+      } finally {
+        if (previousColumn === null) await engine.executeRaw("DELETE FROM config WHERE key='search_embedding_column'");
+        else await engine.setConfig('search_embedding_column', previousColumn);
+        await engine.executeRaw(`ALTER TABLE content_chunks DROP COLUMN ${name},DROP COLUMN ${name}_model,
+          DROP COLUMN ${name}_embedded_text_hash,DROP COLUMN ${name}_embedding_input_hash,
+          DROP COLUMN ${name}_embedded_at,DROP COLUMN ${name}_pending_since`);
+        await engine.executeRaw(`ALTER TABLE pages DROP COLUMN ${name}_signature`);
+        // Remove only this disposable fixture's registry entry; normal registry
+        // writes intentionally refuse deleting an independent model space.
+        if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
+        else await engine.executeRaw("UPDATE config SET value=$1 WHERE key='embedding_columns'", [previousRegistry]);
+      }
     });
 
     check('a partial synopsis projection rebuilds every chunk before demoting the page to title context', async () => {
@@ -624,6 +710,111 @@ for (const kind of testBackends()) {
         if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
         else await engine.setConfig('embedding_columns', previousRegistry);
         await engine.executeRaw('ALTER TABLE content_chunks DROP COLUMN embedding_effect_test');
+      }
+    });
+
+    check('billing opt-out after claim preserves the queued effect and its retry allowance', async () => {
+      const f = await fixture();
+      const fileConfig = { engine: 'pglite' as const, database_path: join(scratch, 'unused') };
+      saveConfig({ ...fileConfig, ai_billing: 'api' });
+      configureGateway({ ai_billing: 'api', env: {} });
+      let requests = 0;
+      try {
+        await run(async () => {
+          saveConfig({ ...fileConfig, ai_billing: 'subscription' });
+          return invokeAI({ operation: 'embed', kind: 'embedding', model: 'openai:text-embedding-3-large' },
+            async () => { requests++; return vectors(); }, () => null);
+        });
+        expect(await state(f.effectId)).toMatchObject({ state: 'queued', attempts: 0, error_code: null });
+        expect(requests).toBe(0);
+        expect(await engine.executeRaw('SELECT id FROM content_chunks WHERE page_id=$1 AND embedding IS NOT NULL', [f.snapshot.page.id])).toEqual([]);
+      } finally {
+        resetGateway();
+        rmSync(join(scratch, '.gbrain', 'config.json'), { force: true });
+      }
+    });
+
+    for (const localColumn of [true, false]) check(
+      `subscription idle probe and worker use the live ${localColumn ? 'local' : 'paid'} column, not the inverse gateway policy`, async () => {
+        const f = await fixture();
+        // hasWork probes the whole shared engine. Earlier canonical-edit cases
+        // leave real projection jobs; finish them before isolating effect policy.
+        await rebuildPendingPageProjections(engine);
+        expect(await engine.executeRaw('SELECT slug FROM page_projection_jobs')).toEqual([]);
+        const name = localColumn ? 'embedding_policy_local' : 'embedding_policy_paid';
+        const targetModel = localColumn ? 'ollama:nomic-embed-text' : 'openai:text-embedding-3-large';
+        const gatewayModel = localColumn ? 'openai:text-embedding-3-large' : 'ollama:nomic-embed-text';
+        const previousColumn = await engine.getConfig('search_embedding_column');
+        const previousRegistry = await engine.getConfig('embedding_columns');
+        const column = await initializeIndependentEmbeddingColumn(engine, name, {
+          provider: targetModel, dimensions: 768, type: 'vector', provenance: 'independent',
+        });
+        const consumer = new PersistenceConsumer(engine, { engine: engine.kind, embedding_model: gatewayModel },
+          async () => { throw new Error('no preparation expected'); }, { hostId: localHostId() });
+        const realFetch = globalThis.fetch;
+        let fetches = 0;
+        globalThis.fetch = (async () => { fetches++; throw new Error('no provider may be invoked'); }) as unknown as typeof fetch;
+        configureGateway({ embedding_model: gatewayModel, embedding_dimensions: 1536,
+          env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'subscription' });
+        try {
+          await engine.setConfig('search_embedding_column', name);
+          // Complete local provenance lets the real worker claim and finish
+          // without calling a provider or using the embedding test override.
+          if (localColumn) {
+            const projection = (await readProjectionSnapshot(engine, 'page', f.sourceId))!;
+            expect(await installPageEmbeddings(engine, projection, projection.chunks.map(chunk => ({
+              chunk_index: chunk.chunk_index, chunk_source: chunk.chunk_source, chunk_text: chunk.chunk_text,
+              embedding: new Float32Array(768).fill(0.5), model: targetModel,
+            })), embeddingColumnSignature(column))).toBe(true);
+          }
+          // Test-only access to the scheduler's private read-only eligibility probe.
+          const probe = consumer as unknown as { hasWork(): Promise<boolean> };
+          const before = await state(f.effectId);
+          expect(await probe.hasWork()).toBe(localColumn);
+          expect(await state(f.effectId)).toMatchObject({
+            state: before.state, attempts: before.attempts, error_code: before.error_code,
+          });
+          expect(await runPersistenceEffects(engine, { engine: engine.kind }, { hostId: localHostId(), limit: 1 }))
+            .toBe(localColumn ? 1 : 0);
+          expect(await state(f.effectId)).toMatchObject(localColumn
+            ? { state: 'committed', attempts: before.attempts + 1, error_code: null }
+            : { state: 'queued', attempts: before.attempts, error_code: null });
+          expect(await probe.hasWork()).toBe(false);
+          expect(fetches).toBe(0);
+        } finally {
+          await consumer.stop();
+          globalThis.fetch = realFetch;
+          resetGateway();
+          if (previousColumn === null) await engine.executeRaw("DELETE FROM config WHERE key='search_embedding_column'");
+          else await engine.setConfig('search_embedding_column', previousColumn);
+          await engine.executeRaw(`ALTER TABLE content_chunks DROP COLUMN ${name},DROP COLUMN ${name}_model,
+            DROP COLUMN ${name}_embedded_text_hash,DROP COLUMN ${name}_embedding_input_hash,
+            DROP COLUMN ${name}_embedded_at,DROP COLUMN ${name}_pending_since`);
+          await engine.executeRaw(`ALTER TABLE pages DROP COLUMN ${name}_signature`);
+          // Only the disposable test registry bypasses the production removal guard.
+          if (previousRegistry === null) await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
+          else await engine.executeRaw("UPDATE config SET value=$1 WHERE key='embedding_columns'", [previousRegistry]);
+        }
+      });
+
+    check('ai_billing=subscription leaves a paid embedding effect queued, unclaimed, with no request', async () => {
+      const f = await fixture();
+      const before = await state(f.effectId);
+      const realFetch = globalThis.fetch;
+      let fetches = 0;
+      globalThis.fetch = (async () => { fetches++; throw new Error('network must not be reached'); }) as unknown as typeof fetch;
+      configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536,
+        env: { OPENAI_API_KEY: 'sk-test-not-real' }, ai_billing: 'subscription' });
+      try {
+        await runPersistenceEffects(engine, { engine: engine.kind }, { hostId: localHostId(), limit: 1 });
+        const after = await state(f.effectId);
+        expect(after.state).toBe(before.state);
+        expect(after.attempts).toBe(before.attempts);
+        expect(after.error_code).toBeNull();
+        expect(fetches).toBe(0);
+      } finally {
+        globalThis.fetch = realFetch;
+        resetGateway();
       }
     });
   });

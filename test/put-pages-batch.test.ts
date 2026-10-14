@@ -19,6 +19,7 @@ import { buildMcpInstructions } from '../src/mcp/instructions.ts';
 const putPages = operations.find(op => op.name === 'put_pages')!;
 const putPage = operations.find(op => op.name === 'put_page')!;
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 const ctx = (extra: Partial<OperationContext> = {}): OperationContext => ({
   engine, config: { engine: 'pglite', embedding_disabled: true } as any,
@@ -31,9 +32,10 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); });
-beforeEach(async () => { await disposePersistenceConsumer(engine); await resetPgliteState(engine); });
+beforeEach(async () => { await disposePersistenceConsumer(engine); await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); });
 
 describe('put_pages', () => {
   test('commits every page with one receipt and deterministic child request ids', async () => {

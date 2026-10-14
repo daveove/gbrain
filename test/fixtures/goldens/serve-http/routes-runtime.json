@@ -624,6 +624,46 @@
             "<anonymous>"
           ],
           "method": "get",
+          "path": "/admin/api/graph/search"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/neighbourhood"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/page"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/sources"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/sources/:id/top"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
           "path": "/admin/events"
         },
         {
@@ -1333,6 +1373,46 @@
           ],
           "method": "post",
           "path": "/admin/api/revoke-client"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/search"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/neighbourhood"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/page"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/sources"
+        },
+        {
+          "handlers": [
+            "requireAdmin#4",
+            "<anonymous>"
+          ],
+          "method": "get",
+          "path": "/admin/api/graph/sources/:id/top"
         },
         {
           "handlers": [

@@ -14,6 +14,7 @@ import { LEGACY_EMBEDDING_CONFIG } from './helpers/legacy-embedding-config.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 async function call(name: string, params: Record<string, unknown>, remote = false) {
   const res = await dispatchToolCall(engine, name, params, remote
@@ -33,11 +34,13 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 afterAll(async () => { resetGateway(); __setEmbedTransportForTests(null); await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
   await call('put_page', { slug: 'people/alice-example', content: '---\ntitle: Alice Example\ntype: person\n---\n# Alice Example\n\nA person.\n' });
   await call('put_page', { slug: 'people/bob-example', content: '---\ntitle: Bob Example\ntype: person\n---\n# Bob Example\n\nA person.\n' });

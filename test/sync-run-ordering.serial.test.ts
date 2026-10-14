@@ -40,6 +40,7 @@ const ENV_KEYS = [
 
 let brainDir: string;
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let repoPath: string;
 
 async function openEngine(init: boolean): Promise<PGLiteEngine> {
@@ -128,6 +129,7 @@ describe('SyncRun controlled-order interleavings (W4 sync, A17)', () => {
   beforeAll(async () => {
     brainDir = mkdtempSync(join(tmpdir(), 'gbrain-syncrun-order-'));
     engine = await openEngine(true);
+    schemaVersion = await engine.getConfig('version');
   }, 120_000);
 
   afterAll(async () => {
@@ -138,6 +140,7 @@ describe('SyncRun controlled-order interleavings (W4 sync, A17)', () => {
   let c0: string;
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-syncrun-repo-'));
     execSync('git init -q', { cwd: repoPath });
     git('config user.email "test@example.com"');

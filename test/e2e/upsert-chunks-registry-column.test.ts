@@ -462,8 +462,14 @@ describe('#1262 upsertChunks registry-aware writes (PGLite)', () => {
     await engine.unsetConfig('search_embedding_column');
   });
 
-  test('pglite: malformed embedding_columns JSON is ignored — default writes keep working', async () => {
-    await engine.setConfig('embedding_columns', '{not json');
+  test('pglite: malformed registry writes fail closed without poisoning subsequent chunk writes', async () => {
+    const registry = await engine.getConfig('embedding_columns');
+    for (const value of ['{not json', '[]', 'null']) {
+      await expect(engine.setConfig('embedding_columns', value)).rejects.toMatchObject({
+        name: 'EmbeddingColumnConfigError', field: 'registry',
+      });
+      expect(await engine.getConfig('embedding_columns')).toBe(registry);
+    }
     await engine.putPage('docs/registry-badjson', {
       type: 'concept',
       title: 'Bad JSON',

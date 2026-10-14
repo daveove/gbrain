@@ -186,7 +186,7 @@ export function buildVisibilityClause(
      * (search/private-visibility.ts). Off by default — trusted local reads
      * are unchanged.
      */
-    excludePrivate?: boolean;
+    excludePrivate?: boolean | 'owner-only';
     requireSafeChunks?: boolean;
     /** #5575: the read floor and proactive activation control (eligibility/sql.ts), applied before LIMIT. */
     minTrust?: TrustTier;
@@ -199,7 +199,7 @@ export function buildVisibilityClause(
   // #4352 remediation: the predicate text lives ONCE in private-visibility.ts
   // (shared with listPages + the relational-arm hydrate) so it cannot drift.
   const privateClause = opts?.excludePrivate
-    ? ` AND ${privatePagesFilterFragment(pageAlias)}`
+    ? ` AND ${privatePagesFilterFragment(pageAlias, opts?.excludePrivate)}`
     : '';
   const chunksClause = requiresSafeChunks(opts) ? ` AND ${safeChunksFilter(pageAlias)}` : '';
   // C4: a pinned question's page holds only the question and owner notes; it is

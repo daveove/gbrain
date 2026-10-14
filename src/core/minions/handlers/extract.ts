@@ -1,9 +1,10 @@
 /**
- * `extract` Minion job handler (built-in; registered by registerBuiltinHandlers in src/commands/jobs.ts).
+ * `extract` and stale-only import recovery (registered by registerBuiltinHandlers).
  */
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionHandler } from '../types.ts';
 import { MinionQueue } from '../queue.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../../deferred-stale-extract.ts';
 
 export function makeExtractHandler(engine: BrainEngine): MinionHandler {
   return async (job) => {
@@ -15,20 +16,26 @@ export function makeExtractHandler(engine: BrainEngine): MinionHandler {
     // unscoped, matching what the CLI hint tells a default-brain operator
     // to run). The sweep is checkout-less + idempotent, so retries and
     // overlapping submissions converge.
-    if (job.data.stale === true) {
+    if (job.data.stale === true || job.name === IMPORT_STALE_EXTRACT_JOB) {
       const sourceIdFilter = typeof job.data.sourceId === 'string' ? job.data.sourceId : undefined;
+      if (sourceIdFilter === 'dream' && job.data.reason === 'daily_memory_write') {
+        const { extractOneShotDailyMemory } = await import('../../cycle/daily-memory-extract.ts');
+        await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { signal: job.signal });
+        return { stale: true, source_id: sourceIdFilter, generated_daily_indexes_only: true };
+      }
       const r = await extractStaleFromDB(engine, {
         dryRun: !!job.data.dryRun,
         jsonMode: false,
         sourceIdFilter,
         catchUp: false,
+        signal: job.signal,
       });
       // Internal 30-min budget hit with work remaining → chain a
       // continuation job so a very large deferred backlog converges without
       // waiting for the next sync. Forward-progress guard (pagesProcessed >
       // 0) prevents an infinite chain if the sweep can't advance.
       if (!job.data.dryRun && r.staleRemaining > 0 && (r.pagesProcessed > 0 || (r.mentions?.pages ?? 0) > 0)) {
-        try {
+        {
           const queue = new MinionQueue(engine);
           // NO maxWaiting: with an unscoped (NULL-sourceId) payload the
           // coalesce filter matches ANY waiting 'extract' job and would
@@ -36,11 +43,11 @@ export function makeExtractHandler(engine: BrainEngine): MinionHandler {
           // one continuation and the sweep is an idempotent watermark scan,
           // so there is no pile-up to guard against.
           await queue.add(
-            'extract',
-            { ...job.data, continuation_of: job.id },
+            job.name === IMPORT_STALE_EXTRACT_JOB ? IMPORT_STALE_EXTRACT_JOB : 'extract',
+            { ...job.data, stale: true, continuation_of: job.id },
             { timeout_ms: STALE_TIME_BUDGET_MS + 5 * 60 * 1000 },
           );
-        } catch { /* best-effort: next sync/manual sweep picks up the rest */ }
+        }
       }
       return { stale: true, source_id: sourceIdFilter ?? null, ...r };
     }

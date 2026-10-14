@@ -123,7 +123,7 @@ export interface SiblingIdentity {
  * skip the per-page reads. Fail-soft.
  */
 export async function readSiblingIdentity(engine: BrainEngine, sourceId: string, row: { slug: string; title: string | null },
-  opts: { excludePrivate: boolean; excludeQuarantined?: boolean; policy?: MentionPolicy; pack?: PackTypes | null }): Promise<SiblingIdentity> {
+  opts: { excludePrivate: boolean | 'owner-only'; excludeQuarantined?: boolean; policy?: MentionPolicy; pack?: PackTypes | null }): Promise<SiblingIdentity> {
   const siblings = await readIdentitySiblings(engine, sourceId, row, opts);
   const aliasRows = await engine.executeRaw<SiblingIdentity['aliasRows'][number]>(
     `SELECT slug, alias_norm, origin, alias_text FROM page_aliases WHERE source_id = $1 AND slug = ANY($2::text[]) ORDER BY alias_norm`,
@@ -141,7 +141,7 @@ export async function readSiblingIdentity(engine: BrainEngine, sourceId: string,
 /** The card's identity fields for `row`. Fail-soft: a failed read leaves the field out. */
 export async function readCardIdentity(engine: BrainEngine, sourceId: string,
   row: { slug: string; title: string | null; compiled_truth: string | null },
-  opts: { excludePrivate: boolean; excludeQuarantined?: boolean; surfaceCeiling?: 'verbs' | 'starter' | 'full'; aka: string[] }): Promise<CardIdentity> {
+  opts: { excludePrivate: boolean | 'owner-only'; excludeQuarantined?: boolean; surfaceCeiling?: 'verbs' | 'starter' | 'full'; aka: string[] }): Promise<CardIdentity> {
   const { aliasRows, identity_siblings } = await readSiblingIdentity(engine, sourceId, row, { excludePrivate: opts.excludePrivate, excludeQuarantined: opts.excludeQuarantined });
   const siblingPages = identity_siblings?.pages ?? [];
   const slugs = [row.slug, ...siblingPages.map(p => p.slug)];

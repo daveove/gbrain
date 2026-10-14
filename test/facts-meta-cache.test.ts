@@ -23,6 +23,7 @@ import {
 import type { BrainEngine, FactRow } from '../src/core/engine.ts';
 import type { OperationContext } from '../src/core/operations.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
+import { REMOTE_PRIVATE_PAGES_KEY, __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
 
 let engine: PGLiteEngine;
 
@@ -53,6 +54,31 @@ function ctx(overrides: Partial<OperationContext> = {}): OperationContext {
 }
 
 describe('meta-hook cache', () => {
+  test('operator private-page opt-out cannot warm the strict remote cache with private provenance', async () => {
+    const origin = 'notes/meta-owner-only-private-origin', claim = 'Synthetic private-origin cache canary';
+    await engine.putPage(origin, { type: 'note', title: 'Synthetic origin', compiled_truth: 'Synthetic body', frontmatter: { visibility: 'private' } });
+    const fact = await engine.insertFact({ fact: claim, kind: 'fact', entity_slug: origin, visibility: 'world', source: 'synthetic' }, { source_id: 'default' });
+    await engine.executeRaw('UPDATE facts SET source_markdown_slug=$1 WHERE id=$2', [origin, fact.id]);
+    const remote = ctx({ remote: true, sessionId: 'synthetic-owner-only-cache' });
+    try {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+      __resetPrivateVisibilityCacheForTests();
+      const optedOut = await getBrainHotMemoryMeta('get_stats', remote);
+      expect(JSON.stringify(optedOut)).toContain(claim);
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+      __resetPrivateVisibilityCacheForTests();
+      const strict = await getBrainHotMemoryMeta('get_stats', remote);
+      expect(JSON.stringify(strict ?? {})).not.toContain(claim);
+      expect(__hotMemoryCacheForTests().size).toBe(2);
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, 'visible');
+      __resetPrivateVisibilityCacheForTests();
+      expect(await getBrainHotMemoryMeta('get_stats', remote)).toEqual(optedOut);
+    } finally {
+      await engine.setConfig(REMOTE_PRIVATE_PAGES_KEY, '');
+      __resetPrivateVisibilityCacheForTests();
+    }
+  });
+
   test('cache hit returns the same payload without re-querying', async () => {
     await engine.insertFact(
       { fact: 'cache test fact', kind: 'fact', entity_slug: 'cache-test', visibility: 'world', source: 'test' },

@@ -105,6 +105,49 @@ If the request expired, was completed, or the server restarted, restart the
 connection from the native client to obtain a new request. Reissuing a login
 link cannot recreate a lost OAuth request or verifier.
 
+## Explore the link graph
+
+The **Graph** tab (`/admin/#graph`) shows the page link graph to the owner.
+
+- **Explorer** (`#graph?id=<page id>`): search a page by a title substring
+  (at least 3 characters) or by its exact slug (`/` focuses search), then see
+  its neighbourhood one or two hops out. The server
+  keeps at most 50, 150 or 300 pages, root first, then the most connected
+  pages. The status line says when the cap or a scan bound dropped reachable
+  pages. Colour shows the source family; edge colour and dash show the link
+  type. `duplicate` edges are hidden by default. Link types and sources are
+  filters applied on the server, so hidden edges never use the page budget.
+  Click or Space selects a page for the side panel, which shows its link
+  counts by type and a short excerpt. Enter, double-click or **Explore from
+  here** recentres on the page.
+- **Source map** (`#graph?view=sources`): one node per source, sized by live
+  pages and labelled with its isolated share (live pages with no edge to
+  another live page). Edges are cross-source link counts. Select a source to
+  list its most connected pages and open one in the explorer.
+  Archived sources remain visible and labelled; active-source page totals
+  exclude their retained pages. The graph views honour `graph.edge_validity`,
+  hiding ended temporal relationships unless the policy is disabled.
+
+The views use `GET /admin/api/graph/{search,neighbourhood,page,sources,sources/:id/top}`.
+Every route requires the owner session and reads only. Each statement runs
+under a deadline: 8 seconds for search, neighbourhood and page reads, and 30
+seconds for aggregates. On Postgres the deadline is a transaction-local
+`statement_timeout`. PGLite cannot cancel a query, so the request returns
+`503 graph_query_timeout` at the deadline and the query runs on to completion.
+The title search uses the title trigram index (`idx_pages_trgm`). There is
+no slug trigram index, so slugs match only exactly, through the
+`(source_id, slug)` key, one probe per source. The source map and top-pages
+aggregates read only `id`, `source_id` and `deleted_at` from `pages`, never
+page content. The source map loads only when its tab is opened. The server
+keeps both results for five minutes and a failure for 90 seconds, so
+reopening the tab after a timeout does not run the scan again at once.
+Unicode exact slugs are supported; two-character input performs only an exact
+slug lookup. Tana JSON excerpts use readable names/descriptions, falling back
+to distinct child titles when neither is present. Ordinary JSON keeps its text.
+Recentring draws new nodes and edges immediately even if the browser pauses
+animation frames. Search, neighbourhood, detail and top-page failures are
+shown explicitly; a failed neighbourhood does not retain the previous graph.
+
 ## Register and connect a client
 
 First choose how the **intended harness** connects:

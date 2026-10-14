@@ -137,3 +137,18 @@ describe('listing (PGLite)', () => {
     await engine.setConfig('memory.core.enabled', 'true');
   });
 });
+
+test('owner-only core filtering preserves ordinary private pages while applying withdrawals', async () => {
+  const slug = 'notes/owner-only-core-withdrawal', removed = 'Synthetic withdrawn core claim', kept = 'Synthetic surviving core claim';
+  const body = renderFactsTable([
+    { rowNum: 1, claim: removed, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true },
+    { rowNum: 2, claim: kept, kind: 'fact', confidence: 1, visibility: 'world', notability: 'medium', active: true },
+  ]);
+  await engine.putPage(slug, { type: 'note', title: 'Synthetic private core', compiled_truth: body, frontmatter: { always_load: true, visibility: 'private' } });
+  await engine.executeRaw(`INSERT INTO fact_withdrawals(source_id,visibility,subject,fact_hash)
+    VALUES ('default','world',$1,gbrain_fact_fingerprint($2))`, [slug, removed]);
+  const optedOut = (await listCorePages(engine, { sourceIds: ['default'], excludePrivate: 'owner-only' })).find(page => page.slug === slug);
+  expect(optedOut?.rendered).toContain(kept);
+  expect(optedOut?.rendered).not.toContain(removed);
+  expect((await listCorePages(engine, { sourceIds: ['default'], excludePrivate: true })).map(page => page.slug)).not.toContain(slug);
+});

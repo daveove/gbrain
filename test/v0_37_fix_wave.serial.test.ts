@@ -14,6 +14,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { surfaceFileSource } from './helpers/source-surface.ts';
 import { CLI_ONLY, CLI_ONLY_SELF_HELP } from '../src/cli/command-table.ts';
+import { EmbeddingDimMismatchError } from '../src/commands/embed-setup.ts';
 
 // Lane A — defaults sweep
 describe('v0.37 Lane A — defaults sweep', () => {
@@ -253,10 +254,10 @@ describe('v0.37 Lane C.3 — Voyage key reaches buildGatewayConfig', () => {
 // (extended in same wave). The PGLite branch + Postgres branch + databasePath
 // fallback + no-op-recipe-removal tests live there.
 
+
 // Lane D.2 — embed pre-flight dim mismatch
 describe('v0.37 Lane D.2 — embed pre-flight dim mismatch', () => {
-  test('CDX2-9: EmbeddingDimMismatchError is exported + tagged', async () => {
-    const { EmbeddingDimMismatchError } = await import('../src/commands/embed.ts');
+  test('CDX2-9: EmbeddingDimMismatchError is exported + tagged', () => {
     expect(typeof EmbeddingDimMismatchError).toBe('function');
     const err = new EmbeddingDimMismatchError('test recipe');
     expect(err).toBeInstanceOf(Error);

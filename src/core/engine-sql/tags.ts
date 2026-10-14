@@ -12,7 +12,7 @@ import { sqlFragment, trustedSql } from './fragment.ts';
 export async function getTags(
   exec: LegacyUnscopedRead,
   slug: string,
-  opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean },
+  opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; liveOnly?: boolean },
 ): Promise<string[]> {
     // #2200: federated grant (sourceIds[]) wins over scalar sourceId. Use
     // `page_id IN (subquery)` — NOT `= (subquery)` — because a federated read of
@@ -23,7 +23,7 @@ export async function getTags(
       opts?.sourceIds && opts.sourceIds.length > 0
         ? sqlFragment`source_id = ANY(${opts.sourceIds}::text[])`
         : sqlFragment`source_id = ${opts?.sourceId ?? 'default'}`;
-    const privacy = opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('pages')}`) : sqlFragment``;
+    const privacy = opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('pages', opts?.excludePrivate)}`) : sqlFragment``;
     const live = opts?.liveOnly ? sqlFragment`AND deleted_at IS NULL` : sqlFragment``;
     const { rows } = await exec.run<{ tag: string }>(sqlFragment`
       SELECT DISTINCT tag FROM tags

@@ -21,12 +21,14 @@ import type { OperationContext } from '../src/core/operations.ts';
 import { resetGateway } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -36,6 +38,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   resetGateway();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-put-page-wt-'));
 });

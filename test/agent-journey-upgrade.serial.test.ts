@@ -198,9 +198,50 @@ describe('(2) scheduled jobs: cron and autopilot invocations, non-TTY', () => {
   test('the one listed flip: doctor --remediate with runnable work now stops for consent (exit 3, nothing submitted)', async () => {
     const table = changelogSection('### Behavior changes for scripts and agents');
     expect(table).toContain('| `gbrain doctor --remediate` without a terminal | ran paid and mutating work');
+    // Drain runnable import work; daily-index continuations scheduled for later
+    // legitimately remain delayed (doctor queue_health counts waiting only).
+    // Recreate genuine legacy extraction debt so runnable work needs consent.
+    const drained = await run(h, ['jobs', 'work']);
+    expect(drained.exitCode, drained.stdout + drained.stderr).toBe(0);
+    const engine = new PGLiteEngine();
+    let existingJobIds: number[] = [];
+    await engine.connect({ engine: 'pglite', database_path: join(h.home, '.gbrain', 'brain.pglite') });
+    try {
+      const pending = await engine.executeRaw<{
+        id: number; name: string; status: string; queue: string; scheduled: boolean; attempts_made: number;
+      }>(
+        "SELECT id,name,status,queue,delay_until IS NOT NULL AS scheduled,attempts_made FROM minion_jobs WHERE status IN ('waiting','active','delayed','waiting-children','paused')");
+      for (const job of pending) {
+        expect(job, `job ${job.id}: only scheduled daily-index work remains, not a failed retry`).toMatchObject({
+          name: 'autopilot-daily-memory', status: 'delayed', queue: 'default', scheduled: true, attempts_made: 0,
+        });
+      }
+      const failed = await engine.executeRaw(
+        "SELECT id,name,status,error_text FROM minion_jobs WHERE status IN ('failed','dead','cancelled')");
+      expect(failed, 'import followups have no failures or cancellations').toEqual([]);
+      existingJobIds = (await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs ORDER BY id')).map(row => row.id);
+      const reset = await engine.executeRaw<{ slug: string }>(
+        "UPDATE pages SET links_extracted_at=NULL WHERE source_id='default' AND slug IN ('alpha','beta','gamma') RETURNING slug");
+      expect(reset.map(row => row.slug).sort()).toEqual(['alpha', 'beta', 'gamma']);
+    } finally {
+      await engine.disconnect();
+    }
+    const preview = await run(h, ['doctor', '--remediation-plan', '--target-score', '30', '--json']);
+    expect(preview.exitCode, preview.stdout + preview.stderr).toBe(0);
+    expect(preview.json).toMatchObject({
+      target_unreachable: false,
+      plan: expect.arrayContaining([expect.objectContaining({ job: 'extract', params: { stale: true } })]),
+    });
     const r = await run(h, ['doctor', '--remediate', '--target-score', '30', '--json']);
     expect(r.exitCode, r.stdout + r.stderr).toBe(3);
     expect(r.json).toMatchObject({ code: 'confirmation_required', fix: { next: 'ask_user' } });
+    await engine.connect({ engine: 'pglite', database_path: join(h.home, '.gbrain', 'brain.pglite') });
+    try {
+      const afterJobIds = (await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs ORDER BY id')).map(row => row.id);
+      expect(afterJobIds, 'refused remediation submits no jobs, including delayed jobs').toEqual(existingJobIds);
+    } finally {
+      await engine.disconnect();
+    }
     const stats = (await run(h, ['jobs', 'stats', '--json'])).json as { by_status: Record<string, number> };
     expect(stats.by_status.waiting ?? 0).toBe(0);
   }, 180_000);
@@ -416,6 +457,13 @@ describe('(5) jobs queued before the upgrade run under the configured budget', (
     for (const n of ['alpha', 'beta', 'gamma']) writeFileSync(join(notes, `${n}.md`), `---\ntitle: ${n} note\n---\n\n# ${n} note\n\nThe ${MARKER} ${n} fact lives here.\n`);
     const imported = await runNet(h, ['import', notes, '--no-embed'], env);
     expect(imported.exitCode, imported.stderr).toBe(0);
+    // Import also queues daily-memory jobs. Their generated dream index has
+    // its own normal embedding effect, outside the default-source backfill cap.
+    // Drain those follow-ups before measuring backfill calls; --no-embed must
+    // still leave all three imported chunks as real work for the backfill.
+    const followups = await runNet(h, ['jobs', 'work'], env, 180_000);
+    expect(followups.exitCode, followups.stderr).toBe(0);
+    expect(await pendingBackfillChunks()).toBe(3);
   }, 180_000);
 
   afterAll(() => { provider?.stop(true); });
@@ -449,25 +497,42 @@ describe('(5) jobs queued before the upgrade run under the configured budget', (
     }
   }
 
+  async function pendingBackfillChunks(): Promise<number> {
+    const engine = new PGLiteEngine();
+    await engine.connect({ engine: 'pglite', database_path: join(h.home, '.gbrain', 'brain.pglite') });
+    try {
+      return await engine.countStaleChunks({ sourceId: 'default' });
+    } finally {
+      await engine.disconnect();
+    }
+  }
+
   test('a configured cap below the work stops every provider call at the cap; the job is not refused for consent', async () => {
     expect((await runNet(h, ['config', 'set', 'embed.backfill_max_usd', '0.00000001'], env)).exitCode).toBe(0);
     const id = await queuePreUpgradeRow();
-    const before = embeddingCalls;
-    const worker = await runNet(h, ['jobs', 'work'], env, 180_000);
-    expect(worker.exitCode, worker.stderr.slice(-2000)).toBe(0);
-    expect(worker.stdout + worker.stderr).not.toContain('confirmation_required');
-    expect(worker.stderr).toContain('embed-backfill:default: projected cost');
-    expect(embeddingCalls).toBe(before);
-    const row = await jobRow(id);
-    expect(row.status, `${row.error_text}\n${worker.stderr.slice(-2000)}`).not.toBe('completed');
-    expect(row.error_text).toContain('embed-backfill: incomplete');
-    const cancelled = await runNet(h, ['jobs', 'cancel', String(id)], env);
-    expect(cancelled.exitCode, cancelled.stderr).toBe(0);
+    try {
+      const before = embeddingCalls;
+      const worker = await runNet(h, ['jobs', 'work'], env, 180_000);
+      expect(worker.exitCode, worker.stderr.slice(-2000)).toBe(0);
+      expect(worker.stdout + worker.stderr).not.toContain('confirmation_required');
+      expect(worker.stderr).toContain('embed-backfill:default: projected cost');
+      expect(embeddingCalls).toBe(before);
+      expect(await pendingBackfillChunks()).toBe(3);
+      const row = await jobRow(id);
+      expect(row.status, `${row.error_text}\n${worker.stderr.slice(-2000)}`).not.toBe('completed');
+      expect(row.error_text).toContain('embed-backfill: incomplete');
+    } finally {
+      // A failed assertion must not leave a retry to consume the next test's work.
+      const cancelled = await runNet(h, ['jobs', 'cancel', String(id)], env);
+      expect(cancelled.exitCode, cancelled.stderr).toBe(0);
+    }
   }, 240_000);
 
   test('a configured cap that covers the work runs it to completion', async () => {
     expect((await runNet(h, ['config', 'set', 'embed.backfill_max_usd', '1'], env)).exitCode).toBe(0);
+    expect(await pendingBackfillChunks()).toBe(3);
     const id = await queuePreUpgradeRow();
+    const before = embeddingCalls;
     const worker = await runNet(h, ['jobs', 'work'], env, 180_000);
     expect(worker.exitCode, worker.stderr.slice(-2000)).toBe(0);
     const row = await jobRow(id);
@@ -475,6 +540,7 @@ describe('(5) jobs queued before the upgrade run under the configured budget', (
     expect(row.result.status).toBe('success');
     expect(row.result.embedded).toBeGreaterThan(0);
     expect(row.result.spentUsd).toBeLessThanOrEqual(1);
-    expect(embeddingCalls).toBeGreaterThan(0);
+    expect(embeddingCalls).toBeGreaterThan(before);
+    expect(await pendingBackfillChunks()).toBe(0);
   }, 240_000);
 });

@@ -564,6 +564,7 @@ describe('subagent handler input validation', () => {
   });
 });
 
+
 describe('makeSubagentHandler default client construction', () => {
   test('factory default wires sdk.messages through to the handler', async () => {
     // Regression guard for the v0.16.0 shipped bug: makeSubagentHandler

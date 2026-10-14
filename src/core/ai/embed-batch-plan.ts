@@ -8,9 +8,8 @@ import type { Recipe } from './types.ts';
 import { resolveRecipe } from './model-resolver.ts';
 import { truncateUtf8 } from '../text-safe.ts';
 import { sendableEmbeddingInputs } from './embedding-guard.ts';
+import { EMBED_MAX_CHARS } from '../embedding-input-cap.ts';
 
-/** Per-input character cap applied before any embedding request. */
-export const EMBED_MAX_CHARS = 8000;
 /** Default chars-per-token when a recipe omits it. Matches OpenAI tiktoken on English. */
 export const DEFAULT_CHARS_PER_TOKEN = 4;
 /** Default safety factor when a recipe omits it. */

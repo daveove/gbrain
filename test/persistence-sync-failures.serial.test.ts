@@ -24,8 +24,9 @@ import { OperationError } from '../src/core/ops/contract.ts';
 import { admitWrite, completeWrite, claimNextWrite, markRecovering } from '../src/core/persistence/journal.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
 import { currentExitCode, _resetCliExitVerdictForTests } from '../src/core/cli-force-exit.ts';
-import { prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
+import { currentSubmissionAuthority, prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
+import { MinionQueue } from '../src/core/minions/queue.ts';
 import { testBackends } from './helpers/test-backends.ts';
 import { recordFactWithdrawal } from '../src/core/facts/withdrawal.ts';
 import { renderFactsTable, parseFactsFence } from '../src/core/facts-fence.ts';
@@ -56,6 +57,25 @@ beforeAll(async () => {
   // #5988: these fixtures force failed receipts with unreadable YAML, which sync now holds by default; sync.holds=fail keeps them fail-closed.
   for (const engine of engines) await engine.setConfig('sync.holds', 'fail');
 }, 120_000);
+
+test('25-page same-day managed sync accepts one daily job per distinct day', async () => withEnv(env, async () => {
+  for (const engine of engines) {
+    const day = '2026-02-25';
+    const before = await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs ORDER BY id');
+    const lastId = Math.max(0, ...before.map(row => Number(row.id)));
+    const files = Object.fromEntries(Array.from({ length: 25 }, (_, i) =>
+      [`same-day-${i}.md`, `---\ntitle: Synthetic sync ${i}\ndate: "${day}"\n---\nSynthetic managed sync fixture.\n`]));
+    const f = await fixture(engine, files);
+    const result = await performManagedSync(engine, { sourceId: f.id, noPull: true, noEmbed: true, noExtract: true },
+      { maxPages: 100, maxMs: 60_000 });
+    expect(result).toMatchObject({ status: 'first_sync', added: 25 });
+    const jobs = await engine.executeRaw<{ data: { daily_memory_date: string } }>(
+      "SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory' AND id>$1", [lastId]);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0].data.daily_memory_date).toBe(day);
+    await disposePersistenceConsumer(engine);
+  }
+}), 120_000);
 
 test('withdrawal-conflicted sync resumes only through explicit guarded rediscovery and cannot restore the fact', async () => withEnv(env, async () => {
   for (const engine of engines) {
@@ -436,16 +456,22 @@ test('remote managed failure results expose only aggregates, never private recei
 test('remote pending sync keeps its private receipt off the response while resuming the same request', async () => withEnv(env, async () => {
   for (const engine of engines) {
     await disposePersistenceConsumer(engine);
-    const f = await fixture(engine, { 'private-pending.md': 'A private observation awaiting publication.\n' });
+    const f = await fixture(engine, { 'private-pending.md': '---\ndate: "2026-03-03"\n---\nA private observation awaiting publication.\n' });
     const clientId = `sync-client-${randomUUID()}`;
     await engine.executeRaw(`INSERT INTO oauth_clients(client_id,client_name,client_secret_hash,scope,source_id,allowed_operations)
       VALUES($1,'fixture-client','test-only','admin',$2,ARRAY['submit_job'])`, [clientId, f.id]);
     const ctx = { engine, remote: true, sourceId: f.id, auth: { clientId, principal: { kind: 'oauth_client', id: clientId }, scopes: ['admin'], sourceId: f.id, allowedOperations: ['submit_job'] } } as OperationContext;
     const accepted = await prepareRemoteJob(ctx, 'sync', { noPull: true });
+    const beforeDailyJobs = await engine.executeRaw<{ id: number }>('SELECT id FROM minion_jobs ORDER BY id');
+    const lastJobId = beforeDailyJobs.at(-1)?.id ?? 0;
     const lock = await acquireWorktree((await getWorktreeBinding(engine, f.id))!);
     expect(lock).not.toBeNull();
     try {
-      const run = () => withSubmissionAuthority(accepted.authority, () => performManagedSync(engine, accepted.data));
+      const run = () => withSubmissionAuthority(accepted.authority, async () => {
+        const result = await performManagedSync(engine, accepted.data);
+        expect(currentSubmissionAuthority()).toEqual(accepted.authority);
+        return result;
+      });
       const pending = await run();
       expect(pending).toMatchObject({ status: 'partial', reason: 'writer_pending', added: 0, filesImported: 0 });
       expect(pending.managedWrite).toBeUndefined();
@@ -460,6 +486,27 @@ test('remote pending sync keeps its private receipt off the response while resum
       expect(await readManagedSyncFailures(engine, [f.id])).toHaveLength(1);
       await lock!.release();
       expect(await run()).toMatchObject({ status: 'first_sync', added: 1 });
+      const dailyJobs = await engine.executeRaw<{ id: number; name: string; data: Record<string, unknown>; submission_authority: unknown }>(
+        'SELECT id,name,data,submission_authority FROM minion_jobs WHERE id>$1 ORDER BY id', [lastJobId]);
+      expect(dailyJobs).toHaveLength(1);
+      for (const job of dailyJobs) {
+        expect(job.name).toBe('autopilot-daily-memory');
+        expect(job.submission_authority).toEqual({ version: 1, kind: 'application' });
+      }
+      expect(dailyJobs[0].data.daily_memory_only).toBe(true);
+      expect(dailyJobs[0].data.source_cycle_job_ids).toEqual([]);
+      await withSubmissionAuthority(accepted.authority, async () => {
+        const queue = new MinionQueue(engine);
+        for (const [name, data] of [
+          ['extract', { slug: 'private-pending', sourceId: f.id }],
+          ['autopilot-daily-memory', { daily_memory_only: true, daily_memory_date: '1900-01-01', sourceId: f.id }],
+          ['autopilot-daily-memory', { daily_memory_only: true, daily_memory_date: '2026-10-14', sourceId: 'another-source' }],
+        ] as const) {
+          await expect(queue.add(name, data)).rejects.toThrow('Remote jobs cannot submit descendant jobs');
+          expect(currentSubmissionAuthority()).toEqual(accepted.authority);
+        }
+      });
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toHaveLength(beforeDailyJobs.length + 1);
     } finally { await lock?.release(); await disposePersistenceConsumer(engine); }
   }
 }), 120_000);

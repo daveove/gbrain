@@ -285,7 +285,11 @@ for (const kind of testBackends()) {
         await engine.executeRaw("DELETE FROM config WHERE key='embedding_model'");
         expect(await mounted(bounded, [], 1)).toMatchObject({ error: 'embedding_unconfigured' });
         await engine.setConfig('embedding_model', model);
-        await engine.setConfig('embedding_columns', '{invalid');
+        await expect(engine.setConfig('embedding_columns', '{invalid')).rejects.toMatchObject({
+          name: 'EmbeddingColumnConfigError', field: 'registry',
+        });
+        // Persisted corruption is an adversarial fixture, not a supported config write.
+        await engine.executeRaw("INSERT INTO config(key,value) VALUES ('embedding_columns',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value", ['{invalid']);
         expect(await mounted(bounded, [], 1)).toMatchObject({ error: 'embedding_configuration' });
         await engine.executeRaw("DELETE FROM config WHERE key='embedding_columns'");
         expect(await mounted(bounded)).toMatchObject({ action: 'retry_queued', attempts: 5 });

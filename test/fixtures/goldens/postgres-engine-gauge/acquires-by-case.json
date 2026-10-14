@@ -117,7 +117,9 @@
     "getEdgesByChunk#default": {},
     "getEdgesByChunk#in+edgeType": {},
     "getEdgesByChunk#out": {},
-    "getEmbeddingsByChunkIds#column": {},
+    "getEmbeddingsByChunkIds#column": {
+      "raw": 1
+    },
     "getEmbeddingsByChunkIds#default": {},
     "getFactsHealth#default": {},
     "getFile#default": {},

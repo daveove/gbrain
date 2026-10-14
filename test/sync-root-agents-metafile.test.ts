@@ -28,11 +28,13 @@ describe('root AGENTS.md / CLAUDE.md classify as metafile', () => {
 
 describe('#5186 — a hardened root AGENTS.md is not imported, and an existing root page survives', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   let repoPath: string;
-  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+  beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 60_000);
   afterAll(async () => { if (engine) await engine.disconnect(); }, 60_000);
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-root-agents-'));
     execSync('git init && git config user.email "test@test.com" && git config user.name "Test"', { cwd: repoPath, stdio: 'pipe' });
     mkdirSync(join(repoPath, 'topics'), { recursive: true });

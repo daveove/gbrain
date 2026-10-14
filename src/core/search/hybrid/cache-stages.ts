@@ -111,7 +111,9 @@ export async function prepareSemanticCache(
   const mergedCfgCached = await loadConfigWithEngine(engine).catch(() => null);
   const cfgCached = mergedCfgCached ?? ((await import('../../config.ts')).loadConfig()) ?? { engine: 'pglite' as const };
   const resolvedColCached = resolveEmbeddingColumn(opts, cfgCached);
-  const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached);
+  // The cache table and its lookup embed live in the primary space with the
+  // brain prefix; an independent column never reads or writes it.
+  const isNonDefaultColumn = !isCacheSafe(resolvedColCached, cfgCached) || resolvedColCached.provenance !== undefined;
 
   // wave-g (#4415): classify ONCE with the brain's `search.intent_patterns`
   // applied (loadEngineIntentPatterns is per-engine + TTL-cached) so the
@@ -174,7 +176,7 @@ export async function prepareSemanticCache(
     // serving old-classification rows for the rest of the cache TTL.
     intentPatterns: intentStateForCache.fingerprint,
     // Retained storage-key shape; semantic response reuse is disabled below.
-    excludePrivate: opts?.excludePrivate === true,
+    excludePrivate: opts?.excludePrivate ?? false,
     // v=27 (E5b) — the resolved gate + this query's intent class, classified
     // by the SAME pattern-aware banks bare hybridSearch resolves (above).
     adaptiveReturn: {

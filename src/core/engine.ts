@@ -682,7 +682,7 @@ export interface FactListOpts {
   /** #5575 read eligibility (eligibility/sql.ts): read floor, quarantined-page and needs_rederive hiding, proactive suppression. Unset for internal writers. */
   eligibility?: import('./eligibility/policy.ts').ReadEligibility;
   /** Hide facts whose provenance page (`source_markdown_slug`) is private. Resolved by the trusted operation layer (resolveExcludePrivatePages), never from MCP parameters. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
 }
 
 /** Per-source operational health snapshot consumed by `gbrain doctor`. */
@@ -727,7 +727,7 @@ export interface TrajectoryOpts {
    */
   remote?: boolean;
   /** Same as FactListOpts.excludePrivate: hide points whose provenance page is private. */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** Metric filter. When set, only facts with this canonical metric label participate. */
   metric?: string;
   /**
@@ -1184,7 +1184,7 @@ export interface BrainEngine {
    * dingColumn rejects bad names). Engines identifier-quote on
    * interpolation as defense in depth (D12).
    */
-  getEmbeddingsByChunkIds(ids: number[], column?: string): Promise<Map<number, Float32Array>>;
+  getEmbeddingsByChunkIds(ids: number[], column?: string | ResolvedColumn): Promise<Map<number, Float32Array>>;
 
   // Chunks
   /**
@@ -1225,7 +1225,7 @@ export interface BrainEngine {
    * them away). `includeEmbedding` opts back in, and beats
    * `getChunksWithEmbeddings`, which honors neither scope precedence nor RLS.
    */
-  getChunks(slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean }): Promise<Chunk[]>;
+  getChunks(slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn }): Promise<Chunk[]>;
   /** Evidence delivery: one batched, re-authorized chunk-window read keyed by page_id (engine-sql/chunks.ts). */
   getChunkWindows(requests: ChunkWindowRequest[], opts: ChunkWindowOpts): Promise<ChunkWindowPage[]>;
   /**
@@ -1243,7 +1243,7 @@ export interface BrainEngine {
    * grandfathered). Provider-migration paths set this so pre-stamp pages
    * aren't silently left in the old embedding space.
    */
-  countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number>;
+  countStaleChunks(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number>;
   /**
    * Sum of LENGTH(chunk_text) over stale chunks — the character-count
    * backlog the embed phase / embed-backfill will process. Sibling of
@@ -1260,7 +1260,7 @@ export interface BrainEngine {
    * `includeNullSignature` lifts the grandfather clause (#3391) — see
    * countStaleChunks.
    */
-  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean }): Promise<number>;
+  sumStaleChunkChars(opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn }): Promise<number>;
   /**
    * Stamp `pages.embedding_signature = signature` for one page. Called after
    * a page's chunks are (re)embedded so a later model swap can detect it as
@@ -1314,6 +1314,7 @@ export interface BrainEngine {
    * support.
    */
   listStaleChunks(opts?: {
+    embeddingColumn?: ResolvedColumn;
     batchSize?: number;
     afterPageId?: number;
     afterChunkIndex?: number;
@@ -1339,9 +1340,11 @@ export interface BrainEngine {
    * `opts.sourceId` scopes the count to a single source, matching
    * `countStaleChunks`. Quarantined and `embed_skip` pages are excluded —
    * both are intentionally chunkless by design, not drift needing repair.
+   * `activeSourcesOnly` excludes archived sources for independent staging;
+   * omitted, the existing primary count policy is unchanged.
    * See `ChunklessPageRow` for the full rationale.
    */
-  countChunklessPagesWithContent(opts?: { sourceId?: string }): Promise<number>;
+  countChunklessPagesWithContent(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number>;
   /**
    * List pages with non-empty `compiled_truth` and/or `timeline` and zero
    * `content_chunks` rows (sibling of `countChunklessPagesWithContent`;
@@ -1379,7 +1382,7 @@ export interface BrainEngine {
    * `attendance` (#5761) excludes or selects pages whose attendance marker
    * equals their current knowledge revision.
    */
-  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked' }): Promise<number>;
+  countStalePagesForExtraction(opts?: { sourceId?: string; versionTs?: string; attendance?: 'exclude' | 'blocked'; slugs?: readonly string[] }): Promise<number>;
   /**
    * List a keyset page (ordered by `id`, `id > afterPageId`) of stale pages
    * WITH their content so the caller extracts without an N+1 `getPage`. Same
@@ -1392,6 +1395,7 @@ export interface BrainEngine {
     afterPageId?: number;
     sourceId?: string;
     versionTs?: string;
+    slugs?: readonly string[];
   }): Promise<StalePageRow[]>;
   /**
    * Stamp `links_extracted_at` for a batch of pages keyed on the unique
@@ -1795,7 +1799,7 @@ export interface BrainEngine {
    * via `page_id IN (…) … DISTINCT`. The write-side addTag/removeTag deliberately
    * stay scalar-only — `allowedSources` is a read grant; writes route to one source.
    */
-  getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean }): Promise<string[]>;
+  getTags(slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; liveOnly?: boolean }): Promise<string[]>;
 
   // Timeline
   /**
@@ -2307,7 +2311,7 @@ export interface BrainEngine {
    */
   listSupersessions(
     source_id: string,
-    opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts['eligibility']; excludePrivate?: boolean },
+    opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts['eligibility']; excludePrivate?: boolean | 'owner-only' },
   ): Promise<FactRow[]>;
 
   /**

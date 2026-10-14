@@ -76,6 +76,8 @@ export const ATOMS_SCAN_HASH_KEY = 'atoms_scan_hash';
  * comment in `src/core/import-file.ts`.
  */
 export const HASH_EPHEMERAL_FRONTMATTER_KEYS: readonly string[] = [
+  // Date representation provenance must not re-embed unchanged content.
+  '_gbrain_date_instants',
   'captured_at',
   'ingested_at',
   QUARANTINE_KEY,
@@ -460,6 +462,7 @@ export function rowToChunk(row: Record<string, unknown>, includeEmbedding = fals
     // Only present when the SELECT included it (getChunks); undefined elsewhere
     // so callers can tell "not selected" from "vector present".
     ...(row.embedding_is_null !== undefined && { embedding_is_null: Boolean(row.embedding_is_null) }),
+    ...(row.embedding_input_hash !== undefined && { embedding_input_hash: row.embedding_input_hash as string | null }),
   };
 }
 

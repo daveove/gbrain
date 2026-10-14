@@ -22,11 +22,13 @@ import type { SearchResult } from '../src/core/types.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -35,6 +37,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 /** Seed a page; returns the id. */

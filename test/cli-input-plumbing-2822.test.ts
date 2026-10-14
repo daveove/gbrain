@@ -90,11 +90,13 @@ describe('#2822 — parseOpArgs warns when a flag overwrites a set positional', 
 // ── Part 3: chunk_skip_reason on 0-chunk puts ─────────────────────────────
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -104,6 +106,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   resetGateway(); // no embedding provider → put_page runs noEmbed
 });
 

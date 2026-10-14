@@ -81,7 +81,7 @@ async function readSnapshotStatement(query: ReadQuery, slug: string, opts?: Page
     filters.push(`p.source_id=$${params.length}`);
   }
   if (!opts?.includeDeleted) filters.push('p.deleted_at IS NULL');
-  if (opts?.excludePrivate) filters.push(privatePagesFilterFragment('p'));
+  if (opts?.excludePrivate) filters.push(privatePagesFilterFragment('p', opts?.excludePrivate));
   if (opts?.requireLiveSource) filters.push('EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived)');
   params.push(opts?.sourceIds?.[0] ?? 'default');
   const and = filters.map(filter => ` AND ${filter}`).join('');
@@ -99,7 +99,10 @@ async function readSnapshotStatement(query: ReadQuery, slug: string, opts?: Page
   const rows = await query<Record<string, unknown>>(`WITH chosen AS (
     SELECT p.*${opts?.requireUnambiguous ? ', count(*) OVER () AS snapshot_matches' : ''} FROM ${candidates}
     ORDER BY (p.slug=$1) DESC, (p.source_id=$${params.length}) DESC, p.source_id ASC LIMIT 1
-  ) SELECT p.*,
+  ) SELECT p.id,p.source_id,p.slug,p.type,p.title,p.compiled_truth,p.timeline,p.frontmatter,p.content_hash,
+    p.source_path,p.knowledge_revision,p.text_projection_revision,p.emotional_weight,p.created_at,p.updated_at,
+    p.deleted_at,p.effective_date,p.effective_date_source,p.import_filename,p.salience_touched_at,
+    p.source_kind,p.source_uri,p.ingested_via,p.ingested_at,p.contextual_retrieval_mode${opts?.requireUnambiguous ? ',p.snapshot_matches' : ''},
     (SELECT s.incarnation FROM sources s WHERE s.id=p.source_id) AS source_incarnation,
     COALESCE((SELECT jsonb_agg(t.tag ORDER BY t.tag) FROM tags t WHERE t.page_id=p.id), '[]'::jsonb) AS snapshot_tags,
     wd.snapshot_withdrawals, wd.snapshot_global_purges,
@@ -111,13 +114,13 @@ async function readSnapshotStatement(query: ReadQuery, slug: string, opts?: Page
     CROSS JOIN LATERAL (SELECT COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',w.visibility,'fact_hash',w.fact_hash,'withdrawn_at',w.withdrawn_at)
       ORDER BY w.visibility,w.fact_hash) FROM (SELECT visibility,fact_hash,min(withdrawn_at) AS withdrawn_at
         FROM fact_withdrawals WHERE source_id=p.source_id AND (subject='*' OR subject=p.slug)
-        ${opts?.excludePrivate ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) w), '[]'::jsonb)
+        ${opts?.excludePrivate === true ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) w), '[]'::jsonb)
       || COALESCE((SELECT jsonb_agg(jsonb_build_object('visibility',x.visibility,'fact_hash',x.fact_hash,'withdrawn_at',x.purged_at,'purged',true)
         ORDER BY x.visibility,x.fact_hash) FROM (SELECT visibility,fact_hash,min(purged_at) AS purged_at
           FROM fact_purges WHERE source_id=p.source_id AND subject=p.slug
-          ${opts?.excludePrivate ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals,
+          ${opts?.excludePrivate === true ? "AND visibility='world'" : ''} GROUP BY visibility,fact_hash) x), '[]'::jsonb) AS snapshot_withdrawals,
       (SELECT jsonb_build_object('count',count(*),'latest',max(g.purged_at)) FROM fact_purges g WHERE g.source_id=p.source_id AND g.subject='*'
-        ${opts?.excludePrivate ? "AND g.visibility='world'" : ''}) AS snapshot_global_purges) wd`, params);
+        ${opts?.excludePrivate === true ? "AND g.visibility='world'" : ''}) AS snapshot_global_purges) wd`, params);
   if (!rows.length) return null;
   const row = rows[0];
   if (opts?.requireUnambiguous && Number(row.snapshot_matches) > 1) throw new PageSnapshotAmbiguousError();

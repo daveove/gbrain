@@ -10,6 +10,42 @@ credits are retained; no result has been reassigned to another provider. Origina
 identifiers and attribution are available in the pre-removal Git revision
 `6040075c6cb95be5881cc2e1b76ef7d71f4e5d29` (retained on 2026-09-23).
 
+## [Unreleased]
+
+### Added
+
+- Owner admin **Graph** tab (`/admin/#graph`): bounded one- or two-hop page neighbourhoods, index-served title and Unicode exact-slug search, readable excerpts with a Tana child fallback, and an on-demand source map with archived labels. Views respect `graph.edge_validity`; aggregate results and failures are memoized, and query failures appear explicitly rather than retaining stale graphs.
+- Independent embedding columns keep separate vectors, model/input provenance and page signatures. `embed --embedding-column` stages text with the target model and document prefix without mutating the primary embedding space or changing search selection. Selecting an independent column live uses the same text-only, no-rechunking path; durable embedding effects also use that column's provider and provenance.
+- Independent stale previews distinguish provider work from page-stamp-only restamps. Archived and active chunkless work are classified separately with source, skip and quarantine exclusions; images are excluded. Provider overlength failures never trigger the live model's chunk healing during staging.
+- Admin Graph explorer **Hide hubs** control (off by default; thresholds 500, 1,000 and 2,000). The owner-only neighbourhood API accepts `max_degree=N`, hiding non-center pages whose total stored link-row degree exceeds N, across both directions and all link types. Hubs are rejected server-side before scan, candidate and node caps and are not traversed; the center always stays visible. Degree probes read at most N+1 indexed rows per direction under the existing statement timeout.
+- Add subscription-only model billing (`ai_billing=subscription` / `GBRAIN_AI_BILLING=subscription`): paid API paths refuse before dispatch, effective billing is reported, workers refresh protected policy, and deferred embedding effects retain their attempts and vector identity. Native `codex-cli:` text generation requires stable Codex CLI 0.162.0+ and a fresh ChatGPT login, isolates tools/configuration/credentials, and never falls back to a paid API.
+- Shared evidence/context assembler and optional host-injected intake reader, with scoped opaque continuation cursors; stock GBrain engines do not create or expose an intake store.
+- Grok Bot digest guide covering confined grants, fenced daily writes, path-scoped Funnel exposure and revision-safe sections shared by multiple bots.
+- Restore complete local agent-session capture and deterministic daily-memory indexes on the current managed publication APIs, including OMP, Pi, OpenCode, and Cursor adapters.
+- Add repository-only nightly launcher helpers and the spend-capped facts runner; reuse current canonical wanted-link wakeups rather than the retired pending-reference registry.
+
+### Fixed
+
+- Admin Graph recentring draws all new nodes and edges immediately, even when animation frames are paused. A timer settles the layout independently of animation frames.
+- Preserve current foreground embedding/image/OCR cap stops and projection healing while carrying original budget refusals through callbacks and image imports; disable unmetered SDK retries inside tracked calls. Low-to-high retrieval retries retain the same lazily-started query-embedding deadline.
+- Private source exports and retrieval snapshots under `/out/` remain untracked, and secret scanning rejects an invalid Git range before dispatching Gitleaks.
+- Preserve owner-only aggregate exclusion across reads and derived links even when remote ordinary-private-page access is enabled. Keep opted-out pinned-question access, withdrawn core-page snapshots, entity backlinks and hot-memory cache visibility tiers consistent with that distinction.
+- Report failed daily-memory handoff from transcript recovery in its JSON receipt and CLI exit verdict rather than silently accepting an incomplete refresh.
+- Preserve pinned calendar zones, historical affected-date debt, single-worker completion barriers, one-connection nightly pools, and bounded infrastructure connect retries. Historical offset-less version dates use that same pinned zone when recovering old daily indexes. Timezone lookup failures never advance capture watermarks.
+- Migration v243 upgrades retained daily-job timeouts, adds the resolver's missing `lower(title)` trigram index using the existing online-index builder, and forward-replaces the trust stamp function so date-representation provenance alone never lowers trust. Existing v240 indexes and trust rules for real content changes are retained.
+- Preserve native YAML `Date` scalars while distinguishing calendar-only dates from explicit midnight instants; database-to-file roundtrips retain calendar spelling and never acquire instant provenance or falsely report an external edit. Generated-index identity markers are protected from speculative frontmatter recovery.
+- Publisher-owned daily-index jobs run outside a delegated job's submission scope and commit atomically with the authorized publication. Direct remote descendant submission remains prohibited.
+- Forward `noExtract` through full reconciliation, preserve aborted-cycle reports without attempting publication, and recount exact extraction debt only for still-owned generated indexes.
+- Keep protected-source refusals on native invalid-input exit status 2 rather than reusing status 3, which means human confirmation is required.
+- Unchanged standalone imports leave the generation clock untouched. Genuine stale link/mention debt is queued as `extract-stale-links`; the nightly one-shot writer drains only that registered job under bounded job/time caps on its existing connection, preserving deferred work and same-name continuations. Delegated imports retain bounded inline recovery at every size without gaining descendant-submission authority; incomplete sweeps retain debt for a later run.
+- Use the live independent embedding column's billing policy for both idle eligibility and effect claims, keeping paid work unclaimed and local recipes runnable on the same bounded connection route.
+- Gate generated daily indexes through the native external-input trust policy on both managed and unmanaged publication paths; repeat publication compares the canonical rendered content without unnecessary revisions. On a fresh managed brain the daily-memory system index is created through writer administration instead of a raw insert the topology guard refuses, so the first daily job no longer fails and retries.
+- Coalesce unclaimed publication daily-index refreshes by calendar day and pinned timezone, retaining one successor after a render is claimed. Ordinary mutations refresh their guarded preimage and current days without scanning every historical version; import/sync recovery still discovers historical debt.
+- Keep affected daily-index dates out of remote write receipts. Alias resolution, revision hints, search cache identities and forget guards preserve the ordinary-private versus owner-aggregate visibility distinction.
+- Daily drain budget expiry immediately defers unfinished work without consuming attempts or stalls and does not fail the nightly run; genuine job failures and shutdown still propagate.
+- Keep the text-only Codex CLI adapter out of image OCR routing without disabling ordinary text expansion or adding a paid fallback.
+- Include Pi, OMP and Cursor session roots in confined transcript discovery; exclude their subagent transcripts instead of reporting phantom ingestion gaps.
+
 ## [0.60.221.0] - 2026-10-14
 
 **When a file you edited by hand blocks every write to its source, one command now shows you both versions and lets you pick which one to keep (#6650).** If you edit a page file while gbrain is publishing a write to that same file, gbrain can no longer tell whether it is safe to put the file back. It used to stop there and leave every later write to that source pending, and the only ways out were deleting the file or editing the database by hand. `gbrain repair stuck-recovery` previews the blocked file with a diff of the version from before the write against what is on disk now. You then choose: `--keep prior` restores the old version so the write publishes again, or `--keep disk` keeps your edit and drops the write. Either way, both versions are backed up first.

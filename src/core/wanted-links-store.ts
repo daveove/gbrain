@@ -114,7 +114,7 @@ export interface WantedPageRow {
  * target name or contributes to a count. Soft-deleted origins never count.
  */
 export async function listWantedPages(engine: Pick<BrainEngine, 'executeRaw'>, opts: {
-  sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; privateFilter?: (alias: string) => string;
+  sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | 'owner-only'; privateFilter?: (alias: string) => string;
   limit: number; offset: number;
 }): Promise<{ total: number; rows: WantedPageRow[] }> {
   const params: unknown[] = [];

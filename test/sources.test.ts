@@ -273,6 +273,23 @@ describe('sources remove', () => {
     expect(code).toBe(2); // agent contract v1 A3: invalid input exits 2 (3 is confirmation_required)
   });
 
+  test('refuses owned dream system index via ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: true }],
+    });
+    const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
+    expect(code).toBe(2);
+  });
+
+  test('does not hard-refuse ordinary dream before ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: false }],
+    });
+    // No source row: ownership guard passes, then not-found exits 4 (not reserved-id 2).
+    const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
+    expect(code).toBe(4);
+  });
+
   test('refuses without --yes', async () => {
     const { engine } = makeStub({
       'SELECT id, name, local_path, last_commit, last_sync_at, config, created_at': [
@@ -294,6 +311,33 @@ describe('sources remove', () => {
     await runSources(engine, ['remove', 'gstack', '--dry-run']);
     const del = calls.find(c => c.sql.startsWith('DELETE FROM sources'));
     expect(del).toBeUndefined();
+  });
+});
+
+// ── archive ─────────────────────────────────────────────────
+
+describe('sources archive', () => {
+  test('refuses default', async () => {
+    const { engine } = makeStub();
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'default']));
+    expect(code).toBe(2);
+  });
+
+  test('refuses owned dream system index via ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: true }],
+    });
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
+    expect(code).toBe(2);
+  });
+
+  test('does not hard-refuse ordinary dream before ownership guard', async () => {
+    const { engine } = makeStub({
+      'AS protected': [{ protected: false }],
+    });
+    // Ownership guard passes; missing source exits 4 (not reserved-id 2).
+    const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
+    expect(code).toBe(4);
   });
 });
 

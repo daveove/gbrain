@@ -23,12 +23,14 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let dir: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 120_000);
 
 afterAll(async () => {
@@ -39,6 +41,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await stopPersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   dir = mkdtempSync(join(tmpdir(), 'gb-managed-ingest-'));
   return () => rmSync(dir, { recursive: true, force: true });
 });

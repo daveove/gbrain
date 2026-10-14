@@ -153,6 +153,10 @@ export interface SyncOpts {
   noPull?: boolean;
   noEmbed?: boolean;
   noExtract?: boolean;
+  /** Durable affected-date handoff before consuming a sync anchor. */
+  dailyMemoryFollowup?: boolean;
+  /** Cycle job owns the post-sync handoff; standalone sync queues its own. */
+  dailyMemoryOwnerJobId?: number;
   /**
    * #3969: opt back into per-poll ingest_log rows. By default a sync that
    * landed nothing (no pages written, no chunks, no failures acknowledged)

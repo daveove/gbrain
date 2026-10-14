@@ -37,6 +37,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const get_page = operations.find(o => o.name === 'get_page')!;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-page-sources-'));
 let betaRoot: string;
@@ -81,6 +82,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -91,6 +93,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // Reset creates a new brain identity; give it a fresh physical checkout.
   // Ownership reservations intentionally survive source deletion and cannot
   // be recycled across different brains.

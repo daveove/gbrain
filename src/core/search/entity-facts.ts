@@ -25,8 +25,8 @@ const LINKED_ENTITIES_CAP = 2;
 
 export interface EntityFact { id: number; fact: string; entity_slug: string | null; kind: string; valid_from: string; source: string; linked_from?: string }
 
-async function newestFacts(engine: BrainEngine, sourceId: string, slugs: string[], remote: boolean, limit: number): Promise<EntityFact[]> {
-  const visibility = remote ? `AND f.visibility = 'world' AND ${privateProvenanceFilterFragment('f')}` : '';
+async function newestFacts(engine: BrainEngine, sourceId: string, slugs: string[], remote: boolean, limit: number, excludePrivate: boolean | 'owner-only'): Promise<EntityFact[]> {
+  const visibility = remote ? `AND f.visibility = 'world' AND ${privateProvenanceFilterFragment('f', excludePrivate)}` : '';
   const rows = await engine.executeRaw<EntityFact>(
     `SELECT f.id, f.fact, f.entity_slug, f.kind, f.valid_from::text AS valid_from, f.source
        FROM facts f
@@ -41,12 +41,12 @@ async function newestFacts(engine: BrainEngine, sourceId: string, slugs: string[
 }
 
 /** The named entity's newest facts, then those of entities its facts name. Fail-soft: errors return []. */
-export async function entitySavedFacts(engine: BrainEngine, entity: ResolvedEntity, opts: { remote: boolean; excludePrivate: boolean }): Promise<EntityFact[]> {
+export async function entitySavedFacts(engine: BrainEngine, entity: ResolvedEntity, opts: { remote: boolean; excludePrivate: boolean | 'owner-only' }): Promise<EntityFact[]> {
   try {
     const sourceId = entity.pages[0]!.source_id;
     const own = new Set<string>();
     for (const p of entity.pages) for (const s of await factEntitySlugs(engine, sourceId, p.slug, { excludePrivate: opts.excludePrivate })) own.add(s);
-    const facts = await newestFacts(engine, sourceId, [...own], opts.remote, ENTITY_FACTS_CAP);
+    const facts = await newestFacts(engine, sourceId, [...own], opts.remote, ENTITY_FACTS_CAP, opts.excludePrivate);
     const out: EntityFact[] = [...facts];
     const seenEntities = new Set(own);
     let linked = 0;
@@ -59,7 +59,7 @@ export async function entitySavedFacts(engine: BrainEngine, entity: ResolvedEnti
         if ([...slugs].some(s => seenEntities.has(s))) continue;
         for (const s of slugs) seenEntities.add(s);
         linked++;
-        for (const g of await newestFacts(engine, sourceId, [...slugs], opts.remote, LINKED_FACTS_CAP)) {
+        for (const g of await newestFacts(engine, sourceId, [...slugs], opts.remote, LINKED_FACTS_CAP, opts.excludePrivate)) {
           if (!out.some(x => x.id === g.id)) out.push({ ...g, linked_from: f.entity_slug ?? entity.pages[0]!.slug });
         }
       }

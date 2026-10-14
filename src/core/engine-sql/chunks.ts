@@ -27,6 +27,9 @@ import {
   normalizeEngineColumn,
   vectorCastSuffix,
   resolveWriteColumnFromConfigRows,
+  getEmbeddingProvenanceColumns,
+  embeddingColumnSignature,
+  independentPageProofContextSql,
   quoteIdentifier,
   COLUMN_NAME_REGEX,
   EmbeddingColumnNotRegisteredError,
@@ -59,6 +62,18 @@ export interface ChunkPageGuards {
 export type ChunkTransactionRunner = <T>(fn: (tx: Pick<BrainEngine, 'executeRaw'>) => Promise<T>) => Promise<T>;
 
 type StaleChunkOpts = { sourceId?: string; signature?: string; includeNullSignature?: boolean };
+
+function independentReadProof(column: ResolvedColumn, complete = true): SqlFragment {
+  const proof = getEmbeddingProvenanceColumns(column);
+  const vector = trustedSql(`cc.${quoteIdentifier(column.name)}`);
+  const model = trustedSql(`cc.${quoteIdentifier(proof.model)}`);
+  const textHash = trustedSql(`cc.${quoteIdentifier(proof.textHash)}`);
+  const inputHash = trustedSql(`cc.${quoteIdentifier(proof.inputHash)}`);
+  const signature = trustedSql(`p.${quoteIdentifier(proof.pageSignature)}`);
+  return sqlFragment`${vector} IS NOT NULL AND ${model} = ${column.embeddingModel}
+    AND ${textHash} = md5(cc.chunk_text) AND ${inputHash} IS NOT NULL
+    ${complete ? sqlFragment`AND ${signature} = ${embeddingColumnSignature(column)} || ':' || ${trustedSql(independentPageProofContextSql())}` : sqlFragment``}`;
+}
 
 export async function upsertChunksOnce(
   exec: SqlExecutor,
@@ -168,11 +183,22 @@ export async function upsertChunksOnce(
     const writeColId = quoteIdentifier(writeCol.name);
     const writeCast = vectorCastSuffix(writeCol);
     const col = trustedSql(writeColId);
+    const proof = getEmbeddingProvenanceColumns(writeCol);
+    const modelId = writeCol.provenance ? quoteIdentifier(proof.model) : 'model';
+    const timeId = writeCol.provenance ? quoteIdentifier(proof.embeddedAt) : 'embedded_at';
+    const textHashId = writeCol.provenance ? quoteIdentifier(proof.textHash) : 'embedded_text_hash';
+    const inputHashId = writeCol.provenance ? quoteIdentifier(proof.inputHash) : 'embedding_input_hash';
+    const pendingId = writeCol.provenance ? quoteIdentifier(proof.pendingSince) : 'embedding_pending_since';
+    const model = trustedSql(modelId), time = trustedSql(timeId), textHash = trustedSql(textHashId);
+    const inputHash = trustedSql(inputHashId), pending = trustedSql(pendingId);
+    const inputChanged = writeCol.provenance
+      ? sqlFragment`(EXCLUDED.chunk_text IS DISTINCT FROM content_chunks.chunk_text OR EXCLUDED.chunk_source IS DISTINCT FROM content_chunks.chunk_source)`
+      : sqlFragment`EXCLUDED.chunk_text != content_chunks.chunk_text`;
 
     // #4246: embedded_text_hash records md5(chunk_text) AT EMBED TIME so a
     // later text rewrite that keeps the vector is detectable as content
     // drift (invalidateContentDriftEmbeddings). NULL when no embedding lands.
-    const cols = `(page_id, chunk_index, chunk_text, chunk_source, ${writeColId}, model, token_count, embedded_at, embedded_text_hash, embedding_input_hash, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image, embedding_pending_since)`;
+    const cols = `(page_id, chunk_index, chunk_text, chunk_source, ${writeColId}, ${modelId}, token_count, ${timeId}, ${textHashId}, ${inputHashId}, language, symbol_name, symbol_type, start_line, end_line, parent_symbol_path, doc_comment, symbol_name_qualified, modality, embedding_image, ${pendingId})`;
     let resolvedModel: string | null = gatewayModel;
     if (!resolvedModel) resolvedModel = (await modelRows)?.[0]?.value ?? null;
     resolvedModel = writeCol.embeddingModel || resolvedModel;
@@ -180,11 +206,18 @@ export async function upsertChunksOnce(
       throw new Error('Embedding model provenance is unknown. Supply an explicit chunk model or run gbrain migrate embeddings --status before an explicit migration.');
     }
     if (!resolvedModel) resolvedModel = 'unconfigured';
+    if (writeCol.provenance && chunks.some(chunk => chunk.embedding_image ||
+      (chunk.embedding && (chunk.embedding.length !== writeCol.dimensions || (chunk.model !== undefined && chunk.model !== writeCol.embeddingModel))))) {
+      throw new Error(`Refusing incompatible vectors for independent embedding space ${writeCol.name}`);
+    }
+    if (writeCol.provenance) {
+      await exec.run(sqlFragment`UPDATE pages SET ${trustedSql(quoteIdentifier(proof.pageSignature))}=NULL WHERE id=${pageId}`);
+    }
 
     // #5984: one statement text per brain whatever the chunk count (the rows bind as one
     // JSON document), so a prepared connection pays no describe round trip per page.
     const incoming = chunks.map(chunk => {
-      const embedding = chunk.embedding ? '[' + Array.from(chunk.embedding).join(',') + ']' : null;
+      const embedding = chunk.embedding ? '[' + chunk.embedding.join(',') + ']' : null;
       return {
         chunk_index: chunk.chunk_index,
         // Already normalized before the seal snapshot. Both storage and the
@@ -261,45 +294,45 @@ export async function upsertChunksOnce(
          chunk_text = EXCLUDED.chunk_text,
          chunk_source = EXCLUDED.chunk_source,
          ${col} = CASE
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.${col}
+           WHEN ${inputChanged} THEN EXCLUDED.${col}
            WHEN content_chunks.${col} IS NULL THEN EXCLUDED.${col}
-           WHEN EXCLUDED.embedded_at IS NOT NULL
-                AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
+           WHEN EXCLUDED.${time} IS NOT NULL
+                AND (content_chunks.${time} IS NULL OR EXCLUDED.${time} > content_chunks.${time})
                 THEN EXCLUDED.${col}
            ELSE content_chunks.${col}
          END,
-         model = CASE
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.model
-           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.model
-           WHEN EXCLUDED.embedded_at IS NOT NULL
-                AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
-                THEN EXCLUDED.model
-           ELSE content_chunks.model
+         ${model} = CASE
+           WHEN ${inputChanged} THEN EXCLUDED.${model}
+           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.${model}
+           WHEN EXCLUDED.${time} IS NOT NULL
+                AND (content_chunks.${time} IS NULL OR EXCLUDED.${time} > content_chunks.${time})
+                THEN EXCLUDED.${model}
+           ELSE content_chunks.${model}
          END,
          token_count = EXCLUDED.token_count,
-         embedded_at = CASE
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text AND EXCLUDED.${col} IS NULL THEN NULL
-           WHEN content_chunks.${col} IS NULL AND EXCLUDED.${col} IS NOT NULL THEN EXCLUDED.embedded_at
-           WHEN EXCLUDED.embedded_at IS NOT NULL
-                AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
-                THEN EXCLUDED.embedded_at
-           ELSE content_chunks.embedded_at
+         ${time} = CASE
+           WHEN ${inputChanged} AND EXCLUDED.${col} IS NULL THEN NULL
+           WHEN content_chunks.${col} IS NULL AND EXCLUDED.${col} IS NOT NULL THEN EXCLUDED.${time}
+           WHEN EXCLUDED.${time} IS NOT NULL
+                AND (content_chunks.${time} IS NULL OR EXCLUDED.${time} > content_chunks.${time})
+                THEN EXCLUDED.${time}
+           ELSE content_chunks.${time}
          END,
-         embedded_text_hash = CASE
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedded_text_hash
-           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.embedded_text_hash
-           WHEN EXCLUDED.embedded_at IS NOT NULL
-                AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
-                THEN EXCLUDED.embedded_text_hash
-           ELSE content_chunks.embedded_text_hash
+         ${textHash} = CASE
+           WHEN ${inputChanged} THEN EXCLUDED.${textHash}
+           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.${textHash}
+           WHEN EXCLUDED.${time} IS NOT NULL
+                AND (content_chunks.${time} IS NULL OR EXCLUDED.${time} > content_chunks.${time})
+                THEN EXCLUDED.${textHash}
+           ELSE content_chunks.${textHash}
          END,
-         embedding_input_hash = CASE
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.embedding_input_hash
-           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.embedding_input_hash
-           WHEN EXCLUDED.embedded_at IS NOT NULL
-                AND (content_chunks.embedded_at IS NULL OR EXCLUDED.embedded_at > content_chunks.embedded_at)
-                THEN EXCLUDED.embedding_input_hash
-           ELSE content_chunks.embedding_input_hash
+         ${inputHash} = CASE
+           WHEN ${inputChanged} THEN EXCLUDED.${inputHash}
+           WHEN content_chunks.${col} IS NULL THEN EXCLUDED.${inputHash}
+           WHEN EXCLUDED.${time} IS NOT NULL
+                AND (content_chunks.${time} IS NULL OR EXCLUDED.${time} > content_chunks.${time})
+                THEN EXCLUDED.${inputHash}
+           ELSE content_chunks.${inputHash}
          END,
          language = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.language ELSE COALESCE(EXCLUDED.language, content_chunks.language) END,
          symbol_name = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.symbol_name ELSE COALESCE(EXCLUDED.symbol_name, content_chunks.symbol_name) END,
@@ -311,11 +344,11 @@ export async function upsertChunksOnce(
          symbol_name_qualified = CASE WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN EXCLUDED.symbol_name_qualified ELSE COALESCE(EXCLUDED.symbol_name_qualified, content_chunks.symbol_name_qualified) END,
          modality = EXCLUDED.modality,
          embedding_image = COALESCE(EXCLUDED.embedding_image, content_chunks.embedding_image),
-         embedding_pending_since = CASE
+         ${pending} = CASE
            WHEN EXCLUDED.${col} IS NOT NULL THEN NULL
-           WHEN content_chunks.${col} IS NULL THEN COALESCE(content_chunks.embedding_pending_since, now())
-           WHEN EXCLUDED.chunk_text != content_chunks.chunk_text THEN now()
-           ELSE content_chunks.embedding_pending_since
+           WHEN content_chunks.${col} IS NULL THEN COALESCE(content_chunks.${pending}, now())
+           WHEN ${inputChanged} THEN now()
+           ELSE content_chunks.${pending}
          END`);
     if (sealed === undefined || opts?.deferSeal) { await exec.query(text, params); return; }
     const [{ rows }] = await pipelined({ kind: exec.dialect }, [sealPage, () => exec.query(text, params)]) as [{ rows: Array<{ id: number }> }];
@@ -325,12 +358,17 @@ export async function upsertChunksOnce(
 
 export async function getChunks(
   exec: ScopedRead,
-  column: string,
+  column: string | ResolvedColumn,
   slug: string,
   scope: { sourceIds?: string[]; sourceId: string },
-  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean },
+  opts?: { includeEmbedding?: boolean; excludePrivate?: boolean | 'owner-only'; requireSafeChunks?: boolean; includeUnsealed?: boolean },
 ): Promise<Chunk[]> {
-      const colId = trustedSql(quoteIdentifier(column));
+      const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+      const colId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
+      const proof = descriptor?.provenance;
+      const model = trustedSql(proof ? `cc.${quoteIdentifier(proof.model)} AS model` : 'cc.model');
+      const embeddedAt = trustedSql(proof ? `cc.${quoteIdentifier(proof.embeddedAt)} AS embedded_at` : 'cc.embedded_at');
+      const fresh = proof ? independentReadProof(descriptor!) : undefined;
       const includeEmbedding = opts?.includeEmbedding === true;
       const scopeSql = scope.sourceIds
         ? sqlFragment`p.source_id = ANY(${scope.sourceIds}::text[])`
@@ -344,18 +382,23 @@ export async function getChunks(
       // embedding_is_null: boolean truth of the stored vector (a schema
       // rebuild NULLs vectors without touching embedded_at). S2: it reports
       // the registry-ACTIVE column's truth — `embed <page>` filters on it.
-      const embedCol = includeEmbedding ? sqlFragment`, cc.${colId} AS embedding` : sqlFragment``;
+      const embedCol = includeEmbedding ? (fresh
+        ? sqlFragment`, CASE WHEN ${fresh} THEN cc.${colId} ELSE NULL END AS embedding`
+        : sqlFragment`, cc.${colId} AS embedding`) : sqlFragment``;
+      const missing = fresh ? sqlFragment`NOT COALESCE((${independentReadProof(descriptor!, false)}),false)` : sqlFragment`cc.${colId} IS NULL`;
+      const inputProof = proof ? sqlFragment`, cc.${trustedSql(quoteIdentifier(proof.inputHash))} AS embedding_input_hash` : sqlFragment``;
       const { rows } = await exec.run(sqlFragment`
         SELECT cc.id, cc.page_id, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-               cc.model, cc.token_count, cc.embedded_at, cc.language,
+               ${model}, cc.token_count, ${embeddedAt}, cc.language,
                cc.symbol_name, cc.symbol_type, cc.start_line, cc.end_line,
                cc.parent_symbol_path, cc.doc_comment, cc.symbol_name_qualified, cc.modality,
-               (cc.${colId} IS NULL) AS embedding_is_null
+               (${missing}) AS embedding_is_null
                ${embedCol}
+               ${inputProof}
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
         WHERE p.slug = ${slug} AND ${scopeSql}
-          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``}
+          ${opts?.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sqlFragment``}
           ${opts?.includeUnsealed ? sqlFragment`` : trustedSql(`AND ${currentTextProjectionFilter('p')}`)}
           ${requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``}
         ORDER BY cc.chunk_index
@@ -373,8 +416,18 @@ export async function getChunks(
  * too (provider-migration paths). Shared by countStaleChunks +
  * sumStaleChunkChars so they can't drift.
  */
-function staleChunkWhere(column: string, opts?: StaleChunkOpts): SqlFragment {
-  const staleColRef = trustedSql(`cc.${quoteIdentifier(column)}`);
+function staleChunkWhere(column: string | ResolvedColumn, opts?: StaleChunkOpts): SqlFragment {
+  const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+  if (descriptor?.provenance) {
+    const scope = opts?.sourceId !== undefined ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
+    return sqlFragment`p.deleted_at IS NULL AND NOT COALESCE((${independentReadProof(descriptor)}),false)
+      AND ${trustedSql(currentTextProjectionFilter('p'))}
+      AND cc.modality = 'text'
+      AND ${trustedSql(EMBED_SKIP_FILTER_FRAGMENT)}
+      AND ${trustedSql(QUARANTINE_FILTER_FRAGMENT)}
+      AND EXISTS(SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived) ${scope}`;
+  }
+  const staleColRef = trustedSql(`cc.${quoteIdentifier(typeof column === 'string' ? column : column.name)}`);
   const conds: SqlFragment[] = [sqlFragment`p.deleted_at IS NULL`];
   if (opts?.signature !== undefined) {
     conds.push(
@@ -390,7 +443,7 @@ function staleChunkWhere(column: string, opts?: StaleChunkOpts): SqlFragment {
   return joinFragments(conds, ' AND ');
 }
 
-export async function countStaleChunks(exec: ScopedRead, column: string, opts?: StaleChunkOpts): Promise<number> {
+export async function countStaleChunks(exec: ScopedRead, column: string | ResolvedColumn, opts?: StaleChunkOpts): Promise<number> {
     // Always JOIN pages so the embed_skip + signature predicates apply.
     // D7: source_id scoping. v0.41.31: optional signature widens staleness
     // to embedding_signature drift (NULL grandfathered unless
@@ -403,7 +456,7 @@ export async function countStaleChunks(exec: ScopedRead, column: string, opts?: 
     return Number(rows[0]?.count ?? 0);
   }
 
-export async function sumStaleChunkChars(exec: LegacyUnscopedRead, column: string, opts?: StaleChunkOpts): Promise<number> {
+export async function sumStaleChunkChars(exec: LegacyUnscopedRead, column: string | ResolvedColumn, opts?: StaleChunkOpts): Promise<number> {
     // Sibling of countStaleChunks: same stale predicate, summing chunk_text
     // length for the sync cost preview. ::bigint guards int4 overflow.
     const { text, params } = renderFragment(sqlFragment`SELECT COALESCE(SUM(LENGTH(cc.chunk_text)), 0)::bigint AS chars
@@ -426,30 +479,39 @@ export async function setPageEmbeddingSignature(exec: SqlExecutor, slug: string,
  * identical text, values bound in place of its hand-numbered `$model` /
  * `$dims`. `test/engine-sql-chunks.test.ts` pins the two against each other.
  */
-export function currentSpaceChunkFragment(column: string, model: string, dims: number | null): SqlFragment {
-  const colId = trustedSql(quoteIdentifier(column));
+export function currentSpaceChunkFragment(column: string | ResolvedColumn, model: string, dims: number | null): SqlFragment {
+  const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+  const colId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
+  const proof = descriptor?.provenance;
+  const modelRef = trustedSql(proof ? `cc.${quoteIdentifier(proof.model)}` : 'cc.model');
+  const hashRef = trustedSql(proof ? `cc.${quoteIdentifier(proof.textHash)}` : 'cc.embedded_text_hash');
   return sqlFragment`COALESCE(cc.${colId} IS NOT NULL
-              AND cc.model = ${model}
-              AND cc.embedded_text_hash = md5(cc.chunk_text)
-              AND vector_dims(cc.${colId}) = ${dims}::int, false)`;
+              AND ${modelRef} = ${proof ? descriptor!.embeddingModel : model}
+              AND ${hashRef} = md5(cc.chunk_text)
+              ${proof ? sqlFragment`AND cc.${trustedSql(quoteIdentifier(proof.inputHash))} IS NOT NULL` : sqlFragment``}
+              AND vector_dims(cc.${colId}) = ${proof ? descriptor!.dimensions : dims}::int, false)`;
 }
 
 export async function invalidateStaleSignatureEmbeddings(
   inTransaction: ChunkTransactionRunner,
-  column: string,
+  column: string | ResolvedColumn,
   opts: { signature: string; sourceId?: string; includeNullSignature?: boolean },
 ): Promise<number> {
-    const colId = trustedSql(quoteIdentifier(column));
+    const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+    const colId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
+    const proof = descriptor?.provenance;
+    const time = trustedSql(proof ? quoteIdentifier(proof.embeddedAt) : 'embedded_at');
+    const pending = trustedSql(proof ? quoteIdentifier(proof.pendingSince) : 'embedding_pending_since');
     const { model, dims } = splitEmbeddingSignature(opts.signature);
     const srcClause = opts.sourceId !== undefined ? sqlFragment` AND p.source_id = ${opts.sourceId}` : sqlFragment``;
-    const sigClause = opts.includeNullSignature
+    const sigClause = proof ? sqlFragment`NOT COALESCE((${independentReadProof(descriptor!)}),false)` : opts.includeNullSignature
       ? sqlFragment`(p.embedding_signature IS NULL OR p.embedding_signature <> ${opts.signature})`
       : sqlFragment`p.embedding_signature IS NOT NULL
           AND p.embedding_signature <> ${opts.signature}`;
     return inTransaction(async tx => {
       const sources = await lockEmbeddingSources(tx, opts.sourceId);
       const { text, params } = renderFragment(sqlFragment`UPDATE content_chunks cc
-            SET ${colId} = NULL, embedded_at = NULL, embedding_pending_since = now()
+            SET ${colId} = NULL, ${time} = NULL, ${pending} = now()
            FROM pages p
           WHERE cc.page_id = p.id
             AND p.deleted_at IS NULL
@@ -465,7 +527,7 @@ export async function invalidateStaleSignatureEmbeddings(
 
 export async function invalidateContentDriftEmbeddings(
   inTransaction: ChunkTransactionRunner,
-  column: string,
+  column: string | ResolvedColumn,
   opts?: { sourceId?: string },
 ): Promise<number> {
     // #4246: NULL embeddings whose stored embed-time hash no longer matches
@@ -477,27 +539,31 @@ export async function invalidateContentDriftEmbeddings(
     // would strand them (same never-NULL-what-nothing-re-embeds rule as
     // embedding-invalidation.ts). S2: keyed on the registry-ACTIVE column
     // (the engine resolves it with the loud resolver).
-    const colId = trustedSql(quoteIdentifier(column));
+    const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+    const colId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
+    const proof = descriptor?.provenance;
+    const time = trustedSql(proof ? quoteIdentifier(proof.embeddedAt) : 'embedded_at');
+    const hash = trustedSql(proof ? quoteIdentifier(proof.textHash) : 'embedded_text_hash');
+    const pending = trustedSql(proof ? quoteIdentifier(proof.pendingSince) : 'embedding_pending_since');
     const srcClause = opts?.sourceId !== undefined ? sqlFragment` AND p.source_id = ${opts.sourceId}` : sqlFragment``;
     return inTransaction(async tx => {
       const sources = await lockEmbeddingSources(tx, opts?.sourceId);
       const { text, params } = renderFragment(sqlFragment`UPDATE content_chunks cc
-            SET ${colId} = NULL, embedded_at = NULL, embedded_text_hash = NULL, embedding_pending_since = now()
+            SET ${colId} = NULL, ${time} = NULL, ${hash} = NULL, ${pending} = now()
            FROM pages p
           WHERE cc.page_id = p.id
             AND p.source_id=ANY(${sources}::text[])
             AND EXISTS (SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived)
             AND p.deleted_at IS NULL
             AND cc.${colId} IS NOT NULL
-            AND cc.embedded_text_hash IS NOT NULL
-            AND cc.embedded_text_hash <> md5(cc.chunk_text)
+            AND ${proof ? sqlFragment`(cc.${hash} IS NULL OR cc.${hash} <> md5(cc.chunk_text))` : sqlFragment`cc.${hash} IS NOT NULL AND cc.${hash} <> md5(cc.chunk_text)`}
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')${srcClause}
           RETURNING cc.page_id`);
       return (await tx.executeRaw(text, params)).length;
     });
   }
 
-export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
+export async function listStaleChunks(exec: ScopedRead, column: string | ResolvedColumn, opts?: {
   batchSize?: number;
   afterPageId?: number;
   afterChunkIndex?: number;
@@ -511,7 +577,10 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
     const orderBy = opts?.orderBy ?? 'page_id';
     // S2: stale = NULL in the registry-ACTIVE column (resolved by the engine
     // BEFORE the scoped transaction, falling back to legacy on a broken registry).
-    const staleColId = trustedSql(quoteIdentifier(column));
+    const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+    const staleColId = trustedSql(quoteIdentifier(typeof column === 'string' ? column : descriptor!.name));
+    const stale = descriptor?.provenance ? staleChunkWhere(descriptor) : sqlFragment`cc.${staleColId} IS NULL AND p.deleted_at IS NULL`;
+    const model = trustedSql(descriptor?.provenance ? `cc.${quoteIdentifier(descriptor.provenance.model)} AS model` : 'cc.model');
     const read = async (fragment: SqlFragment) => (await exec.run(fragment)).rows as unknown as StaleChunkRow[];
 
       // v0.41.18.0 (A13, codex #9): --priority recent path. Composite cursor
@@ -523,21 +592,21 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
         if (opts?.sourceId === undefined) {
           return isFirstPage ? read(sqlFragment`
             SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-                   cc.model, cc.token_count, p.source_id, cc.page_id,
+                   ${model}, cc.token_count, p.source_id, cc.page_id,
                    p.updated_at
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
-            WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+            WHERE ${stale}
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
             LIMIT ${limit}
           `) : read(sqlFragment`
             SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-                   cc.model, cc.token_count, p.source_id, cc.page_id,
+                   ${model}, cc.token_count, p.source_id, cc.page_id,
                    p.updated_at
             FROM content_chunks cc
             JOIN pages p ON p.id = cc.page_id
-            WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+            WHERE ${stale}
               AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
               AND (
                 p.updated_at < ${afterUpdated}::timestamptz
@@ -550,22 +619,22 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
         }
         return isFirstPage ? read(sqlFragment`
           SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-                 cc.model, cc.token_count, p.source_id, cc.page_id,
+                 ${model}, cc.token_count, p.source_id, cc.page_id,
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+          WHERE ${stale}
             AND p.source_id = ${opts.sourceId}
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           ORDER BY p.updated_at DESC NULLS LAST, p.id ASC, cc.chunk_index ASC
           LIMIT ${limit}
         `) : read(sqlFragment`
           SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-                 cc.model, cc.token_count, p.source_id, cc.page_id,
+                 ${model}, cc.token_count, p.source_id, cc.page_id,
                  p.updated_at
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+          WHERE ${stale}
             AND p.source_id = ${opts.sourceId}
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (
@@ -581,10 +650,10 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
       if (opts?.sourceId === undefined) {
         return read(sqlFragment`
           SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-                 cc.model, cc.token_count, p.source_id, cc.page_id
+                 ${model}, cc.token_count, p.source_id, cc.page_id
           FROM content_chunks cc
           JOIN pages p ON p.id = cc.page_id
-          WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+          WHERE ${stale}
             AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
             AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
           ORDER BY cc.page_id, cc.chunk_index
@@ -593,10 +662,10 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
       }
       return read(sqlFragment`
         SELECT p.slug, cc.chunk_index, cc.chunk_text, cc.chunk_source,
-               cc.model, cc.token_count, p.source_id, cc.page_id
+               ${model}, cc.token_count, p.source_id, cc.page_id
         FROM content_chunks cc
         JOIN pages p ON p.id = cc.page_id
-        WHERE cc.${staleColId} IS NULL AND p.deleted_at IS NULL
+        WHERE ${stale}
           AND p.source_id = ${opts.sourceId}
           AND NOT (COALESCE(p.frontmatter, '{}'::jsonb) ? 'embed_skip')
           AND (cc.page_id, cc.chunk_index) > (${afterPid}, ${afterIdx})
@@ -610,7 +679,7 @@ export async function listStaleChunks(exec: ScopedRead, column: string, opts?: {
  * embed_skip pages — both are intentionally chunkless by design, not drift
  * the safety net should repair.
  */
-function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
+function chunklessPagesWhere(opts?: { sourceId?: string; activeSourcesOnly?: boolean }): SqlFragment {
   const conds: SqlFragment[] = [
     sqlFragment`p.deleted_at IS NULL`,
     // healChunklessPages chunks BOTH compiled_truth and timeline (mirrors
@@ -622,10 +691,11 @@ function chunklessPagesWhere(opts?: { sourceId?: string }): SqlFragment {
     sqlFragment`NOT EXISTS (SELECT 1 FROM content_chunks cc WHERE cc.page_id = p.id)`,
   ];
   if (opts?.sourceId) conds.push(sqlFragment`p.source_id = ${opts.sourceId}`);
+  if (opts?.activeSourcesOnly) conds.push(sqlFragment`EXISTS(SELECT 1 FROM sources s WHERE s.id=p.source_id AND NOT s.archived)`);
   return joinFragments(conds, ' AND ');
 }
 
-export async function countChunklessPagesWithContent(exec: ScopedRead, opts?: { sourceId?: string }): Promise<number> {
+export async function countChunklessPagesWithContent(exec: ScopedRead, opts?: { sourceId?: string; activeSourcesOnly?: boolean }): Promise<number> {
     const { text, params } = renderFragment(sqlFragment`SELECT count(*)::int AS count FROM pages p WHERE ${chunklessPagesWhere(opts)}`);
     const { rows } = await exec.unsafe<{ count?: number }>(text, params);
     return Number(rows[0]?.count ?? 0);
@@ -682,24 +752,27 @@ export function decodeVectorSend(value: unknown): Float32Array | null {
   return embedding;
 }
 
-export async function getEmbeddingsByChunkIds(exec: LegacyUnscopedRead, ids: number[], column: string): Promise<Map<number, Float32Array>> {
+export async function getEmbeddingsByChunkIds(exec: LegacyUnscopedRead, ids: number[], column: string | ResolvedColumn): Promise<Map<number, Float32Array>> {
     if (ids.length === 0) return new Map();
+    const descriptor = typeof column === 'string' ? undefined : normalizeEngineColumn(column);
+    const name = typeof column === 'string' ? column : descriptor!.name;
     // v0.36 (D9): column parameter used by hybrid.cosineReScore so
     // rescoring rehydrates from the active column's embedding space,
     // not always 'embedding'. Engine has no resolver access; the
     // caller must pass a known column name. Identifier-quoted (D12
     // defense layer 2) plus a strict regex check (D12 defense layer 1)
     // so even a misconfigured caller can't smuggle a SQL fragment.
-    if (!COLUMN_NAME_REGEX.test(column)) {
-      throw new EmbeddingColumnNotRegisteredError(column, []);
+    if (!COLUMN_NAME_REGEX.test(name)) {
+      throw new EmbeddingColumnNotRegisteredError(name, []);
     }
     // Binary transfer (`vector_send`, halfvec cast exactly to vector): the
     // text literal cost about 3x more in vector_out formatting, wire bytes and
     // parsing than the TOAST read itself, for the same float4 values.
-    const quotedCol = trustedSql(quoteIdentifier(column));
+    const quotedCol = trustedSql(quoteIdentifier(name));
+    const proof = descriptor?.provenance ? sqlFragment`AND ${independentReadProof(descriptor)}` : sqlFragment``;
     const { text, params } = renderFragment(sqlFragment`
       SELECT cc.id, vector_send(cc.${quotedCol}::vector) AS embedding FROM content_chunks cc JOIN pages p ON p.id=cc.page_id
-      WHERE cc.id = ANY(${ids}::int[]) AND cc.${quotedCol} IS NOT NULL AND ${trustedSql(currentTextProjectionFilter('p'))}
+      WHERE cc.id = ANY(${ids}::int[]) AND cc.${quotedCol} IS NOT NULL AND ${trustedSql(currentTextProjectionFilter('p'))} ${proof}
     `);
     const { rows } = await exec.unsafe(text, params);
     const result = new Map<number, Float32Array>();
@@ -727,7 +800,7 @@ export async function getChunkWindows(exec: ScopedRead, requests: ChunkWindowReq
   const scopeSql = opts.sourceIds && opts.sourceIds.length > 0
     ? sqlFragment`AND p.source_id = ANY(${opts.sourceIds}::text[])`
     : opts.sourceId ? sqlFragment`AND p.source_id = ${opts.sourceId}` : sqlFragment``;
-  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p')}`) : sqlFragment``;
+  const privateSql = opts.excludePrivate ? trustedSql(`AND ${privatePagesFilterFragment('p', opts?.excludePrivate)}`) : sqlFragment``;
   const safeSql = requiresSafeChunks(opts) ? trustedSql(`AND ${safeChunksFilter('p')}`) : sqlFragment``;
   const { rows } = await exec.run(sqlFragment`
     WITH req AS (

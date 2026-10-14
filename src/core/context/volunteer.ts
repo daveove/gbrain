@@ -78,7 +78,7 @@ export interface VolunteerOpts {
   /** v0.46.15: lexical-arms kill switch — see ResolvePointersOpts.lexicalArms. */
   lexicalArms?: boolean;
   /** Private-page filter — see ResolvePointersOpts.excludePrivate (default true). */
-  excludePrivate?: boolean;
+  excludePrivate?: boolean | 'owner-only';
   /** #5575: the enclosing surface's proactive eligibility; absent, the `volunteer` surface policy applies. */
   eligibility?: ReadEligibility;
   /** #5575 DX-10: receives the page keys (`source_id:slug`) activation control withheld. */

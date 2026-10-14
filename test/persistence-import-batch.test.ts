@@ -234,16 +234,18 @@ test('a batch admission whose COMMIT acknowledgment is lost replays its admitted
     const lose = (times: number) => {
       let drops = 0;
       brain.engine.reconnect = (async () => undefined) as BrainEngine['reconnect'];
-      brain.engine.transaction = (async <T>(fn: (tx: BrainEngine) => Promise<T>) => {
+      brain.engine.transaction = (async function<T>(this: BrainEngine, fn: (tx: BrainEngine) => Promise<T>, opts?: Parameters<BrainEngine['transaction']>[1]) {
+        // Atomic daily follow-ups open nested savepoints; keep their transaction receiver instead of re-entering the root.
+        if (this !== brain.engine) return original.transaction.call(this, fn, opts) as Promise<T>;
         let admits = false;
-        const value = await original.transaction.call(brain.engine, (tx: BrainEngine) => {
+        const value = await original.transaction.call(this, (tx: BrainEngine) => {
           const seen = Object.create(tx) as BrainEngine;
           seen.executeRaw = ((sql: string, params?: unknown[], opts?: unknown) => {
             if (sql.includes('INSERT INTO persistence_requests') || sql.includes('principal_id=$2 AND request_id=ANY($3::uuid[])')) admits = true;
             return tx.executeRaw(sql, params, opts as never);
           }) as BrainEngine['executeRaw'];
           return fn(seen);
-        });
+        }, opts);
         if (admits && drops < times && ++drops) throw Object.assign(new Error('write CONNECTION_CLOSED 127.0.0.1:5432'), { code: 'CONNECTION_CLOSED' });
         return value as T;
       }) as BrainEngine['transaction'];

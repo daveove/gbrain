@@ -76,7 +76,7 @@ export async function searchAliasRequired(engine: BrainEngine, alias: string, te
   return engine.searchKeyword(phrase, { ...opts, orFallback: false, offset: 0, rankQuery: aliasRankQuery(phrase, terms) });
 }
 
-interface Scope { sourceId?: string; sourceIds?: string[]; excludePrivate: boolean }
+interface Scope { sourceId?: string; sourceIds?: string[]; excludePrivate: boolean | 'owner-only' }
 
 export interface ResolvedEntity { pages: Array<{ slug: string; source_id: string }>; tokens: [number, number] }
 
@@ -106,7 +106,7 @@ export async function resolveQueryEntities(engine: BrainEngine, query: string, s
   const titleRows = await engine.executeRaw<{ slug: string; source_id: string; t: string }>(
     `SELECT slug, source_id, lower(title) AS t FROM pages
       WHERE lower(title) = ANY($1::text[]) AND source_id = ANY($2::text[]) AND type = ANY($3::text[]) AND deleted_at IS NULL
-      ${scope.excludePrivate ? `AND ${privatePagesFilterFragment('pages')}` : ''}`, [norms, sources, types]).catch(() => []);
+      ${scope.excludePrivate ? `AND ${privatePagesFilterFragment('pages', scope.excludePrivate)}` : ''}`, [norms, sources, types]).catch(() => []);
   const caseRows = await engine.executeRaw<{ slug: string; alias_norm: string; alias_text: string | null }>(
     `SELECT slug, alias_norm, alias_text FROM page_aliases WHERE alias_norm = ANY($1::text[]) AND case_sensitive AND source_id = ANY($2::text[])`,
     [norms, sources]).catch(() => []);

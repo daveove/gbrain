@@ -4,10 +4,10 @@
  * (`frontmatter_integrity`, `frontmatter_repairable`, the `timeline_history`
  * group, `fence_integrity`; fixture in test/helpers/doctor-hot-checks-fixture.ts).
  * Pins the first doctor run, then a second one after edits (incremental
- * census pass, resumed timeline state). Captured on 3f960312a before the
- * doctor speedups (shared parse pass, batched reads, Git memo), which must
- * reproduce it byte for byte after the hermetic doctor-json-v1 normalizer
- * (timings, timestamps and paths only).
+ * census pass, resumed timeline state). The original 3f960312a capture pins
+ * the doctor speedups (shared parse pass, batched reads, Git memo). Import's
+ * intentional inline extraction improves graph metrics and queues daily
+ * indexes; both runs now capture that real pending work without draining it.
  *
  * Postgres twin: test/e2e/doctor-hot-checks-golden.test.ts. PGLite, $0.
  */
@@ -45,7 +45,16 @@ async function capture(): Promise<Captures> {
 describe('gbrain doctor --json golden on the hot-check fixture (PGLite)', () => {
   test('first and second doctor runs match the 3f960312a capture', async () => {
     const c = await expectNormalizerStable(capture, BOTH);
-    for (const run of [c.first, c.second]) expect(run.json).not.toBeNull();
+    for (const run of [c.first, c.second]) {
+      expect(run.json).not.toBeNull();
+      const report = run.json as { checks: Array<{ name: string; status: string; details?: { depth?: number; worker_alive?: boolean }; fix?: { argv?: string[] } }> };
+      const queue = report.checks.find(check => check.name === 'queue_health');
+      expect(queue).toMatchObject({
+        status: 'warn', details: { worker_alive: false },
+        fix: { argv: expect.arrayContaining(['gbrain', 'jobs', 'work']) },
+      });
+      expect(queue?.details?.depth).toBeGreaterThan(0);
+    }
     expectGolden('doctor/hot-checks-pglite-json', c, BOTH);
   }, 300_000);
 });
