@@ -1142,7 +1142,7 @@ async function embedPage(
     recordFailure(result, toEmbed.length, slug, e);
     result.pages_processed++;
     serr(`  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
-    await healAndReportOverLength(engine, slug, page.source_id, e, toEmbed.map(c => c.chunk_text), serr);
+    if (!target) await healAndReportOverLength(engine, slug, page.source_id, e, toEmbed.map(c => c.chunk_text), serr);
     return;
   }
   const embeddingMap = new Map<number, Float32Array>();
@@ -1179,7 +1179,7 @@ async function embedPage(
   if (failed > 0) {
     recordFailure(result, failed, slug, firstError);
     serr(`  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
-    await healAndReportOverLength(engine, slug, page.source_id, firstError, toEmbed.map(c => c.chunk_text), serr);
+    if (!target) await healAndReportOverLength(engine, slug, page.source_id, firstError, toEmbed.map(c => c.chunk_text), serr);
   }
   result.pages_processed++;
   if (!quiet) slog(`${slug}: embedded ${toEmbed.length - failed} chunks`);
@@ -1376,14 +1376,14 @@ async function embedAll(
       if (failed > 0) {
         recordFailure(result, failed, page.slug, firstError);
         serr(`\n  ${page.slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
-        await healAndReportOverLength(engine, page.slug, pageSourceId, firstError, toEmbed.map(c => c.chunk_text), serr);
+        if (!target) await healAndReportOverLength(engine, page.slug, pageSourceId, firstError, toEmbed.map(c => c.chunk_text), serr);
       }
     } catch (e: unknown) {
       // #3037: count the darkened page so the run can't exit 0 (abort is a
       // shutdown, not a failure).
       if (!isAborted(signal)) recordFailure(result, toEmbed.length, page.slug, e);
       serr(`\n  Error embedding ${page.slug}: ${e instanceof Error ? e.message : e}`);
-      if (!isAborted(signal)) await healAndReportOverLength(engine, page.slug, pageSourceId, e, toEmbed.map(c => c.chunk_text), serr);
+      if (!target && !isAborted(signal)) await healAndReportOverLength(engine, page.slug, pageSourceId, e, toEmbed.map(c => c.chunk_text), serr);
     }
 
     processed++;
@@ -2083,7 +2083,7 @@ async function embedAllStale(
           if (failed > 0) {
             recordFailure(result, failed, slug, firstError);
             serr(`\n  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${stale.length - failed}`);
-            await healAndReportOverLength(engine, slug, keySourceId, firstError, stale.map(c => c.chunk_text), serr);
+            if (!target) await healAndReportOverLength(engine, slug, keySourceId, firstError, stale.map(c => c.chunk_text), serr);
           }
           // #3622: reaching here means at least one chunk persisted (a total
           // embed failure throws) — progress, so the quarantine counter resets.
@@ -2094,7 +2094,8 @@ async function embedAllStale(
           if (effectiveSignal.aborted) return;
           recordFailure(result, stale.length, slug, e);
           serr(`\n  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
-          noteEmbedQuarantineFailure(key, slug); await healAndReportOverLength(engine, slug, keySourceId, e, stale.map(c => c.chunk_text), serr);
+          noteEmbedQuarantineFailure(key, slug);
+          if (!target) await healAndReportOverLength(engine, slug, keySourceId, e, stale.map(c => c.chunk_text), serr);
         } finally {
           const tally = staleProgress.pageDone(census, stale.length); onProgress?.(tally.done, tally.total, result.embedded);
         }

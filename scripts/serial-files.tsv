@@ -141,6 +141,7 @@ test/dream-publication-hold.serial.test.ts	R2	R2: mock.module(../src/core/ai/gat
 test/dream-synthesize-chunking.serial.test.ts	R1	R1: mutates process.env (ANTHROPIC_API_KEY)
 test/embed-backfill-cli-admission.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect; patches process stdout/stderr/console
 test/embed-exit-code-3037.serial.test.ts	global-state	global-state: binds local servers/ports
+test/embed-independent-column.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway; learned embedding input caps use process-wide test seams
 test/embed-input-type-wire.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway
 test/embed-lock-skipped.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/embed-max-usd-metered.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway; replaces globalThis.fetch for the Voyage multimodal stub
@@ -332,6 +333,7 @@ test/search/crag-escalation-limit.serial.test.ts	R2	R2: mock.module(dynamic spec
 test/search/crag-think-source-scope.serial.test.ts	R2	R2: mock.module(../../src/core/search/hybrid.ts, ../../src/core/think/index.ts) replaces modules for every file in the process
 test/search/diverse-pool-hybrid.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME); stubs the process-wide gateway embed transport
 test/search/hybrid-reranker-integration.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_AUDIT_DIR)
+test/search/independent-column-query.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway
 test/search/operation-expansion-contract.serial.test.ts	global-state	global-state: spyOn hybrid.hybridSearchCached, console.log
 test/search/output-redaction.serial.test.ts	R2	R2: mock.module(../../src/core/eval-capture.ts, ../../src/core/search/hybrid.ts, ../../src/core/ai/gateway.ts, ../../src/core/think/index.ts) replaces modules for every file in the process
 test/search/relational-rerank-pin-hybrid.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)

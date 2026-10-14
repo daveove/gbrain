@@ -6,13 +6,14 @@ import { resolveRegisteredEmbeddingColumnFromEngine, getEmbeddingProvenanceColum
   embeddingColumnSignature, independentPageProofContextSql } from '../core/search/embedding-column.ts';
 import { assertIndependentColumnInitialized } from '../core/embedding-column-schema.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
-import { assertEmbeddingEnabled } from '../core/embedding-dim-check.ts';
+import { assertEmbeddingEnabled, readContentChunksEmbeddingDim, embeddingMismatchMessage } from '../core/embedding-dim-check.ts';
 import { loadConfig } from '../core/config.ts';
 import { validateEmbeddingCreds } from '../core/embed-preflight.ts';
 import { prepareEmbeddingProjections, countArchivedEmbeddingWork, reportBlockedProjections, listPendingProjectionPages } from '../core/embedding-readiness.ts';
 import { probeEmbedder } from '../core/embed-stale.ts';
 import { embedBatchWithBackoff, type EmbedBatchWithBackoffOpts } from '../core/embed-retry.ts';
 import { isAborted } from '../core/abort-check.ts';
+import { getEmbeddingDimensions, getEmbeddingModel } from '../core/ai/gateway.ts';
 import { EMBED_SKIP_FILTER_FRAGMENT } from '../core/embed-skip.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from '../core/quarantine.ts';
 import { currentTextProjectionFilter } from '../core/search/safe-chunks.ts';
@@ -144,8 +145,6 @@ export class EmbeddingDimMismatchError extends Error {
  */
 async function preflightDimMismatch(engine: BrainEngine, dryRun: boolean): Promise<void> {
   if (dryRun) return; // dry-run never embeds, no risk
-  const { readContentChunksEmbeddingDim, embeddingMismatchMessage } = await import('../core/embedding-dim-check.ts');
-  const { getEmbeddingDimensions, getEmbeddingModel } = await import('../core/ai/gateway.ts');
   let existing;
   try {
     existing = await readContentChunksEmbeddingDim(engine);

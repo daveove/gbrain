@@ -323,6 +323,8 @@ embeddings on the next query.
 
 nomic-embed also expects `search_document: ` in front of documents. The primary
 embedding path does not add it; an independent column can declare it explicitly.
+EmbeddingGemma additionally formats documents as `title: {title} | text: {text}`;
+that formatting remains unsupported by the primary document path (#5215).
 
 **Independent embedding columns.** An `embedding_columns` entry declared with
 `provenance: "independent"` is a separate model space with its own

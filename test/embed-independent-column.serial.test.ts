@@ -34,6 +34,8 @@ import { EmbeddingStagingTargetError, parseEmbeddingColumnArg, resolveEmbeddingS
 import { EmbeddingColumnNotRegisteredError } from '../src/core/search/embedding-column.ts';
 import { initializeIndependentEmbeddingColumn } from '../src/core/embedding-column-schema.ts';
 import type { EmbeddingColumnConfig } from '../src/core/types.ts';
+import { learnedChunkCap, _resetLearnedChunkCapsForTest } from '../src/core/embedding-input-limit.ts';
+import { _resetOverLengthHealForTest } from '../src/core/embed-overlength-heal.ts';
 
 const COLUMN = 'embedding_nomic';
 const NOMIC = 'ollama:nomic-embed-text';
@@ -51,6 +53,7 @@ for (const backend of testBackends()) {
     let closePostgres: (() => Promise<void>) | undefined;
     let postgresDatabaseUrl: string | undefined;
     let seen: Array<{ model: string; value: string }> = [];
+    let rejectNomic = false;
 
     /** Every live-space byte a staging run must leave alone, per chunk and page. */
     async function liveSpace(): Promise<Record<string, unknown>[]> {
@@ -78,6 +81,8 @@ for (const backend of testBackends()) {
       __setEmbedTransportForTests((async (args: { model: { modelId?: string }; values: string[] }) => {
         const model = String(args.model?.modelId);
         for (const value of args.values) seen.push({ model, value });
+        if (rejectNomic && model.includes('nomic')) throw Object.assign(
+          new Error('Input length 1460 exceeds maximum allowed token size 512'), { status: 400 });
         const width = model.includes('nomic') ? DIMS : 1536;
         return { embeddings: args.values.map((_, i) => Array.from({ length: width }, (_, j) => (j === i % width ? 1 : 0.001))), usage: { tokens: args.values.length } };
       }) as never);
@@ -107,6 +112,7 @@ for (const backend of testBackends()) {
       await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature = NULL`);
       await engine.setConfig('embedding_columns', JSON.stringify(REGISTRY));
       seen = [];
+      rejectNomic = false;
     });
 
     describe('embed --embedding-column staging', () => {
@@ -165,6 +171,34 @@ for (const backend of testBackends()) {
         expect(all.embedded).toBe(SLUGS.length);
         expect(seen.every(call => call.model === 'nomic-embed-text' && call.value.startsWith(PREFIX))).toBe(true);
         expect(await liveSpace()).toEqual(before);
+      });
+
+      test('staging provider overlength failures never heal chunks or learn a cap for the live model', async () => {
+        const [original] = await engine.executeRaw<{ id: number; chunk_text: string }>(
+          "SELECT cc.id,cc.chunk_text FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.slug='notes/alpha'");
+        _resetLearnedChunkCapsForTest();
+        _resetOverLengthHealForTest();
+        try {
+          await engine.executeRaw('UPDATE content_chunks SET chunk_text=$2 WHERE id=$1',
+            [original!.id, 'An oversized input about thermal reuse. '.repeat(250)]);
+          // A live local model with an undeclared input cap would normally heal
+          // this error; staging may not invoke that mutation path.
+          configureGateway({ embedding_model: NOMIC, embedding_dimensions: DIMS, env: {} });
+          rejectNomic = true;
+          const before = await liveSpace();
+          for (const mode of [{ slug: 'notes/alpha' }, { all: true }, { stale: true }]) {
+            const result = await runEmbedCore(engine, { ...mode, quiet: true, embeddingColumn: COLUMN });
+            expect(result.failures).toBeGreaterThan(0);
+            expect(await liveSpace()).toEqual(before);
+            expect(learnedChunkCap(NOMIC)).toBeUndefined();
+          }
+        } finally {
+          rejectNomic = false;
+          await engine.executeRaw('UPDATE content_chunks SET chunk_text=$2 WHERE id=$1', [original!.id, original!.chunk_text]);
+          _resetLearnedChunkCapsForTest();
+          _resetOverLengthHealForTest();
+          configureGateway({ embedding_model: PRIMARY, embedding_dimensions: 1536, env: { ...process.env, OPENAI_API_KEY: 'sk-test-fake' } });
+        }
       });
 
       test('independent preview counts chunk-unit restamps and real input work without publishing or calling a provider', async () => {

@@ -16,6 +16,7 @@ identifiers and attribution are available in the pre-removal Git revision
 
 - Owner admin **Graph** tab (`/admin/#graph`): bounded one- or two-hop page neighbourhoods, index-served title and Unicode exact-slug search, readable excerpts with a Tana child fallback, and an on-demand source map with archived labels. Views respect `graph.edge_validity`; aggregate results and failures are memoized, and query failures appear explicitly rather than retaining stale graphs.
 - Independent embedding columns keep separate vectors, model/input provenance and page signatures. `embed --embedding-column` stages text with the target model and document prefix without mutating the live embedding space or changing search selection.
+- Independent stale previews distinguish provider work from page-stamp-only restamps. Archived and active chunkless work are classified separately with source, skip and quarantine exclusions; images are excluded. Provider overlength failures never trigger the live model's chunk healing during staging.
 
 ### Fixed
 
