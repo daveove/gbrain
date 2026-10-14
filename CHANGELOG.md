@@ -15,6 +15,7 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Added
 
 - Admin **Graph** tab (`/admin/#graph`). The explorer searches a page and draws its one- or two-hop neighbourhood, capped at 50, 150 or 300 pages, most connected first. Nodes are coloured by source and edges styled by link type. The tab has link-type and source filters, with `duplicate` hidden by default, and a side panel with link counts and an excerpt. The source map shows each source's size, its isolated share and cross-source edge counts. It is backed by owner-only, read-only `GET /admin/api/graph/*` routes. Every statement is bounded by a statement timeout, and the aggregates are memoized for five minutes.
+- Admin Graph explorer **Hide hubs** control (off by default; thresholds 500, 1,000 and 2,000). The owner-only neighbourhood API accepts `max_degree=N`, hiding non-center pages whose total stored link-row degree exceeds N, across both directions and all link types. Hubs are rejected server-side before scan, candidate and node caps and are not traversed; the center always stays visible. Degree probes read at most N+1 indexed rows per direction under the existing statement timeout.
 
 ### Fixed
 

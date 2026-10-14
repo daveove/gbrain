@@ -68,3 +68,38 @@ for (const viewport of VIEWPORTS) {
     await expect(page.getByRole('group', { name: 'Neighbourhood of Project Atlas' })).toBeVisible();
   });
 }
+
+test('hide hubs presets filter on the server, keep the center, and can be turned off', async ({ page, graphBrain }) => {
+  await page.goto(await graphBrain.loginLink());
+  const hits = await (await page.request.get(`${graphBrain.url}/admin/api/graph/search?q=Hub%20filter%20probe`)).json() as Array<{ id: number }>;
+  await page.goto(`${graphBrain.url}/admin/#graph?id=${hits[0].id}`);
+  const select = page.getByRole('combobox', { name: 'Hide hubs' });
+  const figure = page.getByRole('group', { name: 'Neighbourhood of Hub filter probe' });
+  await expect(select).toHaveValue('');
+  await expect(figure.getByRole('button')).toHaveCount(4);
+  await expect(figure.getByRole('button', { name: /^Noisy company —/ })).toHaveCount(1);
+  const filtered = page.waitForResponse(response => response.url().includes('/graph/neighbourhood?') && response.url().includes('max_degree=500'));
+  await select.selectOption('500');
+  const result = await (await filtered).json();
+  expect(result.nodes.map((node: { slug: string }) => node.slug)).toEqual(['hub-filter-probe', 'quiet-note']);
+  expect(result.candidates).toBe(1);
+  expect(result.truncated).toBe(false);
+  await expect(figure.getByRole('button')).toHaveCount(2);
+  await expect(figure.getByRole('button', { name: /^Noisy company —/ })).toHaveCount(0);
+
+  await select.selectOption('1000');
+  await expect(figure.getByRole('button')).toHaveCount(4);
+  await select.selectOption('2000');
+  await expect(select).toHaveValue('2000');
+  await select.selectOption('');
+  await expect(figure.getByRole('button')).toHaveCount(4);
+
+  await select.selectOption('500');
+  await expect(figure.getByRole('button')).toHaveCount(2);
+  const hubHits = await (await page.request.get(`${graphBrain.url}/admin/api/graph/search?q=Noisy%20company`)).json() as Array<{ id: number }>;
+  await page.evaluate(id => { window.location.hash = `graph?id=${id}`; }, hubHits[0].id);
+  const hubFigure = page.getByRole('group', { name: 'Neighbourhood of Noisy company' });
+  await expect(select).toHaveValue('500');
+  await expect(hubFigure.getByRole('button', { name: /^Noisy company —.*501 links, hop 0/ })).toHaveCount(1);
+  await expect(hubFigure.getByRole('button')).toHaveCount(4);
+});
