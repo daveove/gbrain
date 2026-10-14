@@ -4,8 +4,8 @@
  * while the live default model and brain-wide `embedding_query_prefix` stay
  * on the primary OpenAI 1536 space; only vectors whose own model and text
  * hash are current rank or re-score; unified multimodal routing is omitted
- * with honest meta; and the query op's declared-name rerun stays in the
- * requested space.
+ * with honest meta; and the query op's native keyword-only alias fan-out
+ * keeps its vector arm in the requested space.
  *
  * Isolated PGLite/PostgreSQL; the embedding transport is stubbed ($0).
  * The native initializer creates the space and guarded publication writes
@@ -27,6 +27,7 @@ import { fetchFar } from '../../src/core/brainstorm/domain-bank.ts';
 import { resolveEmbeddingColumn, resolveRegisteredEmbeddingColumnFromEngine, embeddingColumnSignature } from '../../src/core/search/embedding-column.ts';
 import { loadConfigWithEngine } from '../../src/core/config.ts';
 
+import { sweep } from '../helpers/mention-brain.ts';
 const COLUMN = 'embedding_nomic';
 const NOMIC = 'ollama:nomic-embed-text';
 const DIMS = 768;
@@ -161,13 +162,23 @@ for (const backend of testBackends()) {
         expect(results.map(r => r.slug)).toEqual(['notes/alpha']);
       });
 
-      test('the query op declared-name rerun embeds in the requested column space', async () => {
-        configureEmbedding();
-        const result = await dispatchToolCall(engine, 'query',
-          { query: 'Alpha roadmap', expand: false, embedding_column: COLUMN }, { remote: false, sourceId: 'default' });
-        expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
-        expect(seen.map(s => s.value)).toContain('search_query: Zorblax roadmap');
-        expect(seen.every(s => s.model === 'nomic-embed-text' && s.value.startsWith('search_query: '))).toBe(true);
+      test('the query op keeps the requested vector space while native alias fan-out stays keyword-only', async () => {
+        await importFromContent(engine, 'companies/alpha', '---\ntype: company\ntitle: Alpha\naliases: [Zorblax]\n---\n\nAlpha project identity.\n', { noEmbed: true });
+        await importFromContent(engine, 'notes/alias-roadmap', '---\ntype: note\ntitle: Alias-only roadmap\n---\n\nZorblax roadmap commitments.\n', { noEmbed: true });
+        try {
+          await sweep(engine);
+          configureEmbedding();
+          const result = await dispatchToolCall(engine, 'query',
+            { query: 'Alpha roadmap', expand: false, embedding_column: COLUMN }, { remote: false, sourceId: 'default' });
+          expect(result.isError, JSON.stringify(result.content)).toBeFalsy();
+          expect(seen).toEqual([{ model: 'nomic-embed-text', value: 'search_query: Alpha roadmap' }]);
+          const fanout = (result._meta?.retrieval as { fanout?: { aliases_searched: Array<{ alias: string }> } } | undefined)?.fanout;
+          expect(fanout?.aliases_searched.map(row => row.alias)).toContain('Zorblax');
+          expect(result.content.map(row => row.text ?? '').join('\n')).toContain('notes/alias-roadmap');
+        } finally {
+          await engine.deletePage('companies/alpha', { sourceId: 'default' });
+          await engine.deletePage('notes/alias-roadmap', { sourceId: 'default' });
+        }
       });
       test('brainstorm file-plane column yields far-page distance without a DB registration', async () => {
         const name = 'embedding_far_file';

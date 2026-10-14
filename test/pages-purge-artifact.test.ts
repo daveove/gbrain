@@ -24,6 +24,7 @@ import { preparePageMutation } from '../src/core/persistence/page-prepare.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 let brainDir: string;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-purge-artifact-'));
@@ -85,12 +86,14 @@ async function failure(params: Record<string, unknown>, state: 'failed' | 'confl
 
 beforeAll(async () => {
   engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => {
   await disposePersistenceConsumer(engine); await engine.disconnect(); rmSync(home, { recursive: true, force: true });
 }, 60_000);
 beforeEach(async () => {
   await disposePersistenceConsumer(engine); await resetPgliteState(engine); _resetWriteThroughCacheForTest();
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   tmpRoot = mkdtempSync(join(home, 'case-')); brainDir = join(tmpRoot, 'brain'); mkdirSync(brainDir);
   await engine.setConfig('sync.repo_path', brainDir);
 });

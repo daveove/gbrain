@@ -119,12 +119,15 @@ check('noSchemaPack bypasses the configured pack and noExtract queues no optiona
       __setPackLocatorForTests(name => { loads++; return name === 'processing-fixture' ? pack : null; });
       try {
         const f = await fixture(engine);
-        const beforeJobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+        const beforeJobs = await engine.executeRaw<{ id: number; name: string }>('SELECT id,name FROM minion_jobs ORDER BY id');
         expect(await performManagedSync(engine, { ...f.opts, noSchemaPack })).toMatchObject({ status: 'first_sync', added: 1 });
         expect(loads > 0).toBe(!noSchemaPack);
         expect((await engine.getPage('records/example-0', { sourceId: f.id }))?.type).toBe(noSchemaPack ? 'concept' : 'custom-record');
         expect(await engine.executeRaw("SELECT kind FROM persistence_effects WHERE source_id=$1 AND kind='facts-backstop'", [f.id])).toEqual([]);
-        expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(beforeJobs);
+        const afterJobs = await engine.executeRaw<{ id: number; name: string }>('SELECT id,name FROM minion_jobs ORDER BY id');
+        expect(afterJobs.slice(0, beforeJobs.length)).toEqual(beforeJobs);
+        // noExtract suppresses optional extraction, not the required owner-index handoff.
+        expect(afterJobs.slice(beforeJobs.length).map(job => job.name)).toEqual(['autopilot-daily-memory', 'autopilot-daily-memory']);
         const [request] = await engine.executeRaw<{ intent: SyncIntent }>("SELECT intent FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]);
         expect(request.intent.processingOptions).toEqual({ noEmbed: true, noSchemaPack, noExtract: true });
       } finally { _resetPackLocatorForTests(); _resetPackCacheForTests(); }

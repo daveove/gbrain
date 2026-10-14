@@ -278,14 +278,14 @@ describe('sources remove', () => {
       'AS protected': [{ protected: true }],
     });
     const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
-    expect(code).toBe(3);
+    expect(code).toBe(2);
   });
 
   test('does not hard-refuse ordinary dream before ownership guard', async () => {
     const { engine } = makeStub({
       'AS protected': [{ protected: false }],
     });
-    // No source row: ownership guard passes, then not-found exits 4 (not reserved-id 3).
+    // No source row: ownership guard passes, then not-found exits 4 (not reserved-id 2).
     const code = await withExitCapture(() => runSources(engine, ['remove', 'dream', '--confirm-destructive']));
     expect(code).toBe(4);
   });
@@ -320,7 +320,7 @@ describe('sources archive', () => {
   test('refuses default', async () => {
     const { engine } = makeStub();
     const code = await withExitCapture(() => runSources(engine, ['archive', 'default']));
-    expect(code).toBe(3);
+    expect(code).toBe(2);
   });
 
   test('refuses owned dream system index via ownership guard', async () => {
@@ -328,14 +328,14 @@ describe('sources archive', () => {
       'AS protected': [{ protected: true }],
     });
     const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
-    expect(code).toBe(3);
+    expect(code).toBe(2);
   });
 
   test('does not hard-refuse ordinary dream before ownership guard', async () => {
     const { engine } = makeStub({
       'AS protected': [{ protected: false }],
     });
-    // Ownership guard passes; missing source exits 4 (not reserved-id 3).
+    // Ownership guard passes; missing source exits 4 (not reserved-id 2).
     const code = await withExitCapture(() => runSources(engine, ['archive', 'dream']));
     expect(code).toBe(4);
   });

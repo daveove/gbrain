@@ -239,7 +239,7 @@ describe('daily memory refresh on source archive/restore', () => {
 
   test('CLI removal refuses reserved indexes without an undefined constant reference', async () => {
     const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
-    try { await expect(runSources(engine, ['remove', 'dream', '--confirm-destructive'])).rejects.toThrow('fixture exit 3'); }
+    try { await expect(runSources(engine, ['remove', 'dream', '--confirm-destructive'])).rejects.toThrow('fixture exit 2'); }
     finally { exit.mockRestore(); }
     expect(await engine.executeRaw("SELECT id FROM sources WHERE id='dream'")).toHaveLength(1);
   });
@@ -294,7 +294,7 @@ describe('daily memory refresh on source archive/restore', () => {
     );
     const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
     try {
-      await expect(runSources(engine, ['purge', 'sys-purge', '--confirm-destructive'])).rejects.toThrow('fixture exit 3');
+      await expect(runSources(engine, ['purge', 'sys-purge', '--confirm-destructive'])).rejects.toThrow('fixture exit 2');
     } finally {
       exit.mockRestore();
     }
@@ -363,7 +363,7 @@ describe('daily memory refresh on source archive/restore', () => {
     const sourceId = 'custom-owned-index';
     await engine.executeRaw("INSERT INTO sources(id,name,config) VALUES($1,'Synthetic index','{\"system_index\":true}'::jsonb)", [sourceId]);
     const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`fixture exit ${code}`); });
-    try { await expect(runSources(engine, ['purge', sourceId, '--confirm-destructive'])).rejects.toThrow('fixture exit 3'); }
+    try { await expect(runSources(engine, ['purge', sourceId, '--confirm-destructive'])).rejects.toThrow('fixture exit 2'); }
     finally { exit.mockRestore(); }
     expect(await engine.executeRaw('SELECT id FROM sources WHERE id=$1', [sourceId])).toHaveLength(1);
     expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);

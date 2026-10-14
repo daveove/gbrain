@@ -24,6 +24,7 @@ import { _resetWriteThroughCacheForTest } from '../src/core/write-through.ts';
 import { parseDataFrontmatter } from '../src/core/data-frontmatter.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let root: string;
 let fixtureDir: string;
 let registration: LocalRegistration;
@@ -33,6 +34,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 120_000);
 
 afterAll(async () => {
@@ -42,6 +44,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   resetGateway();
   _resetWriteThroughCacheForTest();
   fixtureDir = mkdtempSync(join(tmpdir(), 'gbrain-put-recoverable-'));

@@ -236,7 +236,7 @@ describe('#2849 — size-gated sync durably queues the deferred extraction', () 
       name: 'extract',
       data: job.data,
       updateProgress: async () => {},
-      signal: { aborted: false },
+      signal: new AbortController().signal,
     }) as { stale: boolean; pagesProcessed: number; staleRemaining: number };
 
     // Behavioral discrimination vs master: master's handler ignores

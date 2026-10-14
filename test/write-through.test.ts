@@ -24,6 +24,7 @@ import { serializePageToMarkdown, resolvePageFilePath } from '../src/core/markdo
 import { operations, type OperationContext } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 let brainDir: string;
 
@@ -31,6 +32,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -40,6 +42,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   resetGateway();
   _resetWriteThroughCacheForTest();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-wt-helper-'));

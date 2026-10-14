@@ -15,7 +15,8 @@
  *    rows; text keys that differ by case, '-' versus '_' and non-ASCII.
  * 2. A managed worktree with a host binding (`claimWorktree`) and activation
  *    (`activatePersistence`), then three committed page writes through the
- *    real `put_page` handler so their effects are real rows.
+ *    real `put_page` handler so their effects and required daily handoffs are
+ *    real rows. Fixed content dates and UTC make the daily debt deterministic.
  * 3. Derived-work states edited in by hand: a failed embedding effect, a
  *    delayed effect, an orphan `running` effect, a stale `active` minion job
  *    lease and an orphan cycle lock.
@@ -24,6 +25,7 @@
  *    `persistence_requests` does not store) is returned and written to
  *    `<root>/queued-admission.json` so a replay probe in another process
  *    can resubmit it.
+ *    Its target publication adds its own daily barrier and continuation.
  *
  * Preconditions: the engine is connected and `initSchema()`d but not
  * activated, and the process runs under an isolated `GBRAIN_HOME` (the host
@@ -97,6 +99,7 @@ export interface LegacyExpected {
     oauth_client_ids_c_order: string[];
     overlay: { slug: string; stored_contains: string[]; snapshot_contains: string[]; snapshot_excludes: string[] };
     effects: Record<'failed' | 'delayed' | 'orphan_running', { state: string; attempts: number; next_attempt_at?: string; error_code?: string | null; execution_token: string | null; claim_expires_at: string | null }>;
+    daily_jobs: { day: string; timezone: string; status: string; barriers: number; continuations: number; timeout_ms: number; valid_handoffs: boolean };
     stale_job: { status: string; claim_generation: number; lock_token: string; lock_until: string };
     queued_request: { request_id: string; state: string; slug: string; source_id: string };
     managed_requests: { state: string; count: number };
@@ -112,6 +115,7 @@ export interface LegacyExpected {
     absent_tables: string[];
     effects: Record<'failed' | 'delayed' | 'orphan_running', { state: string; attempts: number; next_attempt_at?: string; execution_token: string | null; claim_expires_at: string | null }>;
     stale_job: { status: string; claim_generation: number; lock_token: string | null; lock_until: string | null };
+    daily_jobs: LegacyExpected['source']['daily_jobs'];
     worktree_heartbeat_at: string | null;
     queued_request: { state: string; replay_creates_row: boolean };
     tokens_authorize: Record<string, boolean>;
@@ -173,6 +177,8 @@ export async function buildLegacyBrain(engine: BrainEngine, { root }: { root: st
   const sql = (text: string, params: unknown[] = []) => engine.executeRaw(text, params);
   const chunkDims = await vectorDims(engine, 'content_chunks', 'embedding');
   const factDims = await vectorDims(engine, 'facts', 'embedding');
+  // Content-date handoffs must not depend on the build's wall clock or host timezone.
+  await engine.setConfig('cycle.timezone', 'UTC');
 
   // ── 1. Legacy rows (managed persistence off) ────────────────────────────────
   await sql(`INSERT INTO sources(id,name,local_path,incarnation,config) VALUES('legacy-archive','Legacy archive',NULL,$1::uuid,$2::text::jsonb)`,
@@ -287,7 +293,7 @@ export async function buildLegacyBrain(engine: BrainEngine, { root }: { root: st
   try {
     for (const [i, requestId] of LEGACY_IDS.managedRequestIds.entries()) {
       const d = descriptor(`managed-${i}`, 'put_page', 'local', 'managed-wiki',
-        { slug: `notes/managed-${i}`, content: `---\ntype: note\ntitle: Managed ${i}\n---\n\nManaged write ${i}.\n` }, { requestId });
+        { slug: `notes/managed-${i}`, content: `---\ntype: note\ntitle: Managed ${i}\ndate: 2026-03-09\n---\n\nManaged write ${i}.\n` }, { requestId });
       const observed = await executeOp(world, d);
       assert.equal(observed.status, 'committed', `legacy fixture: managed write ${i} must commit (${observed.code ?? ''})`);
     }
@@ -336,7 +342,7 @@ export async function buildLegacyBrain(engine: BrainEngine, { root }: { root: st
   const ctx = contextFor(world, 'local', 'managed-wiki');
   const binding = (await getWorktreeBinding(engine, 'managed-wiki'))!;
   const slug = 'notes/queued-request';
-  const callerIntent = { source_id: 'managed-wiki', slug, content: '---\ntype: note\ntitle: Queued request\n---\n\nAccepted while no owner ran.\n' };
+  const callerIntent = { source_id: 'managed-wiki', slug, content: '---\ntype: note\ntitle: Queued request\ndate: 2026-03-09\n---\n\nAccepted while no owner ran.\n' };
   const queued: WriteAdmission = { principal: await requestPrincipalForContext(ctx), operation: 'put_page', sourceId: 'managed-wiki',
     sourceIncarnation: LEGACY_IDS.wikiIncarnation, slug, pageId: null, requestId: LEGACY_IDS.queuedRequestId, callerIntent, intent: { ...callerIntent },
     authority: await submissionAuthority(ctx, 'put_page', 'managed-wiki', LEGACY_IDS.wikiIncarnation, slug),
@@ -396,6 +402,39 @@ async function orderedKeys(engine: BrainEngine, sql: string): Promise<string[]> 
   return (await engine.executeRaw<{ k: string }>(sql)).map(r => r.k);
 }
 
+/** Required page-publication debt: each dated write accepts a day barrier and its continuation. */
+async function dailyJobState(engine: BrainEngine) {
+  const rows = await engine.executeRaw<{ id: number; data: Record<string, unknown>; status: string; timeout_ms: number }>(
+    "SELECT id,data,status,timeout_ms FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
+  const barriers = rows.filter(row => !('daily_memory_dates' in row.data));
+  const continuations = rows.filter(row => 'daily_memory_dates' in row.data);
+  const valid_handoffs = barriers.every(row => row.data.daily_memory_only === true
+    && JSON.stringify(row.data.source_cycle_job_ids) === '[]'
+    && continuations.filter(child => Number(child.data.daily_memory_source_job_id) === Number(row.id)).length === 1)
+    && continuations.every(row => {
+      const parent = barriers.find(parent => Number(parent.id) === Number(row.data.daily_memory_source_job_id));
+      return parent !== undefined && row.data.daily_memory_date === parent.data.daily_memory_date
+        && JSON.stringify(row.data.daily_memory_dates) === JSON.stringify([parent.data.daily_memory_date])
+        && JSON.stringify(row.data.daily_memory_day_job_ids) === JSON.stringify([Number(parent.id)])
+        && row.data.daily_memory_cursor === 1 && row.data.daily_memory_replay_round === 0;
+    });
+  return {
+    day: [...new Set(rows.map(row => row.data.daily_memory_date))].join(','),
+    timezone: [...new Set(rows.map(row => row.data.daily_memory_timezone))].join(','),
+    status: [...new Set(rows.map(row => row.status))].join(','),
+    barriers: barriers.length, continuations: continuations.length,
+    timeout_ms: rows.length && rows.every(row => Number(row.timeout_ms) === Number(rows[0].timeout_ms)) ? Number(rows[0].timeout_ms) : 0,
+    valid_handoffs,
+  };
+}
+
+/** Only immutable identity/payload columns: graduation intentionally resets the stale lease. */
+async function minionPayloads(engine: BrainEngine): Promise<Array<{ id: number; payload: string }>> {
+  return (await engine.executeRaw<{ id: number; payload: string }>(
+    'SELECT id,jsonb_build_object(\'name\',name,\'data\',data)::text AS payload FROM minion_jobs ORDER BY id'))
+    .map(row => ({ id: Number(row.id), payload: row.payload }));
+}
+
 /** Every expectation in expected.json's `source` block that differs from this brain (empty when the fixture is exact). */
 export async function legacySourceMismatches(engine: BrainEngine, expected = loadLegacyExpected()): Promise<string[]> {
   const m: string[] = [];
@@ -439,6 +478,7 @@ export async function legacySourceMismatches(engine: BrainEngine, expected = loa
   }
   const [job] = await engine.executeRaw<Record<string, unknown>>(`SELECT status,claim_generation,lock_token,lock_until FROM minion_jobs WHERE data->>'fixture'='stale-lease'`);
   compare(m, 'stale job', { status: job?.status, claim_generation: Number(job?.claim_generation), lock_token: job?.lock_token ?? null, lock_until: iso(job?.lock_until) }, s.stale_job);
+  compare(m, 'daily jobs', await dailyJobState(engine), s.daily_jobs);
   const [queued] = await engine.executeRaw<Record<string, unknown>>(`SELECT request_id::text AS request_id,state,slug,source_id FROM persistence_requests WHERE request_id=$1::uuid`,
     [s.queued_request.request_id]);
   compare(m, 'queued request', queued, s.queued_request);
@@ -454,7 +494,7 @@ export async function legacySourceMismatches(engine: BrainEngine, expected = loa
   const [bytes] = await engine.executeRaw<Record<string, number>>(`SELECT
     (SELECT min(octet_length(data::text)) FROM raw_data)::int AS raw_data,
     (SELECT min(octet_length(metadata::text)) FROM files)::int AS files_metadata,
-    (SELECT min(octet_length(data::text)) FROM minion_jobs)::int AS minion_data,
+    (SELECT min(octet_length(data::text)) FROM minion_jobs WHERE name='noop' AND data->>'fixture'='stale-lease')::int AS minion_data,
     (SELECT octet_length(frontmatter::text) FROM pages WHERE slug='companies/acme-example')::int AS frontmatter`);
   for (const key of ['raw_data', 'files_metadata', 'minion_data', 'frontmatter'] as const) {
     if (!(Number(bytes[key]) >= s.bytes[`${key}_min`])) m.push(`bytes ${key}: ${bytes[key]} < ${s.bytes[`${key}_min`]}`);
@@ -471,6 +511,7 @@ export async function legacySourceMismatches(engine: BrainEngine, expected = loa
 export interface LegacySourceSnapshot {
   brainId: string;
   tables: Record<string, string[]>;
+  minionPayloads: Array<{ id: number; payload: string }>;
 }
 
 /** Capture what the target must reproduce, before graduation starts. */
@@ -478,7 +519,7 @@ export async function snapshotLegacySource(engine: BrainEngine, expected = loadL
   const [brain] = await engine.executeRaw<{ brain_id: string }>('SELECT brain_id::text AS brain_id FROM persistence_brain WHERE singleton=1');
   const tables: Record<string, string[]> = {};
   for (const table of expected.target.unchanged_tables) tables[table] = await canonicalRows(engine, table);
-  return { brainId: brain.brain_id, tables };
+  return { brainId: brain.brain_id, tables, minionPayloads: await minionPayloads(engine) };
 }
 
 /**
@@ -509,6 +550,12 @@ export async function legacyTargetMismatches(target: BrainEngine, before: Legacy
   }
   const [job] = await target.executeRaw<Record<string, unknown>>(`SELECT status,claim_generation,lock_token,lock_until FROM minion_jobs WHERE data->>'fixture'='stale-lease'`);
   compare(m, 'target stale job', { status: job?.status, claim_generation: Number(job?.claim_generation), lock_token: job?.lock_token ?? null, lock_until: iso(job?.lock_until) }, t.stale_job);
+  compare(m, 'target daily jobs', await dailyJobState(target), t.daily_jobs);
+  const payloads = await minionPayloads(target);
+  for (const row of before.minionPayloads) {
+    const got = payloads.find(candidate => candidate.id === row.id);
+    if (got?.payload !== row.payload) m.push(`target minion payload ${row.id}: missing or changed`);
+  }
   const heartbeats = await target.executeRaw<{ h: unknown }>('SELECT heartbeat_at AS h FROM persistence_worktrees');
   compare(m, 'target worktree heartbeat', heartbeats.map(r => iso(r.h)), heartbeats.map(() => t.worktree_heartbeat_at));
   const [queued] = await target.executeRaw<{ state: string }>('SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [expected.source.queued_request.request_id]);

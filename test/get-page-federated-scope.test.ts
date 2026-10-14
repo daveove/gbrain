@@ -609,34 +609,22 @@ describe('#2555 get_chunks federated scope', () => {
         'parent_symbol_path', 'doc_comment', 'symbol_name_qualified', 'modality']) {
         expect(body, `${enginePath} getChunks must select cc.${col}`).toContain(`cc.${col}`);
       }
-      // Two references to the vector column are legitimate; everything else is
-      // the #2544 egress regression coming back.
-      //   1. `(cc.<active column> IS NULL) AS embedding_is_null` — a cheap
-      //      boolean, no vector egress (a schema rebuild NULLs vectors without
-      //      touching embedded_at, and the per-slug embed filter needs that
-      //      truth). S2: the column is the registry-ACTIVE one (resolved by the
-      //      engine with resolveActiveEmbeddingColumnFromEngine and quoted in
-      //      engine-sql/chunks.ts), not the literal legacy `embedding` — a
-      //      registry-routed brain's truth lives in the active column.
-      //   2. the `includeEmbedding` opt-in — importCodeFile's reuse cache
-      //      CONSUMES the vectors (see embed-reuse.ts), and #2544 silently made
-      //      that cache a no-op by dropping the column unconditionally. It too
-      //      selects the ACTIVE column (aliased AS embedding) so a reused
-      //      vector matches the column upsertChunks writes.
-      // Strip (1), then keep forbidding any bare legacy `cc.embedding` use,
-      // require every surviving vector select to be gated by (2), and require
-      // the gate to still exist so a half-revert stranding the flag also fails.
-      const nullBooleanShape = /\(cc\..*? IS NULL\) AS embedding_is_null/g;
-      const withoutNullBoolean = body.replace(nullBooleanShape, '');
-      expect(withoutNullBoolean).not.toMatch(/cc\.embedding\b/);
-      expect(body).toMatch(/\(cc\..*? IS NULL\) AS embedding_is_null/);
+      // Legacy missing-vector truth remains a cheap IS NULL; independent
+      // spaces additionally require their own model/text/input proof. Neither
+      // boolean fetches the vector. Only the includeEmbedding branch may
+      // return one, and an independent vector must carry its full page proof.
+      expect(body).not.toMatch(/cc\.embedding\b/);
+      expect(body).toContain('(${missing}) AS embedding_is_null');
+      expect(body).toContain('const fresh = proof ? independentReadProof(descriptor!) : undefined;');
+      expect(body).toContain('const missing = fresh ? sqlFragment`NOT COALESCE((${independentReadProof(descriptor!, false)}),false)` : sqlFragment`cc.${colId} IS NULL`;');
       expect(engineBody, `${enginePath} getChunks embedding_is_null must key on the registry-active column`).toContain('resolveActiveEmbeddingColumnFromEngine(this, { fallbackToLegacy: true })');
-      expect(body, 'engine-sql getChunks must quote the engine-resolved column').toContain('quoteIdentifier(column)');
-      const vectorLines = withoutNullBoolean.split('\n').filter((l) => / AS embedding\b/.test(l));
-      expect(vectorLines.length, `${enginePath} getChunks must keep the includeEmbedding opt-in`).toBeGreaterThan(0);
-      for (const line of vectorLines) {
-        expect(line, `${enginePath} getChunks must gate the vector select behind includeEmbedding`).toMatch(/includeEmbedding \?/);
-      }
+      expect(body, 'engine-sql getChunks must quote the engine-resolved column').toContain("quoteIdentifier(typeof column === 'string' ? column : descriptor!.name)");
+      const vectorBranch = /const embedCol = includeEmbedding \? \(fresh[\s\S]*?\) : sqlFragment``;/.exec(body)?.[0];
+      expect(vectorBranch, `${enginePath} getChunks must keep the includeEmbedding opt-in`).toBeDefined();
+      expect(vectorBranch).toContain('CASE WHEN ${fresh} THEN cc.${colId} ELSE NULL END AS embedding');
+      expect(vectorBranch).toContain('cc.${colId} AS embedding');
+      const outsideOptIn = body.replace(vectorBranch!, '');
+      expect(outsideOptIn, `${enginePath} getChunks must not select vectors outside the opt-in`).not.toMatch(/ AS embedding\b/);
     }
   });
 });

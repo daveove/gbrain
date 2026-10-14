@@ -20,13 +20,15 @@ const SLOW_LUA = 'if a then\n'.repeat(3000) + 'end\n'.repeat(3000);
 const body = (fences: string[]) => `A chat about scripting.\n\n${fences.map(f => '```lua\n' + f + '```\n').join('\nAnd another one:\n\n')}\nThanks!\n`;
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); });
-beforeEach(async () => { await disposePersistenceConsumer(engine); await resetPgliteState(engine); });
+beforeEach(async () => { await disposePersistenceConsumer(engine); await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); });
 
 describe('fenced code parse budget', () => {
   test('a "Parsing failed" throw from the parser is a timeout', () => {

@@ -112,6 +112,15 @@ function srcExcluded(rel: string): boolean {
   return false;
 }
 
+const SRC_INVOCATION = /\bgbrain\s+([a-z][a-z0-9_-]{2,})\b([^'"`\n]*?)(?=\bgbrain\s+[a-z][a-z0-9_-]{2,}\b|['"`\n]|$)/g;
+
+/** A later invocation has its own flags, even inside the same prose sentence. */
+function invocationFlags(tail: string): string[] {
+  // Prose separators and shell commands end this invocation's argv.
+  const argv = tail.split(/\s—\s|\.\s|;\s|\?\s|!\s|\s\|\s|\s&&\s|\bgbrain\s+[a-z][a-z0-9_-]{2,}\b/)[0]!;
+  return [...argv.matchAll(/--[a-z][a-z0-9-]*/g)].map(flag => flag[0]);
+}
+
 function scanSrcStrings(): string[] {
   const valid = liveCliVerbs();
   const violations: string[] = [];
@@ -125,14 +134,9 @@ function scanSrcStrings(): string[] {
       if (/^(\/\/|\*|\/\*|--)/.test(t)) continue;   // TS comments + SQL comment lines
       if (!/['"`]/.test(l)) continue;               // only string-bearing lines
       // Tail stops at quote/backtick so we never leak across string boundaries.
-      for (const m of l.matchAll(/\bgbrain\s+([a-z][a-z0-9_-]{2,})\b([^'"`\n]*)/g)) {
+      for (const m of l.matchAll(SRC_INVOCATION)) {
         const verb = m[1]!;
-        // Prose separators end the command: an em-dash clause or a new
-        // sentence after the mention is instruction text, not the command's
-        // own argv ("...gbrain binary path — pass --gbrain-bin ...").
-        // A shell pipe starts another command with its own flags (e.g. jq --arg).
-        const tail = (m[2] ?? '').split(/\s—\s|\.\s|;\s|\?\s|!\s|\s\|\s|\s&&\s/)[0]!;
-        const flags = [...tail.matchAll(/--[a-z][a-z0-9-]*/g)].map((f) => f[0]);
+        const flags = invocationFlags(m[2] ?? '');
         if (flags.length === 0) continue; // prose-mention; not gated (see header)
         if (!valid.has(verb)) {
           violations.push(`${rel}:${i + 1}: \`gbrain ${verb}\` is not a real command — ${t.slice(0, 100)}`);
@@ -169,6 +173,22 @@ describe('#3697 — remediation text resolves against the live CLI surface', () 
       `Remediation strings name commands/flags that do not resolve:\n${violations.join('\n')}\n` +
       `Fix the string, or add a cited entry to REGISTRY_GAPS if the generated registry is missing a real flag.`,
     ).toEqual([]);
+  });
+
+  test('flags belong only to their own invocation in a shared remediation sentence', () => {
+    expect(invocationFlags(' --stale --source dream sweeps them (or run gbrain embed --stale --images), or run gbrain sync --full.'))
+      .toEqual(['--stale', '--source']);
+    expect(invocationFlags(' --stale --images), or run gbrain sync --full.')).toEqual(['--stale', '--images']);
+    expect(invocationFlags(' --full --source dream.')).toEqual(['--full', '--source']);
+    // Invalid flags remain visible on either side of the command boundary.
+    expect(invocationFlags(' --source-id dream or run gbrain sync --fake')).toEqual(['--source-id']);
+    expect(invocationFlags(' --fake')).toEqual(['--fake']);
+    const commands = [...'run gbrain embed --source-id dream or run gbrain sync --fake'.matchAll(SRC_INVOCATION)]
+      .map(match => ({ verb: match[1], flags: invocationFlags(match[2] ?? '') }));
+    expect(commands).toEqual([
+      { verb: 'embed', flags: ['--source-id'] },
+      { verb: 'sync', flags: ['--fake'] },
+    ]);
   });
 
   // The scanner must actually catch the classes it exists for — otherwise this

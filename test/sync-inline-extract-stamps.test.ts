@@ -36,6 +36,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let repoPath: string;
 
 function git(cmd: string): void { execSync(cmd, { cwd: repoPath, stdio: 'pipe' }); }
@@ -58,6 +59,7 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -66,6 +68,7 @@ describe('#1696 — inline sync extract stamps links_extracted_at', () => {
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repoPath = mkdtempSync(join(tmpdir(), 'gbrain-stamp-'));
     execSync('git init', { cwd: repoPath, stdio: 'pipe' });
     execSync('git config user.email "t@t.com"', { cwd: repoPath, stdio: 'pipe' });

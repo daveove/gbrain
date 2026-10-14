@@ -24,15 +24,18 @@ import { operationsByName } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 let brainDir: string;
 beforeAll(async () => {
   configureGateway({ embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, env: {} });
   engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 afterAll(async () => { await engine.disconnect(); resetGateway(); });
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   tmpRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-capture-path-')));
   brainDir = path.join(tmpRoot, 'brain');
   fs.mkdirSync(path.join(brainDir, 'notes'), { recursive: true });

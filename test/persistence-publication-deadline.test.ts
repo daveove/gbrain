@@ -92,17 +92,22 @@ describe('boundPublication', () => {
 for (const kind of testBackends()) {
   describe(`a publish held past the publication ceiling (${kind})`, () => {
     let engine: BrainEngine;
+    let schemaVersion: string | null;
     let close: () => Promise<void>;
     let root = '';
     const home = mkdtempSync(join(tmpdir(), 'gbrain-pub-deadline-home-'));
     beforeAll(async () => {
       if (kind === 'postgres') ({ engine, close } = await isolatedPersistencePostgres(process.env.DATABASE_URL!));
       else { const lite = new PGLiteEngine(); await lite.connect({}); await lite.initSchema(); engine = lite; close = () => lite.disconnect(); }
+      schemaVersion = await engine.getConfig('version');
     }, 120_000);
     afterAll(async () => { await withEnv({ GBRAIN_HOME: home }, () => disposePersistenceConsumer(engine)); await close?.(); rmSync(home, { recursive: true, force: true }); });
     beforeEach(async () => {
       await withEnv({ GBRAIN_HOME: home }, () => disposePersistenceConsumer(engine));
-      if (kind === 'pglite') await resetPgliteState(engine as PGLiteEngine);
+      if (kind === 'pglite') {
+        await resetPgliteState(engine as PGLiteEngine);
+        if (schemaVersion) await engine.setConfig('version', schemaVersion);
+      }
       _resetWriteThroughCacheForTest();
       if (kind === 'postgres' && root) return;
       root = mkdtempSync(join(home, 'brain-'));

@@ -18,9 +18,10 @@ import { relationshipFilterSql } from '../src/core/link-validity.ts';
 
 setDefaultTimeout(60_000);
 let engine: PGLiteEngine;
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); });
+let schemaVersion: string | null;
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); });
 afterAll(async () => { await engine.disconnect(); resetGateway(); });
-beforeEach(async () => { await resetPgliteState(engine); resetGateway(); });
+beforeEach(async () => { await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); resetGateway(); });
 
 const ctx = (): OperationContext => ({ engine, config: { engine: 'pglite' as const }, logger: { info: () => {}, warn: () => {}, error: () => {} }, dryRun: false, remote: false, sourceId: 'default' });
 async function put(slug: string, fm: string, body: string) {

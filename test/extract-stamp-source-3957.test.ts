@@ -31,12 +31,14 @@ import { operations, type Operation, type OperationContext } from '../src/core/o
 import type { BrainEngine } from '../src/core/engine.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tempDir: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -45,6 +47,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   tempDir = mkdtempSync(join(tmpdir(), 'gbrain-3957-'));
 });
 

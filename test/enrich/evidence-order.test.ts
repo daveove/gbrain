@@ -75,11 +75,13 @@ describe('assembleEvidence (#2085)', () => {
 // ---------------------------------------------------------------------------
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -88,6 +90,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 const STUB = 'Stub page.';
@@ -207,6 +210,7 @@ describe('runEnrichCore evidence + counters (#2085)', () => {
     expect(rSkip.pages_skipped_insufficient).toBe(1);
 
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     await seedStub('people/alice-example', 'Alice Example');
     await seedBacklink('people/alice-example', 'meetings/m1',
       'Alice Example co-founded WidgetCo in 2025 and leads its product design team across two offices.');

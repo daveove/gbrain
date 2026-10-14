@@ -27,6 +27,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { resolveSlugsForRemovedPaths } from '../src/core/sync-git.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const repos: string[] = [];
 // GBRAIN_HOME isolation: sync reads/writes operator-home state (failure
 // ledger, nag state); keep it away from the real home. Serial-file suffix
@@ -38,6 +39,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -48,6 +50,7 @@ beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-3942-home-'));
   process.env.GBRAIN_HOME = tmpHome;
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 afterEach(() => {

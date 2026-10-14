@@ -22,6 +22,7 @@ const putPageOp = operations.find((o) => o.name === 'put_page')!;
 const receiptOp = operations.find((o) => o.name === 'get_write_request')!;
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let repo: string;
 let gbrainHome: string;
 let oldGbrainHome: string | undefined;
@@ -86,6 +87,7 @@ describe('put_page write-through — commit/push reporting on a hardened repo', 
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   }, 60_000);
 
   afterAll(async () => {
@@ -96,6 +98,7 @@ describe('put_page write-through — commit/push reporting on a hardened repo', 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     repo = mkdtempSync(join(tmpdir(), 'gbrain-ppr-'));
     execSync('git init -q -b main', { cwd: repo, stdio: 'pipe' });
     execSync('git config user.email "t@t.t"', { cwd: repo, stdio: 'pipe' });

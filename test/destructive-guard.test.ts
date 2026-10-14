@@ -15,6 +15,7 @@
 
 import { describe, test, expect, beforeAll, afterAll, spyOn } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -559,8 +560,11 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a NON-FK error re-raises instead of reading as blocked (review gap G8)', async () => {
     const stub = {
+      async getConfig(): Promise<string> { return 'UTC'; },
+      async transaction<T>(work: (tx: BrainEngine) => Promise<T>): Promise<T> { return work(this as unknown as BrainEngine); },
       async executeRaw(sql: string): Promise<Array<{ id: string }>> {
         if (sql.includes('FROM persistence_brain')) return [{ enabled: false } as never]; // #6482: one well-formed unmanaged row
+        if (sql.includes('FROM pages')) return []; // no historical index days in this expiry-error fixture
         if (sql.trimStart().startsWith('SELECT')) return [{ id: 'boom' }];
         const err = new Error('canceling statement due to statement timeout') as Error & { code: string };
         err.code = '57014'; // query_canceled — NOT the FK class
@@ -572,9 +576,12 @@ describe('soft-delete + restore lifecycle (column-based v0.26.5)', () => {
 
   test('gbrain#4115 — a source restored between SELECT and DELETE is neither purged nor blocked (review gap G8)', async () => {
     const stub = {
+      async getConfig(): Promise<string> { return 'UTC'; },
+      async transaction<T>(work: (tx: BrainEngine) => Promise<T>): Promise<T> { return work(this as unknown as BrainEngine); },
       async executeRaw(sql: string): Promise<Array<{ id: string }>> {
         if (sql.includes('archive_expires_at IS NULL')) return []; // #5452 unverified-archive listing: none here
         if (sql.includes('FROM persistence_brain')) return [{ enabled: false } as never]; // #6482: one well-formed unmanaged row
+        if (sql.includes('FROM pages')) return []; // no historical index days in this restore-race fixture
         if (sql.trimStart().startsWith('SELECT')) return [{ id: 'restored-mid-sweep' }];
         return []; // per-id DELETE re-checks the expiry predicate → 0 rows
       },

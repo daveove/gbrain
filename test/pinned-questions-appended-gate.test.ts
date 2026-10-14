@@ -72,13 +72,15 @@ describe('appended-corrections benefit gate (offline plumbing)', () => {
 
   describe('on a PGLite brain', () => {
     let engine: PGLiteEngine;
+    let schemaVersion: string | null;
     beforeAll(async () => {
       engine = new PGLiteEngine();
       await engine.connect({});
       await engine.initSchema();
+      schemaVersion = await engine.getConfig('version');
     });
     afterAll(async () => { await engine.disconnect(); });
-    beforeEach(async () => { await resetPgliteState(engine); });
+    beforeEach(async () => { await resetPgliteState(engine); if (schemaVersion) await engine.setConfig('version', schemaVersion); });
 
     test('the leakage probe catches a private note once private pages are exposed to remote readers', async () => {
       try {

@@ -23,6 +23,7 @@ import { parseMarkdown, serializePageToMarkdown } from '../../src/core/markdown.
 import { upsertFactRow } from '../../src/core/facts-fence.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmpRoot: string;
 let brainDir: string;
 
@@ -30,6 +31,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -44,6 +46,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   // CI fix: put_page's handler at src/core/operations.ts:622 computes
   // `noEmbed = !isAvailable('embedding')`. When the gateway has been
   // configured by a sibling test (or by the cli.ts module-load path

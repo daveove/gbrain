@@ -51,9 +51,11 @@ import { parseGoogleSourceConfig, runGoogleSync } from '../../src/core/google/go
 import { MinionQueue } from '../../src/core/minions/queue.ts';
 import { MinionWorker } from '../../src/core/minions/worker.ts';
 import { registerBuiltinHandlers } from '../../src/commands/jobs.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../../src/core/deferred-stale-extract.ts';
 import { runExtract } from '../../src/commands/extract.ts';
 import { runEmbed } from '../../src/commands/embed.ts';
 import { countExtractAtomsBacklog } from '../../src/core/cycle/extract-atoms.ts';
+import { DAILY_MEMORY_SOURCE_ID, dailyMemorySlug, ensureDailyMemorySource } from '../../src/core/cycle/daily-memory.ts';
 import { operationsByName } from '../../src/core/operations.ts';
 import { runExtractFacts, FENCE_FACTS_INTENT, DELETED_PAGE_FACTS_INTENT } from '../../src/core/cycle/extract-facts.ts';
 import { extractTakes, TAKES_REEXTRACT_INTENT } from '../../src/core/cycle/extract-takes.ts';
@@ -69,6 +71,7 @@ export const GUARDED_TABLES = ['pages', 'tags', 'slug_aliases', 'page_aliases', 
 export const contractCases = [
   'detector_self_test',
   'gmail_sweep_loops_enqueue',
+  'daily_memory_publish',
   'loops_extract_run',
   'loops_close',
   'cycle_extract',
@@ -120,6 +123,7 @@ export const CONNECTOR_ATOMS_SETTING = { key: 'cycle.extract_atoms.connector_pag
  */
 export const HANDLER_COVERAGE: Record<string, { covered: ContractCase } | { exempt: string }> = {
   'autopilot-cycle': { covered: 'cycle_extract' },
+  'autopilot-daily-memory': { covered: 'daily_memory_publish' },
   'extract_facts': { covered: 'cycle_extract_facts' },
   'extract-conversation-facts': { covered: 'extract_conversation_facts' },
   'facts-absorb': { covered: 'facts_absorb' },
@@ -128,6 +132,7 @@ export const HANDLER_COVERAGE: Record<string, { covered: ContractCase } | { exem
   'embed-backfill': { covered: 'embed_backfill' },
   'synthesize': { covered: 'synthesize_publish' },
   'extract': { covered: 'extract_timeline_db' },
+  [IMPORT_STALE_EXTRACT_JOB]: { covered: 'cycle_extract' },
   'connector-sync': { covered: 'gmail_sweep_loops_enqueue' },
   'sync': { covered: 'gmail_sweep_loops_enqueue' },
   'autopilot-global-maintenance': { exempt: 'brain-wide maintenance; selects no connector source' },
@@ -230,6 +235,9 @@ export async function setupContractBrain(engine: BrainEngine): Promise<ContractB
   return withEnv(env, async () => {
     const root = join(home, 'content'); mkdirSync(root);
     await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [root]);
+    // The daily handler reads connector sources but publishes its private aggregate
+    // into the system index, which is installed before the managed guard activates.
+    await ensureDailyMemorySource(engine);
     await claimWorktree(engine, 'default', root);
     await activateSharedSkillPersistence(engine, { confirmQuiesced: true });
     const [fn] = await engine.executeRaw<{ src: string }>("SELECT prosrc AS src FROM pg_proc WHERE proname='gbrain_require_managed_writer'");
@@ -605,6 +613,45 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
     requireCompleted(await drainQueue(state.brain.engine, jobs.map(j => j.id)));
   },
 
+  /** Brain-wide reader, dream-only managed writer: publish a private index, not connector content. */
+  async daily_memory_publish(state) {
+    await gmailSweep(state);
+    const { engine } = state.brain;
+    const day = '2025-04-07';
+    const meetingSlug = `meetings/${day}-daily-contract`;
+    await putConversationPage(state, meetingSlug,
+      `---\ntitle: Daily contract meeting\ntype: meeting\ndate: ${day}\n---\nA private meeting body must stay on its source.\n`);
+    await putConversationPage(state, 'meetings/2025-04-06-other-day',
+      '---\ntitle: Another day\ntype: meeting\ndate: 2025-04-06\n---\nNot part of this index.\n');
+    const connectorBefore = await engine.readPageSnapshot(meetingSlug, { sourceId: state.sourceId });
+    // Audit only the handler, after its real managed connector inputs have landed.
+    state.detector = { ...await startDetector(engine), output: state.detector.output };
+    const data = { daily_memory_only: true, daily_memory_date: day, daily_memory_timezone: 'UTC', source_cycle_job_ids: [] };
+    const [job] = await runJobs(engine, [{ name: 'autopilot-daily-memory', data }], 120_000);
+    requireCompleted([job]);
+    const slug = dailyMemorySlug(day);
+    expect(job.result).toMatchObject({ daily_memory_pending: false, day, dependency_failures: [],
+      daily_memory: { written: true, day, slug, source_id: DAILY_MEMORY_SOURCE_ID, pages: 1 } });
+    const page = await engine.readPageSnapshot(slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(page?.page.frontmatter).toMatchObject({ dream_generated: true, visibility: 'private', dream_cycle_date: day });
+    expect(page?.page.compiled_truth).toContain(`[[${state.sourceId}:${meetingSlug}]]`);
+    expect(page?.page.compiled_truth).not.toContain('A private meeting body');
+    expect(page?.page.compiled_truth).not.toContain('2025-04-06-other-day');
+    expect(page?.page.compiled_truth).not.toContain(state.emailSlug);
+    expect((await engine.readPageSnapshot(meetingSlug, { sourceId: state.sourceId }))?.revision).toBe(connectorBefore?.revision);
+    expect(await changesSince(state)).toEqual([]);
+    const dreamState = { ...state, sourceId: DAILY_MEMORY_SOURCE_ID };
+    const published = (await changesSince(dreamState)).filter(change => change.tbl === 'pages' && change.row_key === slug);
+    expect(published.length).toBeGreaterThan(0);
+    expect(published.every(change => change.request_kind === 'managed_maintenance_page')).toBe(true);
+    const requests = await requestCount(dreamState);
+    const [rerun] = await runJobs(engine, [{ name: 'autopilot-daily-memory', data }], 120_000);
+    requireCompleted([rerun]);
+    expect(rerun.result).toMatchObject({ daily_memory_pending: false,
+      daily_memory: { written: false, reason: 'unchanged', pages: 1 } });
+    expect(await requestCount(dreamState)).toBe(requests);
+  },
+
   async loops_extract_run(state) {
     await gmailSweep(state);
     const job = await extractLoops(state);
@@ -645,6 +692,15 @@ const cases: Record<ContractCase, (state: CaseState) => Promise<void>> = {
     const links = await engine.executeRaw(`SELECT 1 FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
       WHERE f.source_id=$1 AND f.slug='notes/plan-review' AND t.slug='people/alice-example'`, [state.sourceId]);
     expect(links).toHaveLength(1);
+    // The import-only registered consumer must use the same canonical managed
+    // publication path, without falling through to filesystem extraction.
+    await engine.executeRaw("UPDATE pages SET links_extracted_at=NULL WHERE source_id=$1", [state.sourceId]);
+    const [recovery] = await runJobs(engine, [{ name: IMPORT_STALE_EXTRACT_JOB, data: { sourceId: state.sourceId } }], 120_000);
+    requireCompleted([recovery]);
+    expect(recovery.result).toMatchObject({ stale: true, source_id: state.sourceId, staleRemaining: 0 });
+    expect(await staleCount(state)).toBe(0);
+    expect(await engine.executeRaw(`SELECT 1 FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
+      WHERE f.source_id=$1 AND f.slug='notes/plan-review' AND t.slug='people/alice-example'`, [state.sourceId])).toHaveLength(1);
   },
 
   /**
@@ -1076,7 +1132,8 @@ async function runCase(brain: ContractBrain, id: ContractCase): Promise<void> {
     state.detector.output = output;
     try {
       const failure = await cases[id](state).then(() => null, (e: unknown) => e instanceof Error ? e : new Error(String(e)));
-      const findings = await detectorFindings(state);
+      const findings = await detectorFindings(state, id === 'daily_memory_publish'
+        ? { allowedSources: [state.sourceId, DAILY_MEMORY_SOURCE_ID] } : {});
       if (failure) {
         if (findings.length) failure.message += ` [detector: ${findings.join('; ')}]`;
         throw failure;

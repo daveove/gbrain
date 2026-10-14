@@ -31,6 +31,7 @@ import { withEnv } from './helpers/with-env.ts';
 const CLAIM = 'Vault combination is 7731';
 const home = mkdtempSync(join(tmpdir(), 'gbrain-purge-eval-fixes-'));
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const op = (name: string) => operations.find(o => o.name === name)!;
 const context = (): OperationContext => ({ engine, config: { engine: 'pglite', embedding_disabled: true } as never,
   logger: { info() {}, warn() {}, error() {} }, dryRun: false, remote: false, sourceId: 'default' });
@@ -67,10 +68,11 @@ async function journalCarries(text: string): Promise<number> {
   return rows.length;
 }
 
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 60_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); rmSync(home, { recursive: true, force: true }); }, 60_000);
 beforeEach(async () => {
   await disposePersistenceConsumer(engine); await resetPgliteState(engine); _resetWriteThroughCacheForTest();
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   await withEnv({ GBRAIN_HOME: home }, () => registerLocalWriter(engine, 'cli'));
 });
 

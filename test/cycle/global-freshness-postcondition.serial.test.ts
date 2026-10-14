@@ -329,6 +329,8 @@ describe('global maintenance freshness postcondition (#5089)', () => {
       expect(result.report.reason).toBe('aborted');
       expect(result.report.phases.some(p => p.status === 'fail')).toBe(false);
       expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+      expect(await engine.executeRaw("SELECT id FROM pages WHERE source_id='dream' AND slug LIKE 'daily-memory/%'")).toHaveLength(0);
+      expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
     } finally {
       abortDuringEmbed = undefined;
     }
@@ -342,6 +344,8 @@ describe('global maintenance freshness postcondition (#5089)', () => {
         expect(result.report.reason).toBe('lock_stolen');
         expect(result.report.phases.some(p => p.status === 'fail')).toBe(false);
         expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+        expect(await engine.executeRaw("SELECT id FROM pages WHERE source_id='dream' AND slug LIKE 'daily-memory/%'")).toHaveLength(0);
+        expect(await engine.executeRaw("SELECT id FROM minion_jobs WHERE name='autopilot-daily-memory'")).toHaveLength(0);
         const locks = await engine.executeRaw(`SELECT id FROM gbrain_cycle_locks WHERE id = 'gbrain-cycle'`);
         expect(locks).toHaveLength(1);
       });

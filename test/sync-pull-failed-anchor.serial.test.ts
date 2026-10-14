@@ -29,6 +29,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
  */
 describe('#3068: failed git pull + zero imports must not report up_to_date', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   const dirs: string[] = [];
   // Hermetic GBRAIN_HOME: performFullSync (first sync) reads/writes the
   // sync-failure ledger under the gbrain home — never touch the real one.
@@ -42,6 +43,7 @@ describe('#3068: failed git pull + zero imports must not report up_to_date', () 
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
 
   afterAll(async () => {
@@ -53,6 +55,7 @@ describe('#3068: failed git pull + zero imports must not report up_to_date', () 
 
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
   });
 
   afterEach(() => {

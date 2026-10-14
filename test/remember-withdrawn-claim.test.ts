@@ -24,6 +24,7 @@ import { FACT_WITHDRAWN_MESSAGE, FACT_WITHDRAWN_SUGGESTION } from '../src/core/f
 import { NO_ENTITY_HINT } from '../src/core/persistence/memory-prepare.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const CLAIM = 'Alice Example is the procurement lead at Acme Example.';
 
 async function call(name: string, params: Record<string, unknown>) {
@@ -39,11 +40,13 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 afterAll(async () => { resetGateway(); __setEmbedTransportForTests(null); await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
   await dispatchToolCall(engine, 'put_page', { slug: 'crm/acme-example',
     content: '---\ntitle: Acme Example\ntype: company\n---\n# Acme Example\n\nA company.\n' }, { remote: false });

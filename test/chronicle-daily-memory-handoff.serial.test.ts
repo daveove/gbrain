@@ -5,6 +5,7 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import { runChronicleExtract, type ChronicleJudge } from '../src/core/chronicle/extract-events.ts';
 import { ensureDailyMemorySource, DAILY_MEMORY_SOURCE_ID, dailyMemorySlug } from '../src/core/cycle/daily-memory.ts';
 import { runDailyMemoryJob } from '../src/core/cycle/daily-memory-followup.ts';
+import { CHRONICLE_EXTRACTOR_VERSION } from '../src/core/chronicle/contract.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -66,10 +67,17 @@ test('rejected settlement rolls back event, projection and accepted child; retry
 });
 
 test('re-publication retains an existing event prior day alongside its new effective day', async () => {
-  await extract();
+  expect((await extract()).events_written).toBe(1);
   const [event] = await events();
+  // The direct extraction helper does not settle the canonical ownership ledger.
+  // Establish that this is an extractor-owned event, not an operator-edited one.
+  await engine.executeRaw(`INSERT INTO chronicle_page_state
+    (source_id,page_id,content_hash,extractor_version,slug,state,trigger,event_slugs,event_hashes)
+    SELECT p.source_id,p.id,p.content_hash,$3,p.slug,'extracted','backfill',ARRAY[e.slug],ARRAY[e.content_hash]
+    FROM pages p JOIN pages e ON e.source_id=p.source_id AND e.slug=$4
+    WHERE p.source_id=$1 AND p.slug=$2`, [sourceId, slug, CHRONICLE_EXTRACTOR_VERSION, event.slug]);
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-18T00:00:00Z'::timestamptz WHERE source_id=$1 AND slug=$2", [sourceId, event.slug]);
-  await extract();
+  expect((await extract()).events_written).toBe(1);
   expect((await jobs()).some(job => ['2026-09-18', '2026-09-21'].every(day => job.data.daily_memory_dates?.includes(day)))).toBe(true);
   expect(await events()).toHaveLength(1);
   expect(await engine.executeRaw('SELECT id FROM timeline_entries WHERE event_page_id IS NOT NULL')).toHaveLength(1);

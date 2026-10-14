@@ -29,11 +29,13 @@ import { resetGateway } from '../src/core/ai/gateway.ts';
 setDefaultTimeout(30_000);
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -43,6 +45,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   resetGateway(); // no embedding provider → put_page runs noEmbed
 });
 

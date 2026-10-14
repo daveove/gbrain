@@ -67,6 +67,7 @@ describe('cardinality in the pack contract', () => {
 
 describe('declared single-value closures in edge_contradictions', () => {
   let engine: PGLiteEngine;
+  let schemaVersion: string | null;
   let root: string;
   const pack = {
     api_version: 'gbrain-schema-pack-v1', name: 'single-value-fixture', version: '1.0.0', extends: 'gbrain-base',
@@ -107,6 +108,7 @@ describe('declared single-value closures in edge_contradictions', () => {
     engine = new PGLiteEngine();
     await engine.connect({});
     await engine.initSchema();
+    schemaVersion = await engine.getConfig('version');
   });
   afterAll(async () => {
     await engine.disconnect();
@@ -116,6 +118,7 @@ describe('declared single-value closures in edge_contradictions', () => {
   });
   beforeEach(async () => {
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     await engine.setConfig('schema_pack', pack.name);
   });
 
@@ -181,6 +184,7 @@ describe('declared single-value closures in edge_contradictions', () => {
     expect(await liveWorksAt()).toEqual(['companies/acme-example', 'companies/gadget-co', 'companies/widget-co']);
 
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     await engine.setConfig('schema_pack', pack.name);
     await engine.setConfig('dream.single_value.mode', 'off');
     await engine.setConfig('dream.edge_contradictions.mode', 'off');

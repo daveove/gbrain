@@ -480,16 +480,14 @@ for (const timing of ['before snapshot', 'after snapshot'] as const) {
     const beforeMark = await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
       [DAILY_MEMORY_SOURCE_ID, slug]);
     try {
-      const run = extractOneShotDailyMemory(engine, { written: true, extract_slugs: [slug] });
-      let runError: unknown;
-      if (timing === 'after snapshot') await expect(run).rejects.toThrow('changed');
-      else { try { await run; } catch (error) { runError = error; } }
+      // Native .60 defers a concurrent projection write; a human replacement is
+      // no longer owned index debt and must not be retried or stamped.
+      await extractOneShotDailyMemory(engine, { written: true, extract_slugs: [slug] });
       expect(injected).toBe(true);
       expect(await engine.getLinks(slug, { sourceId: DAILY_MEMORY_SOURCE_ID })).toEqual(beforeLinks);
       expect(await engine.executeRaw('SELECT links_extracted_at FROM pages WHERE source_id=$1 AND slug=$2',
         [DAILY_MEMORY_SOURCE_ID, slug])).toEqual(beforeMark);
       expect((await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))?.frontmatter.dream_generated).toBeUndefined();
-      if (runError) throw runError;
     } finally { listSpy.mockRestore(); replaceSpy.mockRestore(); }
   });
 }

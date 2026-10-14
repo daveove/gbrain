@@ -43,12 +43,14 @@ describe('requestLogStatusForResult: accepted_pending (pure)', () => {
 });
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let fixture: string;
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 120_000);
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 120_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   _resetWriteThroughCacheForTest();
   fixture = mkdtempSync(join(tmpdir(), 'gb-accepted-pending-'));
   mkdirSync(join(fixture, 'brain'));

@@ -39,6 +39,7 @@ const backends = testBackends();
 for (const kind of backends) {
   describe(`embedding recovery safety (${kind})`, () => {
     let engine: BrainEngine;
+    let schemaVersion: string | null;
     let originalDimensions: number;
     let originalIdentity: Array<{ key: string; value: string }>;
     async function flow(maxCostUsd = 1, to = model, targetDimensions = dimensions, retarget = false) {
@@ -55,13 +56,16 @@ for (const kind of backends) {
     beforeAll(async () => {
       if (kind === 'postgres') engine = await setupDB();
       else { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }
+      schemaVersion = await engine.getConfig('version');
       originalDimensions = (await readContentChunksEmbeddingDim(engine)).dims!;
       originalIdentity = await engine.executeRaw("SELECT key,value FROM config WHERE key IN ('embedding_model','embedding_dimensions')");
       await runSchemaTransition(engine, dimensions);
     }, 60_000);
     beforeEach(async () => {
-      if (kind === 'pglite') await resetPgliteState(engine as PGLiteEngine);
-      else {
+      if (kind === 'pglite') {
+        await resetPgliteState(engine as PGLiteEngine);
+        if (schemaVersion) await engine.setConfig('version', schemaVersion);
+      } else {
         await truncateCascade(engine, ['facts', 'pages', 'fact_withdrawals', 'page_projection_jobs']);
         await engine.executeRaw("DELETE FROM config WHERE key LIKE 'embedding_migration.%'");
       }

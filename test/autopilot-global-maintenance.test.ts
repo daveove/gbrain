@@ -1,8 +1,9 @@
 /**
  * #2194 fix #3 / #2227 bug #3 — the cycle split.
  *
- * Per-source autopilot cycles run ONLY source-scoped phases; mixed + global
- * phases run ONCE in a separate autopilot-global-maintenance
+ * Per-source freshness cycles run ONLY bounded source-scoped phases; source
+ * background work remains source-scoped, while mixed + global phases run ONCE
+ * in a separate autopilot-global-maintenance
  * job. This replaces the rejected skip-and-stamp-fresh design (codex #1/#2): the
  * split makes single-flight structural (one global job, not N concurrent embeds)
  * and never marks a source "fresh" for global work it didn't do. These tests pin
@@ -60,20 +61,16 @@ describe('cycle phase partition (#2194 fix #3)', () => {
     expect(SOURCE_PHASES).toContain('lint');
     expect(SOURCE_PHASES).toContain('sync');
     expect(SOURCE_PHASES).not.toContain('embed');
-    expect(MIXED_PHASES).toEqual([
-      'synthesize',
-      'patterns',
-      'consolidate',
-      'conversation_facts_backfill',
-      'enrich_thin',
-    ]);
+    expect(MIXED_PHASES).toEqual(['synthesize', 'patterns']);
     expect(MAINTENANCE_PHASES).toContain('synthesize');
     expect(MAINTENANCE_PHASES).toContain('patterns');
-    expect(MAINTENANCE_PHASES).toContain('consolidate');
-    expect(MAINTENANCE_PHASES).toContain('conversation_facts_backfill');
-    expect(MAINTENANCE_PHASES).toContain('enrich_thin');
+    for (const phase of ['consolidate', 'conversation_facts_backfill', 'enrich_thin'] as const) {
+      expect(PHASE_SCOPE[phase]).toBe('source');
+      expect(SOURCE_PHASES).toContain(phase);
+      expect(MAINTENANCE_PHASES).not.toContain(phase);
+    }
     expect(MAINTENANCE_PHASES).toContain('embed');
-    // Once per day, not once per source.
+    // Source background work must not hold the bounded freshness stamp hostage.
     expect(SOURCE_FRESHNESS_PHASES).not.toContain('consolidate');
     expect(SOURCE_FRESHNESS_PHASES).not.toContain('conversation_facts_backfill');
     expect(SOURCE_FRESHNESS_PHASES).not.toContain('enrich_thin');
@@ -81,13 +78,23 @@ describe('cycle phase partition (#2194 fix #3)', () => {
 
   test('source freshness excludes LLM-backed/background source work', () => {
     expect(new Set([...SOURCE_FRESHNESS_PHASES, ...SOURCE_BACKGROUND_PHASES])).toEqual(new Set(SOURCE_PHASES));
+    expect(SOURCE_FRESHNESS_PHASES.filter(phase => SOURCE_BACKGROUND_PHASES.includes(phase))).toEqual([]);
+    expect(SOURCE_BACKGROUND_PHASES).toEqual([
+      'extract_atoms',
+      'consolidate',
+      'propose_takes',
+      'conversation_facts_backfill',
+      'enrich_thin',
+      'schema-suggest',
+    ]);
     expect(SOURCE_FRESHNESS_PHASES).toContain('sync');
     expect(SOURCE_FRESHNESS_PHASES).toContain('extract_facts');
     expect(SOURCE_BACKGROUND_PHASES).toContain('extract_atoms');
     expect(SOURCE_BACKGROUND_PHASES).toContain('propose_takes');
     expect(SOURCE_BACKGROUND_PHASES).toContain('schema-suggest');
-    expect(SOURCE_BACKGROUND_PHASES).not.toContain('consolidate');
-    expect(SOURCE_BACKGROUND_PHASES).not.toContain('enrich_thin');
+    expect(SOURCE_BACKGROUND_PHASES).toContain('consolidate');
+    expect(SOURCE_BACKGROUND_PHASES).toContain('conversation_facts_backfill');
+    expect(SOURCE_BACKGROUND_PHASES).toContain('enrich_thin');
     expect(SOURCE_FRESHNESS_PHASES).not.toContain('extract_atoms');
   });
 

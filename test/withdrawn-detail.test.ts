@@ -13,16 +13,19 @@ import { detailOnEverySurface, hiddenBackingOmitsDetail, mostSpecificSubjectFirs
   singleWriterSameRule } from './helpers/withdrawn-detail-scenarios.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 afterAll(async () => { resetGateway(); await disposePersistenceConsumer(engine); await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
 });
 

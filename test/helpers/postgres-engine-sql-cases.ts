@@ -18,6 +18,7 @@ import { resetFtsLanguageCache } from '../../src/core/fts-language.ts';
 import { makeFakeSql, type FakeSql, type RecordedStatement, type Responder } from './fake-postgres-sql.ts';
 import { withEnv } from './with-env.ts';
 import { LEGACY_EMBEDDING_CONFIG } from './legacy-embedding-config.ts';
+import { resolveEmbeddingColumn } from '../../src/core/search/embedding-column.ts';
 
 export const W1_DOMAINS = [
   'pages', 'links', 'tags', 'timeline', 'sources', 'files',
@@ -258,6 +259,16 @@ const SLUG2 = 'companies/acme-example';
 const SRC = 'src-a';
 const SRCS = ['src-a', 'src-b'];
 const EMB = new Float32Array([0.1, 0.2, 0.3]);
+// Named columns must be declared through the real registry resolver. Keep the
+// supplied vector width, provider model, cast and independent proof coherent.
+const VOYAGE_COLUMNS = {
+  embedding_voyage: { provider: 'voyage:voyage-4', dimensions: EMB.length, type: 'halfvec' as const, provenance: 'independent' as const },
+};
+const VOYAGE_COLUMN = resolveEmbeddingColumn({ embeddingColumn: 'embedding_voyage' }, { engine: 'postgres', embedding_columns: VOYAGE_COLUMNS });
+const voyageConfig: Rule = [
+  /^SELECT key,value FROM config WHERE key IN \('embedding_columns','embedding_model','embedding_dimensions','embedding_multimodal_model'\)$/,
+  [{ key: 'embedding_columns', value: JSON.stringify(VOYAGE_COLUMNS) }],
+];
 const page = { type: 'person', title: 'Alice Example', compiled_truth: 'Alice Example body.', timeline: '', frontmatter: { tags: [] } };
 const pageRet: Rule = [/^\s*INSERT INTO pages \(source_id, slug/, [PAGE_ROW]];
 const pageId: Rule = [/SELECT id FROM pages/i, [{ id: 1 }]];
@@ -521,7 +532,7 @@ export const SQL_CASES: SqlCase[] = [
     ['embedding', (e) => e.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'Alice Example body.', chunk_source: 'compiled_truth', embedding: EMB, model: 'test-model', embedding_input_hash: 'ih' }], { sourceId: SRC }), [pageId]],
     ['empty', (e) => e.upsertChunks(SLUG, []), [pageId]],
     ['expectedRevision', (e) => e.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'x', chunk_source: 'compiled_truth' }], { sourceId: SRC, expectedRevision: REVISION }), [pageId]],
-    ['embeddingColumn', (e) => e.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'x', chunk_source: 'compiled_truth', embedding: EMB }], { embeddingColumn: { name: 'embedding_voyage', dimensions: 3, embeddingModel: 'voyage-test', vectorType: 'halfvec' } }), [pageId]],
+    ['embeddingColumn', (e) => e.upsertChunks(SLUG, [{ chunk_index: 0, chunk_text: 'x', chunk_source: 'compiled_truth', embedding: EMB, model: VOYAGE_COLUMN.embeddingModel, embedding_input_hash: 'ih' }], { embeddingColumn: VOYAGE_COLUMN }), [pageId]],
   ]),
   ...variants('getChunks', [
     ['default', (e) => e.getChunks(SLUG)],
@@ -568,7 +579,7 @@ export const SQL_CASES: SqlCase[] = [
   ...variants('deleteChunks', [['default', (e) => e.deleteChunks(SLUG)]]),
   ...variants('getEmbeddingsByChunkIds', [
     ['default', (e) => e.getEmbeddingsByChunkIds([1, 2])],
-    ['column', (e) => e.getEmbeddingsByChunkIds([1, 2], 'embedding_voyage')],
+    ['column', (e) => e.getEmbeddingsByChunkIds([1, 2], 'embedding_voyage'), [voyageConfig]],
   ]),
   ...variants('getChunkWindows', [
     ['default', (e) => e.getChunkWindows([{ page_id: 1, from_index: 0, to_index: 4, priority: 0 }], { chunkSources: ['compiled_truth', 'timeline'], maxRows: 16 })],

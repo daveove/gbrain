@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { dump, load } from 'js-yaml';
 import { parseDataFrontmatter, stringifyDataFrontmatter } from '../src/core/data-frontmatter.ts';
-import { NAIVE_DATETIME } from '../src/core/effective-date.ts';
+import { CALENDAR_DATE, DATE_INSTANT_PROVENANCE, NAIVE_DATETIME, withDateInstantProvenance } from '../src/core/effective-date.ts';
 
 // js-yaml 4 parses YAML 1.2 core scalars. These cases pin what changed from
 // js-yaml 3 (YAML 1.1 integers) and what must not change (dates, duplicate
@@ -30,6 +30,15 @@ describe('frontmatter scalars under YAML 1.2 (js-yaml 4)', () => {
     expect((data.date as Date).toISOString()).toBe('2024-02-29T00:00:00.000Z');
     expect(data.bad).toBe('2024-02-30');
     expect((data.at as Date & Record<symbol, unknown>)[NAIVE_DATETIME]).toBe(true);
+  });
+
+  test('native YAML calendar dates do not become timestamp provenance while explicit midnight instants do', () => {
+    const calendar = fm('date: 2024-02-29');
+    const instant = fm('date: 2024-02-29T00:00:00Z');
+    expect((calendar.date as Date & Record<symbol, unknown>)[CALENDAR_DATE]).toBe(true);
+    expect(withDateInstantProvenance(calendar)[DATE_INSTANT_PROVENANCE]).toBeUndefined();
+    expect(withDateInstantProvenance(instant)[DATE_INSTANT_PROVENANCE]).toEqual({ date: '2024-02-29T00:00:00.000Z' });
+    expect(JSON.stringify(calendar)).toBe('{"date":"2024-02-29T00:00:00.000Z"}');
   });
 
   test('duplicate keys are refused and merge keys still merge', () => {

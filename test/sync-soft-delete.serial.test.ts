@@ -40,6 +40,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { performSync } from '../src/commands/sync.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const repos: string[] = [];
 let tmpHome: string;
 const originalGbrainHome = process.env.GBRAIN_HOME;
@@ -48,6 +49,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -58,6 +60,7 @@ beforeEach(async () => {
   tmpHome = mkdtempSync(join(tmpdir(), 'gbrain-4587-home-'));
   process.env.GBRAIN_HOME = tmpHome;
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 afterEach(() => {

@@ -14,6 +14,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { operations, type OperationContext } from '../src/core/operations.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const put_page = operations.find(o => o.name === 'put_page')!;
 
 function ctxOf(overrides: Partial<OperationContext> = {}): OperationContext {
@@ -32,6 +33,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 
 afterAll(async () => {
@@ -40,6 +42,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 }, 30_000);
 
 describe('put_page passes the skip/error reason through (#3984)', () => {

@@ -24,6 +24,7 @@ import { screenImportContent } from '../src/core/import-screen.ts';
 import { readPagePurgeTombstones } from '../src/core/persistence/page-purge.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let storageDir: string;
 const home = mkdtempSync(join(tmpdir(), 'gbrain-page-purge-'));
 const op = (name: string) => operations.find(o => o.name === name)!;
@@ -48,10 +49,11 @@ async function errorText(p: Promise<unknown>): Promise<string> {
   try { await p; return 'ok'; } catch (e) { return e instanceof OperationError ? `${e.canonical ?? e.code}: ${e.message}` : String((e as Error).message); }
 }
 
-beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); }, 60_000);
+beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); schemaVersion = await engine.getConfig('version'); }, 60_000);
 afterAll(async () => { await disposePersistenceConsumer(engine); await engine.disconnect(); rmSync(home, { recursive: true, force: true }); }, 60_000);
 beforeEach(async () => {
   await disposePersistenceConsumer(engine); await resetPgliteState(engine); _resetWriteThroughCacheForTest();
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   storageDir = mkdtempSync(join(home, 'storage-'));
 });
 

@@ -66,12 +66,14 @@ const GROK_FIXTURE = join(
 );
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 let tmp: string;
 
 beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 });
 
 afterAll(async () => {
@@ -80,6 +82,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   tmp = mkdtempSync(join(tmpdir(), 'gb-ingest-e2e-'));
 });
 
@@ -463,6 +466,7 @@ describe('all seven formats travel the FULL pipeline (parse → redact → rende
     // limit interplay on a multi-session FILE: limit=1 imports one session,
     // truncates cleanly, and the follow-up run converges.
     await resetPgliteState(engine);
+    if (schemaVersion) await engine.setConfig('version', schemaVersion);
     const rLimit = await runTranscriptsIngest(engine, baseOpts([dbPath], { limit: 1 }));
     expect(rLimit.sessionsImported).toBe(1);
     expect(rLimit.cleanScan).toBe(false);

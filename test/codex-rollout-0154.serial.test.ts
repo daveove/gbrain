@@ -203,10 +203,12 @@ describe('E-N4: assistant turns with no user turn are flagged, never silent', ()
 
   describe('ingest', () => {
     let engine: PGLiteEngine;
+    let schemaVersion: string;
     beforeAll(async () => {
       engine = new PGLiteEngine();
       await engine.connect({});
       await engine.initSchema();
+      schemaVersion = (await engine.getConfig('version'))!;
     });
     afterAll(async () => {
       await engine.disconnect();
@@ -214,6 +216,7 @@ describe('E-N4: assistant turns with no user turn are flagged, never silent', ()
 
     test('an assistant-only file imports but counts as drift and holds the watermark', async () => {
       await resetPgliteState(engine);
+      await engine.setConfig('version', schemaVersion);
       const p = writeRollout('assistant-only.jsonl', [meta, assistant('ok')]);
       const r = await runTranscriptsIngest(engine, { paths: [p], sourceId: 'default', userPatternsPath: '/nonexistent-patterns.txt' });
       expect(r.sessionsImported).toBe(1);

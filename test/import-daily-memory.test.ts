@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, spyOn, test } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, mkdirSync, renameSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, mkdirSync, renameSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -11,10 +11,14 @@ import { loadSyncFailures } from '../src/core/sync-failure-ledger.ts';
 import { MinionQueue } from '../src/core/minions/queue.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { withEnv } from './helpers/with-env.ts';
+import * as extractModule from '../src/commands/extract.ts';
+import { drainNightlyExtractJobs, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
+import { IMPORT_STALE_EXTRACT_JOB } from '../src/core/deferred-stale-extract.ts';
 
 let engine: PGLiteEngine, version: string | null;
 const roots: string[] = [];
-const root = () => { const dir = mkdtempSync(join(tmpdir(), 'gbrain-import-day-')); roots.push(dir); return dir; };
+// Match runImport's canonical directory identity when peers address the same debt.
+const root = () => { const dir = realpathSync(mkdtempSync(join(tmpdir(), 'gbrain-import-day-'))); roots.push(dir); return dir; };
 const markdown = '---\ntype: note\ntitle: Synthetic fixture\ndate: "2026-09-24"\n---\n\nSynthetic fixture';
 beforeAll(async () => { engine = new PGLiteEngine(); await engine.connect({}); await engine.initSchema(); version = await engine.getConfig('version'); }, 60_000);
 afterAll(async () => { await engine.disconnect(); for (const dir of roots) rmSync(dir, { recursive: true, force: true }); });
@@ -109,6 +113,110 @@ test('rejected daily handoff survives an unchanged retry and healthy no-op creat
     expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(0);
     expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(accepted);
   });
+});
+
+test('healthy unchanged import admits no extraction and preserves the generation clock', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'])).imported).toBe(1);
+    const before = await engine.executeRaw('SELECT last_value::text FROM page_generation_clock_seq');
+    const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    const extract = spyOn(extractModule, 'extractStaleFromDB');
+    try {
+      const result = await runImport(engine, [dir, '--no-embed', '--json']);
+      expect(result.imported).toBe(0); expect(result.errors).toBe(0);
+      expect(extract).not.toHaveBeenCalled();
+      expect(await engine.executeRaw('SELECT last_value::text FROM page_generation_clock_seq')).toEqual(before);
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
+    } finally { extract.mockRestore(); }
+  });
+});
+
+test('unchanged small extraction debt queues without a generation write and the nightly consumer extracts it', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await withEnv({ GBRAIN_HOME: home, GBRAIN_DAILY_MEMORY_LOOKBACK: undefined }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(1);
+    const before = await engine.executeRaw('SELECT last_value::text FROM page_generation_clock_seq');
+    const result = await runImport(engine, [dir, '--no-embed', '--json']);
+    expect(result.imported).toBe(0); expect(result.errors).toBe(0);
+    expect(await engine.executeRaw('SELECT last_value::text FROM page_generation_clock_seq')).toEqual(before);
+    const queued = await engine.executeRaw<{ id: number; status: string; data: Record<string, unknown> }>(
+      'SELECT id,status,data FROM minion_jobs WHERE name=$1', [IMPORT_STALE_EXTRACT_JOB]);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.status).toBe('waiting');
+    expect(queued[0]!.data).toEqual(expect.objectContaining({ stale: true, sourceId: 'default', reason: 'import_stale_backlog' }));
+    expect(await engine.executeRaw("SELECT links_extracted_at::text FROM pages WHERE source_id='default' AND slug='note'"))
+      .toEqual([{ links_extracted_at: null }]);
+    const failure = spyOn(MinionQueue.prototype, 'add').mockImplementation(async () => {
+      throw new Error('Synthetic recovery sweep queue outage');
+    });
+    try {
+      const rejected = await runImport(engine, [dir, '--no-embed', '--json']);
+      expect(rejected.errors).toBe(1);
+      expect(rejected.linkExtractionError).toContain('Synthetic recovery sweep queue outage');
+      expect(await engine.executeRaw('SELECT last_value::text FROM page_generation_clock_seq')).toEqual(before);
+    } finally { failure.mockRestore(); }
+    await runOneShotDailyMemoryWrite(engine, '2026-09-24');
+    expect(await engine.executeRaw("SELECT links_extracted_at::text FROM pages WHERE source_id='default' AND slug='note'"))
+      .toEqual([{ links_extracted_at: expect.any(String) }]);
+    expect((await new MinionQueue(engine).getJob(queued[0]!.id))?.status).toBe('completed');
+  });
+}, 120_000);
+
+test('nightly extraction job and wall-time caps retain unclaimed debt and never claim another name', async () => {
+  await engine.putPage('note', { type: 'note', title: 'Synthetic fixture', compiled_truth: 'Body', frontmatter: {} });
+  const queue = new MinionQueue(engine);
+  const fullMode = await queue.add('extract', { mode: 'all', dir: '/does-not-exist' });
+  // Its registered name pins stale mode even if a retained payload omits the flag.
+  const first = await queue.add(IMPORT_STALE_EXTRACT_JOB, { sourceId: 'default' });
+  const second = await queue.add(IMPORT_STALE_EXTRACT_JOB, { stale: true, sourceId: 'default' });
+  const other = await queue.add('autopilot-daily-memory', { daily_memory_only: true, daily_memory_date: '2026-09-24', source_cycle_job_ids: [] });
+  expect(await drainNightlyExtractJobs(engine, { maxJobs: 0, timeBudgetMs: 60_000 })).toBe(0);
+  expect(await drainNightlyExtractJobs(engine, { maxJobs: 1, timeBudgetMs: 0 })).toBe(0);
+  expect((await queue.getJob(first.id))?.status).toBe('waiting');
+  expect(await drainNightlyExtractJobs(engine, { maxJobs: 1, timeBudgetMs: 60_000 })).toBe(1);
+  expect((await queue.getJob(first.id))?.status).toBe('completed');
+  expect((await queue.getJob(second.id))?.status).toBe('waiting');
+  expect((await queue.getJob(other.id))?.status).toBe('waiting');
+  expect((await queue.getJob(fullMode.id))?.status).toBe('waiting');
+  expect(await engine.executeRaw("SELECT links_extracted_at::text FROM pages WHERE source_id='default' AND slug='note'"))
+    .toEqual([{ links_extracted_at: expect.any(String) }]);
+}, 60_000);
+
+test('nightly extraction defers in-flight budget expiry without burning an attempt', async () => {
+  const queue = new MinionQueue(engine);
+  const job = await queue.add(IMPORT_STALE_EXTRACT_JOB, { stale: true, sourceId: 'default' });
+  const stalled = spyOn(extractModule, 'extractStaleFromDB').mockImplementation(async (_engine, opts) => {
+    const signal = opts.signal!;
+    const { promise, reject } = Promise.withResolvers<never>();
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    if (signal.aborted) reject(signal.reason);
+    return promise;
+  });
+  try {
+    expect(await drainNightlyExtractJobs(engine, { maxJobs: 1, timeBudgetMs: 1_100 })).toBe(0);
+  } finally { stalled.mockRestore(); }
+  const deferred = await queue.getJob(job.id);
+  expect(deferred?.status).toBe('delayed');
+  expect(deferred?.attempts_made).toBe(0);
+  expect(deferred?.lock_token).toBeNull();
+}, 10_000);
+
+test('nightly stale-only extraction continuations retain the registered recovery name', async () => {
+  const queue = new MinionQueue(engine);
+  const job = await queue.add(IMPORT_STALE_EXTRACT_JOB, { sourceId: 'default' });
+  const partial = spyOn(extractModule, 'extractStaleFromDB').mockResolvedValue({
+    pagesProcessed: 1, linksCreated: 0, timelineCreated: 0, staleRemaining: 1,
+  });
+  try {
+    expect(await drainNightlyExtractJobs(engine, { maxJobs: 1, timeBudgetMs: 60_000 })).toBe(1);
+  } finally { partial.mockRestore(); }
+  expect((await queue.getJob(job.id))?.status).toBe('completed');
+  const continuation = await engine.executeRaw<{ name: string; status: string; data: Record<string, unknown> }>(
+    "SELECT name,status,data FROM minion_jobs WHERE data->>'continuation_of'=$1", [String(job.id)]);
+  expect(continuation).toHaveLength(1);
+  expect(continuation[0]).toEqual({ name: IMPORT_STALE_EXTRACT_JOB, status: 'waiting',
+    data: { sourceId: 'default', stale: true, continuation_of: job.id } });
 });
 
 

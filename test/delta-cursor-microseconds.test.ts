@@ -16,6 +16,7 @@ import type { OperationContext } from '../src/core/operations.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 const del = operations.find((o) => o.name === 'delta')!;
 const putPage = operations.find((o) => o.name === 'put_page')!;
 
@@ -56,6 +57,7 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 120_000);
 
 afterAll(async () => {
@@ -64,6 +66,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
 });
 
 describe('delta — cursor carries column-precision microseconds', () => {

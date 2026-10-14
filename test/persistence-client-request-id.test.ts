@@ -24,6 +24,7 @@ const ID = 'remember-acme-example-1';
 const ID_UUID = 'ef1eabdc-3cd7-523b-934a-f6e477fe2211';
 const CONFLICT = 'This request_id was used for a different write; send a new one or omit it.';
 let engine: PGLiteEngine;
+let schemaVersion: string | null;
 
 async function callOn(target: PGLiteEngine, name: string, params: Record<string, unknown>) {
   // The Cat 40 serve path: `gbrain serve --surface starter` over stdio.
@@ -43,11 +44,13 @@ beforeAll(async () => {
   engine = new PGLiteEngine();
   await engine.connect({});
   await engine.initSchema();
+  schemaVersion = await engine.getConfig('version');
 }, 60_000);
 afterAll(async () => { resetGateway(); await engine.disconnect(); });
 beforeEach(async () => {
   await disposePersistenceConsumer(engine);
   await resetPgliteState(engine);
+  if (schemaVersion) await engine.setConfig('version', schemaVersion);
   configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: {} });
   await local('put_page', { slug: 'crm/acme-example', content: '---\ntitle: Acme Example\ntype: company\n---\n# Acme Example\n\nA company.\n' });
 });
