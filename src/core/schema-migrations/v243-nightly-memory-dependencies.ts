@@ -1,6 +1,7 @@
 import type { Migration } from './types.ts';
 import { buildIndexOnline, migrationNotice } from './helpers.ts';
 import { TRUST_STAMP_TIER_FUNCTION_SQL } from '../trust/schema.ts';
+import { PAGES_TITLE_LOWER_TRGM_INDEX, PAGE_INDEXES_REPAIR_COMMAND } from '../page-indexes.ts';
 
 /** Keep nightly dependencies live, index title lookup, and forward-update calendar provenance trust semantics. */
 export const v243: Migration = {
@@ -18,9 +19,7 @@ export const v243: Migration = {
     await engine.runMigration(243, `${TRUST_STAMP_TIER_FUNCTION_SQL};`);
     // v240 already supplies the slug trigram and exact source/title indexes.
     // Fresh and upgraded brains build this online through the existing helper.
-    await buildIndexOnline(engine, 243, {
-      name: 'idx_pages_title_lower_trgm', table: 'pages',
-      sql: 'CREATE INDEX IF NOT EXISTS idx_pages_title_lower_trgm ON pages USING GIN (lower(title) gin_trgm_ops)',
-    }, { notice: migrationNotice });
+    await buildIndexOnline(engine, 243, PAGES_TITLE_LOWER_TRGM_INDEX,
+      { notice: migrationNotice, repairCommand: PAGE_INDEXES_REPAIR_COMMAND });
   },
 };

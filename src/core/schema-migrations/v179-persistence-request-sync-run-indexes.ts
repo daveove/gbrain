@@ -16,7 +16,9 @@ export const v179: Migration = {
   sql: '',
   handler: async engine => {
     for (const index of PERSISTENCE_SYNC_RUN_INDEXES) {
-      await buildIndexOnline(engine, 179, { ...index, table: 'persistence_requests' }, { notice: migrationNotice });
+      await buildIndexOnline(engine, 179, { ...index, table: 'persistence_requests' }, {
+        notice: migrationNotice, repairCommand: 'gbrain repair request-indexes --apply',
+      });
     }
   },
 };

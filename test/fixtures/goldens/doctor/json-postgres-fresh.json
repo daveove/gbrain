@@ -807,6 +807,32 @@
         {
           "category": "ops",
           "details": {
+            "command": "gbrain repair page-indexes --apply",
+            "count": 0,
+            "docs": "docs/guides/repair.md#page-indexes",
+            "indexes": [
+              {
+                "name": "idx_pages_source_title_lower",
+                "state": "valid"
+              },
+              {
+                "name": "idx_pages_slug_trgm",
+                "state": "valid"
+              },
+              {
+                "name": "idx_pages_title_lower_trgm",
+                "state": "valid"
+              }
+            ],
+            "repair": "page-indexes"
+          },
+          "message": "Page lookup indexes are valid and ready.",
+          "name": "page_indexes",
+          "status": "ok"
+        },
+        {
+          "category": "ops",
+          "details": {
             "commands": [],
             "docs": "docs/guides/repair.md#request-growth",
             "rows": 0,

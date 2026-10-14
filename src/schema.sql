@@ -266,9 +266,9 @@ CREATE INDEX IF NOT EXISTS idx_pages_type ON pages(type);
 CREATE INDEX IF NOT EXISTS idx_pages_frontmatter ON pages USING GIN(frontmatter);
 CREATE INDEX IF NOT EXISTS idx_pages_trgm ON pages USING GIN(title gin_trgm_ops);
 CREATE INDEX IF NOT EXISTS idx_pages_slug_basename ON pages (source_id, (regexp_replace(slug, '^.*/', '')));
--- v240: the entity name lookups (exact title, alias title check, slug suffix) as index scans.
-CREATE INDEX IF NOT EXISTS idx_pages_source_title_lower ON pages (source_id, lower(title));
-CREATE INDEX IF NOT EXISTS idx_pages_slug_trgm ON pages USING GIN (slug gin_trgm_ops);
+-- BEGIN GENERATED from src/core/page-indexes.ts (PAGES_NAME_LOOKUP_INDEXES). Edit that file, then run: bun run build:schema
+
+-- END GENERATED from src/core/page-indexes.ts (PAGES_NAME_LOOKUP_INDEXES)
 -- v0.13.1 #170: avoids 14.6s seqscan on large brains when listing pages newest-first.
 CREATE INDEX IF NOT EXISTS idx_pages_updated_at_desc ON pages (updated_at DESC);
 -- v0.18.0: source-scoped scans (per /plan-eng-review Section 4).

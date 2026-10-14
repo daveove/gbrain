@@ -451,7 +451,7 @@ src/schema.sql (canonical for every other table) ─┴─> src/schema.sql BEGIN
 ```
 
 - **Fragments** (`FRAGMENTS` in the generator): `grants/schema.ts`, `facts/withdrawal-schema.ts`,
-  `lease-schema.ts`, `page-state/schema.ts`, `persistence/schema.ts`,
+  `lease-schema.ts`, `page-state/schema.ts`, `page-indexes.ts`, `persistence/schema.ts`,
   `page-state/projection-schema.ts`, `persistence/topology-schema.ts`,
   `company-brain/receipt-schema.ts`, `shared-skills/schema-all.ts`. Migrations import the same
   constants, so a fragment is also the migration text. Each has one region in `src/schema.sql`
@@ -471,7 +471,44 @@ Engine differences in the bootstrap (not reconciled; changing them is a schema c
 `dream_verdicts`, `sources.chunker_version`, the `content_chunks` code-symbol and `search_vector`
 columns (with their indexes and trigger), `pages_generation_idx` and `idx_pages_updated_at_desc`
 from migrations. Postgres gets `slug_aliases`, `page_aliases`, the `page_links` view and
-`persistence_requests_database_pending` from migrations.
+`persistence_requests_database_pending` from migrations. The v240
+`idx_pages_source_title_lower` and `idx_pages_slug_trgm` indexes are also omitted
+from Postgres replay and built by the online migration handler; PGLite retains
+both inline in its fresh-schema template. The v243 `idx_pages_title_lower_trgm`
+is migration-only on both engines, not a plain replay build. If these page
+indexes are missing or invalid after their versions are already stamped,
+`gbrain doctor` reports `page_indexes`; `gbrain repair page-indexes --apply`
+rebuilds them online on Postgres without changing user data or schema stamps.
+
+### Schema-only migration deadline
+
+`gbrain init --migrate-only` and the internal schema migration phases use a
+private Postgres engine with a 30-minute statement and overall schema deadline.
+Its read pool is one connection and its existing DDL/direct route is capped at
+one connection; the transient schema-lock diagnostic can bring the peak to
+three. Online handlers can reserve that one DDL connection without falling
+back to the ordinary five-minute budget. No additional executor or pool is
+created. Ordinary import, API and MCP engines retain their current timeouts
+and connection limits; non-schema migration subprocesses retain their ten-minute
+deadline.
+
+On expiry, the runner immediately closes its owned read/direct sockets and
+waits for its migration work to settle before returning failure. PostgreSQL
+14+ `client_connection_check_interval=1000` on these private connections lets
+the server notice the closed socket during a long statement, with the SQL
+statement timeout as a backstop. Use a direct or session-mode connection
+(Supabase session pooler port 5432), not transaction pooling that discards
+startup settings. A timeout can leave durable earlier migrations and an
+INVALID concurrent index; rerun the same `init --migrate-only` after the failed
+owned statement has stopped, or use the doctor-named native repair for an
+already-stamped index.
+
+Every online index helper completion requires both `indisvalid` and
+`indisready`. A foreign concurrent build is not completion: the named
+`OnlineIndexInProgressError` leaves its migration unstamped and tells the
+operator to rerun after that builder finishes. The helper neither cancels nor
+drops that active build. A valid, ready index is a no-op; an inactive INVALID
+leftover is dropped and rebuilt online.
 
 Worked examples:
 

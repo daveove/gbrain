@@ -20,6 +20,8 @@ export const v241: Migration = {
   transaction: false,
   sql: '',
   handler: async engine => {
-    await buildIndexOnline(engine, 241, PERSISTENCE_REQUEST_SLUG_INTENT_INDEX, { notice: migrationNotice });
+    await buildIndexOnline(engine, 241, PERSISTENCE_REQUEST_SLUG_INTENT_INDEX, {
+      notice: migrationNotice, repairCommand: 'gbrain repair request-indexes --apply',
+    });
   },
 };

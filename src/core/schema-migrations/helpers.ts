@@ -33,12 +33,12 @@ export function setQuietMigrationNotices(quiet: boolean): void {
 }
 
 /**
- * Postgres-only: drops `indexName` iff it currently exists AND is invalid — the
- * leftover of a `CREATE INDEX CONCURRENTLY` that failed partway through. Callers
- * MUST already be inside an `engine.kind === 'postgres'` branch (PGLite has no
- * concurrent-build invalid-index concept and no `pg_index` catalog in the same
- * shape) and MUST run this before their own `CREATE INDEX CONCURRENTLY IF NOT
- * EXISTS`, since a stale invalid entry blocks the create from ever landing.
+ * Postgres-only: drops `indexName` iff it currently exists AND is invalid or
+ * not ready — the leftover of a failed `CREATE INDEX CONCURRENTLY`. A fresh
+ * progress probe protects a foreign active build, including one that started
+ * after the caller's initial probe. Callers MUST already be inside an
+ * `engine.kind === 'postgres'` branch and run this before their own
+ * `CREATE INDEX CONCURRENTLY IF NOT EXISTS`.
  *
  * Deliberately does NOT wrap the drop in `DO $$ ... EXECUTE '...' END $$`
  * (#1178): Postgres rejects `CONCURRENTLY` from any function/EXECUTE context —
@@ -51,66 +51,90 @@ export async function dropInvalidConcurrentIndex(
   engine: BrainEngine,
   version: number,
   indexName: string,
+  repairCommand?: string,
 ): Promise<boolean> {
-  // to_regclass() resolves the unqualified name through search_path — the same
-  // resolution the unqualified DROP below relies on — instead of matching
-  // pg_class.relname bare, which could hit a same-named index in a different
-  // schema on a non-default search_path (codex review, #1178).
-  const rows = await engine.executeRaw<{ invalid: boolean }>(
-    `SELECT NOT i.indisvalid AS invalid
-       FROM pg_index i
-      WHERE i.indexrelid = to_regclass($1)`,
-    [indexName],
-  );
-  const isInvalid = rows.some((r) => r.invalid);
-  if (isInvalid) {
-    await engine.runMigration(version, `DROP INDEX CONCURRENTLY IF EXISTS ${indexName};`);
-  }
-  return isInvalid;
+  const state = await readOnlineIndexState(engine, indexName);
+  if (!state || (state.valid && state.ready)) return false;
+  if (state.building) throw new OnlineIndexInProgressError(indexName, repairCommand);
+  await engine.runMigration(version, `DROP INDEX CONCURRENTLY IF EXISTS ${indexName};`);
+  return true;
 }
 
-export type OnlineIndexOutcome = 'present' | 'created' | 'rebuilt' | 'building';
+export type OnlineIndexOutcome = 'present' | 'created' | 'rebuilt';
+
+const MIGRATION_REPAIR_COMMAND = 'gbrain init --migrate-only';
+
+/** An unusable index with a foreign builder cannot be accepted or dropped. */
+export class OnlineIndexInProgressError extends Error {
+  constructor(public readonly indexName: string, repairCommand = MIGRATION_REPAIR_COMMAND) {
+    super(`Index ${indexName} is being built by another session; rerun after the builder completes: ${repairCommand}`);
+    this.name = 'OnlineIndexInProgressError';
+  }
+}
+
+export type OnlineIndexState = { valid: boolean; ready: boolean; building: boolean };
+
+/** Resolve through search_path, just like the unqualified CREATE/DROP statements. */
+export async function readOnlineIndexState(engine: BrainEngine, indexName: string): Promise<OnlineIndexState | undefined> {
+  const [state] = await engine.executeRaw<OnlineIndexState>(
+    `SELECT i.indisvalid AS valid, i.indisready AS ready, ${engine.kind === 'postgres'
+      ? `EXISTS (SELECT 1 FROM pg_stat_progress_create_index p
+          WHERE p.relid = i.indrelid AND p.index_relid IN (i.indexrelid, 0)
+            AND p.pid <> pg_backend_pid())`
+      : 'false'} AS building
+       FROM pg_index i WHERE i.indexrelid = to_regclass($1)`,
+    [indexName],
+  );
+  return state;
+}
 
 /**
- * #5762: build one index without blocking writers. PGLite runs the plain
- * `CREATE INDEX IF NOT EXISTS`. Postgres leaves a valid index alone, reports
- * one another session is still building, drops an INVALID leftover of an
- * interrupted concurrent build, then runs `CREATE INDEX CONCURRENTLY IF NOT
- * EXISTS` on a dedicated connection under the session's startup timeouts, then
- * confirms the index is valid. Callers build one index at a time;
- * a lock timeout leaves an INVALID index that the next call drops and rebuilds.
+ * #5762: build one index without blocking writers. Only a VALID + READY index
+ * succeeds; complete targets are accepted even when another same-table build
+ * has not yet published its index OID. An unusable foreign active build throws
+ * rather than allowing a migration stamp; inactive failed leftovers can be rebuilt.
+ * Postgres builds CONCURRENTLY under the session's startup timeouts with no
+ * session SET; PGLite builds inline. Every create is checked again because
+ * IF NOT EXISTS can skip an unusable index left by a competing caller.
  */
 export async function buildIndexOnline(
   engine: BrainEngine,
   version: number,
   index: { name: string; table: string; sql: string },
-  opts: { notice?: (line: string) => void } = {},
+  opts: { notice?: (line: string) => void; repairCommand?: string } = {},
 ): Promise<OnlineIndexOutcome> {
-  if (engine.kind !== 'postgres') {
-    const [row] = await engine.executeRaw<{ present: boolean }>('SELECT to_regclass($1) IS NOT NULL AS present', [index.name]);
-    if (row?.present) return 'present';
-    await engine.runMigration(version, index.sql);
-    return 'created';
+  const repairCommand = opts.repairCommand ?? MIGRATION_REPAIR_COMMAND;
+  const row = await readOnlineIndexState(engine, index.name);
+  if (row?.valid && row.ready) return 'present';
+  if (row?.building) throw new OnlineIndexInProgressError(index.name, repairCommand);
+  let rebuilt = false;
+  if (row) {
+    // Probe again immediately before destructive DDL: the builder may have
+    // started (or completed) since the first catalog snapshot.
+    const beforeDrop = engine.kind === 'postgres' ? await readOnlineIndexState(engine, index.name) : row;
+    if (beforeDrop?.valid && beforeDrop.ready) return 'present';
+    if (beforeDrop?.building) throw new OnlineIndexInProgressError(index.name, repairCommand);
+    if (beforeDrop) {
+      await engine.runMigration(version, `DROP INDEX ${engine.kind === 'postgres' ? 'CONCURRENTLY ' : ''}IF EXISTS ${index.name};`);
+      rebuilt = true;
+    }
   }
-  const [row] = await engine.executeRaw<{ valid: boolean; building: boolean }>(
-    `SELECT i.indisvalid AS valid, EXISTS (SELECT 1 FROM pg_stat_progress_create_index p
-        WHERE p.relid=i.indrelid AND p.index_relid IN (i.indexrelid, 0)) AS building
-       FROM pg_index i WHERE i.indexrelid = to_regclass($1)`,
-    [index.name],
-  );
-  if (row?.valid) return 'present';
-  if (row?.building) return 'building';
-  if (row) await dropInvalidConcurrentIndex(engine, version, index.name);
-  const [size] = await engine.executeRaw<{ rows: number }>(
-    'SELECT GREATEST(reltuples, 0)::bigint AS rows FROM pg_class WHERE oid = to_regclass($1)', [index.table]);
-  opts.notice?.(`  building ${index.name} on ~${Number(size?.rows ?? 0)} rows; this can take minutes; it is safe to leave running; `
-    + 'if interrupted, gbrain doctor names the rebuild command\n');
+  if (engine.kind === 'postgres' && opts.notice) {
+    const [size] = await engine.executeRaw<{ rows: number }>(
+      'SELECT GREATEST(reltuples, 0)::bigint AS rows FROM pg_class WHERE oid = to_regclass($1)', [index.table]);
+    opts.notice(`  building ${index.name} on ~${Number(size?.rows ?? 0)} rows; this can take minutes; it is safe to leave running; `
+      + `if interrupted, rerun: ${repairCommand}\n`);
+  }
   // No session SET: a reservation can fall back to a transaction-pooled connection, where a SET or RESET
   // reaches another client's backend. The build runs under the session's startup timeouts; one that times
   // out leaves an INVALID index, which the next call drops and rebuilds.
-  await engine.withReservedConnection(conn => conn.executeRaw(index.sql.replace('CREATE INDEX', 'CREATE INDEX CONCURRENTLY')), { selfContained: true });
-  // IF NOT EXISTS also skips an INVALID index a concurrent caller's failed build left behind.
-  const [built] = await engine.executeRaw<{ valid: boolean }>('SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass($1)', [index.name]);
-  if (!built?.valid) throw new Error(`Index ${index.name} is not valid after its concurrent build; rerun: gbrain repair request-indexes --apply`);
-  return row ? 'rebuilt' : 'created';
+  if (engine.kind === 'postgres') {
+    await engine.withReservedConnection(conn => conn.executeRaw(index.sql.replace('CREATE INDEX', 'CREATE INDEX CONCURRENTLY')), { selfContained: true });
+  } else {
+    await engine.runMigration(version, index.sql);
+  }
+  const built = await readOnlineIndexState(engine, index.name);
+  if (built?.valid && built.ready) return rebuilt ? 'rebuilt' : 'created';
+  if (built?.building) throw new OnlineIndexInProgressError(index.name, repairCommand);
+  throw new Error(`Index ${index.name} is not valid after its ${engine.kind === 'postgres' ? 'concurrent ' : ''}build (requires VALID and READY); rerun: ${repairCommand}`);
 }

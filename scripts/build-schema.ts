@@ -45,6 +45,7 @@ import { PINNED_QUESTIONS_SCHEMA_SQL } from '../src/core/questions/schema.ts';
 import { CORE_EDIT_NOTICES_SCHEMA_SQL } from '../src/core/core-memory-schema.ts';
 import { FACT_PURGE_LOOKUP_INDEX_SQL, MEMORY_PURGE_SCHEMA_SQL } from '../src/core/facts/purge-schema.ts';
 import { WRITE_GATE_SCHEMA_SQL } from '../src/core/write-gate-schema.ts';
+import { PAGES_NAME_LOOKUP_INDEXES } from '../src/core/page-indexes.ts';
 
 const REPO = resolve(import.meta.dir, '..');
 export const SCHEMA_SQL_PATH = 'src/schema.sql';
@@ -76,6 +77,14 @@ const persistenceSql = (statements: readonly string[]) => `${statements.join(';\
 
 export const FRAGMENTS: readonly Fragment[] = [
   { source: 'src/core/fts-language.ts', expr: 'FTS_INPUT_FUNCTION_SQL', postgres: FTS_INPUT_FUNCTION_SQL, pglite: FTS_INPUT_FUNCTION_SQL },
+  {
+    source: 'src/core/page-indexes.ts',
+    expr: 'PAGES_NAME_LOOKUP_INDEXES',
+    // v240 must reach populated Postgres pages through its online handler, not
+    // a plain CREATE INDEX during the earlier embedded-schema replay.
+    postgres: '',
+    pglite: PAGES_NAME_LOOKUP_INDEXES.map(index => `${index.sql};`).join('\n'),
+  },
   { source: 'src/core/grants/schema.ts', expr: 'GRANT_AUDIT_SCHEMA_SQL', postgres: GRANT_AUDIT_SCHEMA_SQL, pglite: GRANT_AUDIT_SCHEMA_SQL },
   {
     source: 'src/core/facts/withdrawal-schema.ts',

@@ -2308,6 +2308,8 @@ export interface EngineConfig {
   engine?: 'postgres' | 'pglite';
   /** #6495 file-plane `search.keyword_statement_timeout_ms`, read by the Postgres engine at connect (postgres-engine/keyword-statement-timeout.ts). */
   keyword_statement_timeout_ms?: number;
+  /** Internal init --migrate-only budget; never persisted or enabled by ordinary commands. */
+  migrationStatementTimeoutMs?: number;
 }
 
 // Errors

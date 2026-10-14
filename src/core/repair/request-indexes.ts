@@ -28,7 +28,9 @@ export const requestIndexesRepair: RepairHandler = {
   async apply(ctx, item) {
     const index = PERSISTENCE_REQUEST_ONLINE_INDEXES.find(candidate => candidate.name === item.slug);
     if (!index) return false;
-    const outcome = await buildIndexOnline(ctx.engine, 0, { table: 'persistence_requests', ...index }, { notice: line => ctx.logger.info(line.trimEnd()) });
+    const outcome = await buildIndexOnline(ctx.engine, 0, { table: 'persistence_requests', ...index }, {
+      notice: line => ctx.logger.info(line.trimEnd()), repairCommand: 'gbrain repair request-indexes --apply',
+    });
     return outcome === 'created' || outcome === 'rebuilt';
   },
 };

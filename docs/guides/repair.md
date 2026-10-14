@@ -64,6 +64,7 @@ gbrain repair safe-chunks --apply
 gbrain repair safe-chunks --apply --no-embed   # re-seal text now, embed later
 gbrain repair contextual-mode --apply
 gbrain repair request-indexes --apply
+gbrain repair page-indexes --apply
 gbrain repair google-file-modes --apply             # explicit-only: runs only when named
 gbrain repair --all --apply                    # every automatic kind in order
 ```
@@ -74,7 +75,7 @@ any other option the table below does not list, including `--max-usd`: a
 refused run changes nothing. To cap paid embedding work, run the repairs
 through `gbrain doctor --remediate --yes --include-repairs --expect <plan_hash> --max-usd <n>`
 (`<plan_hash>` comes from `gbrain doctor --remediation-plan --json`). `--all`
-runs `timeline`, then `visibility`, then `safe-chunks`, then `contextual-mode`, then `connector-checkpoints`, then `request-indexes`, then `connector-fences`, then `take-supersession`, then `orphan-bindings`, then `embedding-effects`, then `attribution-backfill`, then `planner-stats`, and stops at the
+runs `timeline`, then `visibility`, then `safe-chunks`, then `contextual-mode`, then `connector-checkpoints`, then `request-indexes`, then `page-indexes`, then `connector-fences`, then `take-supersession`, then `orphan-bindings`, then `embedding-effects`, then `attribution-backfill`, then `planner-stats`, and stops at the
 first kind that stops.
 The explicit-only kinds never run under
 `--all`; it lists each with its preview command and still exits 0 when they
@@ -129,6 +130,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `timeline` | `timeline_history` | Re-saves each page with its current body through a revision-bound `put_page`. The save writes each database-only timeline entry back into the page as a bullet preceded by `<!-- gbrain:materialized v1 <hash> -->`. | `kept_unrenderable_rows`: entries that would change if written as a bullet (for example an empty source). They stay in the database. |
 | `visibility` | `derived_visibility` | Stamps an explicit `visibility` on extracted atoms and synthesized concepts. An atom takes its origin page's visibility; transcript atoms and atoms whose origin is gone become `private`; a concept takes the strictest visibility of its input atoms. A concept input found only through an atom's `concepts:` list counts as private. Atoms are repaired before concepts. It never loosens an explicit value: `private` stays `private`, and `world` can only become `private`. A missing value is stamped with the origin's value, which is `world` when the origin page is public. | `concepts_without_lineage`: concepts whose inputs cannot be found. They stay as they are, and remote readers already treat a missing visibility as private. `atoms_origin_gone_to_private` counts atoms made private because their origin page no longer exists. |
 | `request-indexes` | `persistence_request_indexes` | Creates a missing managed sync request index, or drops an INVALID one (left by an interrupted concurrent build) and rebuilds it, on a brain whose schema version is already current. Postgres builds each index `CONCURRENTLY`, one at a time, so writes continue; PGLite builds inline. It changes no user data, takes no journal admission and runs brain-wide (`--source` does not narrow it). See [managed sync request indexes](#request-indexes). | `building`: an index another session is still building; it is never dropped. |
+| `page-indexes` | `page_indexes` | Creates missing v240/v243 page lookup indexes or drops INVALID leftovers and rebuilds them, even after the migration versions are stamped. Postgres builds `CONCURRENTLY`, one at a time; PGLite builds inline. Brain-wide; no user data changes or journal admission. See [page lookup indexes](#page-indexes). | `building`: an index another session is building; never dropped. |
 | `connector-fences` | none (a `connector_fence_below_timeline` refusal names it) | Moves a facts or takes fence that sits below the timeline sentinel of a Google or GitHub page into the page body through a revision-bound `put_page`, so the connector's next re-render carries the fence instead of refusing. Then re-attempt the held item with `gbrain sources retry-held <source>`. | `kept_ambiguous_pages`: pages whose fences are duplicated, unbalanced or unparseable. Move the fence by hand: read the page, place the fence above the `<!-- timeline -->` line, and save it with the current `expected_revision`. |
 | `take-supersession` | none | Rebuilds `takes.superseded_by` for supersession chains written before the pointer moved onto the old fence row (#5886). Each struck take is linked to the row that replaced it only from evidence: a committed `takes_supersede` receipt, a stored `superseded_by`, or a row carrying the old `superseded by #<own row>` pointer with exactly one possible predecessor. The pointer is written onto the old row (`<source>; superseded by #N`) and stale self-pointers are dropped through a revision-bound `put_page`; a page whose fence is already right but whose stored pointers differ is reprojected without a page write. See [take supersession](#take-supersession). | `ambiguous_pages` / `ambiguous_rows`: pages where a new row has two or more possible predecessors, or where evidence conflicts. The preview lists each with its candidates and the manual edit; nothing on them changes. `unparsed_pages`: pages whose takes fence does not parse cleanly. |
 | `connector-checkpoints` | `connector_checkpoints` | Deletes managed connector checkpoint rows and retry pointers that no registered connector source can load and that are older than 7 days. They accumulate after a content setting such as `g_history_days` changes, or when a connector host older than v0.60.11.0 runs during an upgrade. Cleanup only: it never copies or re-keys a checkpoint, takes no journal admission and runs brain-wide (`--source` does not narrow it). | Rows a queued or running connector write, or a connector's recorded pending set, still references. |
@@ -228,6 +230,34 @@ running), and a warning naming `gbrain repair request-indexes --apply` when one
 is missing or INVALID. After the rebuild, run the retry the refusal printed
 (`gbrain sync --source <source> --no-pull --retry-failed` plus the saved
 processing flags).
+
+<a id="page-indexes"></a>
+### Page lookup indexes
+
+`gbrain doctor` reports `page_indexes` independently of the schema version:
+`idx_pages_source_title_lower` and `idx_pages_slug_trgm` (v240), plus
+`idx_pages_title_lower_trgm` (v243). A missing index and an INVALID or
+not-ready index are distinct findings; an index is healthy only when both
+`indisvalid` and `indisready` are true. A foreign active build is reported
+as `building` and left alone.
+
+Preview with `gbrain repair page-indexes --json`, then apply with
+`gbrain repair page-indexes --apply`. Postgres drops only inactive unusable
+leftovers and creates each index `CONCURRENTLY`, outside a transaction;
+PGLite builds inline. This changes no pages, embeddings or migration stamps
+and runs brain-wide (`--source` does not narrow it). If interrupted, rerun
+the same repair after any active builder finishes, then check
+`gbrain doctor --only page_indexes --json`. A race with another builder
+refuses rather than accepting an unfinished index.
+
+Postgres embedded-schema replay deliberately omits the v240 pair, so a
+populated brain reaches the online handler instead of a write-blocking
+plain build. Fresh PGLite retains the pair inline. The v243 title-trigram
+index is never added as a plain replay build. On an already-stamped brain,
+doctor plus this repair is the recovery path; a current version alone does
+not prove these indexes are present. `repair request-indexes` repairs the
+request journal, not any page index.
+
 
 <a id="request-growth"></a>
 ### Request-table growth
@@ -1787,6 +1817,7 @@ walk me through it before changing anything."*
 | Tag, timeline or take writes fail with `writer_coordinator_required` or `storage_error: Publication failed (P0001)` on a managed brain; sync ends `PARTIAL` at a tagged page | `gbrain doctor --json` (`schema_version` is 197 or later) | the original `gbrain sync --source <source> … --no-pull --retry-failed --json`, then `gbrain extract --stale --source-id <source>` and `gbrain extract timeline --source db --source-id <source>`, then `gbrain facts relink --source <source> --dry-run` (paid tier only after the user agrees), then `gbrain repair failed-writes --source <source>` and, after the user agrees, its printed `--apply --expect <hash>` | `gbrain sources status` shows the new `last_commit`; a second `gbrain extract timeline --source db` run adds no rows; a second `gbrain repair failed-writes` preview lists nothing to replay | brain host; the replay apply after the user agrees | paid (relink tier), destructive (replay apply) |
 | Sync `BLOCKED` with `checkpoint_validation_timeout` | `gbrain doctor` (`persistence_request_indexes`) | `gbrain repair request-indexes --apply` when an index is missing or INVALID, then the printed `gbrain sync --source <source> --no-pull --retry-failed …` | `gbrain doctor --only persistence_request_indexes --json` reports `ok`; `gbrain sources status` shows the new `last_commit` | brain host | none |
 | Doctor `persistence_request_indexes` warns | `gbrain repair request-indexes` | `gbrain repair request-indexes --apply` | `gbrain doctor --only persistence_request_indexes --json` | brain host | none |
+| Doctor `page_indexes` warns | `gbrain repair page-indexes --json` | `gbrain repair page-indexes --apply` after any active builder finishes | `gbrain doctor --only page_indexes --json` reports `ok` | brain host | none |
 | Doctor `persistence_request_growth` warns | `gbrain doctor --json` | the printed `gbrain config set persistence.limits.<limit> <value>` | `gbrain doctor --only persistence_request_growth --json` | brain host | none |
 | Working-tree sync prints `legacy file(s) skipped … no contextual retrieval mode` | `gbrain repair contextual-mode` | `gbrain repair contextual-mode --apply` | the next `gbrain sync --working-tree` no longer prints the line | brain host, after the user agrees | none |
 | Working-tree sync prints `legacy file(s) skipped … not valid UTF-8` | `find <checkout> -name '*.md' ! -exec iconv -f UTF-8 -t UTF-8 -o /dev/null {} \; -print` | re-save each listed file as UTF-8 | the next `gbrain sync --working-tree` no longer prints the line | user (re-saves the files) | none |

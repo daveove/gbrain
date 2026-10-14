@@ -215,7 +215,7 @@ export async function runMigrationSQL(
       await engine.transaction(async (tx) => {
         if (engine.kind === 'postgres') {
           try {
-            await tx.runMigration(m.version, "SET LOCAL statement_timeout = '600000'");
+            await tx.runMigration(m.version, `SET LOCAL statement_timeout = '${engine.migrationStatementTimeoutMs ?? 600000}'`);
             // #5227 (W14 P1.6): a real transaction, so SET LOCAL binds the lock wait to this migration only.
             await tx.runMigration(m.version, `SET LOCAL lock_timeout = '${resolveSchemaLockTimeoutMs()}ms'`);
           } catch {
@@ -245,7 +245,7 @@ export async function runMigrationSQL(
     // BrainEngine.withReservedConnection.
     await engine.withReservedConnection(async (conn) => {
       try {
-        await conn.executeRaw("SET statement_timeout = '600000'");
+        await conn.executeRaw(`SET statement_timeout = '${engine.migrationStatementTimeoutMs ?? 600000}'`);
       } catch {
         // Non-fatal: some managed Postgres may restrict this GUC.
         // Falling through means the DDL runs with the server default.

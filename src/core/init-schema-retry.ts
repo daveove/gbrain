@@ -11,6 +11,8 @@ export interface InitSchemaRetryOpts {
   /** #5227: a short bounded backoff for a lock the other session will release in a moment (default 2 s). */
   lockBackoffMs?: number;
   log?: (line: string) => void;
+  /** Internal migrate-only deadline; prevents a cancelled run from starting another pass. */
+  signal?: AbortSignal;
   _hooks?: {
     initSchema?: () => Promise<void>;
     sleep?: (ms: number) => Promise<void>;
@@ -60,10 +62,12 @@ export async function runInitSchemaWithRetry(
   const log = opts.log ?? ((line: string) => process.stderr.write(`${line}\n`));
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (opts.signal?.aborted) throw opts.signal.reason;
     try {
       await initSchema();
       return { attempts: attempt };
     } catch (err) {
+      if (opts.signal?.aborted) throw opts.signal.reason;
       if (!isRetryableInitSchemaError(err) || attempt === maxAttempts) {
         throw err;
       }

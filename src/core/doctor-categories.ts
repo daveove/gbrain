@@ -262,6 +262,7 @@ export const OPS_CHECK_NAMES: ReadonlySet<string> = new Set([
   'publication_refusals',
   'persistence_request_growth',
   'persistence_request_indexes',
+  'page_indexes',
   'persistence_write_stall',
   'lost_caller_writes',
   'stale_frontmatter_keys',

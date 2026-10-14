@@ -215,6 +215,10 @@
       },
       {
         "category": "ops",
+        "name": "page_indexes"
+      },
+      {
+        "category": "ops",
         "name": "persistence_request_growth"
       },
       {

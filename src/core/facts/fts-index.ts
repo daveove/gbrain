@@ -15,7 +15,7 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { factsFtsIndexSql } from '../fts-language.ts';
-import { buildIndexOnline } from '../schema-migrations/helpers.ts';
+import { buildIndexOnline, OnlineIndexInProgressError, readOnlineIndexState } from '../schema-migrations/helpers.ts';
 
 export const FACTS_FTS_INDEX = 'idx_facts_fts';
 const NEXT = 'idx_facts_fts_next';
@@ -24,13 +24,22 @@ const OLD = 'idx_facts_fts_old';
 export type FactsFtsSwapStep = 'built' | 'renamed';
 
 async function indexState(engine: BrainEngine, name: string, lang: string): Promise<'missing' | 'current' | 'stale'> {
-  const [row] = await engine.executeRaw<{ valid: boolean; def: string }>(
-    'SELECT i.indisvalid AS valid, pg_get_indexdef(i.indexrelid) AS def FROM pg_index i WHERE i.indexrelid = to_regclass($1)', [name]);
+  const [row] = await engine.executeRaw<{ valid: boolean; ready: boolean; building: boolean; def: string }>(
+    `SELECT i.indisvalid AS valid, i.indisready AS ready, pg_get_indexdef(i.indexrelid) AS def,
+       ${engine.kind === 'postgres' ? `EXISTS (SELECT 1 FROM pg_stat_progress_create_index p
+         WHERE p.relid = i.indrelid AND p.index_relid IN (i.indexrelid, 0)
+           AND p.pid <> pg_backend_pid())` : 'false'} AS building
+       FROM pg_index i WHERE i.indexrelid = to_regclass($1)`, [name]);
   if (!row) return 'missing';
-  return row.valid && row.def.includes(`to_tsvector('${lang}'::regconfig`) && row.def.includes('entity_slug') ? 'current' : 'stale';
+  if (row.valid && row.ready && row.def.includes(`to_tsvector('${lang}'::regconfig`) && row.def.includes('entity_slug')) return 'current';
+  if (row.building) throw new OnlineIndexInProgressError(name);
+  return 'stale';
 }
 
 async function dropIndex(engine: BrainEngine, version: number, name: string): Promise<void> {
+  if (engine.kind === 'postgres' && (await readOnlineIndexState(engine, name))?.building) {
+    throw new OnlineIndexInProgressError(name);
+  }
   await engine.runMigration(version, engine.kind === 'postgres' ? `DROP INDEX CONCURRENTLY IF EXISTS ${name}` : `DROP INDEX IF EXISTS ${name}`);
 }
 
@@ -46,8 +55,7 @@ export async function ensureFactsFtsIndex(
     return 'present';
   }
   if (await indexState(engine, NEXT, lang) === 'stale') await dropIndex(engine, version, NEXT);
-  const built = await buildIndexOnline(engine, version, { name: NEXT, table: 'facts', sql: factsFtsIndexSql(NEXT, lang) }, { notice: opts.notice });
-  if (built === 'building') throw new Error(`${NEXT} is being built by another session; rerun once it finishes`);
+  await buildIndexOnline(engine, version, { name: NEXT, table: 'facts', sql: factsFtsIndexSql(NEXT, lang) }, { notice: opts.notice });
   await opts.onStep?.('built');
   await dropIndex(engine, version, OLD);
   await engine.transaction(async tx => {

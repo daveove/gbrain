@@ -17,9 +17,13 @@
       "FTS_CJK_BOUNDARY_REGEX": "e8605bc0f2c6f3ecd2b451cbc8a4fe27ae0974d048f0bea655533cf37e0ff88d",
       "FTS_INPUT_FUNCTION_SQL": "d2f44fc1ef338ff7563c07659d938b743fedb20230948792c71068c022ec54c3",
       "ISSUANCE_CLOCK_SLACK_SECONDS": "8f36c80392df6f9b9c754826289b63969d9d41ca8955213291e4413d614dce35",
+      "MIGRATION_REPAIR_COMMAND": "145ffa14ee6cf654dcf64aa3fc3fa72e745d7bee0208490e602dae64c39ff94a",
       "OPEN_LOOPS_COUNTERPARTY_SOURCE_INDEX": "e9b472d9db37733e908ea40512ad3f9520d7a6729ce207b0d279d43d3beb5b2f",
+      "OnlineIndexInProgressError": "d057fefb7c6f6dac5f8059cf1a836c557087ea4390c0ff20a2b2283c34e744b7",
       "PAGES_NAME_LOOKUP_INDEXES": "1ca830342164b5606e96cf0090645364f9145d36178d90f166230189fe8d2705",
       "PAGES_RECONCILE_NAME_INDEXES": "8805e35341b22324b932b1cc05030cc8f2bfc95532bf810ec35330783f29c59a",
+      "PAGES_TITLE_LOWER_TRGM_INDEX": "bae3fefa803673101494cbb24f743769c6749cbbf9f2a273c7db1813fba4017b",
+      "PAGE_INDEXES_REPAIR_COMMAND": "cbad2df8309c8d6f07ea08d4a6fa59ca916f0641e8986ad5989503bc15eb7b8f",
       "PERSISTENCE_COMMITTED_WATERMARK_INDEX": "f472fa0acb542c1caebaaa3bc69fb2da1647e5e201239429fc02ccef0d669533",
       "PERSISTENCE_COMPACTABLE_INDEX": "25ee657878efb41ba9ea3a7624464ddcf66407d861659456c230366e57f230a0",
       "PERSISTENCE_DATABASE_PENDING_INDEX_SQL": "6e0f618be33d037454933ea4dea11438413d45aef35d3bd4f33e89624d6e199e",
@@ -32,12 +36,12 @@
       "TRUST_STAMP_TIER_FUNCTION_SQL": "0cd92defda770304d097edb6c3bfb4f7be03f4fb12b4713bcc0a243fc37e622c",
       "backfillChunkVectors": "1c8cc09a28aa3e906fe2f112b71cd3aa61f750a99984e35a029cff9458272aa1",
       "backfillPageVectors": "a325a5eee3bab49723af311f21b38a1ee4a0eaff1fb3c7e1539aa4dcb287ed66",
-      "buildIndexOnline": "ed5378b90f24f7d662e02865cf73af4248e348002661f8fbfd8ee1087c60a3e5",
+      "buildIndexOnline": "765bb4d0f43ef66b9e5e1d5256f684db64a582472153a1e6205495888d6cd2af",
       "checkpointKey": "337ef776b18f428542093e27c4d570249d6a5856e5a17e4499d26a22877af34b",
       "chunkSearchVectorTriggerFnSql": "93ed4e29aa058949621b4198fe1ec317218f4b9ec0db0626ec6dc7001032047d",
       "clampOAuthTokenTtls": "b1e94ea8f5b3c3870a56b0f6d00d0a274c2e9dcad912b828848aec250732645f",
-      "dropInvalidConcurrentIndex": "6864d844b7dfb2fbecdd0fb9c73e06248473376feb794b3fe58f036c70d2d44c",
-      "ensureFactsFtsIndex": "95e723314ac30cea2db48e0e167c554ef1fa06df80cae765faa2a080a3a655c2",
+      "dropInvalidConcurrentIndex": "c8d6d6080bcad51d20cf838c20631f1cd95ffac27cb3033bf3ca4e7bcaef27a0",
+      "ensureFactsFtsIndex": "5df642a47f5b8f1c55bd8a4b1eb8a8183d3e1e4b5a28ac98a7c4970167ae8645",
       "getFtsLanguage": "0d790b4c4af1f67a2a1bbd59470beb13f434917b381931baf8404a41c5d903db",
       "grantFromRow": "2d0603bb0f964d7e45e04aa76bac54cd4f6f63c91a8d9f028b60b4792bc1695e",
       "hnswMaxDimsForType": "a187cdcc520f813b7c39da97ce53da58509232ed9f851627ef41abfe1b68bd26",
@@ -48,6 +52,7 @@
       "pageSearchVectorTriggerFnSql": "c31a80562c8053479344d6060115a24854b1f419f6e09945f36b1403305f54e6",
       "quietMigrationNotices": "4045c32034a8f46204dd5d89e185ff5c35e8073f560f14caa8b127f8a695957c",
       "readExistingEmbeddingShape": "16d92d7cd52d8ebd7e89982f02e1bbdd8e8d08a6712a4ce57fbcf0952b7a6ca5",
+      "readOnlineIndexState": "f093e1c6620b2b12dc370811eca7fd5533ac87ffa51ce549341e34ac7405eacd",
       "repairLegacyClientGrants": "c1dc6b1d0c4933c041583aa1c4eacaefc0ff0ae2a67f56cfad7534f87a5ab309",
       "repairLegacyTimelineSourceRows": "405d4ae158482c020b029b93aff1ae4ac6854e6948cafaf82dbef473e6e5552e",
       "seedConnectorDispatchAttempts": "2395a3995a6bf78776d37e72ce79b0dd15f6c6fa7f81c40612a744cb74ab01a5",
@@ -223,7 +228,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "58112a286c7aad52f40a0b0acd0a2dadbefd573609db5bd94ae13ae654e83144"
         },
@@ -528,7 +536,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "2c8b4f5af20cc2383e908b306cf8fc74d83cfd6374cca63683f12df66f0630b9"
         },
@@ -612,7 +623,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "54c70ca2b3c2da0744b16575edba862df819d9d84579f80155bbed5e49d98ec9"
         },
@@ -1001,7 +1015,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "c0b2ad23e3eca0531e5b189e07064e7ba8772c9c1edfd8a30d72fd2ffef1e8b3"
         },
@@ -1085,7 +1102,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "3a223cdd911e6f1d83a58dac8ffffd02a3bc06cbe7a730629f3dbb06a861c40c"
         },
@@ -1339,7 +1359,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "e87972b59b9ca8c2d9710e8bd6a5c1e39be1b9f9b9393f09922f3304da44f7d7"
         },
@@ -1422,7 +1445,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "5927fb7afed18ae5e1b433cc73e9d919afa7aab9da83f5d18b1ec11515b6eec7"
         },
@@ -1441,7 +1467,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "851385140fa8af0e7295c3df4ccddbe163a8d7adfdadf98948d875078cd7b580"
         },
@@ -1530,7 +1559,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "9be33dd868c0fd38696f66fc8e9eabf63064df14f454ac2e75cac71c5167cd64"
         },
@@ -1549,7 +1581,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "ae6981d0217625e147058f4098b3c4a6626fb732a7027834327ad3b00d66b6df"
         },
@@ -1663,7 +1698,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "d163eaf372e4245cfe3de589a42829d9e7208b57b56b6cae597c5a4e598109ee"
         },
@@ -1995,7 +2033,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "6ff82ba7b13e4f389e18260879297cbe9ddc06c8eb42810d82277598bde49a5a"
         },
@@ -2452,8 +2493,11 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_DATABASE_PENDING_INDEX_SQL",
-            "dropInvalidConcurrentIndex"
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "e05c480fcd77263a1548e6b71b2d96f63da1c3e760806da1ad29e098076e3118"
         },
@@ -2524,8 +2568,11 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_EFFECT_PARKED_INDEX_SQL",
-            "dropInvalidConcurrentIndex"
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "5684db9df02f16f290502792de7ec89fbffd41e9469f474f9b15456c706568e5"
         },
@@ -2557,7 +2604,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "df76ce97f1179c046abe29b80c04ef75c653f630f540699d3386e3adfdcb9c99"
         },
@@ -2576,7 +2626,10 @@
         "handler": {
           "form": "arrow",
           "helpers": [
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "aa321180cd2b75e4fb92b5b15a5672e1098580bb10eb8095d0db31bce4eee4d7"
         },
@@ -2666,13 +2719,15 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_SYNC_RUN_INDEXES",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
-          "sha256": "7e7a8d3d5494a28590a5cc062f05cd090a735bf35aadb8a56c5f3cbb2687c8a1"
+          "sha256": "d373075b2b37871913310b278b3290ab78f310a04080111ad65f45b7e5081674"
         },
         "idempotent": true,
         "name": "persistence_request_sync_run_indexes",
@@ -2788,7 +2843,10 @@
           "helpers": [
             "FACT_RELINK_TABLE_SQL",
             "FACT_UNLINKED_INDEX_SQL",
-            "dropInvalidConcurrentIndex"
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "dropInvalidConcurrentIndex",
+            "readOnlineIndexState"
           ],
           "sha256": "b4d519036887e9ba4f75e78b94982150f0f1b26a5f2c01ae5c7796d0cfdceed8"
         },
@@ -3255,11 +3313,13 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PAGES_RECONCILE_NAME_INDEXES",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "307c6ea0c0366c8664ee6bf04782a136d9e07daf3d88606ce168d30a0e20bf81"
         },
@@ -3304,11 +3364,13 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_COMMITTED_WATERMARK_INDEX",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "2c85f48116c5262f6ddff8e57665135247fc5867480c069d70c835e3c27e837d"
         },
@@ -3327,12 +3389,14 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_COMPACTABLE_INDEX",
             "PERSISTENCE_SYNC_WATERMARK_INDEX",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "f7130a17b685dfd2443826ec7959856c9195334273870f1233a8fb1547c1e5b2"
         },
@@ -3452,10 +3516,12 @@
           "helpers": [
             "FACT_PURGES_ALL_SUBJECTS_INDEX",
             "FACT_PURGES_SUBJECT_INDEX",
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "13e51e81b20b251087af7c0e7b59f1dac434dbde7eedebc0f8312b346932f3f6"
         },
@@ -3558,11 +3624,13 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
             "OPEN_LOOPS_COUNTERPARTY_SOURCE_INDEX",
+            "OnlineIndexInProgressError",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "a9803cb770c09bf6fd1bb6a71cffb9059312aa46aeb42283a4108547942ba778"
         },
@@ -3581,12 +3649,14 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "ensureFactsFtsIndex",
             "getFtsLanguage",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
           "sha256": "a12195bd1365d15b7ace35de35648a71abb4cf2774893823b97941d91c956b2e"
         },
@@ -3631,13 +3701,16 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PAGES_NAME_LOOKUP_INDEXES",
+            "PAGE_INDEXES_REPAIR_COMMAND",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
-          "sha256": "476ec7dc4afa4da607d46eb7edbbd3c3bb68de4115722582eb14eab300e73e79"
+          "sha256": "c3e853c81305c7af14e12983d0ae3e23f6cbd4dae71168e4dd498c381a47efa6"
         },
         "idempotent": true,
         "name": "pages_name_lookup_indexes",
@@ -3654,13 +3727,15 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
             "PERSISTENCE_REQUEST_SLUG_INTENT_INDEX",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
-          "sha256": "5239bc4332339df6f5d39e58b0785e7e508d013d842338082406055fca2560b0"
+          "sha256": "146a0ad28387bcc501a4d8df43e4ba76d2af95721ef24d7255d3a3f5adc6e8ae"
         },
         "idempotent": true,
         "name": "persistence_request_slug_intent_index",
@@ -3690,13 +3765,17 @@
         "handler": {
           "form": "arrow",
           "helpers": [
+            "MIGRATION_REPAIR_COMMAND",
+            "OnlineIndexInProgressError",
+            "PAGES_TITLE_LOWER_TRGM_INDEX",
+            "PAGE_INDEXES_REPAIR_COMMAND",
             "TRUST_STAMP_TIER_FUNCTION_SQL",
             "buildIndexOnline",
-            "dropInvalidConcurrentIndex",
             "migrationNotice",
-            "quietMigrationNotices"
+            "quietMigrationNotices",
+            "readOnlineIndexState"
           ],
-          "sha256": "3926f85c4076ec2038a28b5644d3611687427956a7a90f2ff6788dc28791c7e3"
+          "sha256": "959f148a95e02e12a1aa6bed27481fa55e6f1bbc524b865ef25748ce2fe443ab"
         },
         "idempotent": true,
         "name": "nightly_memory_dependencies",
