@@ -43,6 +43,8 @@ identifiers and attribution are available in the pre-removal Git revision
 - Coalesce unclaimed publication daily-index refreshes by calendar day and pinned timezone, retaining one successor after a render is claimed. Ordinary mutations refresh their guarded preimage and current days without scanning every historical version; import/sync recovery still discovers historical debt.
 - Keep affected daily-index dates out of remote write receipts. Alias resolution, revision hints, search cache identities and forget guards preserve the ordinary-private versus owner-aggregate visibility distinction.
 - Daily drain budget expiry immediately defers unfinished work without consuming attempts or stalls and does not fail the nightly run; genuine job failures and shutdown still propagate.
+- Keep the text-only Codex CLI adapter out of image OCR routing without disabling ordinary text expansion or adding a paid fallback.
+- Include Pi, OMP and Cursor session roots in confined transcript discovery; exclude their subagent transcripts instead of reporting phantom ingestion gaps.
 
 ## [0.60.221.0] - 2026-10-14
 

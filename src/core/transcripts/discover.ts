@@ -17,7 +17,7 @@
  */
 
 import { lstatSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import type { BrainEngine } from '../engine.ts';
 import type { TranscriptFormat } from './types.ts';
 import { harnessRoots, type HarnessRoot } from './detect.ts';
@@ -72,6 +72,11 @@ function walk(dir: string, out: string[], depth = 0): void {
 export function discoverTranscriptFiles(roots?: HarnessRoot[], opts: DiscoverOpts = {}): DiscoveredFile[] {
   const out: DiscoveredFile[] = [];
   for (const { format, root, extension } of harnessRoots(roots)) {
+    try {
+      if (!lstatSync(root).isDirectory()) continue; // also reject symlink roots
+    } catch {
+      continue;
+    }
     if (format === 'hermes') {
       const store = join(root, 'state.db');
       try {
@@ -93,6 +98,17 @@ export function discoverTranscriptFiles(roots?: HarnessRoot[], opts: DiscoverOpt
       // bare-UUID directory segment in another harness's tree must never
       // hide that harness's legitimate sessions.
       if (format === 'grok' && !isGrokChatHistoryFile(p)) continue;
+      // Pi/OMP sessions are <cwd-slug>/<session>.jsonl; delegated runs
+      // are nested below that. Cursor selects only the session's own
+      // <project>/agent-transcripts/<id>/<id>.jsonl, never subagents or
+      // unrelated project JSONL. Scope layout checks to their harness roots.
+      if (format === 'pi' || format === 'omp' || format === 'cursor') {
+        const parts = relative(root, p).split(sep);
+        if (format === 'cursor') {
+          if (parts.length !== 4 || parts[1] !== 'agent-transcripts' ||
+            parts[3] !== `${parts[2]}.jsonl`) continue;
+        } else if (parts.length !== 2) continue;
+      }
       // #4796: Claude Code subagent logs (<session>/subagents/agent-*.jsonl)
       // are all-isSidechain — they parse to zero turns and carry the PARENT
       // session id, so they can never import. Left in, each one is a

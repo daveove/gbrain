@@ -2712,6 +2712,9 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
   // touchpoint, or unkeyed): '' rather than silently OCRing with the
   // expansion model.
   if (!isAvailable('expansion', ocrModel)) return '';
+  // Codex's CLI adapter accepts text only. Keep text expansion available,
+  // but treat OCR as unavailable before resolving a model or reserving spend.
+  if (resolveRecipe(ocrModel).recipe.implementation === 'codex-cli') return '';
   const { model, recipe, modelId } = await resolveExpansionProvider(ocrModel);
   const base64 = imageBytes.toString('base64');
   const systemPrompt = [

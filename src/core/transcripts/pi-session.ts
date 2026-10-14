@@ -14,7 +14,8 @@
  * changes, credential pins and compaction summaries are all skipped.
  */
 
-import { basename } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, join, relative, sep } from 'node:path';
 import type { HostSpecTarget } from '../bootstrap/host-specs.ts';
 import type {
   FileDiagnostics,
@@ -196,11 +197,21 @@ export const ompAdapter: TranscriptAdapter = {
 
 const PI_ROOT_SEGMENT = /[/\\]\.pi[/\\]agent[/\\]sessions[/\\]/;
 
+/** Same root override as the nightly seat selector. Shared with discovery. */
+export function piSessionRoot(): string {
+  return process.env.GBRAIN_DAILY_MEMORY_PI_ROOT || join(homedir(), '.pi', 'agent', 'sessions');
+}
+
 export const piAdapter: TranscriptAdapter = {
   format: 'pi',
   specTarget: PI_SPEC_TARGET,
   detect(path: string, sample: Buffer): boolean {
-    return path.endsWith('.jsonl') && PI_ROOT_SEGMENT.test(path) && firstLineType(sample) === 'session';
+    // A relocated Pi store has the same header as OpenClaw. Keep canonical
+    // explicit paths working, and recognize the configured root as Pi too.
+    const parts = relative(piSessionRoot(), path).split(sep);
+    const inConfiguredRoot = parts.length === 2 && parts[0] !== '..';
+    return path.endsWith('.jsonl') && (PI_ROOT_SEGMENT.test(path) || inConfiguredRoot) &&
+      firstLineType(sample) === 'session';
   },
   parse(path: string, opts: ParseSessionsOpts = {}) {
     return parsePiSession('pi', path, opts);

@@ -25,7 +25,7 @@ import { hermesAdapter } from './hermes.ts';
 import { grokAdapter } from './grok.ts';
 import { chatgptExportAdapter } from './chatgpt-export.ts';
 import { claudeExportAdapter } from './claude-export.ts';
-import { ompAdapter, piAdapter } from './pi-session.ts';
+import { ompAdapter, piAdapter, piSessionRoot } from './pi-session.ts';
 import { opencodeAdapter } from './opencode.ts';
 import { cursorAdapter } from './cursor.ts';
 
@@ -61,6 +61,18 @@ export function harnessRoots(overrides?: HarnessRoot[]): HarnessRoot[] {
       root: join(process.env.GROK_HOME ?? join(home, '.grok'), 'sessions'),
       extension: '.jsonl',
     },
+    // Match the canonical layouts and root overrides used by nightly capture.
+    { format: 'pi', root: piSessionRoot(), extension: '.jsonl' },
+    {
+      format: 'omp',
+      root: process.env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(home, '.omp', 'agent', 'sessions'),
+      extension: '.jsonl',
+    },
+    {
+      format: 'cursor',
+      root: process.env.GBRAIN_DAILY_MEMORY_CURSOR_ROOT || join(home, '.cursor', 'projects'),
+      extension: '.jsonl',
+    },
   ];
 }
 
@@ -72,7 +84,7 @@ export function harnessRoots(overrides?: HarnessRoot[]): HarnessRoot[] {
  * keys / cursor role+message rows / grok system-head); the monolithic-JSON
  * exports are sniffed by their distinguishing keys. pi precedes openclaw:
  * both write the identical pi-session header, so pi's detector is gated on
- * the `.pi/agent/sessions` path and anything else stays openclaw.
+ * the canonical `.pi/agent/sessions` path or the configured Pi session root.
  * claude-code detects BEFORE grok: a claude session can lead with a
  * `type:'system'` row (string content), which is grok's head shape — grok's
  * sniff also rejects claude-family keys, so the ordering is belt-and-braces,
