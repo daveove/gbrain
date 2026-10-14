@@ -12,13 +12,17 @@
  * insufficient against a wedged provider), and that a shared/elapsed deadline
  * makes a second embed fail FAST (worst case ~one timeout, not two).
  */
-import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach, spyOn } from 'bun:test';
 import {
   configureGateway,
   resetGateway,
   __setEmbedTransportForTests,
 } from '../../src/core/ai/gateway.ts';
-import { embedQueryBounded, makeQueryEmbedDeadline } from '../../src/core/search/hybrid.ts';
+import { embedQueryBounded, makeQueryEmbedDeadline, hybridSearchCached } from '../../src/core/search/hybrid.ts';
+import { clearQueryEmbedCache } from '../../src/core/ai/query-embed-cache.ts';
+import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import type { HybridSearchMeta } from '../../src/core/types.ts';
+import { LEGACY_EMBEDDING_CONFIG } from '../helpers/legacy-embedding-config.ts';
 
 describe('embedQueryBounded — query-embed deadline', () => {
   beforeEach(() => {
@@ -123,4 +127,66 @@ describe('embedQueryBounded — query-embed deadline', () => {
       name: 'AITransientError', message: expect.stringContaining('synthetic provider failure'),
     });
   });
+});
+
+describe('hybridSearchCached — detail recovery provider budget', () => {
+  let engine: PGLiteEngine;
+  const vector = [1, ...Array(LEGACY_EMBEDDING_CONFIG.embedding_dimensions - 1).fill(0)];
+
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    configureGateway({ ...LEGACY_EMBEDDING_CONFIG, env: { OPENAI_API_KEY: 'fixture-key' } });
+    await engine.connect({});
+    await engine.initSchema();
+    await engine.setConfig('search.reranker.enabled', 'false');
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', ['provider-budget-empty']);
+  }, 60_000);
+
+  afterAll(async () => {
+    __setEmbedTransportForTests(null);
+    resetGateway();
+    await engine.disconnect();
+  });
+
+  test('low-to-high detail recovery retains its lazy deadline without mutating caller options', async () => {
+    let now = Date.now();
+    let requests = 0;
+    const timers: Array<{ at: number; controller: AbortController }> = [];
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    const timeout = spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
+      const controller = new AbortController();
+      timers.push({ at: now + ms, controller });
+      return controller.signal;
+    });
+    // A config/cache invalidation between arms still must not grant a new budget.
+    const searchVector = spyOn(engine, 'searchVector').mockImplementation(async () => {
+      clearQueryEmbedCache();
+      return [];
+    });
+    __setEmbedTransportForTests(async opts => {
+      now += ++requests === 1 ? 5_000 : 3_000;
+      for (const timer of timers) {
+        if (timer.at <= now) timer.controller.abort(new DOMException('fixture provider deadline', 'TimeoutError'));
+      }
+      if (opts.abortSignal?.aborted) throw opts.abortSignal.reason;
+      return { embeddings: [vector], usage: { tokens: 1 } } as never;
+    });
+    try {
+      let meta: HybridSearchMeta | undefined;
+      const options = {
+        limit: 1, detail: 'low' as const, sourceId: 'provider-budget-empty',
+        expansion: false, relationalRetrieval: false,
+        onMeta: (value: HybridSearchMeta) => { meta = value; },
+      };
+      await hybridSearchCached(engine, 'unmatched semantic lookup', options);
+      expect(meta?.detail_resolved).toBe('high');
+      expect(meta?.degraded).toContainEqual({ stage: 'embed_timeout', reason: 'timeout' });
+      expect(requests).toBe(2);
+      expect(options).not.toHaveProperty('_queryEmbedDeadline');
+    } finally {
+      searchVector.mockRestore();
+      timeout.mockRestore();
+      clock.mockRestore();
+    }
+  }, 120_000);
 });

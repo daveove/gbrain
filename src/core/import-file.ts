@@ -28,6 +28,7 @@ import { planEmbeddingReuse } from './embed-reuse.ts';
 import { reuseStoredChunkVectors } from './import-chunk-reuse.ts';
 import { extractCodeRefs, imageOfCandidates } from './link-extraction.ts';
 import { embedMultimodal, currentEmbeddingSignature } from './embedding.ts';
+import { BudgetExhausted } from './budget/budget-tracker.ts';
 // #3374 — import-path embeds ride the shared retry loop (429 retry-after +
 // transient network backoff) instead of bare embedBatch, so one socket blip
 // mid-sync no longer aborts the whole file import. Same core→commands edge
@@ -1776,6 +1777,7 @@ async function maybeOcrGated(
     onSuccess?.();
     return text;
   } catch (err) {
+    if (err instanceof BudgetExhausted) throw err;
     if (!_ocrWarnedThisSession) {
       console.warn(`[gbrain] OCR call failed (continuing without OCR text): ${err instanceof Error ? err.message : String(err)}`);
       _ocrWarnedThisSession = true;
@@ -1918,6 +1920,7 @@ export async function importImageFile(
       ]);
       embedding = vec;
     } catch (err) {
+      if (err instanceof BudgetExhausted) throw err;
       return {
         slug: imageSlug,
         status: 'error',

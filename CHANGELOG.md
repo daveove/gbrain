@@ -22,6 +22,8 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Fixed
 
 - Admin Graph recentring draws all new nodes and edges immediately, even when animation frames are paused. A timer settles the layout independently of animation frames.
+- Add subscription-only model billing (`ai_billing=subscription` / `GBRAIN_AI_BILLING=subscription`): paid API paths refuse before dispatch, effective billing is reported, workers refresh protected policy, and deferred embedding effects retain their attempts and vector identity. Native `codex-cli:` text generation requires stable Codex CLI 0.162.0+ and a fresh ChatGPT login, isolates tools/configuration/credentials, and never falls back to a paid API.
+- Preserve current foreground embedding/image/OCR cap stops and projection healing while carrying original budget refusals through callbacks and image imports; disable unmetered SDK retries inside tracked calls. Low-to-high retrieval retries retain the same lazily-started query-embedding deadline.
 
 ## [0.60.221.0] - 2026-10-14
 

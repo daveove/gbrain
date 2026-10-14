@@ -16,6 +16,8 @@ test/agent-journey-upgrade.serial.test.ts	global-state	global-state: binds local
 test/agent-journey.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll
 test/agent-operator-gate-fixes.serial.test.ts	global-state	global-state: binds local servers/ports
 test/agent-recovery-consent-journeys.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
+test/ai/billing-policy.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME, GBRAIN_AI_BILLING); replaces global fetch and process-wide gateway config
+test/ai/codex-cli-recipe.serial.test.ts	R1	R1: withEnv mutates GBRAIN_CODEX_CLI_BIN and API-key env while native child processes read them
 test/ai/gateway-ledger-records.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests, __setEmbedTransportForTests, __setRerankTransportForTests; configureGateway changes the process-wide AI gateway
 test/ai/gateway-model-sources.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console
 test/ai/header-transport.serial.test.ts	global-state	global-state: process-wide test seams __setRerankTransportForTests; configureGateway changes the process-wide AI gateway
@@ -236,6 +238,7 @@ test/jobs-list-get-json.serial.test.ts	global-state	global-state: patches proces
 test/jobs-stats-backpressure.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/jobs-stats-divergence.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
 test/jobs-stats-private-queue.serial.test.ts	global-state	global-state: patches process stdout/stderr/console
+test/jobs-subscription-policy.serial.test.ts	R1	R1: withEnv mutates GBRAIN_HOME and AI credentials; reconfigures the process-wide gateway between worker handlers
 test/keyword-relaxed-fusion.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process
 test/link-reads-thin-client-5827.serial.test.ts	R2	R2: mock.module(../src/core/config.ts, ../src/core/mcp-client.ts) replaces modules for every file in the process
 test/llm-intent-hybrid-integration.serial.test.ts	global-state	global-state: process-wide test seams __setChatTransportForTests; configureGateway changes the process-wide AI gateway

@@ -35,7 +35,7 @@ import { z } from 'zod';
 
 import { DEFAULT_CHARS_PER_TOKEN, DEFAULT_SAFETY_FACTOR, embedRequestMaxInputTokens, planEmbedRequests, rerankRequestMaxInputTokens, truncateEmbedInputs } from './embed-batch-plan.ts';
 export { splitByTokenBudget, capBatchItems, NO_BATCH_CAP_SUB_BATCH_ITEMS } from './embed-batch-plan.ts';
-import { BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
+import { BudgetExhausted, BudgetTracker, type BudgetReservation } from '../budget/budget-tracker.ts';
 import { failedCallUsage, recordOnTracker } from './budget-record.ts';
 import { estimateChatInputTokens } from './chat-input-estimate.ts';
 import { chatWithFallback, normalizeChatFallbackChain } from './chat-fallback.ts';
@@ -617,7 +617,9 @@ async function resolveGatewayModels(engine: BrainEngine): Promise<AIGatewayConfi
       fileCfg = null;
     }
   }
-  const env = cfg.env ?? process.env;
+  const env = cfg.ai_billing === 'subscription'
+    ? { ...(cfg.env ?? process.env), GBRAIN_AI_BILLING: 'subscription' }
+    : cfg.env ?? process.env;
   const chatEffective = needsFileCfg(chatDetailed.source) ? resolveEffectiveChatModel(fileCfg, env) : null;
   const expansionEffective = needsFileCfg(expansionDetailed.source) ? resolveEffectiveExpansionModel(fileCfg, env) : null;
   const newChat = chatEffective?.model ?? chatDetailed.model;
@@ -1789,7 +1791,7 @@ async function embedSubBatch(
       // per-SDK-call scope). Composes with a caller signal (Fix 3's 6s query
       // deadline) — shorter wins.
       abortSignal: withDefaultTimeout(opts?.abortSignal, AI_EMBED_TIMEOUT_MS),
-      ...(hasAIInvocationGuard() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
+      ...(hasAIInvocationGuard() || getCurrentBudgetTracker() ? { maxRetries: 0 } : opts?.maxRetries !== undefined ? { maxRetries: opts.maxRetries } : {}),
     }), sdkInvocationUsage, err => isTokenLimitError(err) || isUnbilledEmbeddingRejection(recipe.id, err) ? { inputTokens: 0, outputTokens: 0 } : null);
     // Carry the threaded input_type across the SDK boundary via
     // __embedInputTypeStore (the adapter strips it from providerOptions —
@@ -1912,6 +1914,7 @@ export async function embedMultimodal(
   const tracker = __budgetStore.getStore() ?? null;
   if (!tracker) return embedMultimodalUnmetered(inputs, opts);
   const modelStr = requireConfig().embedding_multimodal_model ?? getEmbeddingModel();
+  assertModelApiAllowed(modelStr); // refusal must precede even a $0 budget reservation
   const { parsed, recipe } = resolveRecipe(modelStr);
   const mmModelId = `${recipe.id}:${parsed.modelId}`;
   const charsPerToken = Math.max(recipe.touchpoints.embedding?.chars_per_token ?? DEFAULT_CHARS_PER_TOKEN, 1);
@@ -2736,6 +2739,7 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
     result = await guardedGeneration(ocrModelId, _generateTextTransport, {
       model,
       maxOutputTokens: OCR_MAX_OUTPUT_TOKENS,
+      ...(tracker ? { maxRetries: 0 } : {}),
       // v0.42.20.0 (codex) — OCR is a 5th unbounded generateText entry point.
       abortSignal: withDefaultTimeout(undefined, AI_CHAT_TIMEOUT_MS),
       messages: [
@@ -2755,8 +2759,10 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
         },
       ],
     });
+    recordOcr('gateway.ocr', normalizeSdkUsage(result.usage));
+    return (result.text ?? '').trim();
   } catch (err) {
-    if (isAIInvocationPolicyError(err)) throw err;
+    if (isAIInvocationPolicyError(err) || err instanceof BudgetExhausted) throw err;
     recordOcr('gateway.ocr.failed', failedCallUsage(err, {
       inputTokens: estimatedOcrInputTokens,
       outputTokens: OCR_MAX_OUTPUT_TOKENS,
@@ -2764,9 +2770,9 @@ export async function generateOcrText(imageBytes: Buffer, mime: string): Promise
     // Throw-to-caller contract unchanged: importImageFile routes this to
     // ocr_failed_other. A cap breach surfaces there as a real import failure.
     throw err;
+  } finally {
+    tracker?.release(reservation);
   }
-  recordOcr('gateway.ocr', normalizeSdkUsage(result.usage));
-  return (result.text ?? '').trim();
 }
 
 // ---- BudgetTracker scope (TX5) ----

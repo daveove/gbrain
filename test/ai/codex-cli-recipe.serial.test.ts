@@ -3,6 +3,10 @@
  * The stub records argv, env and the --output-schema file, answers
  * `login status` per CODEX_STUB_LOGIN, and prints scripted `exec --json`
  * events. No Codex install, login or network is used.
+ * Serial: real child processes read process-global env overrides.
+ * Protects native auth/isolation/output contracts; reverting provider checks
+ * admits API-key or unsupported clients. No existing recipe owns this native
+ * protocol boundary; the only seam is the production CLI binary override.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';

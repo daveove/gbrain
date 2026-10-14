@@ -7,7 +7,7 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import type { MinionWorker } from '../src/core/minions/worker.ts';
 import type { MinionHandler, MinionJobContext } from '../src/core/minions/types.ts';
 import { registerBuiltinHandlers } from '../src/commands/jobs.ts';
-import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
+import { configureGateway, getChatModel, getExpansionModel, reconfigureGatewayWithEngine, resetGateway } from '../src/core/ai/gateway.ts';
 import { PaidModelApiDisabledError } from '../src/core/ai/billing-policy.ts';
 import { saveConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -45,6 +45,26 @@ test('a running worker refuses its legacy subagent API after a file-plane billin
     });
   } finally {
     apiFixture.stop(true);
+    resetGateway();
+    await engine.disconnect();
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 60_000);
+
+test('an explicit gateway subscription mode survives engine-backed default resolution', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'gateway-billing-defaults-'));
+  const engine = new PGLiteEngine();
+  try {
+    await withEnv({ GBRAIN_HOME: home, GBRAIN_AI_BILLING: undefined, GBRAIN_MODEL: undefined,
+      OPENAI_API_KEY: 'fixture-key', ANTHROPIC_API_KEY: undefined }, async () => {
+      await engine.connect({ database_url: '' });
+      await engine.initSchema();
+      configureGateway({ ai_billing: 'subscription', env: { OPENAI_API_KEY: 'fixture-key' } });
+      await reconfigureGatewayWithEngine(engine);
+      expect(getChatModel()).toStartWith('codex-cli:');
+      expect(getExpansionModel()).toStartWith('codex-cli:');
+    });
+  } finally {
     resetGateway();
     await engine.disconnect();
     rmSync(home, { recursive: true, force: true });

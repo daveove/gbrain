@@ -90,6 +90,27 @@ describe('unpriced model × cap source', () => {
   });
 });
 
+describe('exhaustion notification preserves the refusal', () => {
+  test.each(['no_pricing', 'cost', 'runtime'] as const)('%s callback receives the exact thrown error once', reason => {
+    const t = tracker({ maxCostUsd: 0.000001, ...(reason === 'runtime' ? { maxRuntimeMs: -1 } : {}) });
+    const notified: BudgetExhausted[] = [];
+    t.onExhausted(error => { notified.push(error); });
+    let refusal: unknown;
+    const reserve = () => t.reserve({
+      modelId: reason === 'no_pricing' ? UNPRICED : PRICED,
+      kind: 'chat', estimatedInputTokens: 100_000, maxOutputTokens: 10_000,
+    });
+    try { reserve(); } catch (error) { refusal = error; }
+    expect(refusal).toBeInstanceOf(BudgetExhausted);
+    expect((refusal as BudgetExhausted).reason).toBe(reason);
+    expect(notified).toHaveLength(1);
+    expect(notified[0]).toBe(refusal);
+    expect(reserve).toThrow(BudgetExhausted);
+    expect(notified).toHaveLength(1);
+  });
+});
+
+
 describe('priced model × cap source', () => {
   test.each(['derived', 'default', 'user'] as const)('%s cap is still enforced on priced calls', (capSource) => {
     const t = tracker({ maxCostUsd: 0.000001, capSource });

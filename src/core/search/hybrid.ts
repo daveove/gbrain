@@ -1179,7 +1179,7 @@ export async function hybridSearch(
   // call's onMeta fires with the escalated detail_resolved; do NOT also
   // fire here (would double-emit and capture stale meta).
   if (deduped.length === 0 && opts?.detail === 'low') {
-    return hybridSearch(engine, query, { ...opts, detail: 'high' });
+    return hybridSearch(engine, query, { ...opts, detail: 'high', _queryEmbedDeadline: req.queryEmbedDeadline });
   }
 
   const { rerankPinned, relationalRerankPin, rerankGate, identityLookups } = await timer.stage('rerank', () => rerankAndPin(req, deduped, relationalList, effectiveModality, {
@@ -1251,7 +1251,7 @@ export async function hybridSearchCached(
   // case ~one timeout (~6s), comfortably under the CLI 10s force-exit. The
   // budget starts at the first embed request (#6400), so lexical work and
   // expansion before the vector arm don't spend it.
-  const queryEmbedDl = lazyQueryEmbedDeadline();
+  const queryEmbedDl = opts?._queryEmbedDeadline ?? lazyQueryEmbedDeadline();
   if (semanticCache && !skipCache) {
     try {
       const { isAvailable } = await import('../ai/gateway.ts');

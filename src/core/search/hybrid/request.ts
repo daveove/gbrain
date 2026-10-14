@@ -9,7 +9,7 @@ import type { BrainEngine } from '../../engine.ts';
 import { perArmPoolLimit } from '../eval-pool-depth.ts';
 import type { DegradedStageEntry, HybridSearchMeta, SearchOpts, SearchResult } from '../../types.ts';
 import { type GBrainConfig, loadConfigWithEngine } from '../../config.ts';
-import { type HybridSearchOpts, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
+import { type HybridSearchOpts, type QueryEmbedDeadline, PRE_FUSION_POOL_FLOOR, compiledTruthFusionBoost } from '../hybrid.ts';
 import type { IdentityTierOpts } from '../alias-hop.ts';
 import { type IntentWeights, applyAliasMentionBoost, applyExactMatchBoost, applyTitleMentionBoost, weightsForIntent } from '../intent-weights.ts';
 import { type QuerySuggestions, classifyQueryWithBrainPatterns } from '../query-intent.ts';
@@ -57,6 +57,8 @@ export interface HybridRequest {
   engine: BrainEngine;
   query: string;
   opts: HybridSearchOpts | undefined;
+  /** One lazy provider deadline shared by cache, vector arms and detail retries. */
+  queryEmbedDeadline?: () => QueryEmbedDeadline;
   modeInput: ResolveSearchModeInput;
   resolvedMode: ResolvedSearchKnobs;
   cfgForColumn: GBrainConfig | null;
@@ -321,6 +323,7 @@ export async function resolveHybridRequest(
 
   const req: HybridRequest = {
     engine, query, opts, modeInput, resolvedMode, cfgForColumn, resolvedCol, limit, offset,
+    queryEmbedDeadline: opts?._queryEmbedDeadline,
     suggestions, intentWeightingOn, intentWeights, detail, detailResolved, ctBoost,
     searchOpts, identityTierOpts, aliasHopOpts, degraded,
     vectorPoolUnderfill: undefined,
