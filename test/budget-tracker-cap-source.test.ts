@@ -104,7 +104,7 @@ describe('exhaustion notification preserves the refusal', () => {
     expect(refusal).toBeInstanceOf(BudgetExhausted);
     expect((refusal as BudgetExhausted).reason).toBe(reason);
     expect(notified).toHaveLength(1);
-    expect(notified[0]).toBe(refusal);
+    expect(notified[0]).toBe(refusal as BudgetExhausted);
     expect(reserve).toThrow(BudgetExhausted);
     expect(notified).toHaveLength(1);
   });

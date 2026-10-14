@@ -16,7 +16,9 @@
  *
  * `ftsLang` must already be validated (getFtsLanguage); `$1` is the websearch text.
  */
-export function buildKeywordChunkMatch(ftsLang: string, excludePrivate: boolean | undefined): { from: string; match: string; modality: string } {
+import type { PageVisibilityFilter } from './private-visibility.ts';
+
+export function buildKeywordChunkMatch(ftsLang: string, excludePrivate: PageVisibilityFilter | undefined): { from: string; match: string; modality: string } {
   const tsq = `websearch_to_tsquery('${ftsLang}', $1)`;
   if (!excludePrivate) return { from: 'content_chunks cc', match: `cc.search_vector @@ ${tsq}`, modality: `AND cc.modality = 'text'` };
   return {

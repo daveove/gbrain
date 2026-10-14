@@ -214,7 +214,7 @@ export const persistenceOperations: Operation[] = [
       // Both fences apply: a slug must sit under each confinement this caller carries.
       const slugPrefixes = bound && subagent ? intersectPrefixes(bound, subagent) : bound ?? subagent?.map(normalizeSlugPrefix);
       const { auditDriftConflicts } = await import('../persistence/drift-conflicts.ts');
-      return auditDriftConflicts(ctx.engine, sourceId, { trusted, sourceIds, slugPrefixes, excludePrivate: policy.excludePrivate === true },
+      return auditDriftConflicts(ctx.engine, sourceId, { trusted, sourceIds, slugPrefixes, excludePrivate: policy.excludePrivate ?? false },
         { limit, cursor: params.cursor as string | undefined });
     },
   },

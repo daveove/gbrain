@@ -2,7 +2,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { ResolvedColumn } from '../core/types.ts';
 import { readProjectionSnapshot, type ProjectionSnapshot } from '../core/page-state/projections.ts';
 import type { EmbedOpts, EmbedResult } from './embed.ts';
-import { resolveRegisteredEmbeddingColumnFromEngine, getEmbeddingProvenanceColumns, quoteIdentifier,
+import { resolveRegisteredEmbeddingColumnFromEngine, resolveActiveEmbeddingColumnFromEngine, getEmbeddingProvenanceColumns, quoteIdentifier,
   embeddingColumnSignature, independentPageProofContextSql } from '../core/search/embedding-column.ts';
 import { assertIndependentColumnInitialized } from '../core/embedding-column-schema.ts';
 import { wrapChunkTextsForStoredMode } from '../core/embedding-context.ts';
@@ -54,22 +54,22 @@ export function sameStagingTarget(prepared: ProjectionSnapshot, target: Resolved
 }
 
 /**
- * Provider inputs under the page's stored wrapping. A staging target's
- * document prefix comes from the guarded snapshot, the same descriptor its
- * installation records in the input proof.
+ * document prefix comes from the guarded snapshot, whether the independent
+ * space is an explicit staging target or the live selector. Installation
+ * records the same descriptor in the input proof.
  */
 export function documentInputs(prepared: ProjectionSnapshot, chunks: ReadonlyArray<{ chunk_text: string; chunk_source?: string | null }>,
   target: ResolvedColumn | undefined): string[] {
   const texts = wrapChunkTextsForStoredMode(prepared.snapshot.page, chunks);
-  const prefix = target ? prepared.embeddingColumn.documentPrefix : undefined;
+  const prefix = target || prepared.embeddingColumn.provenance ? prepared.embeddingColumn.documentPrefix : undefined;
   return prefix ? texts.map(text => prefix + text) : texts;
 }
 
-/** A staging target's provider call names its own model and width; otherwise the configured model serves. */
+/** Independent spaces use their own provider and width, including when selected live. */
 export function embedCallOpts(prepared: ProjectionSnapshot, target: ResolvedColumn | undefined, signal: AbortSignal | undefined): EmbedBatchWithBackoffOpts {
   return {
     ...(signal && { abortSignal: signal }),
-    ...(target && { embeddingModel: prepared.embeddingColumn.embeddingModel, dimensions: prepared.embeddingColumn.dimensions }),
+    ...((target || prepared.embeddingColumn.provenance) && { embeddingModel: prepared.embeddingColumn.embeddingModel, dimensions: prepared.embeddingColumn.dimensions }),
   };
 }
 
@@ -179,9 +179,12 @@ export async function preflightEmbeddingRun(engine: BrainEngine, opts: EmbedOpts
   if (!opts.dryRun) assertEmbeddingEnabled(loadConfig());
   // Resolve in previews too: an absent or incompatible space cannot produce a valid plan.
   const target = opts.embeddingColumn !== undefined ? await resolveEmbeddingStagingTarget(engine, opts.embeddingColumn) : undefined;
-  if (!opts.dryRun) validateEmbeddingCreds(target?.embeddingModel);
-  if (!target) await preflightDimMismatch(engine, !!opts.dryRun);
-  return target;
+  const live = target ?? await resolveActiveEmbeddingColumnFromEngine(engine);
+  if (live.provenance) await assertIndependentColumnInitialized(engine, live);
+  if (!opts.dryRun) validateEmbeddingCreds(live.provenance ? live.embeddingModel : undefined);
+  if (!target && !live.provenance) await preflightDimMismatch(engine, !!opts.dryRun);
+  // A live independent space uses the same text-only, no-rechunking path as explicit staging.
+  return target ?? (live.provenance ? live : undefined);
 }
 
 export function archivedEmbeddingReporter(engine: BrainEngine, dryRun: boolean, result: EmbedResult, sourceId: string | undefined,
@@ -210,7 +213,11 @@ export async function prepareStaleDrainProjections(engine: BrainEngine, options:
       return reportUnsealedForStaging(engine, options, readiness.blocked, result.failure_samples);
     }
   } else if (readiness.blocked && !dryRun) {
-    const probeOk = await probeEmbedder((texts, fnOpts) => embedBatchWithBackoff(texts, { abortSignal: fnOpts.abortSignal }), signature, options.signal);
+    const live = await resolveActiveEmbeddingColumnFromEngine(engine);
+    const probeOk = await probeEmbedder((texts, fnOpts) => embedBatchWithBackoff(
+      live.provenance && live.documentPrefix ? texts.map(text => live.documentPrefix + text) : texts,
+      { abortSignal: fnOpts.abortSignal, ...(live.provenance && { embeddingModel: live.embeddingModel, dimensions: live.dimensions }) }),
+    live.provenance ? embeddingColumnSignature(live) : signature, options.signal);
     if (isAborted(options.signal) || Date.now() >= (options.deadline ?? Infinity)) { await noteBudgetStop(); return null; }
     if (!probeOk) {
       result.failures += readiness.blocked;

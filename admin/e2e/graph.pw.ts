@@ -109,7 +109,7 @@ test('graph failures are visible and a failed recentre clears the old canvas', a
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.getByRole('group', { name: /Sources sized by page count/ })).toBeVisible();
 
-  await page.route('**/admin/api/graph/sources/*/top', route => route.fulfill(unavailable));
+  await page.route('**/admin/api/graph/sources/*/top?**', route => route.fulfill(unavailable));
   await page.getByRole('row', { name: /tana-cache-fixture/ }).getByRole('button').click();
   await expect(page.getByText("Could not load this source's pages: service_unavailable")).toBeVisible();
 });

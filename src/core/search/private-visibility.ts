@@ -161,6 +161,8 @@ export function effectiveVisibility(origin: { kind: 'transcript' } | { kind: 'pa
 export function strictestVisibility(values: Iterable<Visibility>): Visibility {
   for (const value of values) if (value === 'private') return 'private';
   return 'world';
+}
+
 /** Reserved owner-aggregate source+slug identities, independent of page metadata. */
 export function isReservedOwnerAggregateIdentity(sourceId: string, slug: string): boolean {
   if (!['default', 'dream'].includes(sourceId)) return false;

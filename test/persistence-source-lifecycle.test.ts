@@ -25,6 +25,7 @@ import { topologyPrincipal } from '../src/core/persistence/topology-locks.ts';
 
 import type { BrainEngine } from '../src/core/engine.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
+import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 const databaseUrl=process.env.DATABASE_URL;
 for(const flavor of ['pglite',...(databaseUrl?['postgres']:[])] as const)describe(`managed source lifecycle (${flavor})`,()=>{
 let engine:BrainEngine;
@@ -41,6 +42,7 @@ beforeAll(async()=>{
   schemaVersion=await engine.getConfig('version');
 },120_000);
 afterAll(async()=>{if(!engine)return;await disposePersistenceConsumer(engine);await observer?.disconnect();if(closePostgres)await closePostgres();else await engine.disconnect();});
+
 async function fixture(run:(home:string,source:string,root:string)=>Promise<void>){
   const home=mkdtempSync(join(tmpdir(),'gbrain-topology-'));
   try{await withEnv({GBRAIN_HOME:home,DATABASE_URL:undefined,GBRAIN_DATABASE_URL:undefined},async()=>{
@@ -72,7 +74,7 @@ test('managed lifecycle rejects archive of an owned system source before topolog
 
 test('managed archive/restore enqueue daily-memory refresh for admin surface',()=>fixture(async(_home,source)=>{
   await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
-    {type:'note',title:'Archive refresh',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-26'}},{sourceId:source})));
+    {type:'note',title:'Archive refresh',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-26'}},{sourceId:source}),TEST_WRITE_ATTRIBUTION));
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-26'::date::timestamptz,effective_date_source='date' WHERE source_id=$1",[source]);
   await runManagedSourceLifecycle(engine,{operation:'archive',sourceId:source});
   const archived=await engine.executeRaw<{data:Record<string,unknown>}>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
@@ -99,7 +101,7 @@ test('archive/restore advance topology and permanently invalidate accepted old b
 
 test('managed remove keeps source, binding, and accepted jobs atomic on queue failure',()=>fixture(async(_home,source)=>{
   await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
-    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source}),TEST_WRITE_ATTRIBUTION));
   const before=await getWorktreeBinding(engine,source);
   const original=MinionQueue.prototype.add;let calls=0;
   const add=spyOn(MinionQueue.prototype,'add').mockImplementation(async function(this:MinionQueue,...args:Parameters<MinionQueue['add']>){
@@ -131,7 +133,7 @@ test('managed remove keeps source, binding, and accepted jobs atomic on queue fa
 
 test('direct managed archive/restore accepts historical dates atomically with topology',()=>fixture(async(_home,source)=>{
   await engine.transaction(tx=>withCoordinatedWrite(tx,[source],()=>tx.putPage('notes/day',
-    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source})));
+    {type:'note',title:'Fixture',compiled_truth:'Synthetic',frontmatter:{date:'2026-09-30'}},{sourceId:source}),TEST_WRITE_ATTRIBUTION));
   await engine.executeRaw("UPDATE pages SET effective_date='2026-09-30T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id=$1 AND slug='notes/day'",[source]);
   for(const operation of ['archive','restore'] as const){
     const before=await getWorktreeBinding(engine,source);

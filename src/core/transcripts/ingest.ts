@@ -30,6 +30,7 @@
 import type { BrainEngine } from '../engine.ts';
 import { randomUUID } from 'node:crypto';
 import { importFromContent } from '../import-file.ts';
+import type { ImportResult } from '../import-file.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
@@ -374,7 +375,7 @@ export async function runTranscriptsIngest(
                     return renewInFlight;
                   }, LEASE_RENEW_EVERY_MS)
                   : undefined;
-                let r: Awaited<ReturnType<typeof importFromContent>>;
+                let r: Pick<ImportResult, 'slug' | 'status'>;
                 try {
                 await preserveForeignFrontmatter(engine, opts.sourceId ?? 'default', part);
                 const provenance = { source_kind: `transcript:${session.meta.harness}`, source_uri: path, ingested_via: 'cli:transcripts-ingest' };
@@ -585,7 +586,7 @@ async function submitTranscriptPart(
   sourceId: string,
   part: RenderedPart,
   provenance: { source_kind: string; source_uri: string; ingested_via: string },
-): Promise<{ slug: string; status: 'imported' | 'skipped' | 'error' }> {
+): Promise<Pick<ImportResult, 'slug' | 'status'>> {
   const snapshot = await engine.readPageSnapshot(part.slug, { sourceId, includeDeleted: true });
   const receipt = await submitPageMutation(ctx, {
     operation: 'put_page',

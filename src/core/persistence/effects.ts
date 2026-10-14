@@ -23,7 +23,7 @@ import { AIConfigError, normalizeAIError } from '../ai/errors.ts';
 import { modelApiAllowed, PaidModelApiDisabledError } from '../ai/billing-policy.ts';
 import { EMBEDDING_ZERO_NORM, isEmbeddingZeroNormError, type EmbeddingZeroNormError } from '../ai/embedding-guard.ts';
 import { isAIInvocationPolicyError, withAIInvocationPreflight } from '../ai/invocation-guard.ts';
-import { quoteIdentifier } from '../search/embedding-column.ts';
+import { quoteIdentifier, getEmbeddingProvenanceColumns, embeddingColumnSignature, resolveActiveEmbeddingColumnFromEngine } from '../search/embedding-column.ts';
 import type { ResolvedColumn } from '../types.ts';
 import { acquireWorktree, getWorktreeBinding, type WorktreeBinding } from './ownership.ts';
 import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts';
@@ -286,6 +286,10 @@ export async function readEmbeddingEffectProjection(engine: BrainEngine, effect:
         { fix: effectStatusFix(effect) });
     }
     const column = prepared.embeddingColumn;
+    if (column.provenance) {
+      const pending = prepared.chunks.filter(chunk => chunk.modality !== 'image' && chunk.embedding_is_null !== false);
+      return { prepared, pending: pending.length && prepared.snapshot.page.contextual_retrieval_mode === 'per_chunk_synopsis' ? prepared.chunks.filter(chunk => chunk.modality !== 'image') : pending };
+    }
     const completion = await tx.executeRaw<{ id: number; complete: boolean }>(`SELECT cc.id,
       p.embedding_signature=$2 AND cc.${quoteIdentifier(column.name)} IS NOT NULL AND cc.embedded_at IS NOT NULL
         AND cc.embedded_text_hash=md5(cc.chunk_text) AND cc.model IS NOT DISTINCT FROM $3 AS complete
@@ -303,18 +307,21 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
   if (!targetedWithdrawalEffect(effect) && !effect.data.source_scan && (snapshot.revision !== effect.revision || snapshot.page.id !== effect.data.page_id)) {
     await completeEffect(engine, effect, { embedding: 'superseded', reason: 'revision_changed' }); return;
   }
-  const signature = opts.embedding?.signature ?? currentEmbeddingSignature();
+  const primarySignature = opts.embedding?.signature ?? currentEmbeddingSignature();
+  const { prepared, pending } = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, primarySignature ?? '', opts.embedding?.model);
+  const independent = prepared.embeddingColumn.provenance;
+  const signature = independent ? embeddingColumnSignature(prepared.embeddingColumn) : primarySignature;
+  const model = independent ? prepared.embeddingColumn.embeddingModel : opts.embedding?.model;
   if (!signature) throw opError('embedding_unconfigured', 'Configure an embedding provider before explicitly retrying.',
     `Page ${snapshot.page.slug} in source ${effect.source_id} was saved but cannot be embedded: this brain has no embedding provider. Pages and keyword search keep working; check embedding readiness and ask the user before configuring a paid provider.`,
     { fix: embeddingsFix() });
-  const { prepared, pending } = await readEmbeddingEffectProjection(engine, effect, snapshot, opts.hostId, signature, opts.embedding?.model);
   if (pending.length) {
     await assertEmbeddingEffectEnabled(engine, config);
     if (effect.attempts - (effect.data.embedding_retry_base ?? effect.data.embedding_attempt_base ?? 0) > MAX_RATE_LIMIT_RETRIES) {
       await failEffect(engine, effect, 'embedding_attempts_exhausted'); return;
     }
     if (!opts.embedding) {
-      validateEmbeddingCreds();
+      validateEmbeddingCreds(independent ? model : undefined);
     }
     opts.signal?.throwIfAborted();
     const lease = new AbortController();
@@ -332,6 +339,8 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     let vectors: (Float32Array | null)[];
     // #4616: a degenerate vector refuses only its own chunk; the usable vectors still install.
     let refused: EmbeddingZeroNormError | undefined;
+    const wrapped = wrapChunkTextsForStoredMode(prepared.snapshot.page, pending);
+    const inputs = independent && prepared.embeddingColumn.documentPrefix ? wrapped.map(text => prepared.embeddingColumn.documentPrefix + text) : wrapped;
     try {
       await renew();
       signal.throwIfAborted();
@@ -340,7 +349,8 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
         await renew();
         signal.throwIfAborted();
         await assertEmbeddingEffectEnabled(engine, config);
-      }, () => (opts.embedding?.embed ?? embedBatch)(wrapChunkTextsForStoredMode(prepared.snapshot.page, pending), { abortSignal: signal, maxRetries: 0 }));
+      }, () => (opts.embedding?.embed ?? embedBatch)(inputs, { abortSignal: signal, maxRetries: 0,
+        ...(independent && { embeddingModel: model, dimensions: prepared.embeddingColumn.dimensions }) }));
     } catch (error) {
       if (!isEmbeddingZeroNormError(error) || error.vectors.length !== pending.length) throw error;
       refused = error;
@@ -366,16 +376,24 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
       signal.throwIfAborted();
       // A partially refused page keeps its signature unstamped so `gbrain embed --stale` finds the refused chunks.
       const installed = await installPageEmbeddings(tx, prepared, pending.map((chunk, i) => ({ chunk_index: chunk.chunk_index,
-        chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: vectors[i] ?? undefined, model: opts.embedding?.model })),
+        chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: vectors[i] ?? undefined, model })),
       refused ? undefined : signature);
       if (installed && refused) {
         // A refused chunk keeps no vector from an earlier convention, and the page reads as not fully embedded.
         const ids = refused.failures.map(f => pending[f.index]?.id).filter((id): id is number => id !== undefined);
-        await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(prepared.embeddingColumn.name)}=NULL,embedded_at=NULL,
-          embedded_text_hash=NULL,embedding_input_hash=NULL,embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [prepared.snapshot.page.id, ids]);
-        await tx.executeRaw('UPDATE pages SET embedding_signature=NULL WHERE id=$1', [prepared.snapshot.page.id]);
+        if (independent) {
+          const proof = getEmbeddingProvenanceColumns(prepared.embeddingColumn);
+          await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(prepared.embeddingColumn.name)}=NULL,
+            ${quoteIdentifier(proof.embeddedAt)}=NULL,${quoteIdentifier(proof.textHash)}=NULL,${quoteIdentifier(proof.inputHash)}=NULL,
+            ${quoteIdentifier(proof.pendingSince)}=COALESCE(${quoteIdentifier(proof.pendingSince)},now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [prepared.snapshot.page.id, ids]);
+          await tx.executeRaw(`UPDATE pages SET ${quoteIdentifier(proof.pageSignature)}=NULL WHERE id=$1`, [prepared.snapshot.page.id]);
+        } else {
+          await tx.executeRaw(`UPDATE content_chunks SET ${quoteIdentifier(prepared.embeddingColumn.name)}=NULL,embedded_at=NULL,
+            embedded_text_hash=NULL,embedding_input_hash=NULL,embedding_pending_since=COALESCE(embedding_pending_since,now()) WHERE page_id=$1 AND id=ANY($2::int[])`, [prepared.snapshot.page.id, ids]);
+          await tx.executeRaw('UPDATE pages SET embedding_signature=NULL WHERE id=$1', [prepared.snapshot.page.id]);
+        }
       }
-      if (installed && !refused) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, snapshot.page.slug, effect.source_id);
+      if (installed && !refused && !independent) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, snapshot.page.slug, effect.source_id);
       signal.throwIfAborted();
       if (installed && !refused) await finishPage(tx, effect, snapshot);
       return installed;
@@ -395,6 +413,10 @@ async function embedPage(engine: BrainEngine, config: GBrainConfig, effect: Pers
     }
     return;
   }
+  if (independent) await engine.transaction(async tx => {
+    await guardEffectSource(tx, effect, opts.hostId);
+    await installPageEmbeddings(tx, prepared, [], signature);
+  });
   await finishPage(engine, effect, snapshot);
 }
 
@@ -504,11 +526,11 @@ const GIT_YIELD_MS = 250;
  * claiming would spend an attempt and record it skipped or failed. An
  * explicitly configured local recipe (ollama) is not refused and stays claimable.
  */
-export function deferredEffectKinds(opts: Pick<EffectWorkerOptions, 'embedding'> = {}): string[] {
+export function deferredEffectKinds(opts: Pick<EffectWorkerOptions, 'embedding'> = {}, selectedModel?: string): string[] {
   if (opts.embedding) return [];
   const signature = currentEmbeddingSignature();
-  // The embedding boundary owns the exact provider:model:dimensions signature.
-  const model = signature?.slice(0, signature.lastIndexOf(':'));
+  // A live independent column owns the provider; legacy writes use the gateway signature.
+  const model = selectedModel ?? signature?.slice(0, signature.lastIndexOf(':'));
   return model && !modelApiAllowed(model) ? ['embedding'] : [];
 }
 
@@ -696,11 +718,13 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
       [JSON.stringify(recorded.map(effect => ({ id: String(effect.id), token: effect.execution_token }))), JSON.stringify(DURABILITY_NOT_ENABLED)]);
     } catch (error) { for (const effect of recorded) await recordFailure(engine, effect, error, opts.signal); }
   };
+  const liveColumn = opts.embedding ? undefined : await resolveActiveEmbeddingColumnFromEngine(engine);
+  const deferredKinds = deferredEffectKinds(opts, liveColumn?.provenance ? liveColumn.embeddingModel : undefined);
   // A deferred effect that requeues itself (a page walk advancing its cursor,
   // or work unblocked by an earlier effect) is claimable again after the flush.
   for (;;) {
     while (attempted < limit && !opts.signal?.aborted) {
-      const effect = await claimPersistenceEffect(engine, opts.hostId, deferredEffectKinds(opts));
+      const effect = await claimPersistenceEffect(engine, opts.hostId, deferredKinds);
       if (!effect) break;
       attempted++;
       let binding: WorktreeBinding | null = null;

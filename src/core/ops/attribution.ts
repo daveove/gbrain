@@ -175,7 +175,7 @@ const get_write_attribution: Operation = {
     let created: StoredAttribution;
     let last: StoredAttribution;
     let trust: StoredTrust = { trust_tier: live?.trust_tier ?? null, write_origin: live?.write_origin ?? null };
-    const row = rowTarget(ctx, page.id, page.slug, sourceId, { fact, take, timeline }, policy.excludePrivate === true);
+    const row = rowTarget(ctx, page.id, page.slug, sourceId, { fact, take, timeline }, policy.excludePrivate ?? false);
     if (row) {
       const [found] = await ctx.engine.executeRaw<{ id: number; w_req: string | null; w_kind: string | null; w_id: string | null; created_at: Date | string | null;
         l_req: string | null; l_kind: string | null; l_id: string | null; last_written_at: Date | string | null } & StoredTrust>(row.sql, row.params);

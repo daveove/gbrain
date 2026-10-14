@@ -267,7 +267,7 @@ function verifyPinnedHead(run: SyncRun, plan: Pick<SyncPlan, 'company' | 'gitCon
 
 async function applyBookmarkGate(
   run: SyncRun,
-  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'anchorPath' | 'lastCommit' | 'pin' | 'ckpt' | 'filtered' | 'holds'>,
+  plan: Pick<SyncPlan, 'opts' | 'company' | 'gitContextRoot' | 'anchorPath' | 'lastCommit' | 'pin' | 'ckpt' | 'filtered' | 'holds' | 'dailyFollowup'>,
   headVerificationSucceeded: boolean,
 ): Promise<{ done: SyncResult } | { gate: Awaited<ReturnType<typeof applySyncFailureGate>> }> {
   const { engine, succeededPaths, failedFiles, pagesAffected } = run;

@@ -1142,7 +1142,7 @@ async function embedPage(
     recordFailure(result, toEmbed.length, slug, e);
     result.pages_processed++;
     serr(`  Error embedding ${slug}: ${e instanceof Error ? e.message : e}`);
-    if (!target) await healAndReportOverLength(engine, slug, page.source_id, e, toEmbed.map(c => c.chunk_text), serr);
+    if (!target && !prepared.embeddingColumn.provenance) await healAndReportOverLength(engine, slug, page.source_id, e, toEmbed.map(c => c.chunk_text), serr);
     return;
   }
   const embeddingMap = new Map<number, Float32Array>();
@@ -1155,13 +1155,14 @@ async function embedPage(
     chunk_text: c.chunk_text,
     chunk_source: c.chunk_source,
     embedding: embeddingMap.get(c.chunk_index),
+    model: prepared.embeddingModel ?? undefined,
     token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
   }));
 
   const fullyEmbedded = failed === 0 && toEmbed.length === chunks.length;
   // A staging target stamps only its own page signature, and only once the
   // installation leaves every chunk with fresh proof in that column.
-  const signature = target
+  const signature = target || prepared.embeddingColumn.provenance
     ? (failed === 0 ? embeddingColumnSignature(prepared.embeddingColumn) : undefined)
     : (fullyEmbedded ? currentEmbeddingSignature() ?? undefined : undefined);
   // Vectors and their completion stamps share the page guard. A later
@@ -1169,7 +1170,7 @@ async function embedPage(
   if (!await engine.transaction(async tx => {
     if (!await installPageEmbeddings(tx, prepared, updated, signature)) return false;
     // The page's contextual mode describes the live vectors, not a staged space.
-    if (fullyEmbedded && !target) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, page.source_id);
+    if (fullyEmbedded && !target && !prepared.embeddingColumn.provenance) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, page.source_id);
     return true;
   })) {
     recordFailure(result, toEmbed.length, slug, EMBED_UNAVAILABLE_MESSAGE);
@@ -1179,7 +1180,7 @@ async function embedPage(
   if (failed > 0) {
     recordFailure(result, failed, slug, firstError);
     serr(`  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
-    if (!target) await healAndReportOverLength(engine, slug, page.source_id, firstError, toEmbed.map(c => c.chunk_text), serr);
+    if (!target && !prepared.embeddingColumn.provenance) await healAndReportOverLength(engine, slug, page.source_id, firstError, toEmbed.map(c => c.chunk_text), serr);
   }
   result.pages_processed++;
   if (!quiet) slog(`${slug}: embedded ${toEmbed.length - failed} chunks`);
@@ -1359,14 +1360,15 @@ async function embedAll(
         chunk_text: c.chunk_text,
         chunk_source: c.chunk_source,
         embedding: embeddingMap.get(c.chunk_index) ?? undefined,
+        model: prepared.embeddingModel ?? undefined,
         token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
       }));
       // Partial failures retain their old context; a full completion stamps
       // its vectors and title-tier convention in the same guarded transaction.
       if (!await observed(pacer, () => engine.transaction(async tx => {
-        const stamp = failed !== 0 ? undefined : target ? embeddingColumnSignature(prepared.embeddingColumn) : signature;
+        const stamp = failed !== 0 ? undefined : target || prepared.embeddingColumn.provenance ? embeddingColumnSignature(prepared.embeddingColumn) : signature;
         if (!await installPageEmbeddings(tx, prepared, updated, stamp)) return false;
-        if (failed === 0 && !target) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
+        if (failed === 0 && !target && !prepared.embeddingColumn.provenance) await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, page.slug, pageSourceId);
         return true;
       }))) {
         recordFailure(result, toEmbed.length, page.slug, EMBED_UNAVAILABLE_MESSAGE);
@@ -1376,14 +1378,14 @@ async function embedAll(
       if (failed > 0) {
         recordFailure(result, failed, page.slug, firstError);
         serr(`\n  ${page.slug}: ${failed} chunk(s) failed to embed; embedded the other ${toEmbed.length - failed}`);
-        if (!target) await healAndReportOverLength(engine, page.slug, pageSourceId, firstError, toEmbed.map(c => c.chunk_text), serr);
+        if (!target && !prepared.embeddingColumn.provenance) await healAndReportOverLength(engine, page.slug, pageSourceId, firstError, toEmbed.map(c => c.chunk_text), serr);
       }
     } catch (e: unknown) {
       // #3037: count the darkened page so the run can't exit 0 (abort is a
       // shutdown, not a failure).
       if (!isAborted(signal)) recordFailure(result, toEmbed.length, page.slug, e);
       serr(`\n  Error embedding ${page.slug}: ${e instanceof Error ? e.message : e}`);
-      if (!target && !isAborted(signal)) await healAndReportOverLength(engine, page.slug, pageSourceId, e, toEmbed.map(c => c.chunk_text), serr);
+      if (!target && !prepared.embeddingColumn.provenance && !isAborted(signal)) await healAndReportOverLength(engine, page.slug, pageSourceId, e, toEmbed.map(c => c.chunk_text), serr);
     }
 
     processed++;
@@ -2046,7 +2048,7 @@ async function embedAllStale(
           stale = existing.filter(c => selected.get(c.chunk_index)?.chunk_text === c.chunk_text && (!target || c.embedding_is_null !== false))
             .map(c => ({ ...selected.get(c.chunk_index)!, ...c }));
           if (!stale.length) {
-            if (target) await installPageEmbeddings(engine, prepared, [], embeddingColumnSignature(prepared.embeddingColumn));
+            if (target || prepared.embeddingColumn.provenance) await installPageEmbeddings(engine, prepared, [], embeddingColumnSignature(prepared.embeddingColumn));
             return;
           }
           const { embeddings, failed, firstError } = await embedPageTexts(
@@ -2064,6 +2066,7 @@ async function embedAllStale(
             chunk_text: c.chunk_text,
             chunk_source: c.chunk_source,
             embedding: staleIdxToEmbedding.get(c.chunk_index) ?? undefined,
+            model: prepared.embeddingModel ?? undefined,
             token_count: c.token_count || Math.ceil(c.chunk_text.length / 4),
           }));
           // The last batch stamps from complete DB provenance (#4825).
@@ -2072,9 +2075,9 @@ async function embedAllStale(
           if (!await observed(pacer, () => engine.transaction(async tx => {
             await staleOpts?.assertOwned?.(tx);
             if (!await installPageEmbeddings(tx, prepared, merged,
-              target && failed === 0 ? embeddingColumnSignature(prepared.embeddingColumn) : undefined)) return false;
-            if (stamp && failed === 0) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
-            if (!target && failed === 0 && stale.length === existing.length) {
+              (target || prepared.embeddingColumn.provenance) && failed === 0 ? embeddingColumnSignature(prepared.embeddingColumn) : undefined)) return false;
+            if (stamp && failed === 0 && !prepared.embeddingColumn.provenance) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
+            if (!target && !prepared.embeddingColumn.provenance && failed === 0 && stale.length === existing.length) {
               await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);
             }
             return true;
@@ -2083,7 +2086,7 @@ async function embedAllStale(
           if (failed > 0) {
             recordFailure(result, failed, slug, firstError);
             serr(`\n  ${slug}: ${failed} chunk(s) failed to embed; embedded the other ${stale.length - failed}`);
-            if (!target) await healAndReportOverLength(engine, slug, keySourceId, firstError, stale.map(c => c.chunk_text), serr);
+            if (!target && !prepared.embeddingColumn.provenance) await healAndReportOverLength(engine, slug, keySourceId, firstError, stale.map(c => c.chunk_text), serr);
           }
           // #3622: reaching here means at least one chunk persisted (a total
           // embed failure throws) — progress, so the quarantine counter resets.

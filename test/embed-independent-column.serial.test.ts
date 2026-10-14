@@ -149,6 +149,26 @@ for (const backend of testBackends()) {
         expect(seen).toEqual([]);
       });
 
+      test('a live independent selector uses its own provider and leaves primary vectors unchanged in every mode', async () => {
+        const before = await liveSpace();
+        await engine.setConfig('search_embedding_column', COLUMN);
+        try {
+          for (const mode of [{ slugs: SLUGS }, { all: true }, { stale: true }]) {
+            await engine.executeRaw(`UPDATE content_chunks SET ${COLUMN}=NULL`);
+            await engine.executeRaw(`UPDATE pages SET ${COLUMN}_signature=NULL`);
+            seen = [];
+            const result = await runEmbedCore(engine, { ...mode, quiet: true });
+            expect(result.failures).toBe(0);
+            expect(result.embedded).toBe(SLUGS.length);
+            expect(seen.every(call => call.model === 'nomic-embed-text' && call.value.startsWith(PREFIX))).toBe(true);
+            expect((await staged()).every(row => row.dims === DIMS && row.model === NOMIC && row.text_current)).toBe(true);
+            expect(await liveSpace()).toEqual(before);
+          }
+        } finally {
+          await engine.setConfig('search_embedding_column', 'embedding');
+        }
+      });
+
       test('a target vector under another model is selected again; fresh pages are not', async () => {
         await runEmbedCore(engine, { stale: true, quiet: true, embeddingColumn: COLUMN });
         await engine.executeRaw(`UPDATE content_chunks cc SET ${COLUMN}_model = 'ollama:mxbai-embed-large'
@@ -332,6 +352,9 @@ for (const backend of testBackends()) {
           await engine.executeRaw("UPDATE sources SET archived=false WHERE id='default'");
           await engine.executeRaw("UPDATE content_chunks SET modality='text' WHERE page_id=(SELECT id FROM pages WHERE slug='notes/charlie')");
           await engine.executeRaw("UPDATE pages SET frontmatter=frontmatter - 'embed_skip' WHERE slug IN ('notes/alpha','notes/bravo')");
+          // Frontmatter writes advance the page revision even when restoring embed_skip.
+          // These fixtures deliberately retain unchanged text, so restore their sealed projection too.
+          await engine.executeRaw("UPDATE pages SET text_projection_revision=knowledge_revision WHERE slug IN ('notes/alpha','notes/bravo')");
         }
       });
 
