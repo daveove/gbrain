@@ -71,6 +71,8 @@ export interface NeighbourhoodOptions {
   limit?: number;
   hideLinkTypes?: string[];
   hideSources?: string[];
+  /** Hide non-root pages with more than this many stored link rows (all types, both directions). */
+  maxDegree?: number;
 }
 
 export interface NeighbourhoodResult {
@@ -168,18 +170,25 @@ async function liveLinkFilter(engine: BrainEngine): Promise<(alias: string) => s
  * hidden source, and whose type is not hidden. Each direction reads at most
  * GRAPH_EDGE_SCAN_CAP rows in link-id order.
  */
-async function expand(engine: BrainEngine, live: (alias: string) => string, frontier: number[], hideTypes: string[], hideSources: string[]): Promise<{ edges: Array<{ a: number; b: number }>; truncated: boolean }> {
+async function expand(engine: BrainEngine, live: (alias: string) => string, frontier: number[], hideTypes: string[], hideSources: string[], rootId: number, maxDegree?: number): Promise<{ edges: Array<{ a: number; b: number }>; truncated: boolean }> {
+  // Reject hubs BEFORE the edge scan and candidate caps. Each indexed degree
+  // probe reads at most N+1 rows per direction; the root is always eligible.
+  const degreeFilter = maxDegree === undefined ? '' : `AND (p.id = $6 OR (
+    (SELECT count(*) FROM (SELECT 1 FROM links o WHERE o.from_page_id = p.id LIMIT $5 + 1) outgoing)
+    + (SELECT count(*) FROM (SELECT 1 FROM links i WHERE i.to_page_id = p.id LIMIT $5 + 1) incoming)
+  ) <= $5)`;
   const rows = await engine.executeRaw<Row>(
     `(SELECT 'out' AS dir, l.from_page_id AS a, l.to_page_id AS b FROM links l JOIN pages p ON p.id = l.to_page_id
        WHERE l.from_page_id = ANY($1::int[]) AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
-         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')}
+         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')} ${degreeFilter}
        ORDER BY l.id LIMIT $4)
      UNION ALL
      (SELECT 'in' AS dir, l.to_page_id AS a, l.from_page_id AS b FROM links l JOIN pages p ON p.id = l.from_page_id
        WHERE l.to_page_id = ANY($1::int[]) AND l.to_page_id <> l.from_page_id AND p.deleted_at IS NULL
-         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')}
+         AND NOT (l.link_type = ANY($2::text[])) AND NOT (p.source_id = ANY($3::text[])) AND ${live('l')} ${degreeFilter}
        ORDER BY l.id LIMIT $4)`,
-    [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP], bound(GRAPH_QUERY_TIMEOUT_MS));
+    maxDegree === undefined ? [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP]
+      : [frontier, hideTypes, hideSources, GRAPH_EDGE_SCAN_CAP, maxDegree, rootId], bound(GRAPH_QUERY_TIMEOUT_MS));
   let outRows = 0;
   let inRows = 0;
   const edges: Array<{ a: number; b: number }> = [];
@@ -209,6 +218,17 @@ export function clampGraphLimit(raw: unknown, fallback: number, max: number): nu
   return Math.min(n, max);
 }
 
+/** Optional hub threshold; absent means off, never silently clamp a supplied threshold. */
+export function graphMaxDegree(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if ((typeof raw !== 'number' && typeof raw !== 'string') || (typeof raw === 'string' && !/^[1-9]\d*$/.test(raw))
+    || !Number.isInteger(n) || n < 1 || n > 2_147_483_646) {
+    throw new GraphRequestError('max_degree must be a positive integer below 2147483647', 400, 'invalid_max_degree');
+  }
+  return n;
+}
+
 /**
  * Ego network of page `rootId`: hop-1 pages ranked by degree, then (depth 2)
  * pages one further hop out ranked by how many kept pages they touch, then
@@ -218,6 +238,7 @@ export function clampGraphLimit(raw: unknown, fallback: number, max: number): nu
 export async function queryGraphNeighbourhood(engine: BrainEngine, rootId: number, opts: NeighbourhoodOptions = {}): Promise<NeighbourhoodResult> {
   const depth = clampGraphDepth(opts.depth);
   const limit = clampGraphLimit(opts.limit, GRAPH_DEFAULT_LIMIT, GRAPH_MAX_LIMIT);
+  const maxDegree = graphMaxDegree(opts.maxDegree);
   const rootInfo = (await pageInfo(engine, [rootId])).get(rootId);
   if (!rootInfo) throw new GraphRequestError('Page not found', 404, 'not_found');
   const hideTypes = [...new Set(opts.hideLinkTypes ?? [])];
@@ -230,7 +251,7 @@ export async function queryGraphNeighbourhood(engine: BrainEngine, rootId: numbe
 
   let frontier = [rootId];
   for (let hop = 1; hop <= depth; hop++) {
-    const step = await expand(engine, live, frontier, hideTypes, hideSources);
+    const step = await expand(engine, live, frontier, hideTypes, hideSources, rootId, maxDegree);
     truncated ||= step.truncated;
     // Score = distinct kept pages a candidate connects to.
     const touches = new Map<number, Set<number>>();

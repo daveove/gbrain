@@ -108,6 +108,18 @@ export async function seedGraphFixture(engine: BrainEngine): Promise<void> {
     await link(`${N}:members/member-${i}`, `default:people/${slugify(PEOPLE[i % PEOPLE.length])}`, 'mentions', 'mentions');
   }
 
+  // Hub-filter probe: total stored-row degree includes multiple provenances.
+  // A hub is adjacent to the probe before its ordinary low-degree neighbour.
+  await page(N, 'hub-filter-probe', 'Hub filter probe');
+  await page(N, 'noisy-company', 'Noisy company', 'company');
+  await page(N, 'noise-anchor', 'Noise anchor');
+  await page(N, 'quiet-note', 'Quiet note');
+  await link(`${N}:hub-filter-probe`, `${N}:noisy-company`, 'mentions');
+  await engine.executeRaw(`INSERT INTO links (from_page_id, to_page_id, link_type, link_source)
+    SELECT $1, $2, 'mentions', 'noise-' || n FROM generate_series(1, 500) n`,
+    [ids.get(`${N}:noisy-company`), ids.get(`${N}:noise-anchor`)]);
+  await link(`${N}:hub-filter-probe`, `${N}:quiet-note`, 'contains');
+
   // Isolated pages, so the source map shows a realistic isolated share.
   for (const source of [...SOURCES, 'default']) {
     for (let i = 1; i <= 6; i++) await page(source, `loose/${i}`, `Loose note ${i}`);
