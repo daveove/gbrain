@@ -317,7 +317,9 @@ Then check each of these:
 `test/put-page-persistence.test.ts` pins the re-run rules for a fenced remote
 client: forced re-runs converge on one page, a retry replays its receipt, and
 a reused `request_id` is refused. `test/client-slug-fence.test.ts` and
-`test/e2e/qm-provisioning.test.ts` cover the prefix fence.
+`test/qm-provisioning.test.ts` cover the prefix fence. The latter is the
+ungated PGLite provisioning/HTTP suite moved from the E2E directory into
+the unit lane; its over-the-wire fence coverage is unchanged.
 
 ## Publish the endpoint over Tailscale Funnel
 

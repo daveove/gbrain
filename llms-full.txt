@@ -5047,6 +5047,42 @@ It does not enable embeddings, sharing, schedules, or curation automatically.
 
 [Data ingestion guide](docs/guides/data-ingestion.md) covers files, conversations, connectors, Google data, and capture commands.
 
+### Local agent sessions and nightly day indexes
+
+Session capture is explicit and local-only. `gbrain transcripts ingest` accepts
+Claude Code, Codex, OpenClaw, Hermes, Grok, OMP, Pi, OpenCode, Cursor, ChatGPT,
+and Claude export formats. `--date-zone <IANA-zone>` selects the frontmatter
+calendar day without changing stable session identities. Large sessions are
+split into complete continuation pages; a bounded or malformed read holds its
+watermark for retry.
+
+The repository launcher `scripts/gbrain-daily-memory.sh` captures Codex by default;
+set `GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"` to opt into
+additional local seats. Each seat has its own mtime watermark. Clean seats advance
+only after the index write succeeds; failed seats retain their cutoff while other
+seats finish. Explicit-date backfills rewrite the index without advancing capture
+watermarks. OpenCode's SQLite store is opened read-only.
+
+```bash
+GBRAIN_REPO_ROOT="$PWD" GBRAIN_DAILY_MEMORY_POOL_SIZE=1 bash scripts/gbrain-daily-memory.sh
+bun scripts/write-daily-memory.ts 2026-10-01  # index-only backfill
+bun scripts/run-facts-absorb.ts --max-usd 0.50 --concurrency 1 --max-minutes 30
+```
+
+The launcher pins one timezone and day, retries infrastructure connection failures
+within `GBRAIN_CONNECT_RETRY_BUDGET_MS` (20 minutes by default), and fails closed
+when the timezone lookup or zone validation fails. An explicit nightly pool setting
+outranks `env.sh`; the normalized default is two connections, and one is supported.
+It uses subscription-only model routing: paid embeddings remain queued. The separate
+facts runner honors configured billing policy and reserves each in-flight job's worst
+case against the supplied spend cap before claiming work.
+
+Daily indexes and source-record reference pages live in the non-federated `dream`
+system source. They contain labels and links, not copied message bodies, and remain
+owner-only even when ordinary private-page filtering is disabled. Current managed
+publication and wanted-link wakeups preserve affected-date debt across imports,
+syncs, edits, deletions, source lifecycle changes, and nightly job retries.
+
 ## Your brain's shape (schema packs)
 
 Most personal-knowledge tools force one fixed layout: their idea of "notes" + "people" + "tags." Drop a Notion export or your own years-old Obsidian vault on top, and the agent doesn't know what a `Projects/` folder means or whether `Reading/` is people or sources.

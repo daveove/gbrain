@@ -247,7 +247,7 @@ or a physical projection that leaves attribution untouched):
 - `src/core/facts/withdrawal.ts` (1): runs inside the `forget` request's coordinated write.
 - `src/core/trust/timeline-projection.ts` (2): `gbrain extract` timeline walks (file, incremental, stale) and the per-entry fallback write through it: one `maintenanceTransaction` per page tier.
 - `src/core/facts/write-single.ts` (2): the legacy single-fact insert and its supersession link each run in `maintenanceTransaction`; managed brains publish through the fact request.
-- `src/core/import-file.ts` (12): direct markdown, code and image imports, the moved-file rename (`updateSlug`) and the #3694 legacy-hash re-stamp run in `maintenanceTransaction`; managed imports go through the page request preparer.
+- `src/core/import-file.ts` (13): direct markdown, code and image imports, both moved-file rename branches (`updateSlug`, with or without a `beforeCommit` hook) and the #3694 legacy-hash re-stamp run in `maintenanceTransaction`; managed imports go through the page request preparer.
 - `src/core/minions/handlers/ingest-capture.ts` (1): the capture ingest tombstone soft delete runs in `maintenanceTransaction`.
 - `src/core/ops/extraction.ts` (2): extraction review promote (frontmatter) and reject (soft delete) each run in `maintenanceTransaction`.
 - `src/core/output/writer.ts` (4): `BrainWriter.transaction` is a `maintenanceTransaction`, so its pages and timeline rows carry the maintenance principal.
@@ -294,12 +294,13 @@ or a physical projection that leaves attribution untouched):
 - `src/core/trust/supersede-handlers.ts` (3): owner accept/undo of a trust proposal re-tiers the new fact (or take) inside the checked supersede's (or takes publication's) transaction.
 <!-- write-attribution-covered:end -->
 
-Unattributed (on unmanaged brains these would write with `NULL` attribution).
-The list is empty: `gbrain extract` timeline walks, enrichment and meeting
-timeline extraction run as tiered derivers since #5575 (I2). A new writer
-that cannot be attributed yet is declared here:
+Unattributed on unmanaged brains (these direct writes do not enter
+`maintenanceTransaction` and therefore have no maintenance principal).
+Managed daily indexes still publish through the coordinator; this inventory
+does not claim that the unmanaged fallback carries that request's actor.
 
 <!-- write-attribution-unattributed:start -->
+- `src/core/cycle/daily-memory.ts` (1): the unmanaged daily/source-record index fallback calls `engine.putPage` directly without `maintenanceTransaction`; managed indexes use revision-bound `publishMaintenancePage`.
 <!-- write-attribution-unattributed:end -->
 
 ## The privacy boundary

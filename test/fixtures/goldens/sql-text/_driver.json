@@ -268,7 +268,16 @@
       "getEmbeddingsByChunkIds": {
         "column": [
           {
-            "paramCount": 1,
+            "paramCount": 0,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": true
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 3,
             "unsafeOptions": {
               "prepare": false,
               "simple": false
@@ -825,6 +834,15 @@
           },
           {
             "paramCount": 2,
+            "unsafeOptions": {
+              "cancelFence": false,
+              "prepare": true,
+              "simple": false
+            },
+            "via": "unsafe"
+          },
+          {
+            "paramCount": 1,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,

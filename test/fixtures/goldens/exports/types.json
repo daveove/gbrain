@@ -19,7 +19,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "lookback_days?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -65,11 +65,11 @@
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
           "connect: (config: EngineConfig) => Promise<void>",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
-          "countChunklessPagesWithContent: (opts?: { sourceId?: string; }) => Promise<number>",
+          "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
           "countKeywordPages: (query: string, opts?: SearchOpts & { timeoutMs?: number; }) => Promise<number>",
-          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "countStaleFrontmatterKeyPages: (opts: { sourceIds: string[]; }) => Promise<Array<{ source_id: string; n: number; }>>",
-          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; }) => Promise<number>",
+          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; slugs?: readonly string[]; }) => Promise<number>",
           "countStaleTakes: (opts?: StaleTakeOpts) => Promise<number>",
           "countUnconsolidatedFacts: (source_id: string) => Promise<number>",
           "createVersion: (slug: string, opts?: { sourceId?: string; preimage?: PageSnapshot; }) => Promise<PageVersion>",
@@ -101,7 +101,7 @@
           "getCalleesOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getCallersOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getChunkWindows: (requests: ChunkWindowRequest[], opts: ChunkWindowOpts) => Promise<ChunkWindowPage[]>",
-          "getChunks: (slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
+          "getChunks: (slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<Chunk[]>",
           "getChunksWithEmbeddings: (slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
           "getConfig: (key: string) => Promise<string | null>",
           "getContentFlagsByPageIds: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, { reason: string; detail: string; }>>",
@@ -109,7 +109,7 @@
           "getDreamVerdict: (filePath: string, contentHash: string) => Promise<DreamVerdict | null>",
           "getEdgesByChunk: (chunkId: number, opts?: { direction?: \"in\" | \"out\" | \"both\"; edgeType?: string; limit?: number; }) => Promise<CodeEdgeResult[]>",
           "getEffectiveDates: (refs: Array<{ slug: string; source_id: string; }>, opts?: PageReadScope) => Promise<Map<string, Date>>",
-          "getEmbeddingsByChunkIds: (ids: number[], column?: string) => Promise<Map<number, Float32Array>>",
+          "getEmbeddingsByChunkIds: (ids: number[], column?: string | ResolvedColumn) => Promise<Map<number, Float32Array>>",
           "getFactsHealth: (source_id: string) => Promise<FactsHealth>",
           "getFile: (sourceId: string, storagePath: string) => Promise<FileRow | null>",
           "getHealth: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainHealth>",
@@ -126,7 +126,7 @@
           "getScorecard: (opts: TakesScorecardOpts, allowList: string[] | undefined) => Promise<TakesScorecard>",
           "getSince: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
           "getStats: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainStats>",
-          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean; }) => Promise<string[]>",
+          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; liveOnly?: boolean; }) => Promise<string[]>",
           "getTakeEmbeddings: (ids: number[]) => Promise<Map<number, Float32Array>>",
           "getTimeline: (slug: string, opts?: TimelineOpts) => Promise<TimelineEntry[]>",
           "getTimelineForDate: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
@@ -154,11 +154,11 @@
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
           "listPrefixSampledPages: (opts: DomainBankSampleOpts) => Promise<DomainBankRow[]>",
-          "listStaleChunks: (opts?: { batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
+          "listStaleChunks: (opts?: { embeddingColumn?: ResolvedColumn; batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
           "listStaleFrontmatterKeyPages: (opts: { sourceId: string; afterId: number; limit: number; }) => Promise<Array<{ id: number; slug: string; keys: string[]; }>>",
-          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; }) => Promise<StalePageRow[]>",
+          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; slugs?: readonly string[]; }) => Promise<StalePageRow[]>",
           "listStaleTakes: (opts?: StaleTakeOpts) => Promise<StaleTakeRow[]>",
-          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean; }) => Promise<FactRow[]>",
+          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<FactRow[]>",
           "listTakes: (opts?: TakesListOpts) => Promise<Take[]>",
           "loadContradictionsTrend: (days: number) => Promise<Array<{ run_id: string; ran_at: string; judge_model: string; queries_evaluated: number; queries_with_contradiction: number; total_contradictions_flagged: number; wilson_ci_lower: number; wilson_ci_upper: number; judge_errors_total: number; cost_usd_total: number; duration_ms: number; source_tier_breakdown: Record<string, unknown>; report_json: Record<string, unknown>; }>>",
           "lockPageKeys: (keys: readonly PageKey[]) => Promise<void>",
@@ -211,7 +211,7 @@
           "softDeletePage: (slug: string, opts?: { sourceId?: string; }) => Promise<{ slug: string; } | null>",
           "softDeletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "stripStaleFrontmatterKeys: (opts: { sourceId: string; ids: number[]; }) => Promise<number>",
-          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "supersedeTake: (pageId: number, oldRow: number, newRow: Omit<TakeBatchInput, \"page_id\" | \"row_num\" | \"superseded_by\">) => Promise<{ oldRow: number; newRow: number; }>",
           "sweepContradictionCache: () => Promise<number>",
           "sweepDreamVerdicts: () => Promise<number>",
@@ -313,7 +313,7 @@
         "kind": "interface",
         "members": [
           "degreeLinkTypes: string[]",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "linkTypes: string[]",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "neighborCap: number",
@@ -332,7 +332,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "kind?: string | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
@@ -369,6 +369,7 @@
           "doc_comment?: string | null | undefined",
           "embedded_at: Date | null",
           "embedding: Float32Array<ArrayBufferLike> | null",
+          "embedding_input_hash?: string | null | undefined",
           "embedding_is_null?: boolean | undefined",
           "end_line?: number | null | undefined",
           "id: number",
@@ -539,10 +540,25 @@
         "kind": "interface",
         "members": [
           "dimensions: number",
+          "documentPrefix?: string | undefined",
+          "provenance?: \"independent\" | undefined",
           "provider: string",
+          "queryPrefix?: string | undefined",
           "type: \"vector\" | \"halfvec\""
         ],
         "name": "EmbeddingColumnConfig"
+      },
+      {
+        "kind": "interface",
+        "members": [
+          "embeddedAt: string",
+          "inputHash: string",
+          "model: string",
+          "pageSignature: string",
+          "pendingSince: string",
+          "textHash: string"
+        ],
+        "name": "EmbeddingProvenanceColumns"
       },
       {
         "kind": "interface",
@@ -684,7 +700,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeDeleted?: boolean | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -736,6 +752,7 @@
           "keyword_candidates?: CjkKeywordMeta | undefined",
           "metadata_boost_gate?: MetadataBoostGateDecision | undefined",
           "mode?: \"conservative\" | \"balanced\" | \"tokenmax\" | undefined",
+          "omitted_vector_arms?: { arm: \"unified_multimodal\"; reason: \"independent_embedding_column\"; }[] | undefined",
           "relational_evidence_slot?: RelationalEvidenceSlotDecision | undefined",
           "relational_plan?: RelationalPlanMeta | undefined",
           "relational_rerank_pin?: RelationalRerankPinDecision | undefined",
@@ -853,7 +870,7 @@
         "kind": "interface",
         "members": [
           "asof?: string | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeQuarantined?: boolean | undefined",
           "minConfidence?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
@@ -924,7 +941,7 @@
         "members": [
           "effective_after?: string | undefined",
           "effective_before?: string | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeDeleted?: boolean | undefined",
           "limit?: number | undefined",
           "listColumnsOnly?: boolean | undefined",
@@ -974,7 +991,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
@@ -987,7 +1004,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
@@ -1036,11 +1053,11 @@
           "connect: (config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager; }) => Promise<void>",
           "connectionManager: ConnectionManager | null",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
-          "countChunklessPagesWithContent: (opts?: { sourceId?: string; }) => Promise<number>",
+          "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
           "countKeywordPages: (query: string, opts?: SearchOpts & { timeoutMs?: number; }) => Promise<number>",
-          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "countStaleFrontmatterKeyPages: (opts: { sourceIds: string[]; }) => Promise<{ source_id: string; n: number; }[]>",
-          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; }) => Promise<number>",
+          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; slugs?: readonly string[]; }) => Promise<number>",
           "countStaleTakes: (opts?: StaleTakeOpts) => Promise<number>",
           "countUnconsolidatedFacts: (source_id: string) => Promise<number>",
           "createVersion: (slug: string, opts?: { sourceId?: string; preimage?: PageSnapshot; }) => Promise<PageVersion>",
@@ -1062,7 +1079,7 @@
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findDuplicatePages: (sourceId: string, inputs: Parameters<typeof findDuplicatePages>[2]) => Promise<({ slug: string; id: number; } | null)[]>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -1073,7 +1090,7 @@
           "getCalleesOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getCallersOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getChunkWindows: (requests: ChunkWindowRequest[], opts: ChunkWindowOpts) => Promise<ChunkWindowPage[]>",
-          "getChunks: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
+          "getChunks: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean | \"owner-only\"; requireSafeChunks?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<Chunk[]>",
           "getChunksWithEmbeddings: (slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
           "getConfig: (key: string) => Promise<string | null>",
           "getContentFlagsByPageIds: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, { reason: string; detail: string; }>>",
@@ -1081,7 +1098,7 @@
           "getDreamVerdict: (filePath: string, contentHash: string) => Promise<DreamVerdict | null>",
           "getEdgesByChunk: (chunkId: number, opts?: { direction?: \"in\" | \"out\" | \"both\"; edgeType?: string; limit?: number; }) => Promise<CodeEdgeResult[]>",
           "getEffectiveDates: (refs: Array<{ slug: string; source_id: string; }>, opts?: PageReadScope) => Promise<Map<string, Date>>",
-          "getEmbeddingsByChunkIds: (ids: number[], column?: string) => Promise<Map<number, Float32Array>>",
+          "getEmbeddingsByChunkIds: (ids: number[], column?: string | ResolvedColumn) => Promise<Map<number, Float32Array>>",
           "getFactsHealth: (source_id: string) => Promise<FactsHealth>",
           "getFile: (sourceId: string, storagePath: string) => Promise<FileRow | null>",
           "getHealth: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainHealth>",
@@ -1099,7 +1116,7 @@
           "getScorecard: (opts: TakesScorecardOpts, allowList: string[] | undefined) => Promise<TakesScorecard>",
           "getSince: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
           "getStats: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainStats>",
-          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean; }) => Promise<string[]>",
+          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; liveOnly?: boolean; }) => Promise<string[]>",
           "getTakeEmbeddings: (ids: number[]) => Promise<Map<number, Float32Array>>",
           "getTimeline: (slug: string, opts?: TimelineOpts) => Promise<TimelineEntry[]>",
           "getTimelineForDate: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
@@ -1127,11 +1144,11 @@
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
           "listPrefixSampledPages: (opts: DomainBankSampleOpts) => Promise<DomainBankRow[]>",
-          "listStaleChunks: (opts?: { batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
+          "listStaleChunks: (opts?: { embeddingColumn?: ResolvedColumn; batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
           "listStaleFrontmatterKeyPages: (opts: { sourceId: string; afterId: number; limit: number; }) => Promise<{ id: number; slug: string; keys: string[]; }[]>",
-          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; }) => Promise<StalePageRow[]>",
+          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; slugs?: readonly string[]; }) => Promise<StalePageRow[]>",
           "listStaleTakes: (opts?: StaleTakeOpts) => Promise<StaleTakeRow[]>",
-          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: (\"private\" | \"world\")[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean; }) => Promise<FactRow[]>",
+          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: (\"private\" | \"world\")[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<FactRow[]>",
           "listTakes: (opts?: TakesListOpts) => Promise<Take[]>",
           "loadContradictionsTrend: (days: number) => Promise<Array<{ run_id: string; ran_at: string; judge_model: string; queries_evaluated: number; queries_with_contradiction: number; total_contradictions_flagged: number; wilson_ci_lower: number; wilson_ci_upper: number; judge_errors_total: number; cost_usd_total: number; duration_ms: number; source_tier_breakdown: Record<string, unknown>; report_json: Record<string, unknown>; }>>",
           "lockPageKeys: (keys: readonly PageKey[]) => Promise<void>",
@@ -1201,9 +1218,9 @@
           "replaceDerivedLinks: (origin: DerivedLinkOrigin, links: LinkBatchInput[], opts?: DerivedLinkReplacementOptions) => Promise<{ created: number; removed: number; }>",
           "replaceDerivedLinksBatch: (items: readonly DerivedLinkBatchItem[]) => Promise<{ created: number; removed: number; }[]>",
           "resolveAliases: (aliasNorms: string[], opts?: PageReadScope) => Promise<Map<string, Array<{ slug: string; source_id: string; }>>>",
-          "resolveSlugWithAlias: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean; }) => Promise<string>",
-          "resolveSlugWithAliasDetailed: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean; }) => Promise<{ canonical_slug: string; source_id: string; } | null>",
-          "resolveSlugs: (partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<string[]>",
+          "resolveSlugWithAlias: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean | \"owner-only\"; }) => Promise<string>",
+          "resolveSlugWithAliasDetailed: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean | \"owner-only\"; }) => Promise<{ canonical_slug: string; source_id: string; } | null>",
+          "resolveSlugs: (partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<string[]>",
           "resolveSlugsByPaths: (paths: string[], opts: { sourceId: string; }) => Promise<Map<string, string>>",
           "resolveTake: (pageId: number, rowNum: number, resolution: TakeResolution) => Promise<void>",
           "restorePage: (slug: string, opts?: { sourceId?: string; }) => Promise<boolean>",
@@ -1225,15 +1242,15 @@
           "softDeletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "sql: postgres.Sql<{}>",
           "stripStaleFrontmatterKeys: (opts: { sourceId: string; ids: number[]; }) => Promise<number>",
-          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "supersedeTake: (pageId: number, oldRow: number, newRow: Omit<TakeBatchInput, \"page_id\" | \"row_num\" | \"superseded_by\">) => Promise<{ oldRow: number; newRow: number; }>",
           "sweepContradictionCache: () => Promise<number>",
           "sweepDreamVerdicts: () => Promise<number>",
           "transaction: <T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions) => Promise<T>",
           "transactionDirect: <T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions) => Promise<T>",
           "traverseGraph: (slug: string, depth?: number, opts?: TraverseGraphOpts) => Promise<GraphNode[]>",
-          "traversePaths: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<GraphPath[]>",
-          "traversePathsDetailed: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<{ paths: GraphPath[]; truncated: boolean; }>",
+          "traversePaths: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<GraphPath[]>",
+          "traversePathsDetailed: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<{ paths: GraphPath[]; truncated: boolean; }>",
           "unsetConfig: (key: string) => Promise<number>",
           "updatePageContextualRetrievalState: (slug: string, sourceId: string, mode: string, corpusGeneration: string | null) => Promise<void>",
           "updateSlug: (oldSlug: string, newSlug: string, opts?: { sourceId?: string; }) => Promise<number>",
@@ -1284,7 +1301,7 @@
         "members": [
           "depth?: number | undefined",
           "direction?: \"both\" | \"in\" | \"out\" | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeMentions?: boolean | undefined",
           "limit?: number | undefined",
           "linkTypes?: string[] | null | undefined",
@@ -1317,8 +1334,11 @@
         "kind": "interface",
         "members": [
           "dimensions: number",
+          "documentPrefix?: string | undefined",
           "embeddingModel: string",
           "name: string",
+          "provenance?: EmbeddingProvenanceColumns | undefined",
+          "queryPrefix?: string | undefined",
           "type: \"vector\" | \"halfvec\""
         ],
         "name": "ResolvedColumn"
@@ -1337,7 +1357,7 @@
         "kind": "interface",
         "members": [
           "days?: number | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "recency_bias?: \"flat\" | \"on\" | undefined",
@@ -1378,7 +1398,7 @@
           "crossModal?: \"image\" | \"text\" | \"both\" | \"auto\" | undefined",
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
           "embeddingColumn?: string | ResolvedColumn | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
           "floorRatio?: number | undefined",
@@ -1566,7 +1586,7 @@
           "after?: string | undefined",
           "before?: string | undefined",
           "eligibility?: ReadEligibility | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -1753,7 +1773,7 @@
         "kind": "type",
         "name": "EmbeddingDiagnosis",
         "signature": [
-          "{ ok: true; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"no_gateway_config\"; } | { ok: false; reason: \"no_model_configured\"; } | { ok: false; reason: \"unknown_provider\"; model: string; provider: string; message: string; } | { ok: false; reason: \"no_touchpoint\"; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"user_provided_dims_unset\"; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"missing_env\"; model: string; provider: string; recipeId: string; missingEnvVars: string[]; }"
+          "{ ok: true; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"no_gateway_config\"; } | { ok: false; reason: \"no_model_configured\"; } | { ok: false; reason: \"unknown_provider\"; model: string; provider: string; message: string; } | { ok: false; reason: \"no_touchpoint\"; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"user_provided_dims_unset\"; model: string; provider: string; recipeId: string; } | { ok: false; reason: \"missing_env\"; model: string; provider: string; recipeId: string; missingEnvVars: string[]; } | { ok: false; reason: \"paid_api_disabled\"; model: string; provider: string; recipeId: string; }"
         ]
       },
       {
@@ -2668,6 +2688,7 @@
       {
         "kind": "interface",
         "members": [
+          "ai_billing?: \"api\" | \"subscription\" | undefined",
           "anthropic_api_key?: string | undefined",
           "autopilot?: { nightly_quality_probe?: { enabled?: boolean; max_usd?: number; }; conversation_parser_probe?: { enabled?: boolean; }; auto_drain?: { enabled?: boolean; window_seconds?: number; threshold?: number; max_usd_per_day?: number; }; incremental_extract_include_frontmatter?: boolean; } | undefined",
           "azure_openai_api_key?: string | undefined",
@@ -3137,6 +3158,8 @@
         "kind": "interface",
         "members": [
           "abortSignal?: AbortSignal | undefined",
+          "dimensions?: number | undefined",
+          "embeddingModel?: string | undefined",
           "maxRetries?: number | undefined",
           "onBatchComplete?: ((done: number, total: number) => void) | undefined"
         ],
@@ -3308,11 +3331,11 @@
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
           "connect: (config: EngineConfig) => Promise<void>",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
-          "countChunklessPagesWithContent: (opts?: { sourceId?: string; }) => Promise<number>",
+          "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
           "countKeywordPages: (query: string, opts?: SearchOpts & { timeoutMs?: number; }) => Promise<number>",
-          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "countStaleFrontmatterKeyPages: (opts: { sourceIds: string[]; }) => Promise<Array<{ source_id: string; n: number; }>>",
-          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; }) => Promise<number>",
+          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; slugs?: readonly string[]; }) => Promise<number>",
           "countStaleTakes: (opts?: StaleTakeOpts) => Promise<number>",
           "countUnconsolidatedFacts: (source_id: string) => Promise<number>",
           "createVersion: (slug: string, opts?: { sourceId?: string; preimage?: PageSnapshot; }) => Promise<PageVersion>",
@@ -3344,7 +3367,7 @@
           "getCalleesOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getCallersOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getChunkWindows: (requests: ChunkWindowRequest[], opts: ChunkWindowOpts) => Promise<ChunkWindowPage[]>",
-          "getChunks: (slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
+          "getChunks: (slug: string, opts?: PageReadScope & { includeEmbedding?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<Chunk[]>",
           "getChunksWithEmbeddings: (slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
           "getConfig: (key: string) => Promise<string | null>",
           "getContentFlagsByPageIds: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, { reason: string; detail: string; }>>",
@@ -3352,7 +3375,7 @@
           "getDreamVerdict: (filePath: string, contentHash: string) => Promise<DreamVerdict | null>",
           "getEdgesByChunk: (chunkId: number, opts?: { direction?: \"in\" | \"out\" | \"both\"; edgeType?: string; limit?: number; }) => Promise<CodeEdgeResult[]>",
           "getEffectiveDates: (refs: Array<{ slug: string; source_id: string; }>, opts?: PageReadScope) => Promise<Map<string, Date>>",
-          "getEmbeddingsByChunkIds: (ids: number[], column?: string) => Promise<Map<number, Float32Array>>",
+          "getEmbeddingsByChunkIds: (ids: number[], column?: string | ResolvedColumn) => Promise<Map<number, Float32Array>>",
           "getFactsHealth: (source_id: string) => Promise<FactsHealth>",
           "getFile: (sourceId: string, storagePath: string) => Promise<FileRow | null>",
           "getHealth: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainHealth>",
@@ -3369,7 +3392,7 @@
           "getScorecard: (opts: TakesScorecardOpts, allowList: string[] | undefined) => Promise<TakesScorecard>",
           "getSince: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
           "getStats: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainStats>",
-          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean; }) => Promise<string[]>",
+          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; liveOnly?: boolean; }) => Promise<string[]>",
           "getTakeEmbeddings: (ids: number[]) => Promise<Map<number, Float32Array>>",
           "getTimeline: (slug: string, opts?: TimelineOpts) => Promise<TimelineEntry[]>",
           "getTimelineForDate: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
@@ -3397,11 +3420,11 @@
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
           "listPrefixSampledPages: (opts: DomainBankSampleOpts) => Promise<DomainBankRow[]>",
-          "listStaleChunks: (opts?: { batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
+          "listStaleChunks: (opts?: { embeddingColumn?: ResolvedColumn; batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
           "listStaleFrontmatterKeyPages: (opts: { sourceId: string; afterId: number; limit: number; }) => Promise<Array<{ id: number; slug: string; keys: string[]; }>>",
-          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; }) => Promise<StalePageRow[]>",
+          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; slugs?: readonly string[]; }) => Promise<StalePageRow[]>",
           "listStaleTakes: (opts?: StaleTakeOpts) => Promise<StaleTakeRow[]>",
-          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean; }) => Promise<FactRow[]>",
+          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: FactVisibility[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<FactRow[]>",
           "listTakes: (opts?: TakesListOpts) => Promise<Take[]>",
           "loadContradictionsTrend: (days: number) => Promise<Array<{ run_id: string; ran_at: string; judge_model: string; queries_evaluated: number; queries_with_contradiction: number; total_contradictions_flagged: number; wilson_ci_lower: number; wilson_ci_upper: number; judge_errors_total: number; cost_usd_total: number; duration_ms: number; source_tier_breakdown: Record<string, unknown>; report_json: Record<string, unknown>; }>>",
           "lockPageKeys: (keys: readonly PageKey[]) => Promise<void>",
@@ -3454,7 +3477,7 @@
           "softDeletePage: (slug: string, opts?: { sourceId?: string; }) => Promise<{ slug: string; } | null>",
           "softDeletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "stripStaleFrontmatterKeys: (opts: { sourceId: string; ids: number[]; }) => Promise<number>",
-          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "supersedeTake: (pageId: number, oldRow: number, newRow: Omit<TakeBatchInput, \"page_id\" | \"row_num\" | \"superseded_by\">) => Promise<{ oldRow: number; newRow: number; }>",
           "sweepContradictionCache: () => Promise<number>",
           "sweepDreamVerdicts: () => Promise<number>",
@@ -3492,7 +3515,7 @@
         "kind": "interface",
         "members": [
           "bucketSize?: number | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "holder?: string | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -3566,7 +3589,7 @@
           "eligibility?: ReadEligibility | undefined",
           "eventTime?: boolean | undefined",
           "excludeAuditRows?: boolean | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "fingerprint?: boolean | undefined",
           "grep?: string | undefined",
           "kinds?: FactKind[] | undefined",
@@ -3749,7 +3772,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeDeleted?: boolean | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "preserveExactIdentity?: boolean | undefined",
@@ -3933,7 +3956,7 @@
         "members": [
           "active?: boolean | undefined",
           "eligibility?: ReadEligibility | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "holder?: string | undefined",
           "kind?: string | undefined",
           "limit?: number | undefined",
@@ -3971,7 +3994,7 @@
         "kind": "interface",
         "members": [
           "domainPrefix?: string | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "holder?: string | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -3999,7 +4022,7 @@
         "kind": "interface",
         "members": [
           "entitySlug: string",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "kind?: \"event\" | \"metric\" | \"all\" | undefined",
           "limit?: number | undefined",
           "metric?: string | undefined",
@@ -4038,7 +4061,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "frontierCap?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -4372,7 +4395,7 @@
         "kind": "function",
         "name": "extractStaleFromDB",
         "signature": [
-          "(engine: BrainEngine, opts: { dryRun: boolean; jsonMode: boolean; quiet?: boolean; includeFrontmatter?: boolean; sourceIdFilter?: string; catchUp: boolean; timeBudgetMs?: number; }) => Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult; }>"
+          "(engine: BrainEngine, opts: { dryRun: boolean; jsonMode: boolean; quiet?: boolean; includeFrontmatter?: boolean; sourceIdFilter?: string; catchUp: boolean; timeBudgetMs?: number; slugs?: readonly string[]; originGuard?: (snapshot: PageSnapshot, reader: BrainEngine) => Promise<boolean>; signal?: AbortSignal; }) => Promise<{ linksCreated: number; timelineCreated: number; pagesProcessed: number; staleRemaining: number; skippedMissingTarget?: number; skippedCrossSource?: number; skippedAttendanceIncomplete?: number; skippedChanged?: number; skippedConcurrentWrite?: number; mentions?: MentionPassResult; }>"
         ]
       },
       {
@@ -4497,6 +4520,13 @@
     ],
     "./import-file": [
       {
+        "kind": "type",
+        "name": "ImportBeforeCommit",
+        "signature": [
+          "(tx: BrainEngine, slug: string) => Promise<void>"
+        ]
+      },
+      {
         "kind": "interface",
         "members": [
           "error?: string | undefined",
@@ -4514,6 +4544,7 @@
       {
         "kind": "interface",
         "members": [
+          "beforeCommit?: ImportBeforeCommit | undefined",
           "bytes?: Buffer<ArrayBufferLike> | undefined",
           "noEmbed?: boolean | undefined",
           "ocrConcurrency?: number | undefined",
@@ -4551,6 +4582,7 @@
           "after?: ((tx: BrainEngine) => Promise<void>) | undefined",
           "allowEmptyOverwrite?: boolean | undefined",
           "basePage?: Page | null | undefined",
+          "beforeCommit?: ImportBeforeCommit | undefined",
           "chunks?: ChunkInput[] | undefined",
           "file?: FileSpec | undefined",
           "hadExisting: boolean",
@@ -4612,28 +4644,28 @@
         "kind": "function",
         "name": "importCodeFile",
         "signature": [
-          "(engine: BrainEngine, relativePath: string, content: string, opts?: { noEmbed?: boolean; force?: boolean; sourceId?: string; prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, relativePath: string, content: string, opts?: { noEmbed?: boolean; force?: boolean; sourceId?: string; beforeCommit?: ImportBeforeCommit; prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; }) => Promise<ImportResult>"
         ]
       },
       {
         "kind": "variable",
         "name": "importFile",
         "signature": [
-          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { beforeCommit?: ImportBeforeCommit; noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; }) => Promise<ImportResult>"
         ]
       },
       {
         "kind": "function",
         "name": "importFromContent",
         "signature": [
-          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; coordinated?: boolean; existingSnapshot?: PageSnapshot | null; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ParseOpts[\"activePack\"]; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; preserveGateMarkers?: boolean; allowEmptyOverwrite?: boolean; overrideTier?: unknown; writeGate?: WriteGateInput; beforeCommit?: (tx: BrainEngine, slug: string) => Promise<void>; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; } & ImportFenceOptions) => Promise<ImportResult>"
+          "(engine: BrainEngine, slug: string, content: string, opts?: { prepare?: (prepared: PreparedContentImport) => Promise<ImportResult>; coordinated?: boolean; existingSnapshot?: PageSnapshot | null; prepareFrontmatter?: (page: ParsedPage) => void; noEmbed?: boolean; sourceId?: string; filename?: string; sourcePath?: string; sourceRoot?: string; fileTimes?: { birthtime?: Date; mtime?: Date; firstCommit?: Date; }; forceRechunk?: boolean; activePack?: ParseOpts[\"activePack\"]; source_kind?: string | null; source_uri?: string | null; ingested_via?: string | null; remote?: boolean; preserveGateMarkers?: boolean; allowEmptyOverwrite?: boolean; overrideTier?: unknown; writeGate?: WriteGateInput; beforeCommit?: ImportBeforeCommit; onPostCommitEmbedding?: (complete: () => Promise<ImportEmbeddingResult>) => void; } & ImportFenceOptions) => Promise<ImportResult>"
         ]
       },
       {
         "kind": "function",
         "name": "importFromFile",
         "signature": [
-          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; }) => Promise<ImportResult>"
+          "(engine: BrainEngine, filePath: string, relativePath: string, opts?: { beforeCommit?: ImportBeforeCommit; noEmbed?: boolean; inferFrontmatter?: boolean; sourceId?: string; forceRechunk?: boolean; activePack?: { page_types: ReadonlyArray<{ name: string; path_prefixes: ReadonlyArray<string>; aliases?: ReadonlyArray<string>; }>; }; firstCommitAt?: Date; }) => Promise<ImportResult>"
         ]
       },
       {
@@ -5783,7 +5815,7 @@
           "getJob: (id: number) => Promise<MinionJob | null>",
           "getJobs: (opts?: { status?: MinionJobStatus; queue?: string; name?: string; limit?: number; offset?: number; ownerClientId?: string; }) => Promise<MinionJob[]>",
           "getStats: (opts?: { since?: Date; queue?: string; }) => Promise<{ by_status: Record<string, number>; by_type: Array<{ name: string; total: number; completed: number; failed: number; dead: number; avg_duration_ms: number | null; drained_completed: number; drained_failed: number; drained_dead: number; drained_cancelled: number; waiting_now: number; oldest_waiting_minutes: number | null; }>; queue_health: { waiting: number; active: number; stalled: number; }; wedge: { queue: string; active_healthy: number; waiting: number; last_completed_at: string | null; minutes_since_completion: number | null; }; }>",
-          "handleStalled: (graceMsOverride?: number) => Promise<{ requeued: MinionJob[]; dead: MinionJob[]; }>",
+          "handleStalled: (graceMsOverride?: number, scope?: { registeredNames?: string[]; queue?: string; }) => Promise<{ requeued: MinionJob[]; dead: MinionJob[]; }>",
           "handleTimeouts: () => Promise<MinionJob[]>",
           "handleWaitingTTL: (opts?: { maxPerTick?: number; }) => Promise<{ cancelled: number; by_name: Record<string, number>; }>",
           "handleWallClockTimeouts: (lockDurationMs: number) => Promise<MinionJob[]>",
@@ -5794,7 +5826,7 @@
           "private killJobs",
           "private lockParentsOrdered",
           "private lockRetry",
-          "promoteDelayed: () => Promise<MinionJob[]>",
+          "promoteDelayed: (opts?: { registeredNames?: string[]; queue?: string; }) => Promise<MinionJob[]>",
           "prune: (opts?: { olderThan?: Date; status?: MinionJobStatus[]; dryRun?: boolean; }) => Promise<number>",
           "readChildCompletions: (parentId: number, lockToken: string, opts?: { since?: Date; }) => Promise<ChildDoneMessage[]>",
           "readInbox: (jobId: number, lockToken: string) => Promise<InboxMessage[]>",
@@ -6346,11 +6378,11 @@
           "connectForRestore: (config: EngineConfig) => Promise<void>",
           "connectWithHeldLock: (config: EngineConfig, lock: LockHandle) => Promise<void>",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
-          "countChunklessPagesWithContent: (opts?: { sourceId?: string; }) => Promise<number>",
+          "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
           "countKeywordPages: (query: string, opts?: SearchOpts & { timeoutMs?: number; }) => Promise<number>",
-          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "countStaleChunks: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "countStaleFrontmatterKeyPages: (opts: { sourceIds: string[]; }) => Promise<{ source_id: string; n: number; }[]>",
-          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; }) => Promise<number>",
+          "countStalePagesForExtraction: (opts?: { sourceId?: string; versionTs?: string; attendance?: \"exclude\" | \"blocked\"; slugs?: readonly string[]; }) => Promise<number>",
           "countStaleTakes: (opts?: StaleTakeOpts) => Promise<number>",
           "countUnconsolidatedFacts: (source_id: string) => Promise<number>",
           "createVersion: (slug: string, opts?: { sourceId?: string; preimage?: PageSnapshot; }) => Promise<PageVersion>",
@@ -6372,7 +6404,7 @@
           "findDuplicatePage: (sourceId: string, opts: { hash: string; frontmatterId?: string | null; excludeSlug?: string; }) => Promise<{ slug: string; id: number; } | null>",
           "findDuplicatePages: (sourceId: string, inputs: Parameters<typeof pagesImpl.findDuplicatePages>[2]) => Promise<({ slug: string; id: number; } | null)[]>",
           "findOntologyConflicts: (opts?: PageReadScope & { minConfidence?: number; visibility?: OntologyReadOpts[\"visibility\"]; }) => Promise<OntologyConflict[]>",
-          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
+          "findOrphanPages: (opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; mode?: \"inbound\" | \"islanded\"; }) => Promise<Array<{ slug: string; title: string; domain: string | null; type?: string | null; quarantined?: boolean; source_id?: string; }>>",
           "findTrajectory: (opts: TrajectoryOpts) => Promise<TrajectoryPoint[]>",
           "getAdjacencyBoosts: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, AdjacencyRow>>",
           "getAllConfig: () => Promise<Record<string, string>>",
@@ -6383,7 +6415,7 @@
           "getCalleesOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; bareFallback?: boolean; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getCallersOf: (qualifiedName: string, opts?: { sourceId?: string; allSources?: boolean; limit?: number; chunkId?: number; }) => Promise<CodeEdgeResult[]>",
           "getChunkWindows: (requests: ChunkWindowRequest[], opts: ChunkWindowOpts) => Promise<ChunkWindowPage[]>",
-          "getChunks: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean; requireSafeChunks?: boolean; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
+          "getChunks: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; includeEmbedding?: boolean; excludePrivate?: boolean | \"owner-only\"; requireSafeChunks?: boolean; includeUnsealed?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<Chunk[]>",
           "getChunksWithEmbeddings: (slug: string, opts?: { sourceId?: string; includeUnsealed?: boolean; }) => Promise<Chunk[]>",
           "getConfig: (key: string) => Promise<string | null>",
           "getContentFlagsByPageIds: (pageIds: number[], opts?: PageReadScope) => Promise<Map<number, { reason: string; detail: string; }>>",
@@ -6391,7 +6423,7 @@
           "getDreamVerdict: (filePath: string, contentHash: string) => Promise<DreamVerdict | null>",
           "getEdgesByChunk: (chunkId: number, opts?: { direction?: \"in\" | \"out\" | \"both\"; edgeType?: string; limit?: number; }) => Promise<CodeEdgeResult[]>",
           "getEffectiveDates: (refs: Array<{ slug: string; source_id: string; }>, opts?: PageReadScope) => Promise<Map<string, Date>>",
-          "getEmbeddingsByChunkIds: (ids: number[], column?: string) => Promise<Map<number, Float32Array>>",
+          "getEmbeddingsByChunkIds: (ids: number[], column?: string | ResolvedColumn) => Promise<Map<number, Float32Array>>",
           "getFactsHealth: (source_id: string) => Promise<FactsHealth>",
           "getFile: (sourceId: string, storagePath: string) => Promise<FileRow | null>",
           "getHealth: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainHealth>",
@@ -6408,7 +6440,7 @@
           "getScorecard: (opts: TakesScorecardOpts, allowList: string[] | undefined) => Promise<TakesScorecard>",
           "getSince: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
           "getStats: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<BrainStats>",
-          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; liveOnly?: boolean; }) => Promise<string[]>",
+          "getTags: (slug: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; liveOnly?: boolean; }) => Promise<string[]>",
           "getTakeEmbeddings: (ids: number[]) => Promise<Map<number, Float32Array>>",
           "getTimeline: (slug: string, opts?: TimelineOpts) => Promise<TimelineEntry[]>",
           "getTimelineForDate: (date: string, opts?: ChronicleTimelineOpts) => Promise<ChronicleTimelineRow[]>",
@@ -6436,11 +6468,11 @@
           "listLinkSources: (opts?: { sourceId?: string; sourceIds?: string[]; }) => Promise<{ link_source: string | null; count: number; }[]>",
           "listPages: (filters?: PageFilters) => Promise<Page[]>",
           "listPrefixSampledPages: (opts: DomainBankSampleOpts) => Promise<DomainBankRow[]>",
-          "listStaleChunks: (opts?: { batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
+          "listStaleChunks: (opts?: { embeddingColumn?: ResolvedColumn; batchSize?: number; afterPageId?: number; afterChunkIndex?: number; sourceId?: string; orderBy?: \"page_id\" | \"updated_desc\"; afterUpdatedAt?: string | null; }) => Promise<StaleChunkRow[]>",
           "listStaleFrontmatterKeyPages: (opts: { sourceId: string; afterId: number; limit: number; }) => Promise<{ id: number; slug: string; keys: string[]; }[]>",
-          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; }) => Promise<StalePageRow[]>",
+          "listStalePagesForExtraction: (opts: { batchSize: number; afterPageId?: number; sourceId?: string; versionTs?: string; slugs?: readonly string[]; }) => Promise<StalePageRow[]>",
           "listStaleTakes: (opts?: StaleTakeOpts) => Promise<StaleTakeRow[]>",
-          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: (\"private\" | \"world\")[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean; }) => Promise<FactRow[]>",
+          "listSupersessions: (source_id: string, opts?: { since?: Date; limit?: number; visibility?: (\"private\" | \"world\")[]; eligibility?: FactListOpts[\"eligibility\"]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<FactRow[]>",
           "listTakes: (opts?: TakesListOpts) => Promise<Take[]>",
           "loadContradictionsTrend: (days: number) => Promise<Array<{ run_id: string; ran_at: string; judge_model: string; queries_evaluated: number; queries_with_contradiction: number; total_contradictions_flagged: number; wilson_ci_lower: number; wilson_ci_upper: number; judge_errors_total: number; cost_usd_total: number; duration_ms: number; source_tier_breakdown: Record<string, unknown>; report_json: Record<string, unknown>; }>>",
           "lockPageKeys: (keys: readonly PageKey[]) => Promise<void>",
@@ -6502,9 +6534,9 @@
           "replaceDerivedLinks: (origin: DerivedLinkOrigin, links: LinkBatchInput[], opts?: DerivedLinkReplacementOptions) => Promise<{ created: number; removed: number; }>",
           "replaceDerivedLinksBatch: (items: readonly DerivedLinkBatchItem[]) => Promise<{ created: number; removed: number; }[]>",
           "resolveAliases: (aliasNorms: string[], opts?: PageReadScope) => Promise<Map<string, Array<{ slug: string; source_id: string; }>>>",
-          "resolveSlugWithAlias: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean; }) => Promise<string>",
-          "resolveSlugWithAliasDetailed: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean; }) => Promise<{ canonical_slug: string; source_id: string; } | null>",
-          "resolveSlugs: (partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<string[]>",
+          "resolveSlugWithAlias: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean | \"owner-only\"; }) => Promise<string>",
+          "resolveSlugWithAliasDetailed: (slug: string, sourceOrSources: string | readonly string[], opts?: { excludePrivate?: boolean | \"owner-only\"; }) => Promise<{ canonical_slug: string; source_id: string; } | null>",
+          "resolveSlugs: (partial: string, opts?: { sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<string[]>",
           "resolveSlugsByPaths: (paths: string[], opts: { sourceId: string; }) => Promise<Map<string, string>>",
           "resolveTake: (pageId: number, rowNum: number, resolution: TakeResolution) => Promise<void>",
           "restorePage: (slug: string, opts?: { sourceId?: string; }) => Promise<boolean>",
@@ -6525,15 +6557,15 @@
           "softDeletePage: (slug: string, opts?: { sourceId?: string; }) => Promise<{ slug: string; } | null>",
           "softDeletePages: (slugs: string[], opts: { sourceId: string; }) => Promise<string[]>",
           "stripStaleFrontmatterKeys: (opts: { sourceId: string; ids: number[]; }) => Promise<number>",
-          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; }) => Promise<number>",
+          "sumStaleChunkChars: (opts?: { sourceId?: string; signature?: string; includeNullSignature?: boolean; embeddingColumn?: ResolvedColumn; }) => Promise<number>",
           "supersedeTake: (pageId: number, oldRow: number, newRow: Omit<TakeBatchInput, \"page_id\" | \"row_num\" | \"superseded_by\">) => Promise<{ oldRow: number; newRow: number; }>",
           "sweepContradictionCache: () => Promise<number>",
           "sweepDreamVerdicts: () => Promise<number>",
           "transaction: <T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions) => Promise<T>",
           "transactionDirect: <T>(fn: (engine: BrainEngine) => Promise<T>, opts?: TransactionOptions) => Promise<T>",
           "traverseGraph: (slug: string, depth?: number, opts?: TraverseGraphOpts) => Promise<GraphNode[]>",
-          "traversePaths: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<GraphPath[]>",
-          "traversePathsDetailed: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; }) => Promise<{ paths: GraphPath[]; truncated: boolean; }>",
+          "traversePaths: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<GraphPath[]>",
+          "traversePathsDetailed: (slug: string, opts?: { depth?: number; linkType?: string; direction?: \"in\" | \"out\" | \"both\"; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; }) => Promise<{ paths: GraphPath[]; truncated: boolean; }>",
           "unsetConfig: (key: string) => Promise<number>",
           "updatePageContextualRetrievalState: (slug: string, sourceId: string, mode: string, corpusGeneration: string | null) => Promise<void>",
           "updateSlug: (oldSlug: string, newSlug: string, opts?: { sourceId?: string; }) => Promise<number>",
@@ -6851,7 +6883,7 @@
         "members": [
           "auto_packing?: \"off\" | \"cap_only\" | \"breadth_capped\" | \"depth_first\" | undefined",
           "budget_tokens?: number | undefined",
-          "caller?: { remote?: boolean; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean; minTrust?: TrustTier; } | undefined",
+          "caller?: { remote?: boolean; sourceId?: string; sourceIds?: string[]; excludePrivate?: boolean | \"owner-only\"; minTrust?: TrustTier; } | undefined",
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
           "hits: FrozenHit[]",
           "return_unit: \"auto\" | \"window\" | \"chunk\" | \"section\" | \"page\"",
@@ -6973,7 +7005,7 @@
         "kind": "interface",
         "members": [
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
@@ -7374,7 +7406,7 @@
           "dedupOpts?: { cosineThreshold?: number; maxTypeRatio?: number; maxPerPage?: number; } | undefined",
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
           "embeddingColumn?: string | ResolvedColumn | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
           "expandFn?: ((query: string) => Promise<string[]>) | undefined",
@@ -7437,7 +7469,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "excludeSlugPrefixes?: string[] | undefined",
           "excludeSlugs?: string[] | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -7458,7 +7490,7 @@
         "members": [
           "applyBacklinks: boolean",
           "decayMap?: RecencyDecayMap | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "fallback?: RecencyDecayConfig | undefined",
           "floorRatio?: number | undefined",
           "graphSignalsEnabled?: boolean | undefined",
@@ -7602,7 +7634,7 @@
         "kind": "function",
         "name": "cosineReScore",
         "signature": [
-          "(engine: BrainEngine, results: SearchResult[], queryEmbedding: Float32Array, column?: string, imageSpace?: { queryEmbedding: Float32Array; column: string; }, attribute?: boolean) => Promise<SearchResult[]>"
+          "(engine: BrainEngine, results: SearchResult[], queryEmbedding: Float32Array, column?: string | ResolvedColumn, imageSpace?: { queryEmbedding: Float32Array; column: string; }, attribute?: boolean) => Promise<SearchResult[]>"
         ]
       },
       {
@@ -7757,7 +7789,7 @@
           "calibrationHolder?: string | undefined",
           "client?: ThinkLLMClient | undefined",
           "embedQuestion?: ((q: string) => Promise<Float32Array | null>) | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "model?: string | undefined",
           "modelExplicit?: boolean | undefined",
           "question: string",
@@ -7957,7 +7989,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "lookback_days?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -8068,7 +8100,7 @@
         "kind": "interface",
         "members": [
           "degreeLinkTypes: string[]",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "linkTypes: string[]",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "neighborCap: number",
@@ -8087,7 +8119,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "kind?: string | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
@@ -8124,6 +8156,7 @@
           "doc_comment?: string | null | undefined",
           "embedded_at: Date | null",
           "embedding: Float32Array<ArrayBufferLike> | null",
+          "embedding_input_hash?: string | null | undefined",
           "embedding_is_null?: boolean | undefined",
           "end_line?: number | null | undefined",
           "id: number",
@@ -8294,10 +8327,25 @@
         "kind": "interface",
         "members": [
           "dimensions: number",
+          "documentPrefix?: string | undefined",
+          "provenance?: \"independent\" | undefined",
           "provider: string",
+          "queryPrefix?: string | undefined",
           "type: \"vector\" | \"halfvec\""
         ],
         "name": "EmbeddingColumnConfig"
+      },
+      {
+        "kind": "interface",
+        "members": [
+          "embeddedAt: string",
+          "inputHash: string",
+          "model: string",
+          "pageSignature: string",
+          "pendingSince: string",
+          "textHash: string"
+        ],
+        "name": "EmbeddingProvenanceColumns"
       },
       {
         "kind": "interface",
@@ -8439,7 +8487,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeDeleted?: boolean | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
@@ -8491,6 +8539,7 @@
           "keyword_candidates?: CjkKeywordMeta | undefined",
           "metadata_boost_gate?: MetadataBoostGateDecision | undefined",
           "mode?: \"conservative\" | \"balanced\" | \"tokenmax\" | undefined",
+          "omitted_vector_arms?: { arm: \"unified_multimodal\"; reason: \"independent_embedding_column\"; }[] | undefined",
           "relational_evidence_slot?: RelationalEvidenceSlotDecision | undefined",
           "relational_plan?: RelationalPlanMeta | undefined",
           "relational_rerank_pin?: RelationalRerankPinDecision | undefined",
@@ -8608,7 +8657,7 @@
         "kind": "interface",
         "members": [
           "asof?: string | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeQuarantined?: boolean | undefined",
           "minConfidence?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
@@ -8679,7 +8728,7 @@
         "members": [
           "effective_after?: string | undefined",
           "effective_before?: string | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeDeleted?: boolean | undefined",
           "limit?: number | undefined",
           "listColumnsOnly?: boolean | undefined",
@@ -8729,7 +8778,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
@@ -8742,7 +8791,7 @@
       {
         "kind": "interface",
         "members": [
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
           "sourceId?: string | undefined",
@@ -8808,7 +8857,7 @@
         "members": [
           "depth?: number | undefined",
           "direction?: \"both\" | \"in\" | \"out\" | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "includeMentions?: boolean | undefined",
           "limit?: number | undefined",
           "linkTypes?: string[] | null | undefined",
@@ -8841,8 +8890,11 @@
         "kind": "interface",
         "members": [
           "dimensions: number",
+          "documentPrefix?: string | undefined",
           "embeddingModel: string",
           "name: string",
+          "provenance?: EmbeddingProvenanceColumns | undefined",
+          "queryPrefix?: string | undefined",
           "type: \"vector\" | \"halfvec\""
         ],
         "name": "ResolvedColumn"
@@ -8861,7 +8913,7 @@
         "kind": "interface",
         "members": [
           "days?: number | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "recency_bias?: \"flat\" | \"on\" | undefined",
@@ -8902,7 +8954,7 @@
           "crossModal?: \"image\" | \"text\" | \"both\" | \"auto\" | undefined",
           "detail?: \"low\" | \"medium\" | \"high\" | undefined",
           "embeddingColumn?: string | ResolvedColumn | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "exclude_slug_prefixes?: string[] | undefined",
           "exclude_slugs?: string[] | undefined",
           "floorRatio?: number | undefined",
@@ -9090,7 +9142,7 @@
           "after?: string | undefined",
           "before?: string | undefined",
           "eligibility?: ReadEligibility | undefined",
-          "excludePrivate?: boolean | undefined",
+          "excludePrivate?: boolean | \"owner-only\" | undefined",
           "limit?: number | undefined",
           "minTrust?: \"user_confirmed\" | \"operator_curated\" | \"tool_observed\" | \"agent_written\" | \"unknown\" | \"external_untrusted\" | undefined",
           "requireSafeChunks?: boolean | undefined",
