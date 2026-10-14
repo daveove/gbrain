@@ -11,8 +11,8 @@
  * capacity checks, the ownership guard, the counter and request locks, the
  * recovery records (one transaction records all of them before any file is
  * touched) and their cleanup (one transaction after commit). Counters are
- * locked after the members are applied and before their request rows, so the
- * brain-wide counter row is held only for the completion statements (ENG-A5).
+ * locked after the members are applied and before their day-job and request rows.
+ * Day jobs are queued in global date order across the group, as on the single path.
  * A group therefore takes page guards before counters, the reverse of single
  * publication and of forget/mirror recovery; a deadlock with one of those on
  * the same page is detected by Postgres (40P01) and both sides retry: the
@@ -49,7 +49,7 @@ import { DEFAULT_PREPARATION_POLICY, preparationBudgetMs, startPreparation, type
 import { setMemberAttribution, withCoordinatedWrite } from './context.ts';
 import { publicationAttribution } from './attribution.ts';
 import { tryAcquirePublicationCapacity } from './pool-capacity.ts';
-import { captureDailyMemoryPreimage, queuePublicationEffects, queuesMentionLinks, reconcileFinishedBatch } from './effect-journal.ts';
+import { captureDailyMemoryPreimage, queuePublicationEffects, queuePublicationDailyMemory, queuesMentionLinks, reconcileFinishedBatch, type PublicationDailyMemory } from './effect-journal.ts';
 import { assertUnboundPublication, classifyUnboundPage } from './unbound-source.ts';
 import { declareDurablePersistence } from './protocol.ts';
 import { bindPublicationTimeouts, boundPublication, publicationLeaseMs, publicationTransaction, type PublicationBound } from './publication-deadline.ts';
@@ -299,6 +299,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       // transaction reports that failure (postgres.js names the cause of a 25P02 abort), not the settings statement's abort.
       ready.catch(() => undefined);
       const outcomes: Record<string, unknown>[] = [];
+      const dailyMemory: PublicationDailyMemory[] = [];
       // A member's lead (authorization, knowledge guard, its locked read) only reads; the first member's
       // is sent ahead of the coordinated-write settings statement, the others with the previous member's effects.
       const lead = (i: number) => pipelined(tx, [
@@ -349,7 +350,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
           decoratePublicationOutcome(row, member, outcome, final, file ? 1 : 0, false);
           effects = async () => {
             await recordPublicationFenceTrend(tx, row, outcome);
-            await queuePublicationEffects(tx, row, final, outcome, member, singleWrite(row) ? {} : { deferBatchReconcile: true });
+            await queuePublicationEffects(tx, row, final, outcome, member, { deferBatchReconcile: !singleWrite(row), dailyMemory });
           };
           outcomes.push(outcome);
         }
@@ -357,7 +358,7 @@ export async function publishGroup(engine: BrainEngine, rows: WriteRequest[], pr
       }, publicationAttribution(head, prepared[0]!.trust));
       // #5984 lanes: applied concurrently, committed in manifest order.
       if (lane) { timed.apply?.turn(); await faultPoint('lane:applied', { requestId: head.request_id, sourceId: head.source_id, operation: head.operation }); await awaitLaneTurn(tx, lane, rows); timed.apply?.turned(); }
-      const done = await completeGroup(tx, rows, outcomes);
+      const done = await completeGroup(tx, rows, outcomes, dailyMemory);
       // Every member is complete in this transaction: the batch's last page re-arms the batch's mention links once.
       const last = rows[rows.length - 1]!;
       if (publicationGroupKey(last)?.startsWith('batch:') && queuesMentionLinks(last)) await reconcileFinishedBatch(tx, last);
@@ -471,18 +472,27 @@ async function laneFallback(engine: BrainEngine, rows: WriteRequest[], reason: G
  * `worktree:<id>`, the order every completion uses) and one UPDATE that sizes
  * each member's queued effects, checks its claim (`execution_token`,
  * `state='running'`) and terminal reservation, completes the rows and
- * decrements the counters: three statements sent together, one round trip.
+ * decrements the counters. Daily handoffs, when present, follow the counter
+ * locks and precede completion so their dates are stored in each receipt.
  * If the UPDATE returns fewer rows than the group, this throws so the
  * transaction rolls back; the group then takes the single path, where
  * completeWrite reports each member's exact error code. JSON binds as text.
  */
-export async function completeGroup(tx: BrainEngine, rows: WriteRequest[], outcomes: Record<string, unknown>[]): Promise<WriteRequest[]> {
+export async function completeGroup(tx: BrainEngine, rows: WriteRequest[], outcomes: Record<string, unknown>[],
+  dailyMemory: PublicationDailyMemory[] = []): Promise<WriteRequest[]> {
   const ids = rows.map(row => row.id);
   const keys = [...new Set(['brain', ...rows.map(row => principalKey(requestPrincipal(row))), `worktree:${rows[0]!.worktree_id}`])].sort();
   const stamp = writerStamp();
-  const [, , completed] = await pipelined(tx, [
+  const locks = [
     () => tx.executeRaw(ENSURE_COUNTERS_SQL, [keys]),
     () => tx.executeRaw(LOCK_COUNTERS_SQL, [keys]),
+  ];
+  if (dailyMemory.length) {
+    await pipelined(tx, locks);
+    await queuePublicationDailyMemory(tx, dailyMemory);
+  }
+  const completedStatements = await pipelined(tx, [
+    ...(dailyMemory.length ? [] : locks),
     () => tx.executeRaw<WriteRequest & { principal_key: string }>(`WITH m AS (
         SELECT * FROM unnest($1::uuid[],$2::uuid[],$3::text[],$4::bigint[],$5::text[]) AS m(id,token,outcome,need,principal_key)
       ), e AS (
@@ -502,7 +512,8 @@ export async function completeGroup(tx: BrainEngine, rows: WriteRequest[], outco
       SELECT * FROM done`, [ids, rows.map(row => row.execution_token), outcomes.map(outcome => JSON.stringify(outcome)),
       rows.map((row, i) => jsonBytes(outcomes[i]) + jsonBytes(row.authority) + 1024),
       rows.map(row => principalKey(requestPrincipal(row))), stamp.version, stamp.hostId]),
-  ]) as [unknown, unknown, Array<WriteRequest & { principal_key: string }>];
+  ]);
+  const completed = completedStatements[completedStatements.length - 1] as Array<WriteRequest & { principal_key: string }>;
   if (completed.length !== rows.length) throw new OperationError('write_claim_lost', 'A group member failed its claim or terminal-reservation check before publication.',
     'The group rolls back and its members publish one at a time, where each member reports its own outcome; inspect the requests rather than resubmitting.');
   const byId = new Map(completed.map(({ principal_key: _key, ...row }) => [row.id, row as WriteRequest]));
