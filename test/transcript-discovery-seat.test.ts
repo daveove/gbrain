@@ -259,12 +259,13 @@ test('an enumeration-denied root is reported while inaccessible descendants rema
   const publicFile = join(root, 'public.jsonl'); writeFileSync(publicFile, 'synthetic');
   const roots: HarnessRoot[] = [{ format: 'codex', root, extension: '.jsonl' }];
   let denied = root;
-  const original = fs.readdirSync;
-  // Inject the filesystem EACCES boundary: mode bits alone do not deny root on CI.
-  const listing = spyOn(fs, 'readdirSync').mockImplementation(path => {
-    if (path === denied) throw Object.assign(new Error('Synthetic permission denial'), { code: 'EACCES' });
-    return original(path);
-  });
+  // Inject the EACCES boundary without narrowing readdirSync's overloads.
+  // Mode bits alone do not deny root on CI.
+  const deniedListing = new Proxy(fs.readdirSync, { apply(target, receiver, args) {
+    if (args[0] === denied) throw Object.assign(new Error('Synthetic permission denial'), { code: 'EACCES' });
+    return Reflect.apply(target, receiver, args);
+  } });
+  const listing = spyOn(fs, 'readdirSync').mockImplementation(deniedListing);
   try {
     const skippedRoots: SkippedTranscriptRoot[] = [];
     expect(discoverTranscriptFiles(roots, { skippedRoots })).toEqual([]);
