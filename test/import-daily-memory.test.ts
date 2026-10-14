@@ -14,6 +14,8 @@ import { withEnv } from './helpers/with-env.ts';
 import * as extractModule from '../src/commands/extract.ts';
 import { drainNightlyExtractJobs, runOneShotDailyMemoryWrite } from '../scripts/write-daily-memory.ts';
 import { IMPORT_STALE_EXTRACT_JOB } from '../src/core/deferred-stale-extract.ts';
+import { currentSubmissionAuthority, prepareRemoteJob, withSubmissionAuthority } from '../src/core/minions/submission-authority.ts';
+import type { OperationContext } from '../src/core/ops/contract.ts';
 
 let engine: PGLiteEngine, version: string | null;
 const roots: string[] = [];
@@ -131,6 +133,37 @@ test('healthy unchanged import admits no extraction and preserves the generation
     } finally { extract.mockRestore(); }
   });
 });
+
+test('delegated unchanged import drains small extraction debt inline without submitting descendants', async () => {
+  const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);
+  await withEnv({ GBRAIN_HOME: home }, async () => {
+    expect((await runImport(engine, [dir, '--no-embed', '--json'], { noExtract: true })).imported).toBe(1);
+    await engine.executeRaw("UPDATE sources SET local_path=$1 WHERE id='default'", [dir]);
+    await engine.executeRaw("INSERT INTO oauth_clients (client_id, client_secret_hash, client_name, scope, source_id) VALUES ('synthetic-import-client', 'synthetic-only', 'Synthetic import', 'admin', 'default')");
+    const ctx: OperationContext = {
+      engine, config: {} as OperationContext['config'], dryRun: false, remote: true, sourceId: 'default',
+      logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'synthetic-only', clientId: 'synthetic-import-client',
+        principal: { kind: 'oauth_client', id: 'synthetic-import-client' }, scopes: ['admin'], sourceId: 'default' },
+    };
+    const accepted = await prepareRemoteJob(ctx, 'import', {});
+    const jobs = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
+    const extraction = spyOn(extractModule, 'extractStaleFromDB');
+    try {
+      await withSubmissionAuthority(accepted.authority, async () => {
+        const result = await runImport(engine, [dir, '--no-embed', '--json'], { sourceId: 'default' });
+        expect(result.imported).toBe(0); expect(result.errors).toBe(0);
+        expect(extraction).toHaveBeenCalledTimes(1);
+        expect(currentSubmissionAuthority()).toEqual(accepted.authority);
+        await expect(new MinionQueue(engine).add(IMPORT_STALE_EXTRACT_JOB, { stale: true, sourceId: 'default' }))
+          .rejects.toThrow('Remote jobs cannot submit descendant jobs');
+      });
+      expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobs);
+      expect(await engine.executeRaw("SELECT links_extracted_at::text FROM pages WHERE source_id='default' AND slug='note'"))
+        .toEqual([{ links_extracted_at: expect.any(String) }]);
+    } finally { extraction.mockRestore(); }
+  });
+}, 120_000);
 
 test('unchanged small extraction debt queues without a generation write and the nightly consumer extracts it', async () => {
   const dir = root(), home = root(); writeFileSync(join(dir, 'note.md'), markdown);

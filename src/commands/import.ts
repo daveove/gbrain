@@ -47,6 +47,7 @@ import { managedRootMarkerFor } from '../core/persistence/root-registry.ts';
 import { readManagedMode } from '../core/persistence/ownership.ts';
 import { IMPORT_STALE_EXTRACT_JOB, INLINE_EXTRACT_CHANGE_LIMIT, queueDeferredStaleSweep } from '../core/deferred-stale-extract.ts';
 import { previewMentionPass } from '../core/mentions/stale.ts';
+import { currentSubmissionAuthority } from '../core/minions/submission-authority.ts';
 
 /** Return a refusal when an import target lies outside every admitted root. */
 export function configuredRootImportError(dir: string, configuredRoots: string[]): string | null {
@@ -1064,7 +1065,9 @@ export async function runImport(
   // Gate size on imported/changed files, not directory size: a pure no-op
   // re-import of a large tree must not mint deferred UUID successors.
   const deferForSize = opts.fullSync === true || imported > INLINE_EXTRACT_CHANGE_LIMIT;
-  let deferForBacklog = false;
+  const authority = currentSubmissionAuthority();
+  const delegatedImport = authority !== undefined && authority.kind !== 'application';
+  let deferForBacklog = false, inlineNoopRecovery = false;
   if (!opts.noExtract && !deferForSize && allFiles.length > 0) {
     try {
       throwIfInterrupted();
@@ -1074,13 +1077,15 @@ export async function runImport(
         versionTs: await effectiveLinkExtractorWatermark(engine),
       });
       throwIfInterrupted();
-      // A hash-skipped retry can still owe indexes, but must not mutate the
-      // page generation clock itself. Leave that recovery to the durable sweep.
+      // Application-owned hash-skipped retries leave recovery to a durable sweep.
+      // Delegated imports cannot submit descendants; keep their bounded inline path.
       const mentionDebt = imported === 0 && stalePages === 0
         ? (await previewMentionPass(engine, sourceId ?? 'default')).due
         : 0;
-      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT || (imported === 0 && (stalePages > 0 || mentionDebt > 0));
-      if (imported === 0 && !deferForBacklog) linkExtractionRecovered = true;
+      const noopDebt = imported === 0 && (stalePages > 0 || mentionDebt > 0);
+      deferForBacklog = stalePages > INLINE_EXTRACT_CHANGE_LIMIT || (noopDebt && !delegatedImport);
+      inlineNoopRecovery = noopDebt && delegatedImport && !deferForBacklog;
+      if (imported === 0 && !deferForBacklog && !inlineNoopRecovery) linkExtractionRecovered = true;
     } catch (e) {
       rethrowIfCancelled(e);
       recordLinkFailure(e instanceof Error ? e.message : String(e));
@@ -1111,7 +1116,7 @@ export async function runImport(
       (queuedJobId != null ? ` — queued stale-sweep job #${queuedJobId}.` : '.') +
       ` Run 'gbrain extract --stale${sourceId ? ` --source-id ${sourceId}` : ''}' to extract now.`,
     );
-  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0 && imported > 0) {
+  } else if (!opts.noExtract && !linkExtractionError && allFiles.length > 0 && (imported > 0 || inlineNoopRecovery)) {
     try {
       throwIfInterrupted();
       const { extractStaleFromDB } = await import('./extract.ts');

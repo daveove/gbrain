@@ -37,7 +37,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - Publisher-owned daily-index jobs run outside a delegated job's submission scope and commit atomically with the authorized publication. Direct remote descendant submission remains prohibited.
 - Forward `noExtract` through full reconciliation, preserve aborted-cycle reports without attempting publication, and recount exact extraction debt only for still-owned generated indexes.
 - Keep protected-source refusals on native invalid-input exit status 2 rather than reusing status 3, which means human confirmation is required.
-- Unchanged standalone imports leave the generation clock untouched. Genuine stale link/mention debt is queued as `extract-stale-links`; the nightly one-shot writer drains only that registered job under bounded job/time caps on its existing connection, preserving deferred work and same-name continuations.
+- Unchanged standalone imports leave the generation clock untouched. Genuine stale link/mention debt is queued as `extract-stale-links`; the nightly one-shot writer drains only that registered job under bounded job/time caps on its existing connection, preserving deferred work and same-name continuations. Delegated no-op imports retain bounded inline recovery without gaining descendant-submission authority.
 
 ## [0.60.221.0] - 2026-10-14
 
