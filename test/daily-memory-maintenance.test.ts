@@ -28,6 +28,10 @@ import { extractStaleFromDB } from '../src/commands/extract.ts';
 import { operationsByName } from '../src/core/operations.ts';
 import { serializeMarkdown } from '../src/core/markdown.ts';
 import { __resetPrivateVisibilityCacheForTests } from '../src/core/search/private-visibility.ts';
+import type { OperationContext } from '../src/core/operations.ts';
+import type { BacklinkPage } from '../src/core/ops/backlinks-paged.ts';
+import type { ConflictAuditReport } from '../src/core/persistence/drift-conflicts.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 describe('daily memory from sources the brain already holds', () => {
   let engine: PGLiteEngine;
@@ -1166,6 +1170,183 @@ describe('daily memory from sources the brain already holds', () => {
       expect(owner.map(row => row.slug)).toContain(slug);
     }
   });
+
+  // The older coverage grants only default, so source isolation alone can hide
+  // dream indexes. These regressions deliberately grant both sources and opt
+  // out of ordinary private-page filtering. Real generated pages (and their
+  // historical default copies) must still be owner-only in each read surface.
+  // No production-only test seam: only synthetic stored rows and real handlers.
+  async function ownerAggregateFixture() {
+    const target = 'notes/aggregate-target';
+    await engine.putPage(target, { type: 'note', title: 'Aggregate target', compiled_truth: 'Synthetic target.' });
+    await seedRecord('owner-privacy-record', 'gmail', '2026-09-30T00:00:00Z');
+    const generated = await writeSeptember30();
+    const daily = (await engine.getPage(generated.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    const reference = daily.compiled_truth.match(/\[\[dream:(source-records\/[^\]]+)\]\]/)![1];
+    const aggregates: Array<{ slug: string; sourceId: string }> = [];
+    for (const slug of [generated.slug, reference]) {
+      const page = (await engine.getPage(slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+      for (const sourceId of ['default', DAILY_MEMORY_SOURCE_ID]) {
+        // Distinct stored types make enumeration leaks observable, even if
+        // bodies and titles are otherwise withheld.
+        await engine.putPage(slug, {
+          type: slug === generated.slug ? 'owner_daily_index' : 'owner_source_index',
+          title: page.title, compiled_truth: page.compiled_truth, frontmatter: page.frontmatter,
+        }, { sourceId });
+        await engine.addLink(slug, target, 'Synthetic index reference', 'related_to', 'manual',
+          undefined, undefined, { fromSourceId: sourceId, toSourceId: 'default' });
+        aggregates.push({ slug, sourceId });
+      }
+    }
+    for (const [slug, visibility, date] of [
+      ['notes/visible-world', 'world', '2026-10-01T00:00:00Z'],
+      ['notes/visible-private', 'private', '2026-10-02T00:00:00Z'],
+    ]) {
+      await engine.putPage(slug, { type: 'note', title: slug, compiled_truth: 'Synthetic ordinary reference.',
+        frontmatter: { visibility } });
+      await engine.executeRaw("UPDATE pages SET effective_date=$1::timestamptz WHERE source_id='default' AND slug=$2", [date, slug]);
+      await engine.addLink(slug, target, 'Synthetic ordinary reference', 'related_to');
+    }
+    const ctx = (remote: boolean, sourceId = 'default'): OperationContext => ({
+      engine, remote, sourceId, config: { engine: 'pglite', embedding_disabled: true }, dryRun: false,
+      logger: { info() {}, warn() {}, error() {} },
+      auth: { token: 'synthetic', clientId: 'owner-privacy-example', scopes: ['read', 'admin'],
+        allowedSources: ['default', DAILY_MEMORY_SOURCE_ID] },
+    });
+    return { target, aggregates, ctx };
+  }
+
+  for (const optOut of ['config', 'environment'] as const) {
+    async function withPrivateOptOut(run: () => Promise<void>) {
+      await engine.setConfig('search.remote_private_pages', optOut === 'config' ? 'visible' : '');
+      __resetPrivateVisibilityCacheForTests();
+      try {
+        await withEnv({ GBRAIN_REMOTE_PRIVATE_PAGES: optOut === 'environment' ? '1' : undefined }, run);
+      } finally {
+        await engine.setConfig('search.remote_private_pages', '');
+        __resetPrivateVisibilityCacheForTests();
+      }
+    }
+
+    test(`${optOut} private opt-out: paged backlinks hide owner daily/source indexes before counts and cursors`, async () => {
+      const { target, aggregates, ctx } = await ownerAggregateFixture();
+      await withPrivateOptOut(async () => {
+        const first = await operationsByName.get_backlinks.handler(ctx(true),
+          { slug: target, group: 'page', limit: 1 }) as BacklinkPage;
+        expect(first.total).toBe(2);
+        expect(first.truncated).toBe(true);
+        expect(first.cursor).toEqual(expect.any(String));
+        expect(first.rows.map(row => row.slug)).toEqual(['notes/visible-private']);
+        const second = await operationsByName.get_backlinks.handler(ctx(true),
+          { slug: target, group: 'page', limit: 1, cursor: first.cursor }) as BacklinkPage;
+        expect(second.total).toBe(2);
+        expect(second.rows.map(row => row.slug)).toEqual(['notes/visible-world']);
+        expect(second.truncated).toBe(false);
+        expect(second.cursor).toBeNull();
+        const local = await operationsByName.get_backlinks.handler(ctx(false),
+          { slug: target, group: 'page', limit: 100 }) as BacklinkPage;
+        expect(local.total).toBe(6);
+        for (const { slug, sourceId } of aggregates) {
+          expect(local.rows.some(row => row.slug === slug && row.source_id === sourceId)).toBe(true);
+        }
+      });
+    });
+
+    test(`${optOut} private opt-out: backlink type enumeration does not disclose owner index types`, async () => {
+      const { target, ctx } = await ownerAggregateFixture();
+      await withPrivateOptOut(async () => {
+        const enumerate = async (remote: boolean) => {
+          const error = await operationsByName.get_backlinks.handler(ctx(remote),
+            { slug: target, group: 'page', type: 'unknown_fixture_type' })
+            .then(() => null, (error: { code: string; detail: string }) => error);
+          expect(error).toMatchObject({ code: 'invalid_params' });
+          return JSON.parse(error!.detail) as { referrer_types: string[]; valid_types: string[] };
+        };
+        const remote = await enumerate(true);
+        expect(remote.referrer_types).toEqual(['note']);
+        for (const hiddenType of ['owner_daily_index', 'owner_source_index']) {
+          expect(remote.valid_types).not.toContain(hiddenType);
+          const local = await operationsByName.get_backlinks.handler(ctx(false),
+            { slug: target, group: 'page', type: hiddenType }) as BacklinkPage;
+          expect(local.total).toBe(2);
+        }
+        expect((await enumerate(false)).referrer_types).toEqual(['note', 'owner_daily_index', 'owner_source_index']);
+      });
+    });
+
+    test(`${optOut} private opt-out: drift conflict audit omits owner indexes from rows and totals`, async () => {
+      const { aggregates, ctx } = await ownerAggregateFixture();
+      // Persist old conflict receipts directly: this test owns read visibility,
+      // not the separate coordinated-write/file-drift admission contract.
+      for (const { slug, sourceId } of [...aggregates,
+        { slug: 'notes/visible-private', sourceId: 'default' },
+        { slug: 'notes/visible-world', sourceId: 'default' }]) {
+        await engine.executeRaw(
+          `INSERT INTO persistence_requests
+            (principal_kind,principal_id,request_id,operation,source_id,source_incarnation,slug,digest,authority,
+             state,intent_bytes,terminal_reservation,error_code,error_message)
+           SELECT 'local_cli','synthetic-owner',gen_random_uuid(),'put_page',id,incarnation,$2,'synthetic-digest','{}'::jsonb,
+             'conflict',0,0,'source_changed','The canonical file contains an uncoordinated local edit.'
+           FROM sources WHERE id=$1`, [sourceId, slug]);
+      }
+      await withPrivateOptOut(async () => {
+        for (const sourceId of ['default', DAILY_MEMORY_SOURCE_ID]) {
+          const args = { source_id: sourceId, limit: 1 };
+          const remote = await operationsByName.list_write_conflicts.handler(ctx(true, sourceId), args) as ConflictAuditReport;
+          if (sourceId === 'default') {
+            expect(remote.totals).toMatchObject({ slugs: 2, receipts: 2 });
+            expect(remote.conflicts.map(row => row.slug)).toEqual(['notes/visible-private']);
+            expect(remote.next).toEqual(expect.any(String));
+            const rest = await operationsByName.list_write_conflicts.handler(ctx(true, sourceId),
+              { ...args, cursor: remote.next }) as ConflictAuditReport;
+            expect(rest.conflicts.map(row => row.slug)).toEqual(['notes/visible-world']);
+            expect(rest.next).toBeNull();
+            expect(rest.complete).toBe(true);
+          } else {
+            expect(remote.totals).toMatchObject({ slugs: 0, receipts: 0 });
+            expect(remote.conflicts).toEqual([]);
+            expect(remote.complete).toBe(true);
+          }
+          const local = await operationsByName.list_write_conflicts.handler(ctx(false, sourceId),
+            { source_id: sourceId, limit: 100 }) as ConflictAuditReport;
+          expect(local.totals.slugs).toBe(sourceId === 'default' ? 4 : 2);
+          for (const aggregate of aggregates.filter(row => row.sourceId === sourceId)) {
+            expect(local.conflicts.map(row => row.slug)).toContain(aggregate.slug);
+          }
+        }
+      });
+    });
+
+    test(`${optOut} private opt-out: fact attribution hides owner-index provenance on an otherwise readable entity`, async () => {
+      const { target, aggregates, ctx } = await ownerAggregateFixture();
+      await engine.putPage(target, { type: 'note', title: 'Dream entity target', compiled_truth: 'Synthetic target.' },
+        { sourceId: DAILY_MEMORY_SOURCE_ID });
+      await withPrivateOptOut(async () => {
+        for (const { slug, sourceId } of [...aggregates,
+          { slug: 'notes/visible-private', sourceId: 'default' }]) {
+          const factCtx = (remote: boolean): OperationContext => {
+            const base = ctx(remote, sourceId);
+            return { ...base, auth: { ...base.auth!, allowedSources: [sourceId] } };
+          };
+          const [fact] = await engine.executeRaw<{ id: number }>(
+            `INSERT INTO facts(source_id,entity_slug,fact,visibility,source,source_markdown_slug)
+             VALUES($1,$2,'Synthetic attributed fact.','world','fixture',$3) RETURNING id`, [sourceId, target, slug]);
+          const args = { slug: target, fact: Number(fact.id) };
+          const local = await operationsByName.get_write_attribution.handler(factCtx(false), args) as {
+            target: { kind: string; id: number; source_id: string };
+          };
+          expect(local.target).toMatchObject({ kind: 'fact', id: Number(fact.id), source_id: sourceId });
+          if (slug === 'notes/visible-private') {
+            const visible = await operationsByName.get_write_attribution.handler(factCtx(true), args) as { target: { id: number } };
+            expect(visible.target.id).toBe(Number(fact.id));
+          } else {
+            await expect(operationsByName.get_write_attribution.handler(factCtx(true), args))
+              .rejects.toMatchObject({ code: 'fact_not_found' });
+          }
+        }
+      });
+    });
+  }
 
   test('unrenderable stored slugs are skipped without inventing a link target', async () => {
     for (const slug of ['notes/safe', 'notes/bad[[phantom]]', 'notes/bad|alias', 'notes/bad#heading', 'notes/bad^block']) {

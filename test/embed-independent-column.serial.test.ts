@@ -21,7 +21,14 @@
  * Named `.serial.test.ts`: configures the AI gateway and a fake embed
  * transport for its whole lifecycle, which withEnv() can't wrap.
  */
+// Durable-effect cases exercise the live gateway/claim path, not the CLI staging
+// selector or the injected effect embedder. Wrong dispatch, billing deferral or
+// provenance publication must fail without a new production seam.
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -31,19 +38,31 @@ import { importFromContent } from '../src/core/import-file.ts';
 import { configureGateway, getEmbeddingModel, resetGateway, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { runEmbedCore } from '../src/commands/embed.ts';
 import { EmbeddingStagingTargetError, parseEmbeddingColumnArg, resolveEmbeddingStagingTarget } from '../src/commands/embed-setup.ts';
-import { EmbeddingColumnNotRegisteredError } from '../src/core/search/embedding-column.ts';
+import { EmbeddingColumnNotRegisteredError, embeddingColumnSignature } from '../src/core/search/embedding-column.ts';
 import { initializeIndependentEmbeddingColumn } from '../src/core/embedding-column-schema.ts';
 import type { EmbeddingColumnConfig } from '../src/core/types.ts';
 import { learnedChunkCap, _resetLearnedChunkCapsForTest } from '../src/core/embedding-input-limit.ts';
 import { _resetOverLengthHealForTest } from '../src/core/embed-overlength-heal.ts';
+import { embeddingInputHash } from '../src/core/embedding-input-hash.ts';
+import type { OperationContext } from '../src/core/ops/contract.ts';
+import { localHostId, registerLocalWriter } from '../src/core/persistence/identity.ts';
+import { submissionAuthority } from '../src/core/persistence/authority.ts';
+import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
+import { publishMutation } from '../src/core/persistence/coordinator.ts';
+import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
+import { installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const COLUMN = 'embedding_nomic';
 const NOMIC = 'ollama:nomic-embed-text';
 const DIMS = 768;
 const PRIMARY = 'openai:text-embedding-3-large';
 const PREFIX = 'search_document: ';
+const PAID_COLUMN = 'embedding_paid_effect';
+const PAID = 'openai:text-embedding-3-small';
 const REGISTRY: Record<string, EmbeddingColumnConfig> = {
   [COLUMN]: { provider: NOMIC, dimensions: DIMS, type: 'vector', provenance: 'independent', documentPrefix: PREFIX, queryPrefix: 'search_query: ' },
+  [PAID_COLUMN]: { provider: PAID, dimensions: DIMS, type: 'vector', provenance: 'independent' },
 };
 const SLUGS = ['notes/alpha', 'notes/bravo', 'notes/charlie'];
 
@@ -52,6 +71,7 @@ for (const backend of testBackends()) {
     let engine: BrainEngine;
     let closePostgres: (() => Promise<void>) | undefined;
     let postgresDatabaseUrl: string | undefined;
+    let scratch: string;
     let seen: Array<{ model: string; value: string }> = [];
     let rejectNomic = false;
 
@@ -61,7 +81,7 @@ for (const backend of testBackends()) {
           cc.embedded_text_hash, cc.embedding_input_hash, cc.embedded_at::text AS embedded_at,
           cc.embedding_pending_since::text AS pending_since, p.embedding_signature, p.contextual_retrieval_mode,
           p.text_projection_revision::text AS projection, p.chunker_version
-        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id ORDER BY p.slug, cc.chunk_index`);
+        FROM content_chunks cc JOIN pages p ON p.id = cc.page_id ORDER BY p.source_id, p.slug, cc.chunk_index, cc.id`);
     }
 
     async function liveConfig(): Promise<unknown[]> {
@@ -77,6 +97,7 @@ for (const backend of testBackends()) {
     }
 
     beforeAll(async () => {
+      scratch = mkdtempSync(join(tmpdir(), 'gbrain-independent-effects-'));
       configureGateway({ embedding_model: PRIMARY, embedding_dimensions: 1536, env: { ...process.env, OPENAI_API_KEY: 'sk-test-fake' } });
       __setEmbedTransportForTests((async (args: { model: { modelId?: string }; values: string[] }) => {
         const model = String(args.model?.modelId);
@@ -96,6 +117,7 @@ for (const backend of testBackends()) {
       const live = await runEmbedCore(engine, { stale: true, quiet: true });
       expect(live.embedded).toBe(SLUGS.length);
       await initializeIndependentEmbeddingColumn(engine, COLUMN, REGISTRY[COLUMN]!);
+      await initializeIndependentEmbeddingColumn(engine, PAID_COLUMN, REGISTRY[PAID_COLUMN]!);
     }, 120_000);
 
     afterAll(async () => {
@@ -103,6 +125,7 @@ for (const backend of testBackends()) {
       resetGateway();
       if (closePostgres) await closePostgres();
       else await engine?.disconnect();
+      if (scratch) rmSync(scratch, { recursive: true, force: true });
     }, 60_000);
 
     beforeEach(async () => {
@@ -445,6 +468,130 @@ for (const backend of testBackends()) {
         expect((await engine.getEmbeddingsByChunkIds(ids, COLUMN)).size).toBe(SLUGS.length);
         expect(await liveSpace()).toEqual(before);
       });
+    });
+
+    describe('live independent durable effects', () => {
+      async function fixture() {
+        await engine.setConfig('search_embedding_column', 'embedding');
+        await registerLocalWriter(engine, 'cli');
+        const sourceId = `independent-effect-${randomUUID()}`;
+        const [source] = await engine.executeRaw<{ incarnation: string }>(
+          'INSERT INTO sources(id,name) VALUES($1,$1) RETURNING incarnation', [sourceId]);
+        const ctx: OperationContext = { engine, config: { engine: engine.kind }, remote: false, dryRun: false, sourceId,
+          logger: { info() {}, warn() {}, error() {} } };
+        const authority = await submissionAuthority(ctx, 'put_page', sourceId, source!.incarnation, 'page');
+        const admitted = await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId,
+          sourceIncarnation: source!.incarnation, slug: 'page', requestId: randomUUID(),
+          callerIntent: { body: 'Durable target document.' }, intent: { body: 'Durable target document.' } });
+        const row = (await claimNextWrite(engine, localHostId()))!;
+        expect(row.id).toBe(admitted.id);
+        await publishMutation(engine, row, { observedRevision: null, apply: async tx => {
+          await tx.putPage('page', { type: 'note', title: 'Durable example', compiled_truth: 'Durable target document.',
+            timeline: '', frontmatter: {} }, { sourceId });
+          return {};
+        } }, localHostId());
+        const prepared = (await readProjectionSnapshot(engine, 'page', sourceId, { allowUnsealed: true }))!;
+        await installPageProjection(engine, prepared, [{ chunk_index: 0, chunk_source: 'compiled_truth',
+          chunk_text: 'Durable target document.', embedding: new Float32Array(1536).fill(0.25), model: PRIMARY }],
+        { seal: true, signature: `${PRIMARY}:1536` });
+        await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '1 hour'");
+        const [effect] = await engine.executeRaw<{ id: string }>(
+          "UPDATE persistence_effects SET next_attempt_at=now() WHERE request_id=$1::uuid AND kind='embedding' RETURNING id", [row.id]);
+        return { sourceId, row, effectId: effect!.id };
+      }
+
+      async function state(effectId: string) {
+        return (await engine.executeRaw<{ state: string; attempts: number; error_code: string | null }>(
+          'SELECT state,attempts,error_code FROM persistence_effects WHERE id=$1', [effectId]))[0]!;
+      }
+
+      async function drain() {
+        return runPersistenceEffects(engine, { engine: engine.kind }, { hostId: localHostId(), limit: 1 });
+      }
+
+      test('dispatches the live target model, document prefix and width and publishes only its provenance', () =>
+        withEnv({ GBRAIN_HOME: scratch, GBRAIN_AI_BILLING: 'api' }, async () => {
+          const f = await fixture();
+          const before = await liveSpace();
+          await engine.setConfig('search_embedding_column', COLUMN);
+          const config = await liveConfig();
+          try {
+            expect(await drain()).toBe(1);
+            expect(seen).toEqual([{ model: 'nomic-embed-text', value: `${PREFIX}Durable target document.` }]);
+            expect(await state(f.effectId)).toEqual({ state: 'committed', attempts: 1, error_code: null });
+            const rows = (await staged()).filter(row => row.slug === 'page');
+            expect(rows).toHaveLength(1);
+            expect(rows[0]).toMatchObject({ dims: DIMS, model: NOMIC, text_current: true });
+            expect(rows[0]!.input_hash).toBe(embeddingInputHash({ column: COLUMN, model: NOMIC, dimensions: DIMS,
+              title: 'Durable example', corpusGeneration: null, bodyHash: '', documentPrefix: PREFIX, independent: true },
+            'none', { chunk_text: 'Durable target document.', chunk_source: 'compiled_truth' }));
+            expect(rows[0]!.signature).toStartWith(`${embeddingColumnSignature(await resolveEmbeddingStagingTarget(engine, COLUMN))}:`);
+            const [proof] = await engine.executeRaw<{ stamped: boolean; pending: boolean }>(
+              `SELECT ${COLUMN}_embedded_at IS NOT NULL AS stamped, ${COLUMN}_pending_since IS NOT NULL AS pending
+                FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.source_id=$1`, [f.sourceId]);
+            expect(proof).toEqual({ stamped: true, pending: false });
+            expect(await liveSpace()).toEqual(before);
+            expect(await liveConfig()).toEqual(config);
+            expect((await getWriteRequestById(engine, f.row.id))!.state).toBe('committed');
+          } finally {
+            await engine.setConfig('search_embedding_column', 'embedding');
+          }
+        }), 120_000);
+
+      test('subscription-only claims a local live target even when the gateway default is paid', () =>
+        withEnv({ GBRAIN_HOME: scratch, GBRAIN_AI_BILLING: 'subscription' }, async () => {
+          const f = await fixture();
+          const before = await liveSpace();
+          await engine.setConfig('search_embedding_column', COLUMN);
+          configureGateway({ embedding_model: PRIMARY, embedding_dimensions: 1536, ai_billing: 'subscription',
+            env: { OPENAI_API_KEY: 'sk-test-fake' } });
+          try {
+            expect(await drain()).toBe(1);
+            expect(await state(f.effectId)).toEqual({ state: 'committed', attempts: 1, error_code: null });
+            expect(seen).toEqual([{ model: 'nomic-embed-text', value: `${PREFIX}Durable target document.` }]);
+            const chunks = await engine.getChunks('page', { sourceId: f.sourceId, embeddingColumn:
+              await resolveEmbeddingStagingTarget(engine, COLUMN) });
+            expect(chunks).toHaveLength(1);
+            expect(chunks[0]!.embedding_is_null).toBe(false);
+            expect(chunks[0]!.model).toBe(NOMIC);
+            expect(await liveSpace()).toEqual(before);
+          } finally {
+            await engine.setConfig('search_embedding_column', 'embedding');
+            configureGateway({ embedding_model: PRIMARY, embedding_dimensions: 1536,
+              env: { OPENAI_API_KEY: 'sk-test-fake' } });
+          }
+        }), 120_000);
+
+      test('subscription-only defers a paid live target without spending attempts even when the gateway default is local', () =>
+        withEnv({ GBRAIN_HOME: scratch, GBRAIN_AI_BILLING: 'subscription' }, async () => {
+          const f = await fixture();
+          const before = await liveSpace();
+          const queued = await state(f.effectId);
+          await engine.setConfig('search_embedding_column', PAID_COLUMN);
+          configureGateway({ embedding_model: NOMIC, embedding_dimensions: DIMS, ai_billing: 'subscription', env: {} });
+          try {
+            for (let i = 0; i < 2; i++) {
+              expect(await drain()).toBe(0);
+              expect(await state(f.effectId)).toEqual(queued);
+            }
+            expect(queued).toEqual({ state: 'queued', attempts: 0, error_code: null });
+            expect(seen).toEqual([]);
+            const [target] = await engine.executeRaw(
+              `SELECT cc.${PAID_COLUMN}::text AS vector, cc.${PAID_COLUMN}_model AS model,
+                cc.${PAID_COLUMN}_embedded_text_hash AS text_hash, cc.${PAID_COLUMN}_embedding_input_hash AS input_hash,
+                cc.${PAID_COLUMN}_embedded_at AS embedded_at, cc.${PAID_COLUMN}_pending_since AS pending_since,
+                p.${PAID_COLUMN}_signature AS signature
+                FROM content_chunks cc JOIN pages p ON p.id=cc.page_id WHERE p.source_id=$1`, [f.sourceId]);
+            expect(target).toEqual({ vector: null, model: null, text_hash: null, input_hash: null,
+              embedded_at: null, pending_since: null, signature: null });
+            expect(await liveSpace()).toEqual(before);
+            expect((await getWriteRequestById(engine, f.row.id))!.state).toBe('committed');
+          } finally {
+            await engine.setConfig('search_embedding_column', 'embedding');
+            configureGateway({ embedding_model: PRIMARY, embedding_dimensions: 1536,
+              env: { OPENAI_API_KEY: 'sk-test-fake' } });
+          }
+        }), 120_000);
     });
   });
 }
