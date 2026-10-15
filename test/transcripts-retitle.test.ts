@@ -56,6 +56,7 @@ describe('retitled conversation', () => {
     const [first] = await livePages();
     expect(first.slug).toContain('original-title');
 
+    expect((await engine.getPage(first.slug, { sourceId: 'default' }))!.frontmatter.visibility).toBe('private');
     const second = await runTranscriptsIngest(engine, { paths: [exportFile('b.json', 'Renamed by user', true)], sourceId: 'default', format: 'chatgpt' });
 
     expect(second.pages.imported).toBe(1);
@@ -65,6 +66,7 @@ describe('retitled conversation', () => {
     expect(pages[0].slug).toBe(first.slug);
     expect(pages[0].has_new).toBe(true);
     expect(pages[0].title).toBe('Renamed by user');
+    expect((await engine.getPage(first.slug, { sourceId: 'default' }))!.frontmatter.visibility).toBe('private');
   });
 
   test('re-importing the renamed export after the update is a clean skip', async () => {
@@ -73,6 +75,8 @@ describe('retitled conversation', () => {
     await runTranscriptsIngest(engine, { paths: [b], sourceId: 'default', format: 'chatgpt' });
     const again = await runTranscriptsIngest(engine, { paths: [b], sourceId: 'default', format: 'chatgpt' });
     expect(again.pages).toMatchObject({ imported: 0, skipped: 1 });
+    const [page] = await livePages();
+    expect((await engine.getPage(page.slug, { sourceId: 'default' }))!.frontmatter.visibility).toBe('private');
     expect(await livePages()).toHaveLength(1);
   });
 });
@@ -94,5 +98,31 @@ describe('re-ingest keeps frontmatter it does not render (#5431)', () => {
 
     const again = await runTranscriptsIngest(engine, { paths: [b], sourceId: 'default', format: 'chatgpt' });
     expect(again.pages).toMatchObject({ imported: 0, skipped: 1 });
+  });
+
+  test('an unchanged retained session repairs legacy missing or world visibility once', async () => {
+    const path = exportFile('legacy.json', 'Legacy session', false);
+    await runTranscriptsIngest(engine, { paths: [path], sourceId: 'default', format: 'chatgpt' });
+    const [first] = await livePages();
+    const page = (await engine.getPage(first.slug, { sourceId: 'default' }))!;
+
+    for (const visibility of [undefined, 'world']) {
+      const frontmatter: Record<string, unknown> = { ...page.frontmatter, reviewed: true };
+      if (visibility === undefined) delete frontmatter.visibility;
+      else frontmatter.visibility = visibility;
+      // Seed a genuine legacy hash through putPage, not a stale hash left by raw SQL.
+      await engine.putPage(first.slug, {
+        type: page.type, title: page.title, compiled_truth: page.compiled_truth,
+        timeline: page.timeline, frontmatter,
+      }, { sourceId: 'default' });
+
+      const repaired = await runTranscriptsIngest(engine, { paths: [path], sourceId: 'default', format: 'chatgpt' });
+      expect(repaired.pages).toMatchObject({ imported: 1, skipped: 0, errored: 0 });
+      expect((await engine.getPage(first.slug, { sourceId: 'default' }))!.frontmatter)
+        .toMatchObject({ visibility: 'private', reviewed: true });
+
+      const again = await runTranscriptsIngest(engine, { paths: [path], sourceId: 'default', format: 'chatgpt' });
+      expect(again.pages).toMatchObject({ imported: 0, skipped: 1, errored: 0 });
+    }
   });
 });
