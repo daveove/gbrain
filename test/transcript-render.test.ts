@@ -88,6 +88,7 @@ describe('render round-trip through the SHARED imessage-slack pattern', () => {
     const r = renderSessionParts(redactSession(BASIC, { userPatternsPath: '/nonexistent' }));
     const fm = frontmatter(r.parts[0].content);
     expect(fm.type).toBe('conversation');
+    expect(fm.visibility).toBe('private');
     expect(fm.date).toBe('2026-08-02');
     expect(fm.id).toMatch(/-p1$/);
     expect(fm.transcript_import.harness).toBe('codex');
@@ -97,6 +98,24 @@ describe('render round-trip through the SHARED imessage-slack pattern', () => {
     expect(fm.transcript_import.of).toBe(1);
     // Never the dream marker — that would suppress fact extraction.
     expect(fm.dream_generated).toBeUndefined();
+  });
+
+  test('every harness stamps every split part private', () => {
+    const harnesses = [
+      'claude-code', 'codex', 'openclaw', 'hermes', 'grok', 'omp', 'pi',
+      'opencode', 'cursor', 'chatgpt', 'claude-export',
+    ] as const;
+    for (const harness of harnesses) {
+      const rendered = renderSessionParts(
+        redactSession({ ...BASIC, meta: { ...BASIC.meta, harness } }, { userPatternsPath: '/nonexistent' }),
+        { sourcePath: '', partTargetBytes: 100 },
+      );
+      expect(rendered.parts.length).toBeGreaterThan(1);
+      for (const part of rendered.parts) {
+        expect(part.frontmatter.visibility).toBe('private');
+        expect(frontmatter(part.content).visibility).toBe('private');
+      }
+    }
   });
 });
 

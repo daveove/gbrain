@@ -157,6 +157,25 @@ trigger a full re-fetch of your entire history — the exact traffic pattern mos
 likely to trip a provider's anti-abuse. The config table is durable and never
 GC'd.
 
+## Conversation privacy
+
+Transcript ingest writes `visibility: private` on every conversation part, for
+every adapter, and owns that field on re-ingest. Trusted local CLI readers still
+see the pages; remote MCP readers do not by default. The owner setting
+`search.remote_private_pages=visible` exposes ordinary private pages, including
+these conversations, to remote readers again; it is not an owner-only override
+for a particular remote client.
+
+For sessions imported before this default, preview a full scan with
+`gbrain transcripts ingest --all --dry-run --source-id <source-id>`, then omit
+`--dry-run` to apply. Do not pass `--since` or a session limit for the full repair.
+Explicit retained export paths can replace `--all`. Adding visibility changes
+the import hash even if messages are unchanged; the first re-ingest updates the
+page through the normal writer, while subsequent identical scans hash-skip.
+`transcripts recover codex` repairs missing Codex user turns, not general page
+visibility. Re-ingest cannot repair a DB-only session whose original log/export
+is gone; it needs a separately reviewed owner-side repair with a preimage.
+
 ## Feed imported conversations to Dream
 
 Every imported session (connectors, `gbrain transcripts ingest` of a Hermes
