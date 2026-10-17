@@ -13,6 +13,7 @@ import type { KeywordArmConfidenceDecision } from '../arm-confidence.ts';
 import { type MetadataBoostGateDecision, decideMetadataBoosts, lexicalArmsVoted } from '../metadata-boost-gate.ts';
 import { type PostFusionOpts, RRF_K, cosineReScore, resolveWalkDedupCap, rrfFusionWeighted, runPostFusionStages, stampContentFlags, stampUnverifiedExtractions, textVectorArmNonEmpty } from '../hybrid.ts';
 import { type RelationalEvidenceSlotDecision, ensureRelationalEvidenceSlot } from '../relational-recall.ts';
+import { ensureSemanticNeighborSlot } from '../semantic-neighbor-pin.ts';
 import { type RelationalRerankPinDecision, pinRelationalRows } from '../relational-rerank-pin.ts';
 import { applyFeedbackStage } from '../feedback-boost.ts';
 import { capPerSession } from '../diverse-pool.ts';
@@ -462,6 +463,10 @@ export async function sizeReturnPool(
     returnPool = r.pool;
     relationalSlotDecision = r.decision;
   }
+  // A near-best embedding neighbor that lost fusion to multi-arm lexical
+  // pages is promoted to rank 3. First page only; the pure function no-ops
+  // when that neighbor is already in the top 3 or outside the cosine gap.
+  returnPool = ensureSemanticNeighborSlot(returnPool, limit, offset).pool;
   return { returnPool, adaptiveDecision, autocutDecision, relationalSlotDecision };
 }
 
