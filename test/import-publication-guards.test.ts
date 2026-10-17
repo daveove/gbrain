@@ -166,23 +166,24 @@ for (const intervening of ['tag', 'replacement', 'hash'] as const) {
       const slug = `merge-import/noop-race-${intervening}`;
       const body = content(`A stable paragraph before ${intervening}.`);
       await importFromContent(engine, slug, body, { noEmbed: true, sourceId, sourcePath: 'original.md' });
-      const getPage = engine.getPage;
+      const transaction = engine.transaction;
+      const transact = transaction.bind(engine);
       let interposed = false;
       let callbackRan = false;
       let winner: unknown;
-      engine.getPage = async function(candidate, opts) {
-        const page = await getPage.call(this, candidate, opts);
-        if (!interposed && candidate === slug && opts?.sourceId === sourceId && opts.includeDeleted) {
-          interposed = true;
-          if (intervening === 'tag') await engine.addTag(slug, 'concurrent-winner', { sourceId });
-          else if (intervening === 'hash') await engine.executeRaw('UPDATE pages SET content_hash=$1 WHERE id=$2', ['concurrent-hash', page!.id]);
-          else {
-            await engine.deletePage(slug, { sourceId });
-            await importFromContent(engine, slug, content('The replacement page wins.'), { noEmbed: true, sourceId });
-          }
-          winner = await state(engine, slug);
+      engine.transaction = async (fn, options) => {
+        // Commit the competing writer before publication opens its transaction or takes page locks.
+        engine.transaction = transaction;
+        interposed = true;
+        const page = await engine.getPage(slug, { sourceId });
+        if (intervening === 'tag') await engine.addTag(slug, 'concurrent-winner', { sourceId });
+        else if (intervening === 'hash') await engine.executeRaw('UPDATE pages SET content_hash=$1 WHERE id=$2', ['concurrent-hash', page!.id]);
+        else {
+          await engine.deletePage(slug, { sourceId });
+          await importFromContent(engine, slug, content('The replacement page wins.'), { noEmbed: true, sourceId });
         }
-        return page;
+        winner = await state(engine, slug);
+        return transact(fn, options);
       };
       try {
         const result = importFromContent(engine, slug, body, {
@@ -194,7 +195,7 @@ for (const intervening of ['tag', 'replacement', 'hash'] as const) {
         expect(callbackRan).toBe(false);
         expect(await state(engine, slug)).toEqual(winner);
       } finally {
-        engine.getPage = getPage;
+        engine.transaction = transaction;
       }
     }
   });
