@@ -26,6 +26,8 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ### Fixed
 
+- DAV-6973: an HNSW-indexed independent embedding column keeps its model check in the ANN candidate CTE. The text hash, input hash, and page stamp are projected as `proof_current` and filtered in `scored`. Putting that proof inside the candidate CTE made Postgres skip the index and time out the vector arm.
+- DAV-6973: hybrid search promotes one near-best embedding neighbor to rank 3 when lexical fusion buried it past the result limit. The neighbor has to be within 0.02 cosine of the best match and at least 0.70. Pages already inside the returned window stay in fused order. The relational page-1 slot runs after this promotion, so the insert cannot push that answer off the page.
 - DAV-6928: unchanged imports retain the locked identity/revision check while avoiding maintenance attribution when no callback or repair can write. Callback-only skips reuse that same locked page read; body and origin repairs still verify their post-write state. Existing vectors and native publication guards remain intact.
 - DAV-6219: transcript ingest stamps every conversation part `visibility: private`, including grown and re-ingested sessions. An explicit full re-ingest repairs retained legacy sessions; remote ordinary-private-page access remains an owner opt-out.
 - DAV-6928: require VALID and READY online indexes before migration success; refuse named foreign in-progress builds without disturbing them. Add native `page_indexes` diagnosis and `repair page-indexes` for the v240/v243 page lookup indexes, defer v240 Postgres replay builds to their online handler, and give only schema-only migrate runs a cancellable 30-minute DDL deadline on the existing bounded routes.

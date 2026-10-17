@@ -327,6 +327,57 @@ describe('source scope strategy: walk overfetch, walk skip and scope scan', () =
   });
 });
 
+const nomicProvenance = {
+  model: 'embedding_nomic_model',
+  textHash: 'embedding_nomic_embedded_text_hash',
+  inputHash: 'embedding_nomic_embedding_input_hash',
+  embeddedAt: 'embedding_nomic_embedded_at',
+  pendingSince: 'embedding_nomic_pending_since',
+  pageSignature: 'embedding_nomic_signature',
+};
+const nomicColumn = {
+  name: 'embedding_nomic', type: 'vector' as const, dimensions: 768,
+  embeddingModel: 'ollama:nomic-embed-text', provenance: nomicProvenance,
+};
+
+function annCte(sql: string): string {
+  return sql.slice(sql.indexOf('WITH ann AS MATERIALIZED ('), sql.indexOf('hnsw_candidates AS ('));
+}
+
+describe('independent column index walk', () => {
+  test('keeps the model check in the ANN CTE and the publication proof outside it', () => {
+    const stmt = build({ embeddingColumn: nomicColumn });
+    expect(stmt.indexed).toBe(true);
+    expect(stmt.relaxed).toBe(true);
+    expect(stmt.indexWalkSql).toBeDefined();
+    const ann = annCte(stmt.indexWalkSql!);
+    expect(ann).toContain('"embedding_nomic_model"');
+    expect(ann).not.toContain('md5(');
+    expect(ann).not.toContain('embedding_nomic_signature');
+    expect(stmt.indexWalkSql).toContain('AS proof_current');
+    expect(stmt.indexWalkSql).toContain('md5("cc".chunk_text)');
+    expect(stmt.indexWalkSql).toContain('"embedding_nomic_signature"');
+    expect(scoredCte(stmt.indexWalkSql!)).toContain('WHERE proof_current');
+    const joinedWhere = candidateWhere(stmt.sql);
+    expect(joinedWhere).toContain('"embedding_nomic_model"');
+    expect(joinedWhere).not.toContain('md5(');
+    expect(stmt.sql).toContain('AS proof_current');
+    const placeholders = (sql: string) => [...new Set(sql.match(/\$\d+/g))].sort();
+    expect(placeholders(stmt.indexWalkSql!)).toEqual(placeholders(stmt.sql));
+  });
+
+  test('a legacy guard or a non-HNSW width keeps the full proof inside the candidate CTE', () => {
+    const guarded = build({ embeddingColumn: nomicColumn, vectorLegacyGuard: true });
+    expect(guarded.indexWalkSql).toBeUndefined();
+    expect(guarded.relaxed).toBe(false);
+    expect(candidateWhere(guarded.sql)).toContain('md5("cc".chunk_text)');
+    const wide = build({ embeddingColumn: { ...nomicColumn, dimensions: 3072 } });
+    expect(wide.indexed).toBe(false);
+    expect(wide.indexWalkSql).toBeUndefined();
+    expect(candidateWhere(wide.sql)).toContain('md5("cc".chunk_text)');
+  });
+});
+
 describe('vector legacy guard setting', () => {
   afterEach(() => _resetVectorLegacyGuardForTests());
 

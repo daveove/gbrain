@@ -13,6 +13,7 @@ import type { KeywordArmConfidenceDecision } from '../arm-confidence.ts';
 import { type MetadataBoostGateDecision, decideMetadataBoosts, lexicalArmsVoted } from '../metadata-boost-gate.ts';
 import { type PostFusionOpts, RRF_K, cosineReScore, resolveWalkDedupCap, rrfFusionWeighted, runPostFusionStages, stampContentFlags, stampUnverifiedExtractions, textVectorArmNonEmpty } from '../hybrid.ts';
 import { type RelationalEvidenceSlotDecision, ensureRelationalEvidenceSlot } from '../relational-recall.ts';
+import { ensureSemanticNeighborSlot } from '../semantic-neighbor-pin.ts';
 import { type RelationalRerankPinDecision, pinRelationalRows } from '../relational-rerank-pin.ts';
 import { applyFeedbackStage } from '../feedback-boost.ts';
 import { capPerSession } from '../diverse-pool.ts';
@@ -447,6 +448,11 @@ export async function sizeReturnPool(
     autocutDecision = r.decision;
   }
 
+  // Semantic promotion inserts at index 2. That shift would move a relational
+  // answer just placed at limit-1 onto index limit, and the result slice would
+  // drop it. Run the pin first, then the relational guarantee, so the
+  // guarantee still owns the last page-1 slot.
+  returnPool = ensureSemanticNeighborSlot(returnPool, limit, offset).pool;
   // #3995 — guaranteed page-1 relational evidence. A fired arm's answer is
   // often lexically unrecoverable (unverified entity stub, single-arm RRF
   // score), so its fused row can land beyond the limit slice on multi-arm
