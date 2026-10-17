@@ -124,6 +124,82 @@ test('optional legacy path repair rolls back its SQL error without aborting publ
   }
 });
 
+for (const scenario of ['current-path', 'no-path', 'repair-path', 'repair-origin', 'callback', 'legacy-hash'] as const) {
+  test(`unchanged import preserves page state and vectors (${scenario})`, async () => {
+    for (const engine of engines) {
+      const slug = `merge-import/noop-${scenario}`;
+      const body = content(`A stable paragraph for ${scenario}.`);
+      await importFromContent(engine, slug, body, { noEmbed: true, sourceId, sourcePath: 'original.md' });
+      const initial = (await engine.getPage(slug, { sourceId }))!;
+      await engine.executeRaw('UPDATE content_chunks SET embedding=array_fill(0.1::real,ARRAY[1536])::vector WHERE page_id=$1', [initial.id]);
+      if (scenario === 'legacy-hash') {
+        await engine.executeRaw('UPDATE pages SET content_hash=$1 WHERE id=$2', [contentHashLegacy(initial), initial.id]);
+      }
+      const before = await state(engine, slug);
+      const vectors = await engine.executeRaw('SELECT id,embedding::text AS vector FROM content_chunks WHERE page_id=$1 ORDER BY id', [initial.id]);
+      expect(vectors).toEqual([{ id: before.chunks[0]!.id, vector: `[${new Array(1536).fill(0.1).join(',')}]` }]);
+      const hasCallback = scenario !== 'current-path' && scenario !== 'no-path';
+      let callbackRan = false;
+      const result = await importFromContent(engine, slug, body, {
+        noEmbed: true, sourceId,
+        ...(scenario === 'no-path' ? {} : { sourcePath: scenario === 'repair-path' ? 'current.md' : 'original.md' }),
+        ...(scenario === 'repair-origin' ? { sourceRoot: '/synthetic-import-root' } : {}),
+        ...(hasCallback ? { beforeCommit: async () => { callbackRan = true; } } : {}),
+      });
+      expect(result.status).toBe('skipped');
+      expect(callbackRan).toBe(hasCallback);
+      const after = await state(engine, slug);
+      expect(after.snapshot!.revision).toBe(before.snapshot!.revision);
+      expect(after.snapshot!.sourceIncarnation).toBe(before.snapshot!.sourceIncarnation);
+      expect(after.chunks).toEqual(before.chunks);
+      expect(after.versions).toEqual(before.versions);
+      expect(after.snapshot!.page.source_path).toBe(scenario === 'repair-path' ? 'current.md' : 'original.md');
+      if (scenario === 'repair-origin') expect(after.snapshot!.page.source_uri).toBe('file:///synthetic-import-root/original.md');
+      expect(await engine.executeRaw('SELECT id,embedding::text AS vector FROM content_chunks WHERE page_id=$1 ORDER BY id', [initial.id])).toEqual(vectors);
+    }
+  });
+}
+
+for (const intervening of ['tag', 'replacement', 'hash'] as const) {
+  test(`unchanged import rejects a stale base and preserves the winning page (${intervening})`, async () => {
+    for (const engine of engines) {
+      const slug = `merge-import/noop-race-${intervening}`;
+      const body = content(`A stable paragraph before ${intervening}.`);
+      await importFromContent(engine, slug, body, { noEmbed: true, sourceId, sourcePath: 'original.md' });
+      const getPage = engine.getPage;
+      let interposed = false;
+      let callbackRan = false;
+      let winner: unknown;
+      engine.getPage = async function(candidate, opts) {
+        const page = await getPage.call(this, candidate, opts);
+        if (!interposed && candidate === slug && opts?.sourceId === sourceId && opts.includeDeleted) {
+          interposed = true;
+          if (intervening === 'tag') await engine.addTag(slug, 'concurrent-winner', { sourceId });
+          else if (intervening === 'hash') await engine.executeRaw('UPDATE pages SET content_hash=$1 WHERE id=$2', ['concurrent-hash', page!.id]);
+          else {
+            await engine.deletePage(slug, { sourceId });
+            await importFromContent(engine, slug, content('The replacement page wins.'), { noEmbed: true, sourceId });
+          }
+          winner = await state(engine, slug);
+        }
+        return page;
+      };
+      try {
+        const result = importFromContent(engine, slug, body, {
+          noEmbed: true, sourceId, sourcePath: 'original.md', beforeCommit: async () => { callbackRan = true; },
+        });
+        if (intervening === 'hash') await expect(result).rejects.toThrow('stale content_hash');
+        else await expect(result).rejects.toMatchObject({ code: intervening === 'tag' ? 'revision_conflict' : 'page_identity_changed' });
+        expect(interposed).toBe(true);
+        expect(callbackRan).toBe(false);
+        expect(await state(engine, slug)).toEqual(winner);
+      } finally {
+        engine.getPage = getPage;
+      }
+    }
+  });
+}
+
 for (const intervening of ['none', 'page', 'chunks', 'indexing-context'] as const) {
   test(`postcommit embedding uses the complete captured projection (intervening=${intervening})`, async () => {
     for (const engine of engines) {

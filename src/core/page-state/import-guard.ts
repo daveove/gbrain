@@ -7,7 +7,7 @@ import { stableJson } from '../persistence/digest.ts';
 import { assertPageRevision, type PageSnapshot } from './types.ts';
 
 /** Imported bytes are prepared outside transactions; publication still needs CAS. */
-export async function assertImportBase(tx: BrainEngine, slug: string, sourceId: string, existing: Page | null, reusedEmbeddings = false): Promise<void> {
+export async function assertImportBase(tx: BrainEngine, slug: string, sourceId: string, existing: Page | null, reusedEmbeddings = false): Promise<Page | null> {
   await tx.lockPageKeys([{ sourceId, slug }]);
   const current = await tx.getPage(slug, { sourceId, includeDeleted: true });
   if ((current?.id ?? null) !== (existing?.id ?? null)) {
@@ -21,6 +21,7 @@ export async function assertImportBase(tx: BrainEngine, slug: string, sourceId: 
       `Page ${slug} in source ${sourceId} changed embedding mode without changing its canonical revision. Read the current page, then retry the import so it builds vectors for that mode.`,
       { fix: readFix('Reads the current page before retrying the import.', { argv: ['gbrain', 'get', '--source', sourceId, '--', slug], mcp: { tool: 'get_page', arguments: { slug, source_id: sourceId } } }) });
   }
+  return current;
 }
 const canonicalFields = (p: Page | ParsedPage) => ({ type: p.type, title: p.title, compiled_truth: p.compiled_truth,
   timeline: p.timeline ?? '', frontmatter: p.frontmatter });
