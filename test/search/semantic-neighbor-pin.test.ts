@@ -31,6 +31,34 @@ describe('semantic neighbor pin', () => {
     expect(out.map(r => r.slug).filter(s => s === 'topic')).toHaveLength(1);
   });
 
+  test('does not promote a near neighbor that is already inside the result window', () => {
+    const pool = [
+      row('lexical-a', 1.0, 0.50),
+      row('nearest', 0.95, 0.80),
+      row('lexical-b', 0.9, 0.40),
+      row('on-page', 0.85, 0.795),
+      ...Array.from({ length: 6 }, (_, i) => row(`filler-${i}`, 0.6 - i * 0.01, 0.3)),
+    ];
+    const { pool: out, decision } = ensureSemanticNeighborSlot(pool, 10, 0);
+    expect(decision).toBeUndefined();
+    expect(out.map(r => r.slug)).toEqual(pool.map(r => r.slug));
+  });
+
+  test('leaves a near neighbor already inside the result window in fused order', () => {
+    const pool = [
+      row('lexical-a', 1.0, 0.50),
+      row('nearest', 0.95, 0.80),
+      row('lexical-b', 0.9, 0.40),
+      row('on-page', 0.85, 0.795),
+      ...Array.from({ length: 6 }, (_, i) => row(`filler-${i}`, 0.6 - i * 0.01, 0.3)),
+      row('buried', 0.2, 0.79),
+    ];
+    const { pool: out, decision } = ensureSemanticNeighborSlot(pool, 10, 0);
+    expect(decision?.slug).toBe('buried');
+    expect(out.slice(0, 4).map(r => r.slug)).toEqual(['lexical-a', 'nearest', 'buried', 'lexical-b']);
+    expect(out[4].slug).toBe('on-page');
+  });
+
   test('leaves the list alone when the near neighbor is already in the top 3', () => {
     const pool = [
       row('nearest', 1, 0.73),

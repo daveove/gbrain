@@ -36,9 +36,11 @@ export function ensureSemanticNeighborSlot(
   for (const row of pool) maxCosine = Math.max(maxCosine, cosineOf(row));
   if (maxCosine < SEMANTIC_NEIGHBOR_FLOOR) return { pool };
   const cutoff = Math.max(SEMANTIC_NEIGHBOR_FLOOR, maxCosine - SEMANTIC_NEIGHBOR_GAP);
-  const head = Math.min(3, limit);
+  // Scan only past the returned window. A qualifying row already on the page
+  // keeps its fused rank; pulling it to rank 3 would only displace a better
+  // fusion result.
   let bestAt = -1;
-  for (let i = head; i < pool.length; i++) {
+  for (let i = limit; i < pool.length; i++) {
     const cosine = cosineOf(pool[i]);
     if (cosine < cutoff) continue;
     if (bestAt < 0 || cosine > cosineOf(pool[bestAt])) bestAt = i;
