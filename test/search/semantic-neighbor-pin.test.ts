@@ -1,4 +1,6 @@
 import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { ensureRelationalEvidenceSlot } from '../../src/core/search/relational-recall.ts';
 import { ensureSemanticNeighborSlot } from '../../src/core/search/semantic-neighbor-pin.ts';
 import type { SearchResult } from '../../src/core/types.ts';
 
@@ -63,4 +65,37 @@ describe('semantic neighbor pin', () => {
     expect(ensureSemanticNeighborSlot(pool, 10, 5).decision).toBeUndefined();
     expect(ensureSemanticNeighborSlot(pool, 2, 0).decision).toBeUndefined();
   });
+
+  test('pinning before the relational slot keeps that answer inside the page', () => {
+    const limit = 4;
+    const pool = [
+      row('lexical-a', 1.0, 0.50),
+      row('nearest', 0.9, 0.80),
+      row('lexical-b', 0.8, 0.40),
+      row('filler', 0.7, 0.30),
+      row('other', 0.6, 0.20),
+      row('relational', 0.5, 0.10),
+      row('topic', 0.2, 0.79),
+    ];
+    const relational = [row('relational', 0.5, 0.10)];
+    const page = (rows: SearchResult[]) => rows.slice(0, limit).map(r => r.slug);
+
+    const pinnedFirst = ensureSemanticNeighborSlot(pool, limit, 0).pool;
+    const safe = ensureRelationalEvidenceSlot(pinnedFirst, relational, limit, 0).pool;
+    expect(safe[2].slug).toBe('topic');
+    expect(page(safe)).toContain('relational');
+
+    const relationalFirst = ensureRelationalEvidenceSlot(pool, relational, limit, 0).pool;
+    const unsafe = ensureSemanticNeighborSlot(relationalFirst, limit, 0).pool;
+    expect(page(unsafe)).not.toContain('relational');
+    expect(unsafe[limit].slug).toBe('relational');
+  });
+});
+
+test('rank.ts promotes the semantic neighbor before the relational slot', () => {
+  const src = readFileSync(new URL('../../src/core/search/hybrid/rank.ts', import.meta.url), 'utf8');
+  const semantic = src.indexOf('ensureSemanticNeighborSlot(returnPool');
+  const relational = src.indexOf('ensureRelationalEvidenceSlot(returnPool');
+  expect(semantic).toBeGreaterThan(-1);
+  expect(relational).toBeGreaterThan(semantic);
 });

@@ -448,6 +448,11 @@ export async function sizeReturnPool(
     autocutDecision = r.decision;
   }
 
+  // Semantic promotion inserts at index 2. That shift would move a relational
+  // answer just placed at limit-1 onto index limit, and the result slice would
+  // drop it. Run the pin first, then the relational guarantee, so the
+  // guarantee still owns the last page-1 slot.
+  returnPool = ensureSemanticNeighborSlot(returnPool, limit, offset).pool;
   // #3995 — guaranteed page-1 relational evidence. A fired arm's answer is
   // often lexically unrecoverable (unverified entity stub, single-arm RRF
   // score), so its fused row can land beyond the limit slice on multi-arm
@@ -463,10 +468,6 @@ export async function sizeReturnPool(
     returnPool = r.pool;
     relationalSlotDecision = r.decision;
   }
-  // A near-best embedding neighbor that lost fusion to multi-arm lexical
-  // pages is promoted to rank 3. First page only; the pure function no-ops
-  // when that neighbor is already in the top 3 or outside the cosine gap.
-  returnPool = ensureSemanticNeighborSlot(returnPool, limit, offset).pool;
   return { returnPool, adaptiveDecision, autocutDecision, relationalSlotDecision };
 }
 
