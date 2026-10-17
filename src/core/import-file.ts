@@ -506,11 +506,18 @@ export async function importFromContent(
 
   const originUri = fileOriginUri(existing?.source_uri, opts.sourceRoot, opts.sourcePath);
   const persistUnchanged = async (refreshBody = false) => {
+    const canReuseGuardedRead = !refreshBody && (!opts.sourcePath
+      || (existing?.source_path === opts.sourcePath && (originUri === null || existing.source_uri === originUri)));
+    if (canReuseGuardedRead && !opts.beforeCommit) {
+      await engine.transaction(tx => assertImportBase(tx, slug, sourceId ?? 'default', existing));
+      return;
+    }
     await maintenanceTransaction(engine, async tx => {
-      await assertImportBase(tx, slug, sourceId ?? 'default', existing);
+      const current = await assertImportBase(tx, slug, sourceId ?? 'default', existing);
       if (refreshBody) await tx.refreshPageBody(slug, sourceId ?? 'default', parsed.compiled_truth, parsed.timeline || '', hash);
       await refreshSourcePath(tx, slug, sourceId, opts.sourcePath, existing, originUri);
-      if (opts.beforeCommit) await verifyPageReadable(tx, slug, refreshBody ? hash : existing?.content_hash ?? hash, sourceId, 'importFromContent');
+      if (opts.beforeCommit) await verifyPageReadable(tx, slug, refreshBody ? hash : existing?.content_hash ?? hash, sourceId, 'importFromContent',
+        canReuseGuardedRead ? current : undefined);
       await opts.beforeCommit?.(tx, slug);
     });
   };
