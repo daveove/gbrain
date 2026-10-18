@@ -198,7 +198,7 @@ and the commit it would make, and changes nothing.
    it shares with master; one entry per branch) and its migration inventory.
 3. Merges `origin/master` with a merge commit. Version-only hunks in the stamp
    files, `CHANGELOG.md` and generated files (migration registry,
-   `migrations/records.json`, `llms*.txt`, plugin trees, the template repo,
+   `llms*.txt`, plugin trees, the template repo,
    `bun.lock`) resolve mechanically; any other conflict stops with the file
    list.
 4. Sets VERSION to master's `MAJOR.MINOR.(PATCH+1).0` and rewrites every
@@ -213,9 +213,9 @@ and the commit it would make, and changes nothing.
    Published migrations are never renumbered or edited; a branch file whose
    payload matches a migration master already published under another number
    (squash-merged or cherry-picked) stops with the `git rm` fix.
-6. Regenerates the migration registry, `migrations/records.json` (when the
-   branch has migrations), `bun.lock`, the bootstrap template repo and
-   everything `bun run regen:all` covers.
+6. Regenerates the migration registry, `bun.lock`, the bootstrap template
+   repo and everything `bun run regen:all` covers. Migration behavior runs
+   through native upgrade regressions rather than handler-source hashes.
 7. Lists every line the branch added that still names an old migration number
    (`v209`, `v209-name`, `migration 209`, `schema_version ... 209`,
    `version: 209`) and stops: such a line may mean the moved migration or the

@@ -80,7 +80,7 @@ export async function readIdentitySiblings(engine: BrainEngine, sourceId: string
     const rows = await engine.executeRaw<{ slug: string; title: string | null; type: string | null; identity: unknown }>(
       `SELECT slug, title, type, frontmatter->>'identity' AS identity FROM pages
         WHERE source_id = $1 AND deleted_at IS NULL AND type = ANY($2::text[])
-          AND (lower(title) = $3 OR lower(title) LIKE $4)${privacy}
+          AND ((hashtext(lower(title)) = hashtext($3) AND lower(title) = $3) OR lower(title) LIKE $4)${privacy}
         ORDER BY slug LIMIT ${SIBLING_GROUP_CAP + 2}`,
       [sourceId, types, subject, like]);
     const members = rows.filter(r => normalizeAlias(titleName(r.title ?? '')) === subject);

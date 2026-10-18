@@ -14,7 +14,6 @@ import { v223 } from '../src/core/schema-migrations/v223-persistence-serve-loop-
 import { v231 } from '../src/core/schema-migrations/v231-fact-purge-lookup-indexes.ts';
 import { v236 } from '../src/core/schema-migrations/v236-open-loops-counterparty-source.ts';
 import { v237 } from '../src/core/schema-migrations/v237-facts-question-recall-indexes.ts';
-import { v240 } from '../src/core/schema-migrations/v240-pages-name-lookup-indexes.ts';
 import { v241 } from '../src/core/schema-migrations/v241-persistence-request-slug-intent-index.ts';
 import { v243 } from '../src/core/schema-migrations/v243-nightly-memory-dependencies.ts';
 import { requestIndexesRepair } from '../src/core/repair/request-indexes.ts';
@@ -205,7 +204,6 @@ const CALLERS: Array<{ migration: Migration; names: string[]; repair?: string }>
   { migration: v231, names: ['fact_purges_subject_idx', 'fact_purges_all_subjects_idx'] },
   { migration: v236, names: ['open_loops_counterparty_source_idx'] },
   { migration: v237, names: ['idx_facts_fts_next', 'idx_facts_unembedded', 'idx_facts_embedding_model'] },
-  { migration: v240, names: ['idx_pages_source_title_lower', 'idx_pages_slug_trgm'], repair: 'page-indexes' },
   { migration: v241, names: ['persistence_requests_slug_intent'], repair: 'request-indexes' },
   { migration: v243, names: ['idx_pages_title_lower_trgm'], repair: 'page-indexes' },
 ];

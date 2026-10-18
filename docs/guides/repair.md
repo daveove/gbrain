@@ -130,7 +130,7 @@ work behind exits 0, so scripts should also check `results[].complete`.
 | `timeline` | `timeline_history` | Re-saves each page with its current body through a revision-bound `put_page`. The save writes each database-only timeline entry back into the page as a bullet preceded by `<!-- gbrain:materialized v1 <hash> -->`. | `kept_unrenderable_rows`: entries that would change if written as a bullet (for example an empty source). They stay in the database. |
 | `visibility` | `derived_visibility` | Stamps an explicit `visibility` on extracted atoms and synthesized concepts. An atom takes its origin page's visibility; transcript atoms and atoms whose origin is gone become `private`; a concept takes the strictest visibility of its input atoms. A concept input found only through an atom's `concepts:` list counts as private. Atoms are repaired before concepts. It never loosens an explicit value: `private` stays `private`, and `world` can only become `private`. A missing value is stamped with the origin's value, which is `world` when the origin page is public. | `concepts_without_lineage`: concepts whose inputs cannot be found. They stay as they are, and remote readers already treat a missing visibility as private. `atoms_origin_gone_to_private` counts atoms made private because their origin page no longer exists. |
 | `request-indexes` | `persistence_request_indexes` | Creates a missing managed sync request index, or drops an INVALID one (left by an interrupted concurrent build) and rebuilds it, on a brain whose schema version is already current. Postgres builds each index `CONCURRENTLY`, one at a time, so writes continue; PGLite builds inline. It changes no user data, takes no journal admission and runs brain-wide (`--source` does not narrow it). See [managed sync request indexes](#request-indexes). | `building`: an index another session is still building; it is never dropped. |
-| `page-indexes` | `page_indexes` | Creates missing v240/v243 page lookup indexes or drops INVALID leftovers and rebuilds them, even after the migration versions are stamped. Postgres builds `CONCURRENTLY`, one at a time; PGLite builds inline. Brain-wide; no user data changes or journal admission. See [page lookup indexes](#page-indexes). | `building`: an index another session is building; never dropped. |
+| `page-indexes` | `page_indexes` | Creates missing bounded page lookup indexes, rebuilds INVALID leftovers, and removes obsolete unbounded title indexes after the replacement is ready. Postgres builds and drops `CONCURRENTLY`, one at a time; PGLite runs inline. Brain-wide; no user data changes or journal admission. See [page lookup indexes](#page-indexes). | `building`: an index another session is building; never dropped. |
 | `connector-fences` | none (a `connector_fence_below_timeline` refusal names it) | Moves a facts or takes fence that sits below the timeline sentinel of a Google or GitHub page into the page body through a revision-bound `put_page`, so the connector's next re-render carries the fence instead of refusing. Then re-attempt the held item with `gbrain sources retry-held <source>`. | `kept_ambiguous_pages`: pages whose fences are duplicated, unbalanced or unparseable. Move the fence by hand: read the page, place the fence above the `<!-- timeline -->` line, and save it with the current `expected_revision`. |
 | `take-supersession` | none | Rebuilds `takes.superseded_by` for supersession chains written before the pointer moved onto the old fence row (#5886). Each struck take is linked to the row that replaced it only from evidence: a committed `takes_supersede` receipt, a stored `superseded_by`, or a row carrying the old `superseded by #<own row>` pointer with exactly one possible predecessor. The pointer is written onto the old row (`<source>; superseded by #N`) and stale self-pointers are dropped through a revision-bound `put_page`; a page whose fence is already right but whose stored pointers differ is reprojected without a page write. See [take supersession](#take-supersession). | `ambiguous_pages` / `ambiguous_rows`: pages where a new row has two or more possible predecessors, or where evidence conflicts. The preview lists each with its candidates and the manual edit; nothing on them changes. `unparsed_pages`: pages whose takes fence does not parse cleanly. |
 | `connector-checkpoints` | `connector_checkpoints` | Deletes managed connector checkpoint rows and retry pointers that no registered connector source can load and that are older than 7 days. They accumulate after a content setting such as `g_history_days` changes, or when a connector host older than v0.60.11.0 runs during an upgrade. Cleanup only: it never copies or re-keys a checkpoint, takes no journal admission and runs brain-wide (`--source` does not narrow it). | Rows a queued or running connector write, or a connector's recorded pending set, still references. |
@@ -235,16 +235,28 @@ processing flags).
 ### Page lookup indexes
 
 `gbrain doctor` reports `page_indexes` independently of the schema version:
-`idx_pages_source_title_lower` and `idx_pages_slug_trgm` (v240), plus
-`idx_pages_title_lower_trgm` (v243). A missing index and an INVALID or
-not-ready index are distinct findings; an index is healthy only when both
-`indisvalid` and `indisready` are true. A foreign active build is reported
-as `building` and left alone.
+`idx_pages_source_title_hash` and `idx_pages_slug_trgm` (v240), plus
+`idx_pages_title_lower_trgm` (v243). Migration v244 replaces the old
+`idx_pages_source_title_lower` index on already-upgraded brains. Exact-title
+readers match the bounded `hashtext(lower(title))` key and retain full
+case-insensitive equality, so hash collisions cannot return another title.
+Titles remain unchanged, including titles larger than a BTree index entry.
+A missing index and an INVALID or not-ready index are distinct findings.
+An index is healthy only when both `indisvalid` and `indisready` are true.
+The bounded title index must also match the `pages` table, nonunique BTree
+method, and exactly `(source_id, hashtext(lower(title)))` with no predicate
+or included columns. A same-name index on another table or with other keys
+is `conflicting`; migration and repair refuse it without dropping either
+that index or the legacy index. A retained unbounded index is `obsolete`.
+A foreign active build is reported as `building` and left alone.
 
 Preview with `gbrain repair page-indexes --json`, then apply with
-`gbrain repair page-indexes --apply`. Postgres drops only inactive unusable
-leftovers and creates each index `CONCURRENTLY`, outside a transaction;
-PGLite builds inline. This changes no pages, embeddings or migration stamps
+`gbrain repair page-indexes --apply`. Postgres drops inactive unusable
+leftovers and creates each index `CONCURRENTLY`, outside a transaction.
+The repair also removes the obsolete unbounded title index after the
+replacement is valid and ready. PGLite builds and drops inline.
+Legacy retirement also refuses custom covering indexes with included columns.
+This changes no pages, embeddings or migration stamps
 and runs brain-wide (`--source` does not narrow it). If interrupted, rerun
 the same repair after any active builder finishes, then check
 `gbrain doctor --only page_indexes --json`. A race with another builder
