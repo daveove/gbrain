@@ -27,6 +27,7 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Fixed
 
 - Fix independent-column vector retrieval so the materialized ANN stage can use its HNSW index while model, input/text provenance, page freshness, visibility and source guards still reject invalid results. Re-sort relaxed ANN candidates before truncation on PostgreSQL 17+ so propagated CTE ordering cannot discard late closer rows. Keep existing hybrid ranking unchanged. Supersedes the PR35 rank-3 semantic promotion proposal without adopting its query-specific thresholds.
+- DAV-6973: single-flight stale embedding fails closed when source discovery or lease acquisition fails. Partial lease acquisitions are released without starting the drain; an already-held source still reports `lock_skipped`. The source-only lease namespace, TTL and successful-run cleanup are unchanged.
 
 - DAV-6928: unchanged imports retain the locked identity/revision check while avoiding maintenance attribution when no callback or repair can write. Callback-only skips reuse that same locked page read; body and origin repairs still verify their post-write state. Existing vectors and native publication guards remain intact.
 - DAV-6219: transcript ingest stamps every conversation part `visibility: private`, including grown and re-ingested sessions. An explicit full re-ingest repairs retained legacy sessions; remote ordinary-private-page access remains an owner opt-out.

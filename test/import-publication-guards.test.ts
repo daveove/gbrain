@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test';
 import type { BrainEngine } from '../src/core/engine.ts';
+import type { PageSnapshot } from '../src/core/page-state/types.ts';
+import type { Chunk } from '../src/core/types.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent, type ImportEmbeddingResult } from '../src/core/import-file.ts';
 import { contentHashLegacy } from '../src/core/utils.ts';
@@ -31,7 +33,13 @@ afterEach(() => {
   resetGateway();
 });
 
-async function state(engine: BrainEngine, slug: string) {
+interface ImportPublicationState {
+  snapshot: PageSnapshot | null;
+  chunks: Chunk[];
+  versions: Record<string, unknown>[];
+}
+
+async function state(engine: BrainEngine, slug: string): Promise<ImportPublicationState> {
   const snapshot = await engine.readPageSnapshot(slug, { sourceId });
   return {
     snapshot,
@@ -170,7 +178,7 @@ for (const intervening of ['tag', 'replacement', 'hash'] as const) {
       const transact = transaction.bind(engine);
       let interposed = false;
       let callbackRan = false;
-      let winner: unknown;
+      let winner!: ImportPublicationState;
       engine.transaction = async (fn, options) => {
         // Commit the competing writer before publication opens its transaction or takes page locks.
         engine.transaction = transaction;
