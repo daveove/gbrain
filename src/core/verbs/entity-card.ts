@@ -281,7 +281,7 @@ export async function selectEntityCandidates(
          FROM pages
         WHERE deleted_at IS NULL
           AND source_id = $1
-          AND ( lower(title) = $2
+          AND ( (hashtext(lower(title)) = hashtext($2) AND lower(title) = $2)
              OR slug = ANY($3::text[])
              OR slug LIKE $4 )${privatePredicate}`,
       [sourceId, titleLc, exactSlugs, `%/${slug || trimmed}`],

@@ -74,6 +74,7 @@ async function weakTitleHits(engine: BrainEngine, sourceIds: string[], privacySq
          FROM pages p
         WHERE p.deleted_at IS NULL ${privacySql}
           AND p.source_id = ANY($1::text[])
+          AND hashtext(lower(p.title)) = ANY(ARRAY(SELECT hashtext(t) FROM unnest($2::text[]) t))
           AND lower(p.title) = ANY($2::text[])`,
       [sourceIds, norms],
     );
@@ -411,7 +412,7 @@ export async function resolveEntitiesToPointers(
              FROM pages p
             WHERE p.deleted_at IS NULL ${privacySql}
               AND p.source_id = ANY($1::text[])
-              AND ( lower(p.title) = ANY($2::text[])
+              AND ( (hashtext(lower(p.title)) = ANY(ARRAY(SELECT hashtext(t) FROM unnest($2::text[]) t)) AND lower(p.title) = ANY($2::text[]))
                  OR p.slug = ANY($3::text[])
                  OR p.slug LIKE ANY($4::text[])
                  OR (lower(p.title) LIKE ANY($5::text[]) AND p.type = 'person') )`,
@@ -422,7 +423,7 @@ export async function resolveEntitiesToPointers(
              FROM pages p
             WHERE p.deleted_at IS NULL ${privacySql}
               AND p.source_id = ANY($1::text[])
-              AND ( lower(p.title) = ANY($2::text[])
+              AND ( (hashtext(lower(p.title)) = ANY(ARRAY(SELECT hashtext(t) FROM unnest($2::text[]) t)) AND lower(p.title) = ANY($2::text[]))
              OR p.slug = ANY($3::text[])
              OR p.slug LIKE ANY($4::text[]) )`,
           [sourceIds, titlesLc, exactSlugs, slugSuffixes],
@@ -525,7 +526,7 @@ export async function resolveEntitiesToPointers(
              FROM pages p
             WHERE p.deleted_at IS NULL ${privacySql}
               AND p.source_id = ANY($1::text[])
-              AND ( lower(p.title) = ANY($2::text[]) OR p.slug = ANY($3::text[]) )`,
+              AND ( (hashtext(lower(p.title)) = ANY(ARRAY(SELECT hashtext(t) FROM unnest($2::text[]) t)) AND lower(p.title) = ANY($2::text[])) OR p.slug = ANY($3::text[]) )`,
           [sourceIds, cjkNorms, cjkNorms],
         );
         const cjkHits = new Map<string, Array<{ slug: string; source_id: string }>>();

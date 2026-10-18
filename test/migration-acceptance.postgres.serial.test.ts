@@ -4,9 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PostgresEngine } from '../src/core/postgres-engine.ts';
-import { runMigrations } from '../src/core/migrate.ts';
+import { LATEST_VERSION, runMigrations } from '../src/core/migrate.ts';
 import { buildIndexOnline, OnlineIndexInProgressError } from '../src/core/schema-migrations/helpers.ts';
-import { PAGES_TITLE_LOWER_TRGM_INDEX } from '../src/core/page-indexes.ts';
+import { PAGES_NAME_LOOKUP_INDEXES, PAGES_TITLE_LOWER_TRGM_INDEX } from '../src/core/page-indexes.ts';
 import { pageIndexesCheck } from '../src/commands/doctor/checks/page-indexes.ts';
 import { pageIndexesRepair } from '../src/core/repair/page-indexes.ts';
 import { runRepair, resolveRepairScope } from '../src/core/repair/core.ts';
@@ -72,7 +72,7 @@ describe.skipIf(!url)('DAV-6928 disposable PostgreSQL acceptance', () => {
       const [before] = await observer`SELECT indexrelid::text AS oid FROM pg_index WHERE indexrelid=to_regclass(${index.name})`;
       expect(await buildIndexOnline(engine, 243, index)).toBe('present');
       await runMigrations(engine);
-      expect(await engine.getConfig('version')).toBe('243');
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
       const [after] = await observer`SELECT indexrelid::text AS oid, indisvalid, indisready FROM pg_index WHERE indexrelid=to_regclass(${index.name})`;
       expect(after).toMatchObject({ oid: before.oid, indisvalid: true, indisready: true });
     } finally {
@@ -100,7 +100,7 @@ describe.skipIf(!url)('DAV-6928 disposable PostgreSQL acceptance', () => {
       const [valid] = await observer`SELECT indexrelid::text AS oid, indisvalid, indisready FROM pg_index WHERE indexrelid=to_regclass(${index.name})`;
       expect(valid).toMatchObject({ indisvalid: true, indisready: true });
       expect(valid.oid).not.toBe(invalid.oid);
-      expect(await engine.getConfig('version')).toBe('243');
+      expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
     } finally {
       await holder.unsafe('ROLLBACK').catch(() => {});
       await Promise.all([failing.disconnect(), holder.end()]);
@@ -137,9 +137,9 @@ describe.skipIf(!url)('DAV-6928 disposable PostgreSQL acceptance', () => {
 
   test('stamped v240 replay never builds page lookup indexes inline; native repair builds them online', async () => {
     const { engine } = fixture;
-    for (const name of ['idx_pages_source_title_lower', 'idx_pages_slug_trgm']) await engine.executeRaw(`DROP INDEX ${name}`);
+    for (const { name } of PAGES_NAME_LOOKUP_INDEXES) await engine.executeRaw(`DROP INDEX ${name}`);
     await engine.initSchema();
-    for (const name of ['idx_pages_source_title_lower', 'idx_pages_slug_trgm']) {
+    for (const { name } of PAGES_NAME_LOOKUP_INDEXES) {
       const [row] = await engine.executeRaw<{ missing: boolean }>('SELECT to_regclass($1) IS NULL AS missing', [name]);
       expect(row.missing).toBe(true);
     }

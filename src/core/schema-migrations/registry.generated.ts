@@ -244,6 +244,7 @@ import { v240 } from './v240-pages-name-lookup-indexes.ts';
 import { v241 } from './v241-persistence-request-slug-intent-index.ts';
 import { v242 } from './v242-extract-atoms-partial-input.ts';
 import { v243 } from './v243-nightly-memory-dependencies.ts';
+import { v244 } from './v244-bounded-page-title-index.ts';
 
 // Array order is historical (see HISTORICAL_ARRAY_ORDER in the generator); the
 // runner sorts by version before applying.
@@ -486,4 +487,5 @@ export const MIGRATIONS: Migration[] = [
   v241,
   v242,
   v243,
+  v244,
 ];

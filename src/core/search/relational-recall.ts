@@ -150,7 +150,7 @@ async function resolveSeedScoped(
     if (r?.source === 'fallback_slugify' && titleTypes.length) {
       const titled = await engine.executeRaw<{ slug: string }>(
         `SELECT slug FROM pages WHERE source_id = $1 AND deleted_at IS NULL AND type = ANY($2::text[])
-           AND lower(title) = lower($3) LIMIT 2`, [sid, titleTypes, phrase.trim()]);
+           AND hashtext(lower(title)) = hashtext(lower($3)) AND lower(title) = lower($3) LIMIT 2`, [sid, titleTypes, phrase.trim()]);
       if (titled.length === 1) r = { slug: titled[0].slug, source: 'exact_page' };
     }
     if (!r || r.source === 'fallback_slugify') continue;

@@ -364,6 +364,7 @@ export async function readAliases(query: ReadQuery, aliases: string[], scope?: P
     CROSS JOIN LATERAL (SELECT * FROM pages WHERE source_id = a.source_id AND slug = a.slug OFFSET 0) p
     WHERE ${filter}
       AND (a.rank = 0 OR NOT EXISTS (SELECT 1 FROM pages t WHERE t.source_id = a.source_id AND t.deleted_at IS NULL
+                                     AND hashtext(lower(t.title)) = hashtext(a.alias_norm)
                                      AND lower(t.title) = a.alias_norm AND t.slug <> a.slug))
     ORDER BY a.alias_norm, a.source_id, a.rank, a.slug`, params);
   const best = new Map<string, number>();
