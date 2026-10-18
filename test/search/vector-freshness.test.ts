@@ -42,12 +42,13 @@ afterEach(() => {
 });
 
 /** Pages `<prefix>-<i>`, one chunk each at angle `start + i * step` from the query. */
-async function seed(prefix: string, count: number, start: number, step: number, chunk: { hash: 'current' | 'stale' | 'null'; model?: string }) {
+async function seed(prefix: string, count: number, start: number, step: number, chunk: { hash: 'current' | 'stale' | 'null'; model?: string },
+  page: { sourceId?: string; type?: string; frontmatter?: Record<string, unknown> } = {}) {
   const hash = chunk.hash === 'current' ? 'md5(cc_text)' : chunk.hash === 'stale' ? `md5('text before the edit')` : 'NULL';
-  await engine.executeRaw(`INSERT INTO pages (slug, source_id, type, title, compiled_truth, knowledge_revision, text_projection_revision, chunker_version)
-    SELECT '${prefix}-' || i, 'default', 'note', '${prefix} ' || i, 'fixture', '00000000-0000-4000-8000-000000000001'::uuid,
+  await engine.executeRaw(`INSERT INTO pages (slug, source_id, type, title, compiled_truth, frontmatter, knowledge_revision, text_projection_revision, chunker_version)
+    SELECT '${prefix}-' || i, $1, $2, '${prefix} ' || i, 'fixture', $3::jsonb, '00000000-0000-4000-8000-000000000001'::uuid,
       '00000000-0000-4000-8000-000000000001'::uuid, 4
-    FROM generate_series(0, ${count - 1}) i`);
+    FROM generate_series(0, ${count - 1}) i`, [page.sourceId ?? 'default', page.type ?? 'note', JSON.stringify(page.frontmatter ?? {})]);
   await engine.executeRaw(`INSERT INTO content_chunks (page_id, chunk_index, chunk_text, chunk_source, model, embedded_text_hash, embedding)
     SELECT id, 0, cc_text, 'compiled_truth', $1, ${hash}, ARRAY[cos(a), sin(a), 0, 0, 0, 0, 0, 0]::real[]::vector
     FROM (SELECT p.id, '${prefix} chunk text ' || p.slug AS cc_text,
@@ -152,18 +153,20 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
   test('walk, scoped and joined queries enforce discriminating chunk and page predicates', async () => {
     await reset();
     await seed('current', 3, 0.05, 0.001, { hash: 'current' });
-    await seed('blocked', 6, 0.001, 0.001, { hash: 'current' });
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('filter-other', 'Filter other')`);
-    await engine.executeRaw(`UPDATE pages SET
-      source_id = CASE WHEN slug = 'blocked-2' THEN 'filter-other' ELSE source_id END,
-      frontmatter = CASE WHEN slug = 'blocked-4' THEN '{"visibility":"private"}'::jsonb ELSE frontmatter END,
-      type = CASE WHEN slug = 'blocked-5' THEN 'person' ELSE type END`);
+    await seed('language', 1, 0.001, 0, { hash: 'current' });
+    await seed('detail', 1, 0.002, 0, { hash: 'current' });
+    await seed('source', 1, 0.003, 0, { hash: 'current' }, { sourceId: 'filter-other' });
+    await seed('excluded', 1, 0.004, 0, { hash: 'current' });
+    await seed('private', 1, 0.005, 0, { hash: 'current' }, { frontmatter: { visibility: 'private' } });
+    await seed('typed', 1, 0.006, 0, { hash: 'current' }, { type: 'person' });
+    await seed('test/filtered', 1, 0.007, 0, { hash: 'current' });
     await engine.executeRaw(`UPDATE content_chunks cc SET
-      language = CASE WHEN p.slug = 'blocked-0' THEN 'python' ELSE 'typescript' END,
-      chunk_source = CASE WHEN p.slug = 'blocked-1' THEN 'fenced_code' ELSE 'compiled_truth' END
+      language = CASE WHEN p.slug = 'language-0' THEN 'python' ELSE 'typescript' END,
+      chunk_source = CASE WHEN p.slug = 'detail-0' THEN 'fenced_code' ELSE 'compiled_truth' END
       FROM pages p WHERE p.id = cc.page_id`);
     const options: SearchOpts = { embeddingColumn: column, sourceId: 'default', excludePrivate: true,
-      exclude_slugs: ['blocked-3'], language: 'typescript', detail: 'low' };
+      exclude_slugs: ['excluded-0'], language: 'typescript', detail: 'low' };
     const results = [];
     for (const dialect of ['postgres', 'pglite'] as const) {
       const walk = buildVectorSearchStatement({ dialect, embedding: query, limit: 10, offset: 0, opts: options });
@@ -176,7 +179,7 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
         witness: await engine.executeRaw(narrowed.hasMoreSql, narrowed.params.slice(0, narrowed.innerLimitIdx + 1)) });
     }
     const expected = ['current-0', 'current-1', 'current-2'];
-    expect(results).toEqual(['postgres', 'pglite'].map(dialect => ({ dialect, walk: ['blocked-5', ...expected],
+    expect(results).toEqual(['postgres', 'pglite'].map(dialect => ({ dialect, walk: ['typed-0', ...expected],
       joined: expected, scoped: expected, exact: expected, witness: [{ eligible: 3 }] })));
   }, 60_000);
 
