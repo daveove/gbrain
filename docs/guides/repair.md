@@ -243,8 +243,12 @@ case-insensitive equality, so hash collisions cannot return another title.
 Titles remain unchanged, including titles larger than a BTree index entry.
 A missing index and an INVALID or not-ready index are distinct findings.
 An index is healthy only when both `indisvalid` and `indisready` are true.
-A retained unbounded index is `obsolete`. A foreign active build is reported
-as `building` and left alone.
+The bounded title index must also match the `pages` table, nonunique BTree
+method, and exactly `(source_id, hashtext(lower(title)))` with no predicate
+or included columns. A same-name index on another table or with other keys
+is `conflicting`; migration and repair refuse it without dropping either
+that index or the legacy index. A retained unbounded index is `obsolete`.
+A foreign active build is reported as `building` and left alone.
 
 Preview with `gbrain repair page-indexes --json`, then apply with
 `gbrain repair page-indexes --apply`. Postgres drops inactive unusable

@@ -144,4 +144,22 @@ for (const backend of testBackends()) describe(`page title boundaries (${backend
       expect(retained?.present).toBe(true);
     });
   }, 120_000);
+  for (const table of ['pages', 'unrelated_title_fixture']) test(`replacement index collision on ${table} blocks migration and repair without retiring the legacy index`, async () => {
+    await withFixture(backend, async engine => {
+      if (table !== 'pages') await engine.executeRaw(`CREATE TABLE ${table} (source_id text, title text)`);
+      await engine.executeRaw(`CREATE INDEX ${LEGACY_PAGE_TITLE_INDEX} ON pages (source_id, lower(title))`);
+      await engine.executeRaw(`DROP INDEX ${PAGE_ONLINE_INDEXES[0].name}`);
+      await engine.executeRaw(`CREATE INDEX ${PAGE_ONLINE_INDEXES[0].name} ON ${table} (source_id, lower(title))`);
+      await engine.setConfig('version', '243');
+      await expect(runMigrations(engine)).rejects.toThrow('Conflicting page title index');
+      expect(await engine.getConfig('version')).toBe('243');
+      expect((await pageIndexesCheck(engine)).status).toBe('warn');
+      expect(await readPageIndexStates(engine)).toContainEqual({ name: PAGE_ONLINE_INDEXES[0].name, state: 'conflicting' });
+      const ctx = { engine, logger: { info() {} } } as unknown as OperationContext;
+      const plan = await pageIndexesRepair.plan(engine, { brain_id: 'title-test', source_ids: ['default'] }, null);
+      for (const item of plan.items) await expect(pageIndexesRepair.apply(ctx, item)).rejects.toThrow('Conflicting page title index');
+      const [retained] = await engine.executeRaw<{ present: boolean }>('SELECT to_regclass($1) IS NOT NULL AS present', [LEGACY_PAGE_TITLE_INDEX]);
+      expect(retained?.present).toBe(true);
+    });
+  }, 120_000);
 });

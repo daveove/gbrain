@@ -7,7 +7,7 @@ export async function pageIndexesCheck(engine: BrainEngine): Promise<Check> {
   const docs = 'docs/guides/repair.md#page-indexes';
   try {
     const indexes = await readPageIndexStates(engine);
-    const broken = indexes.filter(index => index.state === 'missing' || index.state === 'invalid' || index.state === 'obsolete');
+    const broken = indexes.filter(index => index.state === 'missing' || index.state === 'invalid' || index.state === 'obsolete' || index.state === 'conflicting');
     const building = indexes.filter(index => index.state === 'building');
     const details = { count: broken.length, indexes, repair: 'page-indexes', command: PAGE_INDEXES_REPAIR_COMMAND, docs };
     if (broken.length) return { name: 'page_indexes', status: 'warn', details,
