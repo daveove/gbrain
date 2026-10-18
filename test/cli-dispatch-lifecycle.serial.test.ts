@@ -331,11 +331,25 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(row.blend_norm_rrf).toBeUndefined();
     });
 
-    test(`${command} resolves --no-explain before rendering a global --explain request`, async () => {
-      const [row] = JSON.parse(await runRanking(['--explain', '--no-explain', '--json']));
+    test.each([
+      ['negated', '--explain', '--no-explain'],
+      ['inline false', '--explain', '--explain=false'],
+      ['literal false', '--explain', '--explain', 'false'],
+    ])(`${command} applies the last disabling explain flag: %s`, async (_name, ...flags) => {
+      const [row] = JSON.parse(await runRanking([...flags, '--json']));
       expect(row.score_details).toBeUndefined();
       expect(row.rrf).toBeUndefined();
       expect(row.blend_norm_rrf).toBeUndefined();
+    });
+
+    test.each([
+      ['negated', '--no-explain', '--explain'],
+      ['inline false', '--explain=false', '--explain'],
+      ['literal false', '--explain', 'false', '--explain'],
+    ])(`${command} applies the last enabling explain flag: %s`, async (_name, ...flags) => {
+      const [row] = JSON.parse(await runRanking([...flags, '--json']));
+      expect(row.score_details?.arms.map((arm: { arm: string }) => arm.arm)).toEqual(['vector', 'keyword']);
+      expect(row.score_details.final).toBeCloseTo(0.94, 6);
     });
   }
 });

@@ -87,6 +87,12 @@ describe('parseGlobalFlags', () => {
     expect(r.rest).toEqual(['search', 'test query']);
   });
 
+  test.each(['--explain', '--no-explain', '--explain=false'])('does not interpret literal query text after --: %s', token => {
+    const result = parseGlobalFlags(['search', '--', token]);
+    expect(result.cliOpts.explain).toBe(false);
+    expect(result.rest).toEqual(['search', '--', token]);
+  });
+
   // #4541 — the global claim is scoped to the search/query formatter commands.
   // Pre-fix, parseGlobalFlags claimed --explain for EVERY command, starving
   // extract (`extract --explain timeline` fell through to the WRITE-pass

@@ -112,9 +112,9 @@ function parseBrainValue(val: string | undefined): string {
 export const TIMEOUT_OWNING_COMMANDS = new Set(['sync', 'remote']);
 
 /**
- * #4541: commands whose result formatter consumes the GLOBAL --explain (the
- * v0.40.4 per-stage search attribution view in cli.ts's query/search
- * formatter; `ask` is the query alias rewritten before dispatch). For every
+ * #4541: commands whose GLOBAL --explain resolution is threaded into
+ * search/query operation parameters (`ask` is the query alias rewritten
+ * before dispatch). For every
  * OTHER command the global parser hands the flag back IN PLACE — `extract
  * --explain <kind>`, `whoknows --explain`, and `onboard --check --explain`
  * parse it themselves, and the blanket claim starved them: `extract
@@ -138,11 +138,15 @@ export function parseGlobalFlags(argv: string[]): { cliOpts: CliOptions; rest: s
   type Slot =
     | { plain: string }
     | { timeoutValue: string; equalsForm: boolean }
-    | { explainFlag: true };
+    | { explainFlag: boolean; token: string; literal?: string };
   const slots: Slot[] = [];
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === '--') {
+      for (; i < argv.length; i++) slots.push({ plain: argv[i] });
+      break;
+    }
     if (a === '--quiet') {
       cliOpts.quiet = true;
       continue;
@@ -186,11 +190,24 @@ export function parseGlobalFlags(argv: string[]): { cliOpts: CliOptions; rest: s
       slots.push({ timeoutValue: a.slice('--timeout='.length), equalsForm: true });
       continue;
     }
-    // v0.40.4 — --explain for `gbrain search/query` per-stage attribution.
-    // #4541: like --timeout, whether the global parser claims it depends on
-    // the command, which is only known after the full scan — slot it.
+    // Resolve all explain boolean forms in argv order; non-claiming commands
+    // receive their original tokens, including a literal boolean value.
     if (a === '--explain') {
-      slots.push({ explainFlag: true });
+      const literal = argv[i + 1];
+      if (literal === 'true' || literal === 'false') {
+        slots.push({ explainFlag: literal === 'true', token: a, literal });
+        i++;
+      } else {
+        slots.push({ explainFlag: true, token: a });
+      }
+      continue;
+    }
+    if (a === '--no-explain') {
+      slots.push({ explainFlag: false, token: a });
+      continue;
+    }
+    if (a.startsWith('--explain=')) {
+      slots.push({ explainFlag: a.slice('--explain='.length) !== 'false', token: a });
       continue;
     }
     // --brain <id> / --brain=<id> — brain (database) axis. Exact-match only:
@@ -281,11 +298,11 @@ export function parseGlobalFlags(argv: string[]): { cliOpts: CliOptions; rest: s
     }
     if ('explainFlag' in s) {
       if (commandClaimsExplain) {
-        cliOpts.explain = true;
-      } else if (commandEmitted) {
-        rest.push('--explain');
+        cliOpts.explain = s.explainFlag;
       } else {
-        deferredExplain.push('--explain');
+        const target = commandEmitted ? rest : deferredExplain;
+        target.push(s.token);
+        if (s.literal !== undefined) target.push(s.literal);
       }
       continue;
     }
