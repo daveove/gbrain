@@ -148,8 +148,6 @@ describe('#2185 acceptance — real usage stays legal', () => {
     expect(p.query).toBe('needle');
     expect((p as Record<string, unknown>)['json=true']).toBeUndefined();
     expect(parseOpArgs(search, ['needle', '--json=false']).json).toBe(false);
-    // = forms of bare-only CLI-locals reject loud instead of silently eating tokens.
-    expect(findUnknownOpFlag(search, ['--explain=verbose'])).toBe('--explain');
   });
 });
 

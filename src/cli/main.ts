@@ -531,6 +531,8 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
   // transform, and required-param check are all engine-free; refactoring
   // them out of the engine try/catch is safe and unlocks routing.
   const params = parseOpArgs(op, subArgs);
+  // Global parsing consumed the flags; query text after `--` must not be rescanned.
+  if (cliOpts.explain && (op.name === 'search' || op.name === 'query')) params.explain = true;
 
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
   // piped input can't block the parse forever — the bounded read leaves the
@@ -1030,8 +1032,7 @@ export function resolveQueryImage(
 }
 
 export function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
-  const explain = (op.name === 'search' || op.name === 'query') && (getCliOptions().explain || args.includes('--explain'));
-  const params: Record<string, unknown> = explain ? { explain: true } : {};
+  const params: Record<string, unknown> = {};
   const positional = op.cliHints?.positional || [];
   let posIdx = 0;
 

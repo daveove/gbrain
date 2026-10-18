@@ -237,7 +237,7 @@ describe('CLI explanation attribution through native dispatch', () => {
   // Formatter-only tests miss the global parser stripping --explain before dispatch.
   // The operation fixture runs real fusion and cosine stages without a DB or provider.
   for (const command of ['search', 'query'] as const) {
-    const runRanking = async (flags: string[], keywordOnly = false, routed = false) => {
+    const runRanking = async (flags: string[], keywordOnly = false, routed = false, query: string | null = 'semantic match') => {
       const row: SearchResult = {
         slug: 'notes/semantic-match', page_id: 1, title: 'Semantic match', type: 'note',
         chunk_text: 'A deterministic semantic match.', chunk_source: 'compiled_truth',
@@ -271,7 +271,7 @@ describe('CLI explanation attribution through native dispatch', () => {
       try {
         resetRetrievalMetaForTests();
         writeConfig(routed ? THIN : LOCAL);
-        const events = await run([command, 'semantic match', ...flags]);
+        const events = await run([command, ...(query === null ? [] : [query]), ...flags]);
         expect(events).toContain('returned');
         expect(events.some(event => event.startsWith('threw:'))).toBe(false);
         return output.join('');
@@ -295,6 +295,13 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(text).toContain('found by: vector #1');
       expect(text).toContain('keyword #1');
       expect(text).toContain('cosine=0.8');
+    });
+
+    test(`${command} keeps --explain after the option terminator as literal query text`, async () => {
+      const [row] = JSON.parse(await runRanking(['--json', '--', '--explain'], false, false, null));
+      expect(row.score_details).toBeUndefined();
+      expect(row.rrf).toBeUndefined();
+      expect(row.blend_norm_rrf).toBeUndefined();
     });
 
     test(`${command} --explain survives strict routed dispatch`, async () => {
