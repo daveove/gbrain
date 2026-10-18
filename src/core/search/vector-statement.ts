@@ -10,7 +10,9 @@
  * the vector deadline on large brains. On an HNSW-indexed column the
  * candidate CTE therefore carries only the well-estimated model check
  * (relaxed variant); freshness is projected as `hash_current` and filtered in
- * `scored`, so a stale-text chunk still never reaches results. The guarded
+ * `scored`, so a stale-text chunk still never reaches results. Independent
+ * columns project their full model, text/input and page proof as
+ * `proof_current` after the ANN walk and filter it in `scored`. The guarded
  * variant (freshness inside the CTE) serves non-indexed columns, the legacy
  * guard rollback, the exact fallback and the `hasMore` exhaustion witness.
  *
@@ -60,7 +62,7 @@
 import type { SearchOpts } from '../types.ts';
 import { hnswIndexExpected } from '../vector-index.ts';
 import { unverifiedExtractionFragment } from '../extraction-review.ts';
-import { buildVectorCastFragment, normalizeEngineColumn, independentEmbeddingReadFilter } from './embedding-column.ts';
+import { buildVectorCastFragment, normalizeEngineColumn, independentEmbeddingSearchPredicates } from './embedding-column.ts';
 import { resolveBoostMap, resolveHardExcludes } from './source-boost.ts';
 import { buildBestPerPagePoolCte, buildHardExcludeClause, buildSourceFactorCase, buildVisibilityClause } from './sql-ranking.ts';
 
@@ -295,7 +297,8 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
 
   let modelParam: string | undefined;
   if (resolvedCol.name === 'embedding') modelParam = bind(resolvedCol.embeddingModel || null);
-  const relaxed = indexed && modelParam !== undefined && opts?.vectorLegacyGuard !== true;
+  const independentPredicates = resolvedCol.provenance ? independentEmbeddingSearchPredicates(resolvedCol, bind) : undefined;
+  const relaxed = indexed && (modelParam !== undefined || independentPredicates !== undefined) && opts?.vectorLegacyGuard !== true;
   // A type or date filter, or a source scope with a small share of pages, is
   // the caller narrowing the search; the walk would usually come back short,
   // so those keep the joined statement alone.
@@ -307,10 +310,18 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
   const overfetch = indexWalkOverfetch(share);
   const preMigration = modelParam ? `(${modelParam}::text IS NULL AND NOT EXISTS(SELECT 1 FROM config WHERE key='embedding_migration.state'))` : '';
   const hashCurrent = `(cc.embedded_text_hash=md5(cc.chunk_text) OR cc.embedded_text_hash IS NULL)`;
-  const independentProof = resolvedCol.provenance ? independentEmbeddingReadFilter(resolvedCol, bind) : undefined;
+  const independentProof = independentPredicates?.proof;
   const guardedGeneration = independentProof ? `AND (${independentProof})` : modelParam ? `AND ((cc.model=${modelParam} AND ${hashCurrent})
         OR ${preMigration})` : '';
-  const relaxedGeneration = modelParam ? `AND (cc.model=${modelParam} OR ${preMigration})` : '';
+  const relaxedGeneration = independentPredicates
+    ? `AND (${independentPredicates.ann})`
+    : modelParam ? `AND (cc.model=${modelParam} OR ${preMigration})` : '';
+  const scoredProofSql = independentPredicates
+    ? `${independentPredicates.proof} AS proof_current`
+    : `${hashCurrent} AS hash_current`;
+  const freshFilter = independentPredicates
+    ? 'proof_current'
+    : `${modelParam}::text IS NULL OR hash_current`;
 
   const innerLimitParam = bind(innerLimit);
   const innerLimitIdx = params.length - 1;
@@ -332,7 +343,6 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
           ${generation}
           ${hardExcludeClause}
           ${visibilityClause}`;
-  const freshFilter = `${modelParam}::text IS NULL OR hash_current`;
 
   const candidateColumns = `p.slug, p.id as page_id, p.title, p.type, p.source_id,${dialect === 'pglite' ? ' p.updated_at,' : ''}
           p.effective_date, p.effective_date_source,
@@ -349,7 +359,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
       WITH hnsw_candidates AS (
         SELECT
           ${candidateColumns}${relax ? `
-          ${hashCurrent} AS hash_current,` : ''}
+          ${scoredProofSql},` : ''}
           1 - (cc.${col} <=> ${castSql}) AS raw_score
         ${candidateFrom(relax ? relaxedGeneration : guardedGeneration)}
         ORDER BY ${exact ? '(' : ''}cc.${col} <=> ${castSql}${exact ? ') + 0' : ''}
@@ -370,7 +380,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
       hnsw_candidates AS (
         SELECT
           ${candidateColumns}
-          ${hashCurrent} AS hash_current,
+          ${scoredProofSql},
           1 - ann.distance AS raw_score
         FROM ann
         JOIN content_chunks cc ON cc.id = ann.id
@@ -406,7 +416,7 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
       hnsw_candidates AS (
         SELECT
           ${candidateColumns}
-          ${hashCurrent} AS hash_current,
+          ${scoredProofSql},
           1 - (cc.${col} <=> ${castSql}) AS raw_score
         FROM scope_scan
         JOIN content_chunks cc ON cc.id = scope_scan.id
