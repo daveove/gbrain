@@ -832,17 +832,21 @@ export function mergeEmbeddingColumnRegistries(file: Record<string, EmbeddingCol
   return combined ?? file;
 }
 
-/** Completed own-space publication, including the exact canonical page revision. */
-export function independentEmbeddingReadFilter(column: ResolvedColumn, bind: (value: string) => string, chunkAlias = 'cc', pageAlias = 'p'): string {
+/** Keep model filtering in ANN and the completed publication proof after the index walk. */
+export function independentEmbeddingSearchPredicates(column: ResolvedColumn, bind: (value: string) => string, chunkAlias = 'cc', pageAlias = 'p'): { ann: string; proof: string } {
   const checked = normalizeEngineColumn(column);
   if (!checked.provenance || !checked.embeddingModel) throw new Error('Independent read proof requires an independent model space');
   const proof = getEmbeddingProvenanceColumns(checked);
   const cc = quoteIdentifier(chunkAlias);
   const p = quoteIdentifier(pageAlias);
-  return `${cc}.${quoteIdentifier(proof.model)} = ${bind(checked.embeddingModel)}
+  const ann = `${cc}.${quoteIdentifier(proof.model)} = ${bind(checked.embeddingModel)}`;
+  return {
+    ann,
+    proof: `${ann}
     AND ${cc}.${quoteIdentifier(proof.textHash)} = md5(${cc}.chunk_text)
     AND ${cc}.${quoteIdentifier(proof.inputHash)} IS NOT NULL
-    AND ${p}.${quoteIdentifier(proof.pageSignature)} = ${bind(embeddingColumnSignature(checked))} || ':' || ${independentPageProofContextSql(pageAlias)}`;
+    AND ${p}.${quoteIdentifier(proof.pageSignature)} = ${bind(embeddingColumnSignature(checked))} || ':' || ${independentPageProofContextSql(pageAlias)}`,
+  };
 }
 
 /** Canonical and projection changes invalidate a completed page's own-space stamp. */

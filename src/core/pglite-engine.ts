@@ -76,7 +76,7 @@ import { logBatchRetry as auditLogBatchRetry, logBatchExhausted as auditLogBatch
 import { supportsHnswIterativeScan } from './vector-index.ts';
 import { searchIndexWalk, searchVectorPool, readVectorPool, type VectorPoolAttempt } from './search/vector-pool.ts';
 import { beforePlannerRead, plannerRead } from './planner-stats.ts';
-import { buildVectorSearchStatement, PAGE_SOURCE_STATS_SQL, SCOPE_CHUNKS_SQL, VECTOR_EXTENSION_VERSION_SQL, vectorScopeLoader, type PageSourceStats, type ScopeChunkCount } from './search/vector-statement.ts';
+import { buildVectorSearchStatement, INDEX_WALK_OVERFETCH, PAGE_SOURCE_STATS_SQL, SCOPE_CHUNKS_SQL, VECTOR_EXTENSION_VERSION_SQL, vectorScopeLoader, type PageSourceStats, type ScopeChunkCount } from './search/vector-statement.ts';
 import { withVectorSettings } from './search/vector-settings.ts';
 import { PGLITE_SCHEMA_SQL, getPGLiteSchema } from './pglite-schema.ts';
 import { DEFAULT_EMBEDDING_MODEL, DEFAULT_EMBEDDING_DIMENSIONS } from './ai/defaults.ts';
@@ -1719,7 +1719,7 @@ export class PGLiteEngine implements BrainEngine {
         const bound = [...stmt.params];
         bound[stmt.innerLimitIdx] = requested;
         return readVectorPool((await tx.query<Record<string, unknown>>(scopeScan && stmt.scopeScanSql || indexWalk && stmt.indexWalkSql || stmt.sql, bound)).rows);
-      }, undefined, opts?.hnswIterativeScan, indexWalk && stmt.indexWalkSql ? stmt.indexWalkOverfetch : undefined));
+      }, undefined, opts?.hnswIterativeScan, indexWalk && stmt.indexWalkSql ? stmt.indexWalkOverfetch : !scopeScan && stmt.relaxed ? INDEX_WALK_OVERFETCH : 1, !!(indexWalk && stmt.indexWalkSql)));
     const rows = await searchIndexWalk(stmt, limit, attempt) ?? await searchVectorPool(limit, stmt.innerLimit, iterative, stmt.indexed, 'pglite',
       attempt,
       async pool => {

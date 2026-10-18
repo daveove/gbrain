@@ -68,7 +68,7 @@ import { SCHEMA_SQL } from './schema-embedded.generated.ts';
 import { verifySchema } from './schema-verify.ts';
 import { applyChunkEmbeddingIndexPolicy, dropZombieIndexes, supportsHnswIterativeScan } from './vector-index.ts';
 import { searchIndexWalk, searchVectorPool, readVectorPool, remainingVectorBudget, type VectorPoolAttempt, POOL_MAX_SCAN_TUPLES } from './search/vector-pool.ts';
-import { buildVectorSearchStatement, PAGE_SOURCE_STATS_SQL, SCOPE_CHUNKS_SQL, SET_STATEMENT_TIMEOUT_SQL, VECTOR_EXTENSION_VERSION_SQL, vectorScopeLoader, type PageSourceStats, type ScopeChunkCount, type VectorSearchStatement } from './search/vector-statement.ts';
+import { buildVectorSearchStatement, INDEX_WALK_OVERFETCH, PAGE_SOURCE_STATS_SQL, SCOPE_CHUNKS_SQL, SET_STATEMENT_TIMEOUT_SQL, VECTOR_EXTENSION_VERSION_SQL, vectorScopeLoader, type PageSourceStats, type ScopeChunkCount, type VectorSearchStatement } from './search/vector-statement.ts';
 import { withVectorSettings } from './search/vector-settings.ts';
 import { guardSearchStatistics } from './search/projection-statistics.ts';
 import {
@@ -1464,7 +1464,7 @@ export class PostgresEngine implements BrainEngine {
         bound[stmt.innerLimitIdx] = exact ? null : innerLimit;
         await tx.unsafe(SET_STATEMENT_TIMEOUT_SQL, [String(remainingVectorBudget(deadline))]);
         return run(tx, (scopeScan && stmt.scopeScanSql) || walk || (exact ? stmt.exactSql : stmt.sql), bound as Parameters<typeof tx.unsafe>[1]);
-      }, deadline, opts?.hnswIterativeScan, walk ? stmt.indexWalkOverfetch : undefined);
+      }, deadline, opts?.hnswIterativeScan, walk ? stmt.indexWalkOverfetch : !exact && !scopeScan && stmt.relaxed ? INDEX_WALK_OVERFETCH : 1, !!walk);
     }, { alwaysTransaction: true, jitOff: true });
   }
 

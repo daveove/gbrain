@@ -14,15 +14,13 @@ import {
 } from '../../src/core/search/hnsw-iterative-scan.ts';
 import { searchConfigValueRefusal } from '../../src/core/search/config-values.ts';
 
-async function appliedSettings(iterative: boolean, mode?: 'relaxed_order' | 'strict_order' | 'off'): Promise<Record<string, string>> {
+async function appliedSettings(iterative: boolean, mode?: 'relaxed_order' | 'strict_order' | 'off', overfetch = 1, indexWalk = false): Promise<Record<string, string>> {
   const sets: Array<[string[], string[]]> = [];
   const query = async (sql: string, params: unknown[]) => {
     if (sql.includes('set_config')) sets.push(params as [string[], string[]]);
     return (params[0] as string[]).map((name) => ({ name, value: null }));
   };
-  const args: Parameters<typeof withVectorSettings> = [query, iterative, 200, 20_000, async () => 'ok', undefined];
-  if (mode) args.push(mode);
-  await withVectorSettings(...args);
+  await withVectorSettings(query, iterative, 200, 20_000, async () => 'ok', undefined, mode, overfetch, indexWalk);
   const [names, values] = sets[0]!;
   return Object.fromEntries(names.map((n, i) => [n, values[i]!]));
 }
@@ -44,6 +42,18 @@ describe('hnsw.iterative_scan mode', () => {
 
   test('an engine without iterative scan support sets no iterative mode', async () => {
     expect((await appliedSettings(false))['hnsw.iterative_scan']).toBeUndefined();
+  });
+
+  test('joined ANN overscan sizes ef_search without disabling planner sorts', async () => {
+    const s = await appliedSettings(true, 'relaxed_order', 2);
+    expect(s['hnsw.ef_search']).toBe(String(hnswEfSearchFor(400)));
+    expect(s.enable_sort).toBeUndefined();
+  });
+
+  test('only an index walk applies the walk planner settings to its larger window', async () => {
+    const s = await appliedSettings(true, 'relaxed_order', 3, true);
+    expect(s['hnsw.ef_search']).toBe(String(hnswEfSearchFor(600)));
+    expect(s.enable_sort).toBe('off');
   });
 
   test('env wins over config; config over the default; an invalid value falls back to the default', () => {
