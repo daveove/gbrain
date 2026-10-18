@@ -52,7 +52,7 @@ export async function retireLegacyPageTitleIndex(engine: BrainEngine, version: n
   if (!await readOnlineIndexState(engine, LEGACY_PAGE_TITLE_INDEX)) return false;
   const [legacy] = await engine.executeRaw<{ owned: boolean }>(
     `SELECT i.indrelid = to_regclass('pages') AND NOT i.indisunique AND i.indnkeyatts = 2
-       AND i.indpred IS NULL AND am.amname = 'btree'
+       AND i.indnatts = 2 AND i.indpred IS NULL AND am.amname = 'btree'
        AND pg_get_indexdef(i.indexrelid, 1, true) = 'source_id'
        AND pg_get_indexdef(i.indexrelid, 2, true) = 'lower(title)' AS owned
        FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_am am ON am.oid = c.relam

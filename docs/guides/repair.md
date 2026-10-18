@@ -255,6 +255,7 @@ Preview with `gbrain repair page-indexes --json`, then apply with
 leftovers and creates each index `CONCURRENTLY`, outside a transaction.
 The repair also removes the obsolete unbounded title index after the
 replacement is valid and ready. PGLite builds and drops inline.
+Legacy retirement also refuses custom covering indexes with included columns.
 This changes no pages, embeddings or migration stamps
 and runs brain-wide (`--source` does not narrow it). If interrupted, rerun
 the same repair after any active builder finishes, then check

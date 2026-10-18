@@ -162,4 +162,18 @@ for (const backend of testBackends()) describe(`page title boundaries (${backend
       expect(retained?.present).toBe(true);
     });
   }, 120_000);
+  test('covering legacy title index is retained by migration and repair', async () => {
+    await withFixture(backend, async engine => {
+      await engine.executeRaw(`CREATE INDEX ${LEGACY_PAGE_TITLE_INDEX} ON pages (source_id, lower(title)) INCLUDE (compiled_truth)`);
+      await engine.setConfig('version', '243');
+      await expect(runMigrations(engine)).rejects.toThrow('Refusing to drop unrelated index');
+      expect(await engine.getConfig('version')).toBe('243');
+      const ctx = { engine, logger: { info() {} } } as unknown as OperationContext;
+      const plan = await pageIndexesRepair.plan(engine, { brain_id: 'title-test', source_ids: ['default'] }, null);
+      expect(plan.items).toHaveLength(1);
+      await expect(pageIndexesRepair.apply(ctx, plan.items[0]!)).rejects.toThrow('Refusing to drop unrelated index');
+      const [retained] = await engine.executeRaw<{ definition: string }>('SELECT pg_get_indexdef(to_regclass($1)) AS definition', [LEGACY_PAGE_TITLE_INDEX]);
+      expect(retained?.definition).toContain('INCLUDE (compiled_truth)');
+    });
+  }, 120_000);
 });
