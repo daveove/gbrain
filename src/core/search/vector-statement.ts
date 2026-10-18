@@ -355,13 +355,30 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
 
   const joinedCandidates = (exact: boolean) => {
     const relax = relaxed && !exact;
+    if (relax) return `
+      WITH joined_ann AS MATERIALIZED (
+        SELECT cc.id, cc.${col} <=> ${castSql} AS distance
+        ${candidateFrom(relaxedGeneration)}
+        ORDER BY cc.${col} <=> ${castSql}
+        LIMIT ${innerLimitParam}::int * ${INDEX_WALK_OVERFETCH}
+      ),
+      hnsw_candidates AS (
+        SELECT
+          ${candidateColumns}
+          ${scoredProofSql},
+          1 - ann.distance AS raw_score
+        FROM joined_ann ann
+        JOIN content_chunks cc ON cc.id = ann.id
+        JOIN pages p ON p.id = cc.page_id
+        ORDER BY ann.distance + 0, ann.id
+        LIMIT ${innerLimitParam}
+      ),`;
     return `
       WITH hnsw_candidates AS (
         SELECT
-          ${candidateColumns}${relax ? `
-          ${scoredProofSql},` : ''}
+          ${candidateColumns}
           1 - (cc.${col} <=> ${castSql}) AS raw_score
-        ${candidateFrom(relax ? relaxedGeneration : guardedGeneration)}
+        ${candidateFrom(guardedGeneration)}
         ORDER BY ${exact ? '(' : ''}cc.${col} <=> ${castSql}${exact ? ') + 0' : ''}
         LIMIT ${innerLimitParam}
       ),`;

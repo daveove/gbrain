@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
 import postgres from '#postgres';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
@@ -8,6 +8,7 @@ import { readProjectionSnapshot, installPageEmbeddings } from '../../src/core/pa
 import { embeddingColumnSignature } from '../../src/core/search/embedding-column.ts';
 import { buildVectorSearchStatement } from '../../src/core/search/vector-statement.ts';
 import type { ResolvedColumn } from '../../src/core/types.ts';
+import * as vectorPool from '../../src/core/search/vector-pool.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const url = process.env.DATABASE_URL;
@@ -130,6 +131,39 @@ function indexes(plan: unknown): string[] {
       (SELECT extversion FROM pg_extension WHERE extname='vector') AS vector`);
     console.info(JSON.stringify({ fixture: 'independent-column-ann', ...versions,
       legacyIndexes: indexes(legacy), fixedIndexes: indexes(fixed) }));
+  }, 30_000);
+
+  test('native type and date narrowing re-sort joined HNSW candidates under shipped settings', async () => {
+    for (const narrowing of [{ type: 'note' }, { afterDate: '2000-01-01' }]) {
+      const options = { ...opts(), ...narrowing };
+      expect(indexes(await engine.explainVectorSearch(query, options))).toContain('idx_chunks_embedding_nomic');
+      assertSafe(await engine.searchVector(query, options));
+    }
+  }, 30_000);
+
+  test('an actually underfilled native walk falls back to the guarded, re-sorted joined search', async () => {
+    const original = vectorPool.searchIndexWalk;
+    let underfilled = false;
+    let walkResult: unknown;
+    const spy = spyOn(vectorPool, 'searchIndexWalk').mockImplementation(async (statement, limit, run) => {
+      const result = await original(statement, limit, async attempt => {
+        const batch = await run(attempt);
+        if (attempt.indexWalk) underfilled = batch.candidatePool < attempt.innerLimit;
+        return batch;
+      });
+      walkResult = result;
+      return result;
+    });
+    try {
+      const rows = await engine.searchVector(query, { ...opts(),
+        exclude_slugs: Array.from({ length: 3950 }, (_, i) => `background/${i + 51}`) });
+      expect(underfilled).toBe(true);
+      expect(walkResult).toBeNull();
+      assertSafe(rows);
+      expect(rows.every(row => !row.slug.startsWith('background/') || Number(row.slug.slice('background/'.length)) <= 50)).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   }, 30_000);
 
   test('joined, walk, scoped, exact and legacy queries enforce the same publication and source boundary', async () => {
