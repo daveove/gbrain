@@ -23,6 +23,13 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spy
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { operationsByName } from '../src/core/operations.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
+import type { SearchResult } from '../src/core/types.ts';
+import { cosineReScore, rrfFusionWeighted } from '../src/core/search/hybrid.ts';
+import { buildScoreDetails } from '../src/core/search/explain-formatter.ts';
+import * as stdoutDelivery from '../src/core/cli-force-exit.ts';
+import { captureRetrievalMeta, resetRetrievalMetaForTests } from '../src/cli/main.ts';
 
 const events: string[] = [];
 let connectError: Error | null = null;
@@ -222,4 +229,84 @@ describe('CLI dispatch lifecycle (connect / remote-route / drain / disconnect)',
     expect(seen.slice(0, 1)).toEqual(['connect']);
     expect(seen.slice(-3)).toEqual(['drain', 'disconnect', 'returned']);
   });
+});
+
+describe('CLI explanation attribution through native dispatch', () => {
+  // Formatter-only tests miss the global parser stripping --explain before dispatch.
+  // The operation fixture runs real fusion and cosine stages without a DB or provider.
+  for (const command of ['search', 'query'] as const) {
+    const runRanking = async (flags: string[], keywordOnly = false) => {
+      const row: SearchResult = {
+        slug: 'notes/semantic-match', page_id: 1, title: 'Semantic match', type: 'note',
+        chunk_text: 'A deterministic semantic match.', chunk_source: 'compiled_truth',
+        chunk_id: 1, chunk_index: 0, score: 1, stale: false, source_id: 'default',
+      };
+      const embeddings = {
+        getEmbeddingsByChunkIds: async () => new Map([[1, new Float32Array([0.8, 0.6])]]),
+      } as unknown as BrainEngine;
+      const handler = spyOn(operationsByName[command], 'handler').mockImplementation(async (_ctx, p) => {
+        const attribute = p.explain === true;
+        let rows = keywordOnly ? [row] : await cosineReScore(embeddings,
+          rrfFusionWeighted([
+            { list: [row], k: 60, arm: 'vector' },
+            { list: [row], k: 60, arm: 'keyword' },
+          ], false, attribute), new Float32Array([1, 0]), 'embedding', undefined, attribute);
+        if (attribute) rows = rows.map(r => ({ ...r, score_details: buildScoreDetails(r) }));
+        captureRetrievalMeta('retrieval', {
+          degraded: keywordOnly ? [{ stage: 'query_embed_failed', reason: 'paid_api_disabled' }] : [],
+        });
+        return rows;
+      });
+      const output: string[] = [];
+      const delivery = spyOn(stdoutDelivery, 'writeStdoutFinal').mockImplementation(async text => { output.push(text); });
+      try {
+        resetRetrievalMetaForTests();
+        writeConfig(LOCAL);
+        const events = await run([command, 'semantic match', ...flags]);
+        expect(events).toContain('returned');
+        expect(events.some(event => event.startsWith('threw:'))).toBe(false);
+        return output.join('');
+      } finally {
+        handler.mockRestore();
+        delivery.mockRestore();
+        resetRetrievalMetaForTests();
+      }
+    };
+
+    test(`${command} --explain --json reports the real fusion votes and cosine blend`, async () => {
+      const [row] = JSON.parse(await runRanking(['--explain', '--json']));
+      expect(row.score_details.arms.map((arm: { arm: string; rank: number }) => [arm.arm, arm.rank]))
+        .toEqual([['vector', 1], ['keyword', 1]]);
+      expect(row.score_details.rrf).toMatchObject({ state: 'applied', raw: 1 / 30, normalized: 1 });
+      expect(row.score_details.blend).toMatchObject({ state: 'applied', norm_rrf: 1 });
+      expect(row.score_details.blend.cosine).toBeCloseTo(0.8, 6);
+      expect(row.score_details.final).toBeCloseTo(0.94, 6);
+    });
+
+    test(`${command} --explain preserves a genuine missing-vector cause`, async () => {
+      const output = await runRanking(['--explain'], true);
+      expect(output).toContain('query_embed_failed (paid_api_disabled)');
+      expect(output).toContain('notes/semantic-match');
+      const [row] = JSON.parse(await runRanking(['--explain', '--json'], true));
+      expect(row.score_details.arms).toEqual([]);
+      expect(row.score_details.rrf).toEqual({ state: 'not_run', reason: 'single_arm_path' });
+      expect(row.score_details.blend).toEqual({ state: 'not_run', reason: 'no_query_embedding' });
+    });
+
+    test(`${command} plain output and JSON remain unchanged without explain`, async () => {
+      expect(await runRanking([])).toBe('[0.9400] notes/semantic-match -- A deterministic semantic match.\n');
+      const [row] = JSON.parse(await runRanking(['--json']));
+      expect(row.score_details).toBeUndefined();
+      expect(row.rrf).toBeUndefined();
+      expect(row.blend_norm_rrf).toBeUndefined();
+      expect(row.cosine).toBeCloseTo(0.8, 6);
+    });
+
+    if (command === 'query') test('query --no-explain keeps attribution disabled', async () => {
+      const [row] = JSON.parse(await runRanking(['--no-explain', '--json']));
+      expect(row.score_details).toBeUndefined();
+      expect(row.rrf).toBeUndefined();
+      expect(row.blend_norm_rrf).toBeUndefined();
+    });
+  }
 });
