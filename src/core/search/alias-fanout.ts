@@ -106,6 +106,7 @@ export async function resolveQueryEntities(engine: BrainEngine, query: string, s
   const titleRows = await engine.executeRaw<{ slug: string; source_id: string; t: string }>(
     `SELECT slug, source_id, lower(title) AS t FROM pages
       WHERE lower(title) = ANY($1::text[]) AND source_id = ANY($2::text[]) AND type = ANY($3::text[]) AND deleted_at IS NULL
+        AND hashtext(lower(title)) = ANY(ARRAY(SELECT hashtext(t) FROM unnest($1::text[]) t))
       ${scope.excludePrivate ? `AND ${privatePagesFilterFragment('pages', scope.excludePrivate)}` : ''}`, [norms, sources, types]).catch(() => []);
   const caseRows = await engine.executeRaw<{ slug: string; alias_norm: string; alias_text: string | null }>(
     `SELECT slug, alias_norm, alias_text FROM page_aliases WHERE alias_norm = ANY($1::text[]) AND case_sensitive AND source_id = ANY($2::text[])`,

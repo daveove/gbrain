@@ -70,14 +70,6 @@ reproduce byte for byte. Each file is written by `test/helpers/golden.ts` as
 
 ## Migrations, routes, exports (A11 / TE1 / O13)
 
-- `migrations/records.json` (`test/migrations-golden.test.ts`, `migrations-record-v1`):
-  all MIGRATIONS entries in array order (the runner sorts by version), gaps 17-19 and
-  100, name, exact `sql` / `sqlFor` hashes, `transaction`, `idempotent`, handler /
-  verify presence, and sha256 of the normalized AST source of handler / verify bodies
-  and the helpers they reference (`test/helpers/migration-records.ts`, tokens from
-  `scripts/lib/normalize-tokens.ts`; never `Function.toString()`). Records are located
-  by shape across `src/core/migrate.ts` and `src/core/schema-migrations/**`, helpers
-  keyed by name, so the W3 split must reproduce the file unchanged.
 - `serve-http/routes.json` (`test/serve-http-route-golden.test.ts`,
   `serve-http-routes-v1`): the ordered Express registration stack from `runServeHttp`
   by AST, following mount functions that receive the app.

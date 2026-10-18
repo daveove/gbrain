@@ -1746,7 +1746,7 @@ export function makeResolver(
         [normalizeBasename(value), slugifySegment(value)].map(form => `${hint}/${form}`)))];
       const matches = await engine.executeRaw<{ slug: string }>(`SELECT slug FROM pages
         WHERE source_id=$1 AND deleted_at IS NULL AND type='person'
-          AND (slug=ANY($2::text[]) OR lower(title)=lower($3)
+          AND (slug=ANY($2::text[]) OR (hashtext(lower(title))=hashtext(lower($3)) AND lower(title)=lower($3))
             OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(frontmatter->'aliases')='array'
               THEN frontmatter->'aliases' ELSE '[]'::jsonb END) alias WHERE lower(alias)=lower($3))) LIMIT 2`,
       [opts.sourceId ?? 'default', slugs, value]);

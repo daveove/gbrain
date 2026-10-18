@@ -558,7 +558,7 @@ async function tryUnambiguousPrefixExpansion(
     const rows = await engine.executeRaw<{ slug: string; title: string | null }>(
       `SELECT slug, title FROM pages
         WHERE source_id = $1 AND deleted_at IS NULL
-          AND slug LIKE ANY($2::text[]) AND lower(title) = lower($3)
+          AND slug LIKE ANY($2::text[]) AND hashtext(lower(title)) = hashtext(lower($3)) AND lower(title) = lower($3)
         LIMIT 3`,
       [source_id, patterns, raw.trim()],
     );

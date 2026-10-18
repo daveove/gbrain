@@ -7,11 +7,11 @@ export async function pageIndexesCheck(engine: BrainEngine): Promise<Check> {
   const docs = 'docs/guides/repair.md#page-indexes';
   try {
     const indexes = await readPageIndexStates(engine);
-    const broken = indexes.filter(index => index.state === 'missing' || index.state === 'invalid');
+    const broken = indexes.filter(index => index.state === 'missing' || index.state === 'invalid' || index.state === 'obsolete');
     const building = indexes.filter(index => index.state === 'building');
     const details = { count: broken.length, indexes, repair: 'page-indexes', command: PAGE_INDEXES_REPAIR_COMMAND, docs };
     if (broken.length) return { name: 'page_indexes', status: 'warn', details,
-      message: `${broken.map(index => `${index.name} is ${index.state === 'invalid' ? 'INVALID' : 'missing'}`).join('; ')}: page name and title lookups can scan the whole pages table. Rebuild on the brain host: ${PAGE_INDEXES_REPAIR_COMMAND}` };
+      message: `${broken.map(index => `${index.name} is ${index.state === 'invalid' ? 'INVALID' : index.state}`).join('; ')}: page lookup indexes need repair; obsolete unbounded indexes can reject long titles. Repair on the brain host: ${PAGE_INDEXES_REPAIR_COMMAND}` };
     if (building.length) return { name: 'page_indexes', status: 'warn', details,
       message: `Still building: ${building.map(index => index.name).join('; ')}. It is safe to leave running; rerun gbrain doctor to follow it.` };
     return { name: 'page_indexes', status: 'ok', message: 'Page lookup indexes are valid and ready.', details };

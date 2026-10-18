@@ -864,7 +864,7 @@
             "docs": "docs/guides/repair.md#page-indexes",
             "indexes": [
               {
-                "name": "idx_pages_source_title_lower",
+                "name": "idx_pages_source_title_hash",
                 "state": "valid"
               },
               {
