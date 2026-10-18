@@ -29,7 +29,9 @@ import type { SearchResult } from '../src/core/types.ts';
 import { cosineReScore, rrfFusionWeighted } from '../src/core/search/hybrid.ts';
 import { buildScoreDetails } from '../src/core/search/explain-formatter.ts';
 import * as stdoutDelivery from '../src/core/cli-force-exit.ts';
-import { captureRetrievalMeta, resetRetrievalMetaForTests } from '../src/cli/main.ts';
+import { resetRetrievalMetaForTests } from '../src/cli/main.ts';
+import * as mcpClient from '../src/core/mcp-client.ts';
+import { dispatchToolCall } from '../src/mcp/dispatch.ts';
 
 const events: string[] = [];
 let connectError: Error | null = null;
@@ -235,7 +237,7 @@ describe('CLI explanation attribution through native dispatch', () => {
   // Formatter-only tests miss the global parser stripping --explain before dispatch.
   // The operation fixture runs real fusion and cosine stages without a DB or provider.
   for (const command of ['search', 'query'] as const) {
-    const runRanking = async (flags: string[], keywordOnly = false) => {
+    const runRanking = async (flags: string[], keywordOnly = false, routed = false) => {
       const row: SearchResult = {
         slug: 'notes/semantic-match', page_id: 1, title: 'Semantic match', type: 'note',
         chunk_text: 'A deterministic semantic match.', chunk_source: 'compiled_truth',
@@ -244,7 +246,7 @@ describe('CLI explanation attribution through native dispatch', () => {
       const embeddings = {
         getEmbeddingsByChunkIds: async () => new Map([[1, new Float32Array([0.8, 0.6])]]),
       } as unknown as BrainEngine;
-      const handler = spyOn(operationsByName[command], 'handler').mockImplementation(async (_ctx, p) => {
+      const handler = spyOn(operationsByName[command], 'handler').mockImplementation(async (ctx, p) => {
         const attribute = p.explain === true;
         let rows = keywordOnly ? [row] : await cosineReScore(embeddings,
           rrfFusionWeighted([
@@ -252,16 +254,23 @@ describe('CLI explanation attribution through native dispatch', () => {
             { list: [row], k: 60, arm: 'keyword' },
           ], false, attribute), new Float32Array([1, 0]), 'embedding', undefined, attribute);
         if (attribute) rows = rows.map(r => ({ ...r, score_details: buildScoreDetails(r) }));
-        captureRetrievalMeta('retrieval', {
+        ctx.emitResponseMeta?.('retrieval', {
           degraded: keywordOnly ? [{ stage: 'query_embed_failed', reason: 'paid_api_disabled' }] : [],
         });
         return rows;
       });
       const output: string[] = [];
       const delivery = spyOn(stdoutDelivery, 'writeStdoutFinal').mockImplementation(async text => { output.push(text); });
+      const remote = routed ? spyOn(mcpClient, 'callRemoteTool').mockImplementation(async (_config, name, args) =>
+        dispatchToolCall({
+          ...fakeEngine(),
+          getConfig: async (key: string) => key === 'mcp.strict_params' ? 'reject' : null,
+        } as unknown as BrainEngine, name, args, {
+          remote: true, transport: 'http', sourceId: 'default', config: { engine: 'pglite' },
+        })) : null;
       try {
         resetRetrievalMetaForTests();
-        writeConfig(LOCAL);
+        writeConfig(routed ? THIN : LOCAL);
         const events = await run([command, 'semantic match', ...flags]);
         expect(events).toContain('returned');
         expect(events.some(event => event.startsWith('threw:'))).toBe(false);
@@ -269,6 +278,7 @@ describe('CLI explanation attribution through native dispatch', () => {
       } finally {
         handler.mockRestore();
         delivery.mockRestore();
+        remote?.mockRestore();
         resetRetrievalMetaForTests();
       }
     };
@@ -285,6 +295,13 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(text).toContain('found by: vector #1');
       expect(text).toContain('keyword #1');
       expect(text).toContain('cosine=0.8');
+    });
+
+    test(`${command} --explain survives strict routed dispatch`, async () => {
+      const text = await runRanking(['--explain'], false, true);
+      expect(text).toContain('found by: vector #1');
+      expect(text).toContain('keyword #1');
+      expect(text).toContain('= final 0.94');
     });
 
     test(`${command} --explain preserves a genuine missing-vector cause`, async () => {
