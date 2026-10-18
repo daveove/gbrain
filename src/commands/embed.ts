@@ -449,25 +449,18 @@ export async function runEmbedCore(engine: BrainEngine, opts: EmbedOpts): Promis
       if (opts.sourceId) {
         lockSourceIds = [opts.sourceId];
       } else {
-        try {
-          const rows = await engine.listAllSources();
-          lockSourceIds = rows.map((r) => r.id).sort();
-        } catch {
-          lockSourceIds = [];
-        }
+        const rows = await engine.listAllSources();
+        lockSourceIds = rows.map((r) => r.id).sort();
       }
       for (const sid of lockSourceIds) {
         let lock: DbLockHandle | null = null;
         try {
           lock = await tryAcquireDbLock(engine, embedBackfillLockId(sid), 60);
-        } catch {
-          // Fail-open: a lock-subsystem error must not crash a backfill. Drop
-          // single-flight for this run (release what we took) and proceed.
+        } catch (error) {
           for (const h of sfLocks) {
             try { await h.release(); } catch { /* best-effort */ }
           }
-          sfLocks.length = 0;
-          break;
+          throw error;
         }
         if (!lock) {
           // Another backfill (CLI or job) holds this source. Release what we
