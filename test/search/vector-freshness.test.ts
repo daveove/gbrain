@@ -149,6 +149,37 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
     expect(await slugs({ afterDate: '2024-01-12T00:00:00Z', beforeDate: '2024-01-20T00:00:00Z', beforeDateInclusive: true })).toEqual(['dated-1', 'dated-3']);
   }, 60_000);
 
+  test('walk, scoped and joined queries enforce discriminating chunk and page predicates', async () => {
+    await reset();
+    await seed('current', 3, 0.05, 0.001, { hash: 'current' });
+    await seed('blocked', 6, 0.001, 0.001, { hash: 'current' });
+    await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('filter-other', 'Filter other')`);
+    await engine.executeRaw(`UPDATE pages SET
+      source_id = CASE WHEN slug = 'blocked-2' THEN 'filter-other' ELSE source_id END,
+      frontmatter = CASE WHEN slug = 'blocked-4' THEN '{"visibility":"private"}'::jsonb ELSE frontmatter END,
+      type = CASE WHEN slug = 'blocked-5' THEN 'person' ELSE type END`);
+    await engine.executeRaw(`UPDATE content_chunks cc SET
+      language = CASE WHEN p.slug = 'blocked-0' THEN 'python' ELSE 'typescript' END,
+      chunk_source = CASE WHEN p.slug = 'blocked-1' THEN 'fenced_code' ELSE 'compiled_truth' END
+      FROM pages p WHERE p.id = cc.page_id`);
+    const options: SearchOpts = { embeddingColumn: column, sourceId: 'default', excludePrivate: true,
+      exclude_slugs: ['blocked-3'], language: 'typescript', detail: 'low' };
+    const results = [];
+    for (const dialect of ['postgres', 'pglite'] as const) {
+      const walk = buildVectorSearchStatement({ dialect, embedding: query, limit: 10, offset: 0, opts: options });
+      const narrowed = buildVectorSearchStatement({ dialect, embedding: query, limit: 10, offset: 0,
+        opts: { ...options, type: 'note' }, scope: { share: 0.2, chunks: 500 } });
+      const slugs = async (sql: string, params: unknown[]) => (await engine.executeRaw<{ slug: string }>(sql, params)).map(row => row.slug);
+      results.push({ dialect, walk: await slugs(walk.indexWalkSql!, walk.params),
+        joined: await slugs(narrowed.sql, narrowed.params), scoped: await slugs(narrowed.scopeScanSql!, narrowed.params),
+        exact: await slugs(narrowed.exactSql, narrowed.params),
+        witness: await engine.executeRaw(narrowed.hasMoreSql, narrowed.params.slice(0, narrowed.innerLimitIdx + 1)) });
+    }
+    const expected = ['current-0', 'current-1', 'current-2'];
+    expect(results).toEqual(['postgres', 'pglite'].map(dialect => ({ dialect, walk: ['blocked-5', ...expected],
+      joined: expected, scoped: expected, exact: expected, witness: [{ eligible: 3 }] })));
+  }, 60_000);
+
   test('non-indexed 3072-dimensional vectors retain model, legacy and freshness eligibility in both dialects', async () => {
     await reset();
     await seed('stale', 1, 0.001, 0, { hash: 'stale' });
