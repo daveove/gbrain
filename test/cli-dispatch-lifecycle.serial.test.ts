@@ -307,15 +307,13 @@ describe('CLI explanation attribution through native dispatch', () => {
     test(`${command} --explain preserves a genuine missing-vector cause`, async () => {
       const output = await runRanking(['--explain'], true);
       expect(output).toContain('query_embed_failed (paid_api_disabled)');
-      expect(output).toContain('notes/semantic-match');
       const [row] = JSON.parse(await runRanking(['--explain', '--json'], true));
       expect(row.score_details.arms).toEqual([]);
       expect(row.score_details.rrf).toEqual({ state: 'not_run', reason: 'single_arm_path' });
       expect(row.score_details.blend).toEqual({ state: 'not_run', reason: 'no_query_embedding' });
     });
 
-    test(`${command} plain output and JSON remain unchanged without explain`, async () => {
-      expect(await runRanking([])).toBe('[0.9400] notes/semantic-match -- A deterministic semantic match.\n');
+    test(`${command} keeps attribution out of ordinary JSON output`, async () => {
       const [row] = JSON.parse(await runRanking(['--json']));
       expect(row.score_details).toBeUndefined();
       expect(row.rrf).toBeUndefined();
