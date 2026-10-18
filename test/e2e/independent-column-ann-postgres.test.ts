@@ -50,10 +50,13 @@ function indexes(plan: unknown): string[] {
       provider: model, dimensions: 768, type: 'vector', provenance: 'independent',
       documentPrefix: 'search_document: ', queryPrefix: 'search_query: ',
     });
+    await engine.executeRaw(`INSERT INTO sources(id,name) VALUES ('other','Other')`);
     for (const name of ['current', ...forbidden]) {
       const slug = `fixture/${name}`;
-      await importFromContent(engine, slug, '---\ntype: note\ntitle: Fixture\n---\n\nA bounded independent embedding fixture.\n', { noEmbed: true });
-      const snapshot = await readProjectionSnapshot(engine, slug, 'default', { embeddingColumn: column });
+      const sourceId = name === 'other-source' ? 'other' : 'default';
+      const visibility = name === 'private' ? 'visibility: private\n' : '';
+      await importFromContent(engine, slug, `---\ntype: note\ntitle: Fixture\n${visibility}---\n\nA bounded independent embedding fixture.\n`, { noEmbed: true, sourceId });
+      const snapshot = await readProjectionSnapshot(engine, slug, sourceId, { embeddingColumn: column });
       if (!snapshot) throw new Error(`Missing native publication snapshot for ${slug}`);
       expect(await installPageEmbeddings(engine, snapshot, snapshot.chunks.map(chunk => ({
         chunk_index: chunk.chunk_index, chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source,
@@ -65,16 +68,16 @@ function indexes(plan: unknown): string[] {
       SELECT 'background/' || i,p.source_id,p.type,p.title,p.compiled_truth,p.knowledge_revision,p.text_projection_revision,
         p.chunker_version,p.contextual_retrieval_mode,p.corpus_generation,p.embedding_nomic_signature
       FROM pages p CROSS JOIN generate_series(1,4000) i WHERE p.slug='fixture/current'`);
-    const background = new Float32Array(768);
-    background[0] = 0.6;
-    background[1] = 0.8;
     await engine.executeRaw(`INSERT INTO content_chunks (page_id,chunk_index,chunk_text,chunk_source,embedding_nomic,
       embedding_nomic_model,embedding_nomic_embedded_text_hash,embedding_nomic_embedding_input_hash)
-      SELECT p.id,cc.chunk_index,cc.chunk_text,cc.chunk_source,$1::vector,cc.embedding_nomic_model,
+      SELECT p.id,cc.chunk_index,cc.chunk_text,cc.chunk_source,v.embedding,cc.embedding_nomic_model,
         cc.embedding_nomic_embedded_text_hash,cc.embedding_nomic_embedding_input_hash
       FROM pages p CROSS JOIN content_chunks cc
       JOIN pages template ON template.id=cc.page_id AND template.slug='fixture/current'
-      WHERE p.slug LIKE 'background/%'`, [JSON.stringify(Array.from(background))]);
+      CROSS JOIN LATERAL (SELECT l2_normalize(array_agg(
+        (('x'||substr(md5(p.id::text||':'||d::text),1,8))::bit(32)::int)::real / 2147483648.0
+        ORDER BY d)::real[]::vector) AS embedding FROM generate_series(1,768) d) v
+      WHERE p.slug LIKE 'background/%'`);
     await engine.executeRaw(`UPDATE content_chunks cc SET embedding_nomic_model='ollama:other'
       FROM pages p WHERE p.id=cc.page_id AND p.slug='fixture/wrong-model'`);
     await engine.executeRaw(`UPDATE content_chunks cc SET embedding_nomic_embedded_text_hash=md5('before edit')
@@ -82,9 +85,6 @@ function indexes(plan: unknown): string[] {
     await engine.executeRaw(`UPDATE content_chunks cc SET embedding_nomic_embedding_input_hash=NULL
       FROM pages p WHERE p.id=cc.page_id AND p.slug='fixture/missing-input'`);
     await engine.executeRaw(`UPDATE pages SET title='Changed after publication' WHERE slug='fixture/stale-page'`);
-    await engine.executeRaw(`UPDATE pages SET frontmatter='{"visibility":"private"}'::jsonb WHERE slug='fixture/private'`);
-    await engine.executeRaw(`INSERT INTO sources(id,name) VALUES ('other','Other')`);
-    await engine.executeRaw(`UPDATE pages SET source_id='other' WHERE slug='fixture/other-source'`);
     for (const table of ['pages', 'content_chunks', 'sources']) await engine.executeRaw(`ANALYZE ${table}`);
   }, 120_000);
 
@@ -104,6 +104,19 @@ function indexes(plan: unknown): string[] {
   }
 
   test('the native search path naturally uses independent HNSW and rejects stale or inaccessible candidates', async () => {
+    const control = buildVectorSearchStatement({ dialect: 'postgres', embedding: query, limit: 10, offset: 0, opts: opts() });
+    const exact = await engine.executeRaw<{ slug: string; source_id: string }>(control.exactSql, control.params);
+    const candidates = await engine.executeRaw<{ slug: string; distance: number }>(`WITH candidates AS MATERIALIZED (
+      SELECT id,embedding_nomic <=> $1::vector AS distance FROM content_chunks
+      WHERE embedding_nomic_model=$2 ORDER BY embedding_nomic <=> $1::vector LIMIT 200)
+      SELECT p.slug,candidates.distance FROM candidates JOIN content_chunks cc ON cc.id=candidates.id
+      JOIN pages p ON p.id=cc.page_id ORDER BY candidates.distance,cc.id`, [JSON.stringify(Array.from(query)), model]);
+    const candidateSlugs = candidates.map(row => row.slug);
+    console.info(JSON.stringify({ exact: exact.map(row => row.slug), rawNearest: candidateSlugs.slice(0, 10) }));
+    for (const name of ['current', 'stale-text', 'missing-input', 'stale-page', 'private', 'other-source']) {
+      expect(candidateSlugs).toContain(`fixture/${name}`);
+    }
+    assertSafe(exact);
     const legacy = await engine.explainVectorSearch(query, { ...opts(), vectorLegacyGuard: true });
     const fixed = await engine.explainVectorSearch(query, opts());
     expect(indexes(legacy)).not.toContain('idx_chunks_embedding_nomic');
@@ -118,12 +131,16 @@ function indexes(plan: unknown): string[] {
   test('joined, walk, scoped, exact and legacy queries enforce the same publication and source boundary', async () => {
     const statement = buildVectorSearchStatement({ dialect: 'postgres', embedding: query, limit: 10, offset: 0,
       opts: opts(), scope: { share: 0.25, chunks: 30_000 } });
-    for (const sql of [statement.sql, statement.indexWalkSql!, statement.scopeScanSql!, statement.exactSql]) {
+    for (const sql of [statement.exactSql, statement.sql, statement.indexWalkSql!, statement.scopeScanSql!]) {
       assertSafe(await engine.executeRaw<{ slug: string; source_id: string }>(sql, statement.params));
     }
     assertSafe(await engine.searchVector(query, { ...opts(), vectorLegacyGuard: true }));
     const witnessParams = [...statement.params.slice(0, statement.innerLimitIdx), 10_000];
     expect(await engine.executeRaw(statement.hasMoreSql, witnessParams)).toEqual([{ eligible: 4001 }]);
     expect(await engine.searchVector(query, { ...opts(), embeddingColumn: { ...column, documentPrefix: 'changed: ' } })).toEqual([]);
+    const unscoped = await engine.searchVector(query, { embeddingColumn: column, limit: 10 });
+    expect(unscoped.map(row => row.slug)).toContain('fixture/private');
+    expect(unscoped.map(row => row.slug)).toContain('fixture/other-source');
+    expect((await engine.searchVector(query, { ...opts(), sourceId: 'other' })).map(row => row.slug)).toEqual(['fixture/other-source']);
   }, 30_000);
 });
