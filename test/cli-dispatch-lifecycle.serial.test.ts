@@ -330,5 +330,12 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(row.rrf).toBeUndefined();
       expect(row.blend_norm_rrf).toBeUndefined();
     });
+
+    test(`${command} resolves --no-explain before rendering a global --explain request`, async () => {
+      const [row] = JSON.parse(await runRanking(['--explain', '--no-explain', '--json']));
+      expect(row.score_details).toBeUndefined();
+      expect(row.rrf).toBeUndefined();
+      expect(row.blend_norm_rrf).toBeUndefined();
+    });
   }
 });

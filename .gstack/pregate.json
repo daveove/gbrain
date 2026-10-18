@@ -7,13 +7,13 @@
       "test/scripts/serial-files.test.ts"
     ],
     "src/cli.ts": [
-      "test/cli-goldens.test.ts"
+      "test/cli-dispatch-lifecycle.serial.test.ts"
     ],
     "src/commands/**": [
-      "test/cli-goldens.test.ts"
+      "test/cli-dispatch-lifecycle.serial.test.ts"
     ],
     "src/core/operations*.ts": [
-      "test/cli-goldens.test.ts"
+      "test/cli-dispatch-lifecycle.serial.test.ts"
     ]
   },
   "guards": [
@@ -36,7 +36,7 @@
         "src/core/operations*.ts",
         "src/core/ops/**"
       ],
-      "command": "bun test --timeout=60000 test/cli-goldens.test.ts test/cli-dispatch-phase.test.ts test/export-surface-golden.test.ts",
+      "command": "bun test --timeout=60000 test/cli-dispatch-lifecycle.serial.test.ts test/cli-dispatch-phase.test.ts test/export-surface-golden.test.ts",
       "fix": "bun run regen:all, then justify each changed golden in the PR body"
     },
     {

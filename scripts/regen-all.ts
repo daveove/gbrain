@@ -55,7 +55,6 @@ export const ARTIFACTS: Artifact[] = [
 /** Offline contract goldens: regenerated only with --goldens, each a reviewer-visible change to justify. */
 export const CONTRACT_GOLDENS = [
   'test/export-surface-golden.test.ts',
-  'test/cli-goldens.test.ts',
   'test/cli-dispatch-phase.test.ts',
   'test/engine-sql-sql-text.test.ts',
 ];

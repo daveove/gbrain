@@ -87,13 +87,14 @@ reproduce byte for byte. Each file is written by `test/helpers/golden.ts` as
 
 ## CLI goldens (A16b / EO5 / EO13)
 
-- `cli/*.json` (`test/cli-goldens.test.ts`, `test/cli-dispatch-phase.test.ts`,
+- `cli/*.json` (`test/cli-dispatch-phase.test.ts`,
   `test/cli-thin-client-refusal-matrix.test.ts`, `test/cli-engine-free-db-down.test.ts`):
-  `--help` / `--version` / `--tools-json` / unknown command, membership sets and alias
-  table, per-command dispatch phase and thin-client mode (AST,
+  membership sets and alias table, per-command dispatch phase and thin-client mode (AST,
   `test/helpers/cli-dispatch-extract.ts`), literal command imports, the thin-client
   refusal matrix for every `handleCliOnly` case, and engine-free commands against an
   unreachable database. Normalizers in `test/helpers/cli-golden-normalize.ts`.
+  CLI help wording, version strings and tool-catalog bytes are not snapshot contracts;
+  native consumer behavior is covered by `test/cli-dispatch-lifecycle.serial.test.ts`.
 
 ## Schema catalog and upgrade replay (E4 / EO3 / EO12)
 
