@@ -323,7 +323,7 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(row.cosine).toBeCloseTo(0.8, 6);
     });
 
-    if (command === 'query') test('query --no-explain keeps attribution disabled', async () => {
+    test(`${command} --no-explain keeps attribution disabled`, async () => {
       const [row] = JSON.parse(await runRanking(['--no-explain', '--json']));
       expect(row.score_details).toBeUndefined();
       expect(row.rrf).toBeUndefined();

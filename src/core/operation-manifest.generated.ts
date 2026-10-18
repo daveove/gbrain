@@ -992,6 +992,11 @@ export const OPERATION_MANIFEST: OperationMeta[] = [
         ],
         "description": "Lowest trust tier to return (the connection floor still applies).",
         "fullSurfaceOnly": true
+      },
+      "explain": {
+        "type": "boolean",
+        "description": "Per-row score_details.",
+        "fullSurfaceOnly": true
       }
     },
     "scope": "read",
