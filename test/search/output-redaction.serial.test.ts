@@ -39,7 +39,7 @@ mock.module('../../src/core/think/index.ts', () => ({
 const { PGLiteEngine } = await import('../../src/core/pglite-engine.ts');
 const { operationsByName } = await import('../../src/core/operations.ts');
 const { formatResult, captureRetrievalMeta, resetRetrievalMetaForTests } = await import('../../src/cli/main.ts');
-const { getCliOptions, setCliOptions, _resetCliOptionsForTest } = await import('../../src/core/cli-options.ts');
+const { _resetCliOptionsForTest } = await import('../../src/core/cli-options.ts');
 const { resetPgliteState } = await import('../helpers/reset-pglite.ts');
 const { installFixtureChunks } = await import('../helpers/page-projection.ts');
 let engine: InstanceType<typeof PGLiteEngine>;
@@ -224,8 +224,7 @@ describe('retrieval output boundary', () => {
     expectScrubbed(json[0]);
     const human = formatResult(op, rows);
     expect(human.includes(syntheticKey.slice(0, 20))).toBe(false);
-    setCliOptions({ ...getCliOptions(), explain: true });
-    const explain = formatResult(op, rows);
+    const explain = formatResult(op, rows, { explain: true });
     expect(explain.includes(syntheticKey)).toBe(false);
     expect(explain.includes(syntheticBearer)).toBe(false);
     expect(rows).toEqual(original);

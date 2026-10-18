@@ -531,6 +531,8 @@ async function runSharedOperation(command: string, subArgs: string[], cliOpts: C
   // transform, and required-param check are all engine-free; refactoring
   // them out of the engine try/catch is safe and unlocks routing.
   const params = parseOpArgs(op, subArgs);
+  // Global parsing consumed the flags; query text after `--` must not be rescanned.
+  if (cliOpts.explain && (op.name === 'search' || op.name === 'query')) params.explain = true;
 
   // #3513: stdin fill moved out of parseOpArgs so a non-TTY stdin with no
   // piped input can't block the parse forever — the bounded read leaves the
@@ -789,7 +791,13 @@ async function runThinClientRouted(
 
   try {
     const { callRemoteTool, unpackToolResult } = await import('../core/mcp-client.ts');
-    const raw = await callRemoteTool(cfg, op.name, params, {
+    // JSON selects local output formatting, not a server operation parameter.
+    let requestParams = params;
+    if (params.json !== undefined) {
+      requestParams = { ...params };
+      delete requestParams.json;
+    }
+    const raw = await callRemoteTool(cfg, op.name, requestParams, {
       timeoutMs,
       signal: sigintController.signal,
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
@@ -1024,8 +1032,7 @@ export function resolveQueryImage(
 }
 
 export function parseOpArgs(op: Operation, args: string[]): Record<string, unknown> {
-  // `gbrain search --explain`: the CLI-local formatter flag also asks the op for score attribution.
-  const params: Record<string, unknown> = op.name === 'search' && args.includes('--explain') ? { explain: true } : {};
+  const params: Record<string, unknown> = {};
   const positional = op.cliHints?.positional || [];
   let posIdx = 0;
 
@@ -1648,6 +1655,7 @@ export function formatResult(
     }
     case 'search':
     case 'query': {
+      const explain = params.explain === true;
       const { results, meta } = redactRetrievalOutput(result as any[], lastRetrievalMeta);
       const incompleteStages = Array.isArray(meta?.degraded)
         ? [...new Set((meta.degraded as Array<{ stage?: string }>).map(d => d.stage)
@@ -1661,17 +1669,16 @@ export function formatResult(
       if (params.json === true) {
         if (incompleteNotice) process.stderr.write(incompleteNotice);
         // --explain --json: the same per-row score_details object MCP `explain: true` returns.
-        if (getCliOptions().explain) for (const r of results) r.score_details ??= require('../core/search/explain-formatter.ts').buildScoreDetails(r);
+        if (explain) for (const r of results) r.score_details ??= require('../core/search/explain-formatter.ts').buildScoreDetails(r);
         return JSON.stringify(answerId ? results.map(r => ({ ...r, answer_id: answerId })) : results, null, 2) + '\n';
       }
       // T15/FOV-1: an empty result names its cause when the pipeline told us
       // (degradation stages from _meta.retrieval / the local meta capture) —
       // a bare "No results." was indistinguishable from a degraded pipeline.
-      const cliOpts = getCliOptions();
-      const timingsLine = cliOpts.explain && meta?.timings ? require('../core/search/stage-timings.ts').formatTimingsSummary(meta.timings) + '\n' : '';
+      const timingsLine = explain && meta?.timings ? require('../core/search/stage-timings.ts').formatTimingsSummary(meta.timings) + '\n' : '';
       if (results.length === 0) return `No results.${describeEmptyRetrieval()}\n` + timingsLine;
       // v0.40.4 — --explain switches to per-stage attribution formatter.
-      if (cliOpts.explain) {
+      if (explain) {
         // Lazy import keeps formatResult's startup hot path narrow for
         // the common non-explain case.
         const { formatResultsExplain } = require('../core/search/explain-formatter.ts');
