@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import postgres from '#postgres';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { initializeIndependentEmbeddingColumn } from '../../src/core/embedding-column-schema.ts';
@@ -9,13 +9,16 @@ import { embeddingColumnSignature } from '../../src/core/search/embedding-column
 import { buildVectorSearchStatement } from '../../src/core/search/vector-statement.ts';
 import type { ResolvedColumn } from '../../src/core/types.ts';
 import * as vectorPool from '../../src/core/search/vector-pool.ts';
+import { withVectorSettings } from '../../src/core/search/vector-settings.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const url = process.env.DATABASE_URL;
 const database = `gbrain_test_semantic_${randomUUID().replaceAll('-', '')}`;
 const model = 'ollama:nomic-embed-text';
-const query = new Float32Array(768);
-query[0] = 1;
+// A dense query shares the background distribution instead of isolating a sparse-axis needle from HNSW.
+const query = Float32Array.from({ length: 768 }, (_, i) => createHash('md5').update(`0:${i + 1}`).digest().readInt32BE(0) / 2147483648);
+const queryNorm = Math.sqrt(query.reduce((sum, value) => sum + value * value, 0));
+for (let i = 0; i < query.length; i++) query[i] /= queryNorm;
 const forbidden = ['wrong-model', 'stale-text', 'missing-input', 'stale-page', 'private', 'other-source'];
 
 function indexes(plan: unknown): string[] {
@@ -115,7 +118,14 @@ function indexes(plan: unknown): string[] {
       SELECT p.slug,candidates.distance FROM candidates JOIN content_chunks cc ON cc.id=candidates.id
       JOIN pages p ON p.id=cc.page_id ORDER BY candidates.distance + 0,cc.id`;
     const candidateParams = [JSON.stringify(Array.from(query)), model, control.innerLimit * control.indexWalkOverfetch];
-    const candidates = await engine.executeRaw<{ slug: string; distance: number }>(candidateSql, candidateParams);
+    const candidates = await engine.transaction(tx => withVectorSettings((sql, params) => tx.executeRaw(sql, params), true,
+      control.innerLimit, Math.max(2_000, control.innerLimit * control.indexWalkOverfetch), async () => {
+        expect(indexes(await tx.executeRaw(`EXPLAIN (FORMAT JSON) ${candidateSql}`, candidateParams))).toContain('idx_chunks_embedding_nomic');
+        console.info(JSON.stringify({ fixture: 'raw-ann-candidate-control', database, settings: await tx.executeRaw(
+          `SELECT name,current_setting(name,true) AS value FROM unnest($1::text[]) t(name)`,
+          [['work_mem','hnsw.ef_search','hnsw.iterative_scan','hnsw.max_scan_tuples','hnsw.scan_mem_multiplier','enable_sort']]) }));
+        return tx.executeRaw<{ slug: string; distance: number }>(candidateSql, candidateParams);
+      }, undefined, undefined, control.indexWalkOverfetch));
     const candidateSlugs = candidates.map(row => row.slug);
     console.info(JSON.stringify({ exact: exact.map(row => row.slug), rawNearest: candidateSlugs.slice(0, 10) }));
     for (const name of ['current', 'stale-text', 'missing-input', 'stale-page', 'private', 'other-source']) {
