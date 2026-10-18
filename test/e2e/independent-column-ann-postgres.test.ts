@@ -103,14 +103,18 @@ function indexes(plan: unknown): string[] {
     expect(rows.every(row => row.source_id === 'default' && !forbidden.some(name => row.slug === `fixture/${name}`))).toBe(true);
   }
 
-  test('the native search path naturally uses independent HNSW and rejects stale or inaccessible candidates', async () => {
-    const control = buildVectorSearchStatement({ dialect: 'postgres', embedding: query, limit: 10, offset: 0, opts: opts() });
+  test('the native HNSW path re-sorts relaxed candidates before truncation and rejects stale or inaccessible rows', async () => {
+    const control = buildVectorSearchStatement({ dialect: 'postgres', embedding: query, limit: 10, offset: 0, opts: opts(),
+      scope: { share: 4006 / 4007, chunks: 4006 } });
     const exact = await engine.executeRaw<{ slug: string; source_id: string }>(control.exactSql, control.params);
-    const candidates = await engine.executeRaw<{ slug: string; distance: number }>(`WITH candidates AS MATERIALIZED (
+    const candidateSql = `WITH candidates AS MATERIALIZED (
       SELECT id,embedding_nomic <=> $1::vector AS distance FROM content_chunks
-      WHERE embedding_nomic_model=$2 ORDER BY embedding_nomic <=> $1::vector LIMIT 200)
+      WHERE embedding_nomic IS NOT NULL AND modality='text' AND embedding_nomic_model=$2
+      ORDER BY embedding_nomic <=> $1::vector LIMIT $3)
       SELECT p.slug,candidates.distance FROM candidates JOIN content_chunks cc ON cc.id=candidates.id
-      JOIN pages p ON p.id=cc.page_id ORDER BY candidates.distance,cc.id`, [JSON.stringify(Array.from(query)), model]);
+      JOIN pages p ON p.id=cc.page_id ORDER BY candidates.distance + 0,cc.id`;
+    const candidateParams = [JSON.stringify(Array.from(query)), model, control.innerLimit * control.indexWalkOverfetch];
+    const candidates = await engine.executeRaw<{ slug: string; distance: number }>(candidateSql, candidateParams);
     const candidateSlugs = candidates.map(row => row.slug);
     console.info(JSON.stringify({ exact: exact.map(row => row.slug), rawNearest: candidateSlugs.slice(0, 10) }));
     for (const name of ['current', 'stale-text', 'missing-input', 'stale-page', 'private', 'other-source']) {

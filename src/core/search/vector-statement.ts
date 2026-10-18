@@ -390,7 +390,8 @@ export function buildVectorSearchStatement(input: VectorSearchStatementInput): V
           ${pageFilters.join('\n          ')}
           ${hardExcludeClause}
           ${visibilityClause}
-        ORDER BY ann.distance, ann.id
+        -- PG17+ CTE pathkeys cannot certify pgvector relaxed-order output.
+        ORDER BY ann.distance + 0, ann.id
         LIMIT ${innerLimitParam}::int
       ),`;
 
