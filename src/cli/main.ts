@@ -789,7 +789,13 @@ async function runThinClientRouted(
 
   try {
     const { callRemoteTool, unpackToolResult } = await import('../core/mcp-client.ts');
-    const raw = await callRemoteTool(cfg, op.name, params, {
+    // JSON selects local output formatting, not a server operation parameter.
+    let requestParams = params;
+    if (params.json !== undefined) {
+      requestParams = { ...params };
+      delete requestParams.json;
+    }
+    const raw = await callRemoteTool(cfg, op.name, requestParams, {
       timeoutMs,
       signal: sigintController.signal,
       ...(op.mutating ? { writeWaitMs: currentCliWriteWait().waitMs } : {}),
