@@ -17,6 +17,28 @@ describe('vector statement parameters', () => {
     expect(stmt.innerLimitIdx).toBe(4);
     expect(stmt.innerLimit).toBe(100);
   });
+
+  test('wide, legacy and image searches do not use relaxed ANN or an index walk', () => {
+    for (const options of [{ embeddingColumn: wideColumn }, { vectorLegacyGuard: true },
+      { embeddingColumn: { name: 'embedding_image', type: 'vector' as const, dimensions: 1024, embeddingModel: 'test:image' } }]) {
+      for (const dialect of ['postgres', 'pglite'] as const) {
+        const statement = build(options, dialect);
+        expect(statement.relaxed).toBe(false);
+        expect(statement.indexWalkSql).toBeUndefined();
+      }
+    }
+  });
+
+  test('type and date narrowing omit the walk while keeping indexed ANN available', () => {
+    for (const narrowing of [{ type: 'note' }, { types: ['note'] }, { afterDate: '2026-01-01' }, { beforeDate: '2026-01-01' }]) {
+      for (const dialect of ['postgres', 'pglite'] as const) {
+        const statement = build(narrowing, dialect);
+        expect(statement.indexed).toBe(true);
+        expect(statement.relaxed).toBe(true);
+        expect(statement.indexWalkSql).toBeUndefined();
+      }
+    }
+  });
 });
 
 

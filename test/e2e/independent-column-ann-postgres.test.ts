@@ -10,6 +10,7 @@ import { buildVectorSearchStatement } from '../../src/core/search/vector-stateme
 import type { ResolvedColumn } from '../../src/core/types.ts';
 import * as vectorPool from '../../src/core/search/vector-pool.ts';
 import { withVectorSettings } from '../../src/core/search/vector-settings.ts';
+import * as vectorSettings from '../../src/core/search/vector-settings.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
 
 const url = process.env.DATABASE_URL;
@@ -125,7 +126,7 @@ function indexes(plan: unknown): string[] {
           `SELECT name,current_setting(name,true) AS value FROM unnest($1::text[]) t(name)`,
           [['work_mem','hnsw.ef_search','hnsw.iterative_scan','hnsw.max_scan_tuples','hnsw.scan_mem_multiplier','enable_sort']]) }));
         return tx.executeRaw<{ slug: string; distance: number }>(candidateSql, candidateParams);
-      }, undefined, undefined, control.indexWalkOverfetch));
+      }, undefined, undefined, control.indexWalkOverfetch, true));
     const candidateSlugs = candidates.map(row => row.slug);
     console.info(JSON.stringify({ exact: exact.map(row => row.slug), rawNearest: candidateSlugs.slice(0, 10) }));
     for (const name of ['current', 'stale-text', 'missing-input', 'stale-page', 'private', 'other-source']) {
@@ -144,10 +145,25 @@ function indexes(plan: unknown): string[] {
   }, 30_000);
 
   test('native type and date narrowing re-sort joined HNSW candidates under shipped settings', async () => {
-    for (const narrowing of [{ type: 'note' }, { afterDate: '2000-01-01' }]) {
-      const options = { ...opts(), ...narrowing };
-      expect(indexes(await engine.explainVectorSearch(query, options))).toContain('idx_chunks_embedding_nomic');
-      assertSafe(await engine.searchVector(query, options));
+    const original = vectorSettings.withVectorSettings;
+    const observed: Record<string, unknown>[] = [];
+    const spy = spyOn(vectorSettings, 'withVectorSettings').mockImplementation((runQuery, iterative, window, maxScanTuples, run, deadline, mode, overfetch, indexWalk) =>
+      original(runQuery, iterative, window, maxScanTuples, async () => {
+        observed.push(...await runQuery(`SELECT current_setting('hnsw.ef_search') AS ef_search,
+          current_setting('enable_sort') AS enable_sort, current_setting('work_mem') AS work_mem`, []));
+        return run();
+      }, deadline, mode, overfetch, indexWalk));
+    try {
+      for (const narrowing of [{ type: 'note' }, { afterDate: '2000-01-01' }]) {
+        const options = { ...opts(), ...narrowing };
+        expect(indexes(await engine.explainVectorSearch(query, options))).toContain('idx_chunks_embedding_nomic');
+        assertSafe(await engine.searchVector(query, options));
+      }
+      expect(observed).toHaveLength(4);
+      for (const settings of observed) expect(settings).toEqual({ ef_search: '200', enable_sort: 'on', work_mem: '1MB' });
+      console.info(JSON.stringify({ fixture: 'joined-ann-window', settings: observed }));
+    } finally {
+      spy.mockRestore();
     }
   }, 30_000);
 

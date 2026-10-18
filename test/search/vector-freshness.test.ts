@@ -11,6 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from 'b
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
 import * as vectorPool from '../../src/core/search/vector-pool.ts';
 import type { VectorPoolAttempt } from '../../src/core/search/vector-pool.ts';
+import { buildVectorSearchStatement } from '../../src/core/search/vector-statement.ts';
 import type { SearchOpts } from '../../src/core/types.ts';
 
 const MODEL = 'test:vector-freshness';
@@ -75,13 +76,23 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
     await seed('mismatch', 3, 0.002, 0.001, { hash: 'current', model: 'test:other-model' });
     await seed('legacy', 2, 0.01, 0.001, { hash: 'null' });
     await seed('fresh', 20, 0.05, 0.001, { hash: 'current' });
+    const expected = ['legacy-0', 'legacy-1', ...Array.from({ length: 8 }, (_, i) => `fresh-${i}`)];
+    const actual = [];
     for (const vectorLegacyGuard of [false, true]) {
-      const hits = await engine.searchVector(query, { limit: 10, embeddingColumn: column, vectorLegacyGuard });
-      const slugs = hits.map(hit => hit.slug);
-      expect(slugs).toHaveLength(10);
-      expect(slugs.slice(0, 2)).toEqual(['legacy-0', 'legacy-1']);
-      expect(slugs.some(slug => slug.startsWith('stale-') || slug.startsWith('mismatch-'))).toBe(false);
+      const options = { limit: 10, embeddingColumn: column, vectorLegacyGuard };
+      const native = (await engine.searchVector(query, options)).map(row => row.slug);
+      const queries = [];
+      for (const dialect of ['postgres', 'pglite'] as const) {
+        const statement = buildVectorSearchStatement({ dialect, embedding: query, limit: 10, offset: 0, opts: options });
+        const hits = (await engine.executeRaw<{ slug: string }>(statement.sql, statement.params)).map(row => row.slug);
+        const exact = (await engine.executeRaw<{ slug: string }>(statement.exactSql, statement.params)).map(row => row.slug);
+        const witness = await engine.executeRaw(statement.hasMoreSql, statement.params.slice(0, statement.innerLimitIdx + 1));
+        queries.push({ dialect, hits, exact, witness });
+      }
+      actual.push({ vectorLegacyGuard, native, queries });
     }
+    expect(actual).toEqual([false, true].map(vectorLegacyGuard => ({ vectorLegacyGuard, native: expected,
+      queries: ['postgres', 'pglite'].map(dialect => ({ dialect, hits: expected, exact: expected, witness: [{ eligible: 22 }] })) })));
   }, 60_000);
 
   test('the pre-migration branch (no model, no migration state) is unchanged: every model and hash is eligible', async () => {
@@ -136,5 +147,55 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
     expect(await slugs({ afterDate: '2024-01-15T00:00:00Z', afterDateInclusive: true })).toEqual(['dated-1', 'dated-2', 'dated-3']);
     expect(await slugs({ beforeDate: '2024-01-20T00:00:00Z' })).toEqual(['dated-0', 'dated-3']);
     expect(await slugs({ afterDate: '2024-01-12T00:00:00Z', beforeDate: '2024-01-20T00:00:00Z', beforeDateInclusive: true })).toEqual(['dated-1', 'dated-3']);
+  }, 60_000);
+
+  test('non-indexed 3072-dimensional vectors retain model, legacy and freshness eligibility in both dialects', async () => {
+    await reset();
+    await seed('stale', 1, 0.001, 0, { hash: 'stale' });
+    await seed('mismatch', 1, 0.002, 0, { hash: 'current', model: 'test:other-model' });
+    await seed('legacy', 1, 0.01, 0, { hash: 'null' });
+    await seed('fresh', 2, 0.05, 0.001, { hash: 'current' });
+    await engine.executeRaw('DROP INDEX idx_chunks_embedding');
+    await engine.executeRaw(`ALTER TABLE content_chunks ALTER COLUMN embedding TYPE vector(3072)
+      USING embedding || array_fill(0::real, ARRAY[3064])::vector`);
+    try {
+      const wideQuery = new Float32Array(3072);
+      wideQuery[0] = 1;
+      const options = { limit: 10, embeddingColumn: { ...column, dimensions: 3072 } };
+      const expected = ['legacy-0', 'fresh-0', 'fresh-1'];
+      expect((await engine.searchVector(wideQuery, options)).map(row => row.slug)).toEqual(expected);
+      for (const dialect of ['postgres', 'pglite'] as const) {
+        const statement = buildVectorSearchStatement({ dialect, embedding: wideQuery, limit: 10, offset: 0, opts: options });
+        for (const sql of [statement.sql, statement.exactSql]) {
+          expect((await engine.executeRaw<{ slug: string }>(sql, statement.params)).map(row => row.slug)).toEqual(expected);
+        }
+      }
+    } finally {
+      await engine.executeRaw('DELETE FROM content_chunks');
+      await engine.executeRaw('ALTER TABLE content_chunks ALTER COLUMN embedding TYPE vector(8)');
+      await engine.executeRaw('CREATE INDEX idx_chunks_embedding ON content_chunks USING hnsw (embedding vector_cosine_ops)');
+    }
+  }, 60_000);
+
+  test('image retrieval enforces modality without applying text-model or text-hash guards in either dialect', async () => {
+    await reset();
+    await seed('image', 2, 0.01, 0.01, { hash: 'stale', model: 'test:not-the-image-model' });
+    await seed('text', 1, 0, 0, { hash: 'current' });
+    await engine.executeRaw(`UPDATE content_chunks cc SET
+      modality = CASE WHEN p.slug LIKE 'image-%' THEN 'image' ELSE 'text' END,
+      embedding_image = ARRAY[cos(a), sin(a)]::real[]::vector || array_fill(0::real, ARRAY[1022])::vector
+      FROM (SELECT id, slug, CASE slug WHEN 'image-0' THEN 0.01 WHEN 'image-1' THEN 0.02 ELSE 0 END AS a FROM pages) p
+      WHERE p.id = cc.page_id`);
+    const imageQuery = new Float32Array(1024);
+    imageQuery[0] = 1;
+    const options = { limit: 10, embeddingColumn: { name: 'embedding_image', type: 'vector' as const, dimensions: 1024, embeddingModel: 'test:image-model' } };
+    const expected = ['image-0', 'image-1'];
+    expect((await engine.searchVector(imageQuery, options)).map(row => row.slug)).toEqual(expected);
+    for (const dialect of ['postgres', 'pglite'] as const) {
+      const statement = buildVectorSearchStatement({ dialect, embedding: imageQuery, limit: 10, offset: 0, opts: options });
+      for (const sql of [statement.sql, statement.exactSql]) {
+        expect((await engine.executeRaw<{ slug: string }>(sql, statement.params)).map(row => row.slug)).toEqual(expected);
+      }
+    }
   }, 60_000);
 });
