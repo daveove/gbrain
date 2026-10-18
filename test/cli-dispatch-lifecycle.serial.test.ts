@@ -281,6 +281,10 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(row.score_details.blend).toMatchObject({ state: 'applied', norm_rrf: 1 });
       expect(row.score_details.blend.cosine).toBeCloseTo(0.8, 6);
       expect(row.score_details.final).toBeCloseTo(0.94, 6);
+      const text = await runRanking(['--explain']);
+      expect(text).toContain('found by: vector #1');
+      expect(text).toContain('keyword #1');
+      expect(text).toContain('cosine=0.8');
     });
 
     test(`${command} --explain preserves a genuine missing-vector cause`, async () => {
