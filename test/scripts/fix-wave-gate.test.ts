@@ -148,7 +148,8 @@ describe('fix-wave gate workflow', () => {
     expect(wf.permissions).toEqual({});
     expect(wf.jobs['contributor-gate'].permissions).toEqual({ contents: 'read', 'pull-requests': 'read' });
     expect(wf.jobs['welcome-comment'].permissions).toEqual({ contents: 'read', 'pull-requests': 'write' });
-    expect(wf.jobs['welcome-comment'].if).toBe("github.event.action == 'opened'");
+    expect(wf.jobs['contributor-gate'].if).toBe("github.repository == 'garrytan/gbrain'");
+    expect(wf.jobs['welcome-comment'].if).toBe("github.repository == 'garrytan/gbrain' && github.event.action == 'opened'");
     for (const job of Object.values(wf.jobs)) for (const s of job.steps) if (s.uses) expect(s.uses).toMatch(/@[0-9a-f]{40}$/);
     const script = readFileSync(join(ROOT, 'scripts', 'fix-wave-gate.ts'), 'utf8');
     const imports = [...script.matchAll(/^import .* from '([^']+)';$/gm)].map(m => m[1]);

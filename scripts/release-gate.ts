@@ -6,13 +6,13 @@
  *        [--timeout-minutes 110] [--poll-seconds 60] [--output <file>]
  *
  * release.yml publishes a release, and moves `latest-stable`, only for a
- * commit whose push-to-master runs of Test and E2E Tests both succeeded.
+ * commit whose push-to-main runs of Test and E2E Tests both succeeded.
  * The gate polls those runs for the release SHA:
  *
  * - both green: publish that SHA;
  * - either failed (failure, timed out, startup failure): no publish; the
  *   job fails naming the run, the master-red issue and the next command;
- * - either cancelled by a newer push: follow the next push-to-master run of
+ * - either cancelled by a newer push: follow the next push-to-main run of
  *   that workflow. When its commit contains the release SHA and carries the
  *   same VERSION, the gate re-evaluates both workflows there and publishes
  *   that commit; when VERSION moved on, this version is superseded (the
@@ -20,10 +20,10 @@
  * - still running, or not created yet: wait, up to --timeout-minutes, then
  *   fail with the dispatch backfill command.
  *
- * A workflow_dispatch backfill runs the same gate for master's HEAD, so it
- * publishes the current VERSION once master's CI for HEAD is green. Writes
+ * A workflow_dispatch backfill runs the same gate for main's HEAD, so it
+ * publishes the current VERSION once main's CI for HEAD is green. Writes
  * `publish=true|false` and `sha=<commit>` to --output (GITHUB_OUTPUT).
- * Exit 0 publish or superseded, 1 no publish (failed, timed out, not master),
+ * Exit 0 publish or superseded, 1 no publish (failed, timed out, not main),
  * 2 usage. Docs: docs/RELEASING.md#release-ci-gate
  */
 import { appendFileSync } from 'node:fs';
@@ -60,7 +60,7 @@ export async function evaluate(deps: GateDeps, sha: string, version: string): Pr
       return {
         kind: 'fail', sha: candidate,
         why: `${failed.wf.name} run ${failed.run!.id} (${failed.run!.html_url ?? `run ${failed.run!.run_number}`}) ended ${failed.run!.conclusion} on ${candidate.slice(0, 12)}, so v${version} is not published and latest-stable does not move. Releases publish only commits master CI passed.`,
-        next: `Repair master (the open "Master red: ${failed.wf.name}" issue names the failing tests; docs/RELEASING.md#master-red-issues). Once a later push-to-master run of Test and E2E Tests is green, publish the current VERSION with: gh workflow run release.yml --ref main`,
+        next: `Repair main (the open "Master red: ${failed.wf.name}" issue names the failing tests; docs/RELEASING.md#master-red-issues). Once a later push-to-main run of Test and E2E Tests is green, publish the current VERSION with: gh workflow run release.yml --ref main`,
       };
     }
     const cancelled = runs.find(r => r.run && r.run.status === 'completed' && (r.run.conclusion === 'cancelled' || r.run.conclusion === 'skipped'));
@@ -68,18 +68,18 @@ export async function evaluate(deps: GateDeps, sha: string, version: string): Pr
       const successor = (await deps.newerRuns(cancelled.wf.file, cancelled.run!.run_number))
         .filter(r => r.event === 'push' && r.head_branch === 'main' && r.head_sha !== candidate)
         .sort((a, b) => a.run_number - b.run_number)[0];
-      if (!successor) return { kind: 'wait', sha: candidate, why: `${cancelled.wf.name} run ${cancelled.run!.id} was cancelled (superseded by a newer push); waiting for the newer push-to-master run` };
+      if (!successor) return { kind: 'wait', sha: candidate, why: `${cancelled.wf.name} run ${cancelled.run!.id} was cancelled (superseded by a newer push); waiting for the newer push-to-main run` };
       const [moved, inside] = [await deps.versionAt(successor.head_sha), await deps.contains(sha, successor.head_sha)];
-      if (!inside) return { kind: 'fail', sha: candidate, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled and the next master run (${successor.head_sha.slice(0, 12)}) does not contain the release commit`, next: 'Re-run the gate after master settles: gh workflow run release.yml --ref main' };
+      if (!inside) return { kind: 'fail', sha: candidate, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled and the next main run (${successor.head_sha.slice(0, 12)}) does not contain the release commit`, next: 'Re-run the gate after master settles: gh workflow run release.yml --ref main' };
       if (moved !== version) return { kind: 'superseded', sha: successor.head_sha, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled by a newer push that carries VERSION ${moved}; v${version} is superseded and v${moved}'s own release run publishes` };
       candidate = successor.head_sha;
       continue;
     }
     const pending = runs.filter(r => !r.run || r.run.status !== 'completed');
     if (pending.length) return { kind: 'wait', sha: candidate, why: pending.map(r => `${r.wf.name} ${r.run ? `run ${r.run.id} is ${r.run.status}` : 'has no push run yet'} on ${candidate.slice(0, 12)}`).join('; ') };
-    return { kind: 'publish', sha: candidate, why: `Test and E2E Tests both succeeded on ${candidate.slice(0, 12)}${candidate === sha ? '' : ` (the newer master commit that replaced the cancelled runs of ${sha.slice(0, 12)}; same VERSION)`}` };
+    return { kind: 'publish', sha: candidate, why: `Test and E2E Tests both succeeded on ${candidate.slice(0, 12)}${candidate === sha ? '' : ` (the newer main commit that replaced the cancelled runs of ${sha.slice(0, 12)}; same VERSION)`}` };
   }
-  return { kind: 'fail', sha: candidate, why: `followed ${MAX_HOPS} cancelled runs without a completed one`, next: 'Wait for master to settle, then: gh workflow run release.yml --ref main' };
+  return { kind: 'fail', sha: candidate, why: `followed ${MAX_HOPS} cancelled runs without a completed one`, next: 'Wait for main to settle, then: gh workflow run release.yml --ref main' };
 }
 
 export function apiDeps(client: GitHubClient): GateDeps {
@@ -132,7 +132,7 @@ if (import.meta.main) {
   }
   const write = (publish: boolean, at: string) => { if (output) appendFileSync(output, `publish=${publish}\nsha=${at}\n`); };
   if (ref !== 'refs/heads/main') {
-    console.log(`::error::Release v${version} not published: this run is on ${ref}. Why: releases publish only master commits that master CI passed. Fix: gh workflow run release.yml --ref main. Docs: ${DOCS}`);
+    console.log(`::error::Release v${version} not published: this run is on ${ref}. Why: releases publish only main commits that main CI passed. Fix: gh workflow run release.yml --ref main. Docs: ${DOCS}`);
     write(false, sha);
     process.exit(1);
   }

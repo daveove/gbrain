@@ -361,19 +361,19 @@ export type Route = { track: 'schedule' | 'push' | 'replay' } | { refuse: string
 
 /** Which state track a run feeds; every refusal names what nightly-watch accepts and the next command. */
 export function routeRun(run: RunInfo, repo: string, replayIssue?: number): Route {
-  const fix = 'Fix: pass a scheduled run id, a push-to-master run id of Test or E2E Tests (gh run list --workflow test.yml --event push --branch main --limit 5), or an E2E Tests dispatch run on master with replay_issue. Docs: docs/RELEASING.md#master-red-issues';
+  const fix = 'Fix: pass a scheduled run id, a push-to-main run id of Test or E2E Tests (gh run list --workflow test.yml --event push --branch main --limit 5), or an E2E Tests dispatch run on main with replay_issue. Docs: docs/RELEASING.md#master-red-issues';
   if (run.repository?.full_name && run.repository.full_name !== repo) return { refuse: `run ${run.id} belongs to ${run.repository.full_name}, not ${repo}. ${fix}` };
   if (run.event === 'schedule') return replayIssue ? { refuse: `run ${run.id} is a scheduled run; replay_issue applies only to E2E Tests dispatch runs. ${fix}` } : { track: 'schedule' };
   if (run.event === 'push') {
-    if (run.head_branch !== 'main') return { refuse: `run ${run.id} is a push to '${inert(run.head_branch, 80)}'; only push-to-master runs open master-red issues. ${fix}` };
+    if (run.head_branch !== 'main') return { refuse: `run ${run.id} is a push to '${inert(run.head_branch, 80)}'; only push-to-main runs open master-red issues. ${fix}` };
     if (!PUSH_ALLOWLIST[run.name]) return { refuse: `run ${run.id} is a push run of '${inert(run.name, 80)}', which master-red does not watch (allowlist: ${Object.keys(PUSH_ALLOWLIST).join(', ')}). ${fix}` };
     return replayIssue ? { refuse: `run ${run.id} is a push run; replay_issue applies only to E2E Tests dispatch runs. ${fix}` } : { track: 'push' };
   }
   if (run.event === 'workflow_dispatch' && replayIssue) {
-    if (run.name !== 'E2E Tests' || run.head_branch !== 'main') return { refuse: `run ${run.id} is a dispatch of '${inert(run.name, 80)}' on '${inert(run.head_branch, 80)}'; an issue-bound replay must be an E2E Tests dispatch on master (gh workflow run e2e.yml --ref main -f full_corpus=true). ${fix}` };
+    if (run.name !== 'E2E Tests' || run.head_branch !== 'main') return { refuse: `run ${run.id} is a dispatch of '${inert(run.name, 80)}' on '${inert(run.head_branch, 80)}'; an issue-bound replay must be an E2E Tests dispatch on main (gh workflow run e2e.yml --ref main -f full_corpus=true). ${fix}` };
     return { track: 'replay' };
   }
-  return { refuse: `run ${run.id} is a ${inert(run.event, 40)} run; nightly-watch evaluates scheduled runs, push-to-master runs of Test and E2E Tests, and issue-bound E2E replays only (pull-request and other runs are refused). ${fix}` };
+  return { refuse: `run ${run.id} is a ${inert(run.event, 40)} run; nightly-watch evaluates scheduled runs, push-to-main runs of Test and E2E Tests, and issue-bound E2E replays only (pull-request and other runs are refused). ${fix}` };
 }
 
 export type RoutedResult =

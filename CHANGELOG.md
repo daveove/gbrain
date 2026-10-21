@@ -27,6 +27,7 @@ identifiers and attribution are available in the pre-removal Git revision
 ### Changed
 
 - DAV-7022: `main` is this fork's default branch. CI workflow triggers (`push`, `pull_request`, `pull_request_target`, `workflow_run`) run on `main`, and the CI tooling that keys off the default branch follows: baseline and diff gates read `origin/main`, nightly-watch, master-red, ci-health and the release gate count push runs on `main`, and the release gate publishes only from `refs/heads/main`. The `master-red` issue label keeps its name; the old `master` branch is archived as tag `archive/master-v0.48.3`.
+- DAV-7022: this fork's CI runs on GitHub-hosted `ubuntu-24.04` / `ubuntu-24.04-arm` runners instead of upstream's Ubicloud labels, which have no runners here. The upstream-only fix-wave gate runs only in garrytan/gbrain, so it no longer fails every same-repository PR into the fork's `main`.
 
 ### Fixed
 

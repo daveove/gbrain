@@ -60,7 +60,7 @@ describe('release gate', () => {
     expect(v).toMatchObject({ kind: 'publish', sha: B });
     expect(v.why).toContain('same VERSION');
     const notYet = deps({ 'test.yml': [run(1, 10, A, 'completed', 'cancelled')], 'e2e.yml': [run(2, 20, A, 'completed', 'success')] });
-    expect((await evaluate(notYet, A, '0.60.70.0')).why).toContain('waiting for the newer push-to-master run');
+    expect((await evaluate(notYet, A, '0.60.70.0')).why).toContain('waiting for the newer push-to-main run');
     const redSuccessor = deps({ 'test.yml': [run(1, 10, A, 'completed', 'cancelled'), run(3, 11, B, 'completed', 'failure')], 'e2e.yml': [run(4, 21, B, 'completed', 'success')] });
     expect(await evaluate(redSuccessor, A, '0.60.70.0')).toMatchObject({ kind: 'fail', sha: B });
   });

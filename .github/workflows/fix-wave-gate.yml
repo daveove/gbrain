@@ -11,6 +11,8 @@ name: Fix-wave gate
 # reads only event metadata and the PR timeline: it NEVER checks out, builds or
 # runs PR code. Required-check status is a repository setting a maintainer
 # turns on (docs/RELEASING.md#fix-wave-gate); until then the check is advisory.
+# Both jobs run only in garrytan/gbrain: the trusted head repository and the
+# maintainer allowlist are upstream's, so in a fork every PR would fail.
 
 on:
   pull_request_target:
@@ -25,7 +27,8 @@ concurrency:
 
 jobs:
   contributor-gate:
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    if: github.repository == 'garrytan/gbrain'
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -45,8 +48,8 @@ jobs:
         run: bun scripts/fix-wave-gate.ts
 
   welcome-comment:
-    if: github.event.action == 'opened'
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    if: github.repository == 'garrytan/gbrain' && github.event.action == 'opened'
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read

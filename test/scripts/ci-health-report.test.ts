@@ -132,14 +132,14 @@ describe('ci-health-report', () => {
     expect(masterTest).toMatchObject({ event: 'push', runs: 19, first_attempt_pass: 16 });
     expect(masterTest.coverage).toEqual({ total: 20, completed: 20, cancelled: 1, skipped: 0 });
     expect(masterTest.classification).toEqual({ stress_gate: 1, test: 1, infrastructure: 1, unread: 0 });
-    expect(data.criteria.find(c => c.name === 'master Test push runs')).toMatchObject({ verdict: 'missed', target: 0.95 });
+    expect(data.criteria.find(c => c.name === 'main Test push runs')).toMatchObject({ verdict: 'missed', target: 0.95 });
     const prTest = data.workflows.find(w => w.workflow === 'test.yml')!;
     expect(prTest.stress_gate_failures).toBe(1);
     expect(prTest.classification.stress_gate).toBe(1);
     const body = renderHealth(data);
-    expect(body).toContain('| test.yml | push to master | 19 | 16 (84%) | 1 | 1 / 1 / 1 | 1 of 20 cancelled; 20 of 20 completed |');
-    expect(body).toContain('Exit criterion missed: master Test push runs at 84% (target 95%)');
-    expect(body).toContain('**Nightly-watch residual:** 9 skipped watch runs; 8 watched-workflow runs on master outside the schedule and push allowlist');
+    expect(body).toContain('| test.yml | push to main | 19 | 16 (84%) | 1 | 1 / 1 / 1 | 1 of 20 cancelled; 20 of 20 completed |');
+    expect(body).toContain('Exit criterion missed: main Test push runs at 84% (target 95%)');
+    expect(body).toContain('**Nightly-watch residual:** 9 skipped watch runs; 8 watched-workflow runs on main outside the schedule and push allowlist');
   });
 
   test('master-red first response: an allowlisted comment or the first linked PR from anyone; bot comments never count', async () => {

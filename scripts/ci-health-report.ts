@@ -11,10 +11,10 @@
  * for an explicit acceptance window. It reports:
  *
  * - first-attempt pass rate of same-repository pull-request runs and of
- *   push-to-master runs, per workflow (`firstAttempt()`: a run that needed a
+ *   push-to-main runs, per workflow (`firstAttempt()`: a run that needed a
  *   re-run failed its first attempt; cancelled and skipped runs are excluded;
  *   dispatch and scheduled runs are not read);
- * - the exit criteria (master Test and E2E >= 95%, PR test.yml and e2e.yml
+ * - the exit criteria (main Test and E2E >= 95%, PR test.yml and e2e.yml
  *   >= 90%), each met, missed or indeterminate. The window is paged in full
  *   (a query over the API's 1000-result search cap is split in halves);
  *   when completeness cannot be established the criterion is indeterminate,
@@ -28,7 +28,7 @@
  *   collaborator, or a `--responders` login; bots other than those never
  *   count) or the first linked repair PR from any author. The 1-hour target
  *   is measured, not enforced;
- * - the nightly-watch residual (watched-workflow runs on master that still
+ * - the nightly-watch residual (watched-workflow runs on main that still
  *   create a skipped watch run), the test files with the most failure
  *   annotations (failed runs sampled), shard spread with the weights miner
  *   command, serial files added in the window and nightly-watch's status.
@@ -258,9 +258,9 @@ export function renderHealth(data: HealthData): string {
   if (slow.length) steps.push(`${slow.length} master-red issue(s) got no first response within 1 hour (${slow.map(r => `#${r.issue}`).join(', ')}): the agent on release duty answers with a comment or a linked repair PR. Docs: docs/RELEASING.md#master-red-issues`);
   if (data.serial_added?.length) steps.push(`Review the ${data.serial_added.length} new serial file(s) below: each needs a reason it cannot run in parallel (\`bash scripts/check-test-isolation.sh <file>\`).`);
   if (data.nightly_watch !== 'success') steps.push(`nightly-watch's latest run is \`${inert(data.nightly_watch, 40)}\`: read it with \`gh run list --workflow nightly-watch.yml --limit 3\` before trusting nightly issues.`);
-  const seriesRow = (s: Series) => `| ${s.workflow} | ${s.event === 'push' ? 'push to master' : 'pull request'} | ${s.runs} | ${s.first_attempt_pass} (${pct(s.first_attempt_rate)})${s.complete ? '' : ' (incomplete)'} | ${s.stress_gate_failures} | ${s.classification.stress_gate} / ${s.classification.test} / ${s.classification.infrastructure}${s.classification.unread ? ` (+${s.classification.unread} unread)` : ''} | ${s.coverage.cancelled} of ${s.coverage.total} cancelled; ${s.coverage.completed} of ${s.coverage.total} completed |`;
+  const seriesRow = (s: Series) => `| ${s.workflow} | ${s.event === 'push' ? 'push to main' : 'pull request'} | ${s.runs} | ${s.first_attempt_pass} (${pct(s.first_attempt_rate)})${s.complete ? '' : ' (incomplete)'} | ${s.stress_gate_failures} | ${s.classification.stress_gate} / ${s.classification.test} / ${s.classification.infrastructure}${s.classification.unread ? ` (+${s.classification.unread} unread)` : ''} | ${s.coverage.cancelled} of ${s.coverage.total} cancelled; ${s.coverage.completed} of ${s.coverage.total} completed |`;
   const lines = [
-    `Runs created ${data.since} .. ${data.until} (same-repository pull-request runs and push-to-master runs; dispatch and scheduled runs are not counted).`,
+    `Runs created ${data.since} .. ${data.until} (same-repository pull-request runs and push-to-main runs; dispatch and scheduled runs are not counted).`,
     '',
     '| workflow | event | completed runs | first-attempt pass | stress-gate failures | failure classes (stress / test / infra) | coverage |',
     '|---|---|---|---|---|---|---|',
@@ -274,7 +274,7 @@ export function renderHealth(data: HealthData): string {
     ...data.master_red.issues.map(r => `- #${r.issue} opened ${r.opened}: ${r.first_response ? `${r.via === 'pull_request' ? 'linked PR' : 'comment'} after ${hrs(r.hours)}` : 'no response yet'}`),
     '',
     `**Shard spread:** ${data.workflows.map(w => `${w.workflow} ${ratio(w.spread.mean_ratio)} / ${ratio(w.spread.worst_ratio)} (mean / worst slowest-to-mean over ${w.spread.runs} runs); fork runs not read: ${w.fork_runs_excluded}`).join('; ')}.`,
-    `**Nightly-watch residual:** ${data.watch_residual.skipped_watch_runs ?? 'n/a'} skipped watch runs; ${data.watch_residual.master_runs_outside_allowlist ?? 'n/a'} watched-workflow runs on master outside the schedule and push allowlist (each creates a skipped watch run; no trigger-level event filter exists).`,
+    `**Nightly-watch residual:** ${data.watch_residual.skipped_watch_runs ?? 'n/a'} skipped watch runs; ${data.watch_residual.master_runs_outside_allowlist ?? 'n/a'} watched-workflow runs on main outside the schedule and push allowlist (each creates a skipped watch run; no trigger-level event filter exists).`,
     '',
     '**Most failure annotations by test file** (failed runs sampled):',
     ...(data.failing_files.length ? data.failing_files.map(f => `- \`${f.file}\`: ${f.count} (e.g. \`${f.sample}\`)`) : ['- none']),
@@ -376,8 +376,8 @@ export async function collectHealth(client: GitHubClient, window: Window, opts: 
     });
   }
   const criteria = [
-    criterion('master Test push runs', TARGETS.master, master[0]!),
-    criterion('master E2E Tests push runs', TARGETS.master, master[1]!),
+    criterion('main Test push runs', TARGETS.master, master[0]!),
+    criterion('main E2E Tests push runs', TARGETS.master, master[1]!),
     criterion('PR test.yml first attempt', TARGETS.pr, workflows[0]!),
     criterion('PR e2e.yml first attempt', TARGETS.pr, workflows[1]!),
   ];
