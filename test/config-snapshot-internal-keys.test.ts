@@ -51,12 +51,17 @@ describe('getAllConfig excludes internal.* keys', () => {
     expect(await engine.getConfig('internal.pending-links.0001')).toBe('x'.repeat(400));
     expect((await engine.listConfigKeys('internal.pending-links.')).length).toBe(rows);
 
-    // The persistence lane's preparation view answers getAllConfig from its own
-    // read; it keeps the same contract and still serves per-key internal reads.
+    // The persistence lane's preparation view takes its own startup read. That
+    // read skips internal.* rows too; a per-key internal read goes to the engine.
     const view = await preparationConfigView(engine);
     const viewAll = await view.getAllConfig();
     expect(Object.keys(viewAll).filter(key => key.startsWith('internal.'))).toEqual([]);
     expect(viewAll['test.user_key']).toBe('user-value');
     expect(await view.getConfig('internal.pending-links.0001')).toBe('x'.repeat(400));
+    expect(await view.executeRaw<{ value: string }>('SELECT value FROM config WHERE key=$1', ['internal.pending-links.0002']))
+      .toEqual([{ value: 'x'.repeat(400) }]);
+    // Not captured at view creation: a later internal write is visible per key.
+    await engine.setConfig('internal.pending-links.late', 'late');
+    expect(await view.getConfig('internal.pending-links.late')).toBe('late');
   });
 });
