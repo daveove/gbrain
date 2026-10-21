@@ -309,8 +309,8 @@ jobs:
     # of verify work in addition to their test files (the old shape stuffed
     # this into `test (1)` via `if: matrix.shard == 1`, which made shard 1
     # the slowest matrix worker). The dispatcher retains every check and its
-    # 120s deadline. Two concurrent checks fit this fork's 4-vCPU runner;
-    # four made cold tsc hit 120s twice beside the builds and AST scans.
+    # 120s deadline. A single check owns this fork's 4-vCPU runner so cold
+    # tsc does not compete with binary builds or whole-tree AST scans.
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
@@ -361,7 +361,7 @@ jobs:
         env:
           GBRAIN_TEST_RECEIPT_DIR: ${{ runner.temp }}/receipts
           GBRAIN_VERIFY_LOG_DIR: ${{ runner.temp }}/verify-logs
-          GBRAIN_VERIFY_MAX_PARALLEL: 2
+          GBRAIN_VERIFY_MAX_PARALLEL: 1
       - name: Upload verify logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

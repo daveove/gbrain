@@ -58,9 +58,9 @@ fork's `ubuntu-24.04` / `ubuntu-24.04-arm` runners, the empty label list in
 fails on any Ubicloud label. If a job outgrows a 4-vCPU runner, raise its
 `timeout-minutes` or split it across the existing shard matrix.
 
-The fork's verify job runs two checks concurrently on its 4-vCPU runner. A
-cold typecheck reached the unchanged 120-second per-check deadline twice
-with four concurrent builds and AST scans. The narrower pool retains every
+The fork's verify job runs one check at a time on its 4-vCPU runner. Cold
+typecheck reached the unchanged 120-second per-check deadline beside other
+checks at both four-way and two-way fanout. Serial execution retains every
 guard and its deadline; local verify still detects the host's CPU count.
 
 ### Event parity
