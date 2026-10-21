@@ -50,7 +50,7 @@ import { submissionAuthority } from '../src/core/persistence/authority.ts';
 import { admitWrite, claimNextWrite, getWriteRequestById } from '../src/core/persistence/journal.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { runPersistenceEffects } from '../src/core/persistence/effects.ts';
-import { installPageProjection, readProjectionSnapshot } from '../src/core/page-state/projections.ts';
+import { installPageEmbeddings, installPageProjection, readProjectionSnapshot, type ProjectionSnapshot } from '../src/core/page-state/projections.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const COLUMN = 'embedding_nomic';
@@ -467,6 +467,39 @@ for (const backend of testBackends()) {
         expect(seen).toEqual([]);
         expect((await engine.getEmbeddingsByChunkIds(ids, COLUMN)).size).toBe(SLUGS.length);
         expect(await liveSpace()).toEqual(before);
+      });
+
+      test('a staged install aborts after a concurrent page write and stamps only a complete page', async () => {
+        const slug = 'notes/delta';
+        const write = (body: string) => importFromContent(engine, slug, `---\ntype: note\ntitle: delta\n---\n\n${body}\n`, { noEmbed: true });
+        await write('delta field notes about the gizmotron.');
+        try {
+          const target = await resolveEmbeddingStagingTarget(engine, COLUMN);
+          const signature = embeddingColumnSignature(target);
+          const read = async () => (await readProjectionSnapshot(engine, slug, 'default', { requireLiveSource: true, embeddingColumn: target }))!;
+          // One staged vector per chunk of the snapshot the install checks.
+          const vectors = (prepared: ProjectionSnapshot) => prepared.chunks.map(chunk => ({ chunk_index: chunk.chunk_index,
+            chunk_text: chunk.chunk_text, chunk_source: chunk.chunk_source, embedding: new Float32Array(DIMS).fill(0.01) }));
+          const delta = async () => (await staged()).filter(row => row.slug === slug);
+
+          // No staged vector yet: an empty install must not publish the page.
+          expect(await installPageEmbeddings(engine, await read(), [], signature)).toBe(true);
+          expect((await delta()).every(row => row.dims === null && row.signature === null)).toBe(true);
+
+          // A canonical write lands between the read and the install.
+          const prepared = await read();
+          await write('delta field notes, revised.');
+          expect(await installPageEmbeddings(engine, prepared, vectors(prepared), signature)).toBe(false);
+          expect((await delta()).every(row => row.dims === null && row.signature === null)).toBe(true);
+
+          const fresh = await read();
+          expect(await installPageEmbeddings(engine, fresh, vectors(fresh), signature)).toBe(true);
+          const rows = await delta();
+          expect(rows.length).toBeGreaterThan(0);
+          expect(rows.every(row => row.dims === DIMS && row.text_current && row.signature?.startsWith(`${signature}:`))).toBe(true);
+        } finally {
+          await engine.executeRaw('DELETE FROM pages WHERE slug=$1', [slug]);
+        }
       });
     });
 

@@ -795,6 +795,11 @@ export async function resolveActiveEmbeddingColumnFromEngine(
 export async function resolveRegisteredEmbeddingColumnFromEngine(engine: RawQueryEngine, name: string): Promise<ResolvedColumn> {
   const rows = await engine.executeRaw<{ key: string; value: string }>(
     "SELECT key,value FROM config WHERE key IN ('embedding_columns','embedding_model','embedding_dimensions','embedding_multimodal_model')");
+  return resolveRegisteredEmbeddingColumnFromRows(rows, name);
+}
+
+/** resolveRegisteredEmbeddingColumnFromEngine over config rows the caller already read. */
+export function resolveRegisteredEmbeddingColumnFromRows(rows: ReadonlyArray<{ key: string; value: string }>, name: string): ResolvedColumn {
   // This is a projection of the actual DB configuration, not an alternate profile.
   const cfg = {} as GBrainConfig;
   for (const row of rows) {
