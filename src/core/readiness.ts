@@ -36,7 +36,8 @@ import { heldLockFor, peekLock, type LockPeekResult } from './pglite-lock.ts';
 import { listRecipes, RECIPES } from './ai/recipes/index.ts';
 import type { Recipe } from './ai/types.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
-import { modelApiAllowed, paidModelApiBlocked, resolveAIBilling } from './ai/billing-policy.ts';
+import { paidModelApiBlocked, resolveAIBilling } from './ai/billing-policy.ts';
+import { DEFAULT_COLUMN_NAME } from './search/embedding-column.ts';
 import { resolveSchemaEmbeddingDim } from './embedding-dim-check.ts';
 import { DEFAULT_EMBEDDING_DIMENSIONS, NEW_INSTALL_DEFAULT_EMBEDDING_MODEL } from './ai/defaults.ts';
 import { getCliOptions, parseGlobalFlags } from './cli-options.ts';
@@ -315,10 +316,16 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
  */
 function paidEmbeddingsRefusedEntry(cfg: GBrainConfig, model: string): ReadinessEntry {
   const base = { capability: 'embeddings' as const, tier: 'config' as const, http_visible: true };
+  // Local means a recipe that can embed and bills nothing under subscription (not e.g. codex-cli, which has no embedding touchpoint).
   const local = Object.entries(cfg.embedding_columns ?? {})
-    .filter(([, column]) => typeof column?.provider === 'string' && modelApiAllowed(column.provider, 'subscription'))
+    .filter(([, column]) => {
+      if (typeof column?.provider !== 'string') return false;
+      const recipe = RECIPES.get(column.provider.split(':')[0]);
+      return !!recipe?.touchpoints.embedding && !paidModelApiBlocked(recipe, 'subscription');
+    })
     .map(([name, column]) => ({ name, provider: column.provider }));
-  const searching = local.find(column => column.name === cfg.search_embedding_column);
+  const searchColumn = cfg.search_embedding_column ?? DEFAULT_COLUMN_NAME;
+  const searching = local.find(column => column.name === searchColumn);
   if (searching) {
     return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searching.provider} column '${searching.name}'. Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called.` };
   }

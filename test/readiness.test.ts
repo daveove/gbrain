@@ -111,6 +111,14 @@ describe('config plane: state and reason per capability', () => {
 
         expect(entry(configReadiness(pglite({ ...paid, embedding_columns: nomic, search_embedding_column: 'embedding_nomic' }), { transport: 'stdio' }).entries, 'embeddings'))
           .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        // An unset search column means the default `embedding` column; a local override of it is already live.
+        const localDefault = { embedding: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const } };
+        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: localDefault }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        // A subscription-allowed recipe with no embedding touchpoint is not a local embedding column.
+        const chatOnly = { embedding_codex: { provider: 'codex-cli:gpt-5.6-terra', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
+        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: chatOnly, search_embedding_column: 'embedding_codex' }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
         const noLocal = entry(configReadiness(pglite(paid), { transport: 'stdio' }).entries, 'embeddings');
         expect(noLocal).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
         expect(noLocal.fix).toBeUndefined();
