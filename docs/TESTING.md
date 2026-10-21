@@ -30,7 +30,7 @@ log's absolute path. A failing `bun run verify` keeps each failed check's log
 and prints it. In CI, each red job's step summary lists the failing tests with a
 `bun test … -t` reproduce command.
 
-**Red CI on master:** [CI red runbook](ci-red-runbook.md).
+**Red CI on main:** [CI red runbook](ci-red-runbook.md).
 
 | File suffix or location | Lane | Command | Runs in PR CI |
 |---|---|---|---|

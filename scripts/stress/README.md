@@ -136,7 +136,7 @@ shards.
 
 The scheduled Test run (and `gh workflow run test.yml -f race_hunt=true`, a
 diagnostic) runs every file in `test/postgres-unit-arms.txt` 10 times against
-Postgres, plus the Postgres-arm and E2E importers of helpers changed on master
+Postgres, plus the Postgres-arm and E2E importers of helpers changed on main
 since the previous night that the gate sampled out. Budget: at most 55-minute
 shards, 6 by default, growing to 12; past that every file runs at least 3
 iterations nightly and the spare capacity rotates by day, so each file still
