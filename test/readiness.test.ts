@@ -16,6 +16,7 @@ import {
   type LockOwner, type ReadinessEntry,
 } from '../src/core/readiness.ts';
 import { renderAction, cliRenderContext, type Action } from '../src/core/agent-output.ts';
+import { degradedRecallNotice } from '../src/core/interop-notices.ts';
 import { listRecipes } from '../src/core/ai/recipes/index.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -90,6 +91,31 @@ describe('config plane: state and reason per capability', () => {
       expect(entry(configReadiness(pglite({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536 }), { transport: 'stdio' }).entries, 'embeddings'))
         .toMatchObject({ state: 'ok', reason: 'configured' });
     });
+  });
+
+  test('embeddings under ai_billing=subscription never ask for a key', async () => {
+    const nomic = { embedding_nomic: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
+    const paid = { embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, ai_billing: 'subscription' as const };
+    for (const keys of [{}, { OPENAI_API_KEY: 'sk-test' }]) {
+      await withKeys({ ...keys, GBRAIN_AI_BILLING: undefined } as Record<string, string>, () => {
+        const pending = entry(configReadiness(pglite({ ...paid, embedding_columns: nomic }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(pending).toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
+        expect(pending.fix).toMatchObject({ actor: 'agent', consent: [] });
+        expect(pending.fix?.inputs).toBeUndefined();
+        expect(pending.fix?.user_message).toBe('Vector search is off until local nomic-embed-text embeddings finish filling in. Keyword search still works, and there is nothing you need to do.');
+
+        const notice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }],
+          { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(notice?.user_message).toBe(pending.fix?.user_message);
+        expect(notice?.user_message).not.toMatch(/api key|add (a|the|it)\b/i);
+
+        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: nomic, search_embedding_column: 'embedding_nomic' }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        const noLocal = entry(configReadiness(pglite(paid), { transport: 'stdio' }).entries, 'embeddings');
+        expect(noLocal).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(noLocal.fix).toBeUndefined();
+      });
+    }
   });
 
   test('chat, writeback, tool surface and thin-client rows', async () => {

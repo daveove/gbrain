@@ -36,6 +36,7 @@ import { heldLockFor, peekLock, type LockPeekResult } from './pglite-lock.ts';
 import { listRecipes, RECIPES } from './ai/recipes/index.ts';
 import type { Recipe } from './ai/types.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
+import { modelApiAllowed, paidModelApiBlocked, resolveAIBilling } from './ai/billing-policy.ts';
 import { resolveSchemaEmbeddingDim } from './embedding-dim-check.ts';
 import { DEFAULT_EMBEDDING_DIMENSIONS, NEW_INSTALL_DEFAULT_EMBEDDING_MODEL } from './ai/defaults.ts';
 import { getCliOptions, parseGlobalFlags } from './cli-options.ts';
@@ -80,6 +81,7 @@ export interface ReadinessCache {
 
 export const EMBEDDINGS_REASONS = [
   'configured', 'embedding_disabled', 'not_configured', 'key_missing', 'unknown_model', 'remote_brain',
+  'paid_api_disabled', 'local_column_pending', 'local_search_column',
 ] as const;
 export const CHAT_LLM_REASONS = ['configured', 'not_configured', 'remote_brain'] as const;
 export const WORKER_REASONS = [
@@ -285,6 +287,7 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
   if (!recipe?.touchpoints.embedding) {
     return { ...base, state: 'degraded', reason: 'unknown_model', why: `The configured embedding model '${model}' is not a known embedding provider, so vectors cannot be computed.`, fix: embeddingEnablement({ ...cfg, embedding_model: undefined }) };
   }
+  if (paidModelApiBlocked(recipe, resolveAIBilling(cfg))) return paidEmbeddingsRefusedEntry(cfg, model);
   const env = mergedProviderEnv(cfg);
   if (embeddingProviderConfigured(model, k => !!env[k]) && detectCapabilities({ config: cfg }).embeddings.available) {
     return { ...base, state: 'ok', reason: 'configured', why: `Embeddings run on ${model}.` };
@@ -298,6 +301,37 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
       why: `Provide ${keys.join(', ')}: ${keys.map(keyHow).join('; ')}. Queued chunks then embed on the next \`gbrain embed --stale\`.`,
       user_message: `Semantic search is configured for ${providerLabel(recipe)} but its API key is missing. Can you add it?`,
       inputs: keyInput(recipe), verify: VERIFY('embeddings'),
+    },
+  };
+}
+
+/**
+ * `ai_billing=subscription` refuses the configured paid embedding model before any request, so an API key
+ * changes nothing and the entry never asks for one. A registered column on a local (non-billing) provider
+ * decides what search does: it is the search column (vector search runs on it), or it is still being filled
+ * by the operator (vector search is off for now; the user has nothing to do).
+ */
+function paidEmbeddingsRefusedEntry(cfg: GBrainConfig, model: string): ReadinessEntry {
+  const base = { capability: 'embeddings' as const, tier: 'config' as const, http_visible: true };
+  const local = Object.entries(cfg.embedding_columns ?? {})
+    .filter(([, column]) => typeof column?.provider === 'string' && modelApiAllowed(column.provider, 'subscription'))
+    .map(([name, column]) => ({ name, provider: column.provider }));
+  const searching = local.find(column => column.name === cfg.search_embedding_column);
+  if (searching) {
+    return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searching.provider} column '${searching.name}'. Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called.` };
+  }
+  const staged = local[0];
+  if (!staged) {
+    return { ...base, state: 'disabled_by_choice', reason: 'paid_api_disabled', why: `Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called and search is keyword-only by that choice. An API key does not change this.` };
+  }
+  const localModel = staged.provider.slice(staged.provider.indexOf(':') + 1);
+  return {
+    ...base, state: 'degraded', reason: 'local_column_pending',
+    why: `Vector search is off. Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called, and search stays keyword-only until the local ${staged.provider} column '${staged.name}' is filled and becomes the search column. No API key is needed.`,
+    fix: {
+      consent: [], actor: 'agent', requires_exclusive: false,
+      why: `Nothing to ask the user. The brain operator fills '${staged.name}' with \`gbrain embed --stale --catch-up --embedding-column ${staged.name}\`, then switches search with \`gbrain config set search_embedding_column ${staged.name}\` once coverage is high enough.`,
+      user_message: `Vector search is off until local ${localModel} embeddings finish filling in. Keyword search still works, and there is nothing you need to do.`,
     },
   };
 }
