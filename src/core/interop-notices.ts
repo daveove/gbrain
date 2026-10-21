@@ -360,7 +360,10 @@ export function recallInteropNotices(
     const entries = (meta.retrieval as { degraded?: Array<{ stage?: string; reason?: string }> } | undefined)?.degraded ?? [];
     const stages = recallStagesFor(op, result, meta, opts.config).map(stage => entries.find(d => d.stage === stage) ?? stage);
     const { _meta: _ignored, ...args } = params;
-    const degraded = degradedRecallNotice(stages, { ...opts, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
+    // A per-call embedding_column override is the column this call searched, so the embeddings guidance describes it.
+    const column = typeof params.embedding_column === 'string' && params.embedding_column ? params.embedding_column : undefined;
+    const config = column && opts.config ? { ...opts.config, search_embedding_column: column } : opts.config;
+    const degraded = degradedRecallNotice(stages, { ...opts, config, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
     if (degraded) out.push(degraded);
     const narrowed = opts.transport === 'stdio' ? sourceBindingNarrowedNotice(op, params, result, opts.binding) : null;
     if (narrowed) out.push(narrowed);

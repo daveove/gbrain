@@ -16,7 +16,7 @@ import {
   type LockOwner, type ReadinessEntry,
 } from '../src/core/readiness.ts';
 import { renderAction, cliRenderContext, type Action } from '../src/core/agent-output.ts';
-import { degradedRecallNotice } from '../src/core/interop-notices.ts';
+import { degradedRecallNotice, recallInteropNotices } from '../src/core/interop-notices.ts';
 import { listRecipes } from '../src/core/ai/recipes/index.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -151,6 +151,17 @@ describe('config plane: state and reason per capability', () => {
         expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage, search_embedding_column: 'embedding_voyage' }), { transport: 'stdio' }).entries, 'embeddings'))
           .toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
         expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage }), { transport: 'stdio' }).entries, 'embeddings').state).toBe('ok');
+        // A per-call embedding_column override is the column that call searched: its provider decides the guidance.
+        const overrideMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }] } };
+        const [paidOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_voyage' },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' });
+        expect(paidOverride?.code).toBe('degraded_recall');
+        expect(paidOverride?.why).toContain("search column 'embedding_voyage'");
+        expect(paidOverride?.fix).toBeUndefined();
+        const [localOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_nomic' },
+          { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(localOverride?.user_message).toBeUndefined();
+        expect(localOverride?.why).not.toContain('is filled and becomes the search column');
       });
     }
   });
