@@ -145,7 +145,8 @@ function embeddingsFix(cfg: GBrainConfig | null | undefined, transport: 'stdio' 
     return { byChoice: false, billing: { why: entry.why, ...(entry.user_message ? { user_message: entry.user_message } : {}) } };
   }
   if (entry?.state === 'disabled_by_choice') return { byChoice: true };
-  return { fix: entry && entry.state !== 'ok' && entry.fix ? entry.fix : doctorFix('Embeddings are configured but did not answer; doctor reports the provider failure.'), byChoice: false };
+  if (entry && entry.state !== 'ok') return { fix: entry.fix ?? doctorFix(entry.why), byChoice: false };
+  return { fix: doctorFix('Embeddings are configured but did not answer; doctor reports the provider failure.'), byChoice: false };
 }
 
 /**

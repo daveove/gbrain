@@ -115,10 +115,21 @@ describe('config plane: state and reason per capability', () => {
         const localDefault = { embedding: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const } };
         expect(entry(configReadiness(pglite({ ...paid, embedding_columns: localDefault }), { transport: 'stdio' }).entries, 'embeddings'))
           .toMatchObject({ state: 'ok', reason: 'local_search_column' });
-        // A subscription-allowed recipe with no embedding touchpoint is not a local embedding column.
+        // A subscription-allowed recipe with no embedding touchpoint is unsupported, not refused by billing.
         const chatOnly = { embedding_codex: { provider: 'codex-cli:gpt-5.6-terra', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
-        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: chatOnly, search_embedding_column: 'embedding_codex' }), { transport: 'stdio' }).entries, 'embeddings'))
-          .toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        const codexCfg = pglite({ ...paid, embedding_columns: chatOnly, search_embedding_column: 'embedding_codex' });
+        const codex = entry(configReadiness(codexCfg, { transport: 'stdio' }).entries, 'embeddings');
+        expect(codex).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(codex.why).toContain('codex-cli:gpt-5.6-terra cannot compute embeddings');
+        expect(codex.why).not.toContain('is not called');
+        expect(codex.fix).toBeUndefined();
+        const codexNotice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'no_touchpoint' }], { config: codexCfg, transport: 'stdio' });
+        expect(codexNotice?.why).not.toContain('refuses');
+        expect(codexNotice?.fix?.why).toBe(codex.why);
+        // With a local column staged, the unsupported search column still names its own cause.
+        const codexStaged = entry(configReadiness(pglite({ ...paid, embedding_columns: { ...chatOnly, ...nomic }, search_embedding_column: 'embedding_codex' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(codexStaged).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(codexStaged.why).toContain("local ollama:nomic-embed-text column 'embedding_nomic'");
         const noLocal = entry(configReadiness(pglite(paid), { transport: 'stdio' }).entries, 'embeddings');
         expect(noLocal).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
         expect(noLocal.fix).toBeUndefined();
@@ -128,12 +139,15 @@ describe('config plane: state and reason per capability', () => {
         expect(refused?.why).toContain('ai_billing=subscription');
         expect(refused?.why).not.toContain('names the enable command');
 
-        // A missing or unknown model under subscription never falls back to the key-asking enablement fix.
-        for (const cfg of [pglite({ ai_billing: 'subscription' }), pglite({ ai_billing: 'subscription', embedding_model: 'nope:model' })]) {
-          const e = entry(configReadiness(cfg, { transport: 'stdio' }).entries, 'embeddings');
-          expect(e).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
-          expect(e.fix).toBeUndefined();
-        }
+        // A missing model under subscription never falls back to the key-asking enablement fix.
+        const none = entry(configReadiness(pglite({ ai_billing: 'subscription' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(none).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(none.fix).toBeUndefined();
+        // An unknown model under subscription is unsupported (no recipe), with no key-asking fix either.
+        const unknown = entry(configReadiness(pglite({ ai_billing: 'subscription', embedding_model: 'nope:model' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(unknown).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(unknown.why).toContain('nope:model cannot compute embeddings');
+        expect(unknown.fix).toBeUndefined();
         // Billing guidance has no action, so a concurrent doctor-actionable stage keeps its doctor fix.
         const mixed = degradedRecallNotice([...stage, { stage: 'embed_timeout' }], { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(mixed?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);

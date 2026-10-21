@@ -316,8 +316,9 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
  * the entry never asks for one. What matters is the provider of the active search column
  * (`search_embedding_column`, default `embedding`, which uses `embedding_model` unless registered). Null
  * when that is the primary model and it is local: the ordinary checks apply. A local search column is ok;
- * otherwise a local column still being filled by the operator means vector search is off for now (no fix,
- * and the user has nothing to do).
+ * a provider with no embedding recipe (unknown, or chat-only like codex-cli) is `unknown_model`, not a
+ * billing refusal; otherwise a local column still being filled by the operator means vector search is off
+ * for now (no fix, and the user has nothing to do).
  */
 function subscriptionEmbeddingsEntry(cfg: GBrainConfig, model: string | undefined): ReadinessEntry | null {
   const base = { capability: 'embeddings' as const, tier: 'config' as const, http_visible: true };
@@ -334,15 +335,23 @@ function subscriptionEmbeddingsEntry(cfg: GBrainConfig, model: string | undefine
     if (searchColumn === DEFAULT_COLUMN_NAME && !cfg.embedding_columns?.[DEFAULT_COLUMN_NAME]) return null;
     return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searchProvider} column '${searchColumn}'. Paid embedding APIs are disabled (ai_billing=subscription).` };
   }
+  const staged = Object.entries(columns).find(([name, provider]) => name !== searchColumn && isLocal(provider)) as [string, string] | undefined;
+  const fill = staged ? `the brain operator fills it with \`gbrain embed --stale --catch-up --embedding-column ${staged[0]}\` and switches search with \`gbrain config set search_embedding_column ${staged[0]}\`` : '';
+  // No embedding recipe (unknown provider, or chat-only like codex-cli) is unsupported, not a billing refusal.
+  if (searchProvider && !RECIPES.get(searchProvider.split(':')[0])?.touchpoints.embedding) {
+    const next = staged
+      ? ` The local ${staged[1]} column '${staged[0]}' can take over once filled: ${fill}.`
+      : ' Vector search needs an embedding provider on that column; under ai_billing=subscription that means a local one (ollama, llama-server or lmstudio), which is the user\'s decision.';
+    return { ...base, state: 'degraded', reason: 'unknown_model', why: `The search column '${searchColumn}' uses ${searchProvider}, but ${searchProvider} cannot compute embeddings, so search is keyword-only.${next}` };
+  }
   const refused = searchProvider ? `, so ${searchProvider} (search column '${searchColumn}') is not called` : ' and no local embedding model is configured';
-  const staged = Object.entries(columns).find(([name, provider]) => name !== searchColumn && isLocal(provider));
   if (!staged) {
     return { ...base, state: 'disabled_by_choice', reason: 'paid_api_disabled', why: `Paid embedding APIs are disabled (ai_billing=subscription)${refused}, and search is keyword-only. An API key does not change this; vector search needs a local embedding model or column (ollama, llama-server or lmstudio) or ai_billing=api, and both are the user's decision.` };
   }
-  const [stagedName, stagedProvider] = staged as [string, string];
+  const [stagedName, stagedProvider] = staged;
   return {
     ...base, state: 'degraded', reason: 'local_column_pending',
-    why: `Vector search is off. Paid embedding APIs are disabled (ai_billing=subscription)${refused}, and search stays keyword-only until the local ${stagedProvider} column '${stagedName}' is filled and becomes the search column. No API key is needed and nothing is asked of the user: the brain operator fills it with \`gbrain embed --stale --catch-up --embedding-column ${stagedName}\` and switches search with \`gbrain config set search_embedding_column ${stagedName}\`.`,
+    why: `Vector search is off. Paid embedding APIs are disabled (ai_billing=subscription)${refused}, and search stays keyword-only until the local ${stagedProvider} column '${stagedName}' is filled and becomes the search column. No API key is needed and nothing is asked of the user: ${fill}.`,
     user_message: `Vector search is off until local ${stagedProvider.slice(stagedProvider.indexOf(':') + 1)} embeddings finish filling in. Keyword search still works, and there is nothing you need to do.`,
   };
 }
