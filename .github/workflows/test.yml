@@ -308,9 +308,9 @@ jobs:
     # Lives in its own runner so the matrix shards aren't carrying ~2-3min
     # of verify work in addition to their test files (the old shape stuffed
     # this into `test (1)` via `if: matrix.shard == 1`, which made shard 1
-    # the slowest matrix worker). scripts/run-verify-parallel.sh fans out
-    # the 20 checks via & + wait (~5s vs ~15-25s sequential).
-    # 8 vCPUs: measured 51s vs 48s on 16 and 58s on 4.
+    # the slowest matrix worker). The dispatcher retains every check and its
+    # 120s deadline. Two concurrent checks fit this fork's 4-vCPU runner;
+    # four made cold tsc hit 120s twice beside the builds and AST scans.
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
@@ -361,6 +361,7 @@ jobs:
         env:
           GBRAIN_TEST_RECEIPT_DIR: ${{ runner.temp }}/receipts
           GBRAIN_VERIFY_LOG_DIR: ${{ runner.temp }}/verify-logs
+          GBRAIN_VERIFY_MAX_PARALLEL: 2
       - name: Upload verify logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
