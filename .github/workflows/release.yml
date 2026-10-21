@@ -4,11 +4,11 @@ name: Release
 # tag + title `v<VERSION>`, notes from that version's CHANGELOG.md entry,
 # compiled binaries attached (#3521).
 #
-# Why every bump: `gbrain check-update` resolves the latest version from the
-# VERSION file on main, but binary self-update
-# (src/core/binary-self-update.ts) downloads assets from `releases/latest`.
-# If releases lag VERSION, binary installs are told an upgrade exists that
-# self-update cannot apply. Keeping releases/latest == VERSION closes that gap.
+# This fork publishes its own main-branch release artifacts and provenance.
+# The installed updater still downloads and verifies only upstream
+# garrytan/gbrain releases, whose VERSION and trusted builder use master.
+# Fork artifacts are deliberately outside that trust boundary. Upstream must
+# keep releases/latest aligned with VERSION for binary self-update to work.
 #
 # Idempotent: the `version` job skips build+release when a release for
 # v<VERSION> already exists WITH all expected assets. A half-published release

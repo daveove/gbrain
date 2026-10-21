@@ -11,8 +11,8 @@
  * Behavior:
  *   - Baseline source: `git show origin/main:scripts/coverage-baseline.json`.
  *       * unresolvable ref            → exit 2 (infrastructure)
- *       * path absent on master      → 'ungated first landing', exit 0
- *       * present on master but the working-tree file was DELETED → exit 2
+ *       * path absent on main        → 'ungated first landing', exit 0
+ *       * present on main but the working-tree file was DELETED → exit 2
  *         (deletion defense: removing the file must not silently un-gate)
  *   - Like-for-like: ONLY the section named by --corpus is compared. A null
  *     corpus section → 'ungated first landing', exit 0 (sections are seeded
@@ -35,7 +35,7 @@
  *   COVERAGE_BASELINE_JSON_OVERRIDE   literal baseline JSON text used instead
  *                                     of git show; the sentinel value
  *                                     'ABSENT_ON_MASTER' simulates a missing
- *                                     path on master, 'GIT_FAILURE' simulates
+ *                                     path on main, 'GIT_FAILURE' simulates
  *                                     an unresolvable ref.
  *   COVERAGE_BASELINE_WORKTREE_PATH   working-tree baseline path checked by
  *                                     the deletion defense (default
@@ -131,7 +131,7 @@ function fetchBaselineFromMaster(): BaselineFetch {
   if (res.error) return { status: "git-failure", msg: String(res.error) };
   if (res.status === 0) return { status: "ok", text: res.stdout };
   const stderr = res.stderr || "";
-  // Path errors mean the ref resolved but the file is not on master yet.
+  // Path errors mean the ref resolved but the file is not on main yet.
   if (/does not exist in|exists on disk, but not in/.test(stderr)) return { status: "absent" };
   return { status: "git-failure", msg: stderr.trim() };
 }
@@ -186,7 +186,7 @@ function main(): void {
     process.exit(0);
   }
 
-  // Deletion defense: baseline exists on master; the working-tree copy must
+  // Deletion defense: baseline exists on main; the working-tree copy must
   // still exist too, or a PR could delete the file to dodge the gate.
   const worktreePath =
     process.env.COVERAGE_BASELINE_WORKTREE_PATH || join(import.meta.dir, "coverage-baseline.json");
