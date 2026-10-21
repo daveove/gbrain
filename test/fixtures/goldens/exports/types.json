@@ -63,6 +63,7 @@
           "addTimelineEntriesBatch: (entries: TimelineBatchInput[], opts?: BatchOpts) => Promise<number>",
           "addTimelineEntry: (slug: string, entry: TimelineInput, opts?: { skipExistenceCheck?: boolean; sourceId?: string; }) => Promise<boolean>",
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
+          "cancelSchemaInitialization?: (() => Promise<void>) | undefined",
           "connect: (config: EngineConfig) => Promise<void>",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
           "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
@@ -177,6 +178,7 @@
           "readPageSnapshot: (slug: string, opts?: PageSnapshotOptions) => Promise<PageSnapshot | null>",
           "readPageSnapshotsBatch: (refs: ReadonlyArray<{ slug: string; sourceId: string; }>, opts?: { maxBytes?: number; includeDeleted?: boolean; absentIsNull?: boolean; }) => Promise<PageSnapshotBatch>",
           "readonly kind: \"postgres\" | \"pglite\"",
+          "readonly migrationStatementTimeoutMs?: number | undefined",
           "reconnect: (ctx?: { error?: unknown; }) => Promise<void>",
           "refreshPageBody: (slug: string, sourceId: string, compiledTruth: string, timeline: string, contentHash: string) => Promise<void>",
           "registerBeforeDisconnect: (stop: () => Promise<void>) => () => void",
@@ -585,7 +587,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "migrationStatementTimeoutMs?: number | undefined"
         ],
         "name": "EngineConfig"
       },
@@ -1050,6 +1053,7 @@
           "addTimelineEntriesBatch: (entries: TimelineBatchInput[], opts?: BatchOpts) => Promise<number>",
           "addTimelineEntry: (slug: string, entry: TimelineInput, opts?: { skipExistenceCheck?: boolean; sourceId?: string; }) => Promise<boolean>",
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
+          "cancelSchemaInitialization: () => Promise<void>",
           "connect: (config: EngineConfig & { poolSize?: number; parentConnectionManager?: ConnectionManager; }) => Promise<void>",
           "connectionManager: ConnectionManager | null",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
@@ -1159,6 +1163,7 @@
           "markPagesExtractedBatch: (refs: Array<{ slug: string; source_id: string; extractedAt?: string; }>, defaultExtractedAt: string) => Promise<number>",
           "mergeOntologyFact: (obs: OntologyObservationInput) => Promise<OntologyMergeResult>",
           "migrateFactsToCanonical: (phantomSlug: string, canonicalSlug: string, sourceId: string) => Promise<{ migrated: number; }>",
+          "migrationStatementTimeoutMs: number | undefined",
           "onCheckout: (listener: () => void) => () => void",
           "private _beforeDisconnect",
           "private _bulkRetryOptsCache",
@@ -1171,6 +1176,7 @@
           "private _pageTransaction",
           "private _reconnecting",
           "private _savedConfig",
+          "private _schemaInitializationCancelled",
           "private _searchKeywordCJK",
           "private _sql",
           "private _upsertChunksOnce",
@@ -3329,6 +3335,7 @@
           "addTimelineEntriesBatch: (entries: TimelineBatchInput[], opts?: BatchOpts) => Promise<number>",
           "addTimelineEntry: (slug: string, entry: TimelineInput, opts?: { skipExistenceCheck?: boolean; sourceId?: string; }) => Promise<boolean>",
           "batchLoadEmotionalInputs: (slugs?: string[]) => Promise<EmotionalWeightInputRow[]>",
+          "cancelSchemaInitialization?: (() => Promise<void>) | undefined",
           "connect: (config: EngineConfig) => Promise<void>",
           "consolidateFact: (id: number, takeId: number) => Promise<void>",
           "countChunklessPagesWithContent: (opts?: { sourceId?: string; activeSourcesOnly?: boolean; }) => Promise<number>",
@@ -3443,6 +3450,7 @@
           "readPageSnapshot: (slug: string, opts?: PageSnapshotOptions) => Promise<PageSnapshot | null>",
           "readPageSnapshotsBatch: (refs: ReadonlyArray<{ slug: string; sourceId: string; }>, opts?: { maxBytes?: number; includeDeleted?: boolean; absentIsNull?: boolean; }) => Promise<PageSnapshotBatch>",
           "readonly kind: \"postgres\" | \"pglite\"",
+          "readonly migrationStatementTimeoutMs?: number | undefined",
           "reconnect: (ctx?: { error?: unknown; }) => Promise<void>",
           "refreshPageBody: (slug: string, sourceId: string, compiledTruth: string, timeline: string, contentHash: string) => Promise<void>",
           "registerBeforeDisconnect: (stop: () => Promise<void>) => () => void",
@@ -8372,7 +8380,8 @@
           "database_path?: string | undefined",
           "database_url?: string | undefined",
           "engine?: \"postgres\" | \"pglite\" | undefined",
-          "keyword_statement_timeout_ms?: number | undefined"
+          "keyword_statement_timeout_ms?: number | undefined",
+          "migrationStatementTimeoutMs?: number | undefined"
         ],
         "name": "EngineConfig"
       },
