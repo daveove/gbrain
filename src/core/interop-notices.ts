@@ -364,7 +364,8 @@ export function recallInteropNotices(
     const column = typeof params.embedding_column === 'string' && params.embedding_column ? params.embedding_column : undefined;
     const config = column && opts.config ? { ...opts.config, search_embedding_column: column } : opts.config;
     const degraded = degradedRecallNotice(stages, { ...opts, config, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
-    if (degraded) out.push(degraded);
+    // The guidance is column-specific, so a session must not dedupe one override's notice against another's.
+    if (degraded) out.push(column && degraded.dedupe_key ? { ...degraded, dedupe_key: `${degraded.dedupe_key}|column:${column}` } : degraded);
     const narrowed = opts.transport === 'stdio' ? sourceBindingNarrowedNotice(op, params, result, opts.binding) : null;
     if (narrowed) out.push(narrowed);
     return out;

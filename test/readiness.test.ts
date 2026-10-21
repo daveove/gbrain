@@ -162,6 +162,12 @@ describe('config plane: state and reason per capability', () => {
           { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(localOverride?.user_message).toBeUndefined();
         expect(localOverride?.why).not.toContain('is filled and becomes the search column');
+        // no_provider is configuration-persistent; per-call overrides keep column-specific dedupe keys.
+        const persistentMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'no_provider' }] } };
+        const keyFor = (embedding_column?: string) => recallInteropNotices('search', [], persistentMeta, { query: 'q', ...(embedding_column ? { embedding_column } : {}) },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' })[0]?.dedupe_key;
+        expect(keyFor()).toBeDefined();
+        expect(new Set([keyFor(), keyFor('embedding_voyage'), keyFor('embedding_other')]).size).toBe(3);
       });
     }
   });
