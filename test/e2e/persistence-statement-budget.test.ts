@@ -42,9 +42,12 @@ const CRITICAL: Phase[] = ['admission', 'claim', 'prepare', 'recovery_record', '
  * code before #6007 measured 29, 5, 21, 9, 61, 10: 135, and 10). The claim
  * counts only the transaction that claimed this write; another tick's empty
  * claim attempt is a consumer scan.
+ * Daily-memory coalescing (e6f7a7808) adds a nested transaction and a row
+ * lock to publication: the measured count is now 52. Keep its existing
+ * two-statement headroom; the 118-statement critical-path ceiling is unchanged.
  */
 const BUDGET: Record<string, number> = {
-  admission: 28, claim: 6, prepare: 25, recovery_record: 7, publication: 50, completion: 7, critical_path: 118, receipt: 9,
+  admission: 28, claim: 6, prepare: 25, recovery_record: 7, publication: 54, completion: 7, critical_path: 118, receipt: 9,
 };
 
 const SCAN = [
