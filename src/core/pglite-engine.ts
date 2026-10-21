@@ -6058,7 +6058,7 @@ export class PGLiteEngine implements BrainEngine {
   }
 
   async getAllConfig(): Promise<Record<string, string>> {
-    const { rows } = await this.db.query('SELECT key, value FROM config');
+    const { rows } = await this.db.query("SELECT key, value FROM config WHERE key NOT LIKE 'internal.%'");
     const out: Record<string, string> = {};
     for (const row of rows as { key: string; value: string }[]) out[row.key] = row.value;
     return out;
