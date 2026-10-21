@@ -13,7 +13,9 @@
  * arm matched something, the keyword arm's #1 page is lifted to rank 1. The
  * fused #1 drops to #2; every other position keeps its fused order. Queries
  * whose rank-1 row already carries a lexical vote, longer (paraphrase)
- * queries and queries with no strict keyword match are untouched.
+ * queries and queries with no strict keyword match are untouched, and a
+ * keyword #1 that an earlier stage penalized (superseded, generated,
+ * suspected injection) or an unverified stub is never lifted.
  *
  * Runs on the fused list before dedup and the reranker, so a working
  * cross-encoder still has the final say. `search.lexical_anchor=false`
@@ -52,9 +54,14 @@ export function findLexicalAnchor(fused: readonly SearchResult[], query: string,
   }
   if (lexicalPages.has(pageKey(fused[0]))) return null;
   const key = pageKey(anchor);
-  return fused.find(r => r.chunk_id === anchor.chunk_id && pageKey(r) === key)
-    ?? fused.find(r => pageKey(r) === key)
-    ?? null;
+  const row = fused.find(r => r.chunk_id === anchor.chunk_id && pageKey(r) === key)
+    ?? fused.find(r => pageKey(r) === key);
+  // A row an earlier stage penalized (superseded, generated, suspected
+  // injection) or never trusted (unverified stub) is not lifted: the anchor
+  // must not cancel those safeguards.
+  if (!row || row.superseded === true || row.supersede_penalty !== undefined || row.generated_demotion !== undefined
+    || row.injection_suspected === true || row.unverified === true) return null;
+  return row;
 }
 
 /**

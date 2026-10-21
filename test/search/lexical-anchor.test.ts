@@ -57,6 +57,16 @@ describe('findLexicalAnchor (pure)', () => {
     expect(findLexicalAnchor([neighbour, name], 'Mandalorian', { ...lists, titleFusionList: [neighbour] })).toBeNull();
     expect(findLexicalAnchor([neighbour, name], 'Mandalorian', { ...lists, relationalList: [neighbour] })).toBeNull();
   });
+
+  test('a penalized or unverified keyword #1 is never lifted', () => {
+    for (const penalty of [
+      { superseded: true }, { supersede_penalty: 0.5 }, { generated_demotion: 0.5 },
+      { injection_suspected: true as const }, { unverified: true },
+    ]) {
+      const penalized = row(NAME, { score: 0.4, chunk_id: 1, ...penalty });
+      expect(findLexicalAnchor([neighbour, penalized], 'Mandalorian', { ...lists, keywordFusionList: [penalized] })).toBeNull();
+    }
+  });
 });
 
 let engine: PGLiteEngine;
