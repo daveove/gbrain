@@ -42,9 +42,12 @@ const CRITICAL: Phase[] = ['admission', 'claim', 'prepare', 'recovery_record', '
  * code before #6007 measured 29, 5, 21, 9, 61, 10: 135, and 10). The claim
  * counts only the transaction that claimed this write; another tick's empty
  * claim attempt is a consumer scan.
+ * Daily-memory coalescing (e6f7a7808) adds a nested transaction and a row
+ * lock to publication: the measured count is now 52. Keep its existing
+ * two-statement headroom; the 118-statement critical-path ceiling is unchanged.
  */
 const BUDGET: Record<string, number> = {
-  admission: 28, claim: 6, prepare: 25, recovery_record: 7, publication: 50, completion: 7, critical_path: 118, receipt: 9,
+  admission: 28, claim: 6, prepare: 25, recovery_record: 7, publication: 54, completion: 7, critical_path: 118, receipt: 9,
 };
 
 const SCAN = [
@@ -96,8 +99,23 @@ function classify(records: TraceRecord[]) {
     ?? anchor('claim', 'end') ?? Infinity;
   const publicationBegin = anchor('publication', 'begin') ?? Infinity;
   const publicationEnd = anchor('publication', 'end') ?? Infinity;
+  // The effect drain resolves its registry outside the claim transaction.
+  // Attribute it by the next statement on that connection, not wall-clock
+  // overlap with a different connection's page preparation.
+  const effectBegins = new Set(labelled.filter(g => g.phase === 'effects').map(g => g.records[0]!));
+  const effectRegistryReads = new Set<TraceRecord>();
+  const previousByConnection = new Map<number, TraceRecord>();
+  for (const record of sorted) {
+    const previous = previousByConnection.get(record.conn);
+    if (effectBegins.has(record) && previous &&
+      flat(previous.sql) === "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')") {
+      effectRegistryReads.add(previous);
+    }
+    previousByConnection.set(record.conn, record);
+  }
   const phaseOf = (record: TraceRecord): Phase => {
     const text = flat(record.sql);
+    if (effectRegistryReads.has(record)) return 'effects';
     if (SCAN.some(pattern => pattern.test(text))) return 'consumer_scan';
     if (/^SELECT state,error_code,error_message,completed_at,updated_at,blocked_reason,outcome FROM persistence_requests/.test(text)) return 'wait_poll';
     if (/^UPDATE persistence_requests SET state='running'/.test(text) || /FOR UPDATE OF r SKIP LOCKED\) RETURNING/.test(text)) return 'claim';
@@ -125,6 +143,32 @@ function classify(records: TraceRecord[]) {
   }), { statements: 0, describes: 0 });
   return result;
 }
+
+test('statement classifier attributes only registry reads followed by an effect claim to effects', () => {
+  const record = (t: number, conn: number, sql: string, kind = 'execute'): TraceRecord => ({ t, ms: 0, conn, sql, kind });
+  const registry = "SELECT key, value FROM config WHERE key IN ('search_embedding_column', 'embedding_columns')";
+  const rows = [
+    record(-2, 1, 'begin', 'simple'),
+    record(-1, 1, 'INSERT INTO persistence_requests'),
+    record(0, 1, 'commit'),
+    record(1, 1, 'begin', 'simple'),
+    record(2, 1, "SELECT r.* FROM persistence_requests r LEFT JOIN persistence_worktrees w ON w.id=r.worktree_id WHERE r.state='queued'"),
+    record(3, 1, "UPDATE persistence_requests SET state='running'"),
+    record(4, 1, 'commit'),
+    record(5, 2, registry, 'simple'),
+    record(6, 2, 'begin', 'simple'),
+    record(7, 2, "SELECT * FROM persistence_effects WHERE state='queued'"),
+    record(8, 2, 'commit'),
+    record(9, 1, registry, 'simple'),
+    record(10, 1, 'begin', 'simple'),
+    record(11, 1, 'UPDATE persistence_requests SET publication_started=true'),
+    record(12, 1, 'commit'),
+  ];
+  const counts = classify(rows);
+  expect(counts.effects?.statements).toBe(4);
+  expect(counts.prepare?.statements).toBe(1);
+  expect(counts.critical_path.statements).toBe(11);
+});
 
 const d = hasDatabase() ? describe : describe.skip;
 d('#6007 put_page statement budget (Postgres)', () => {

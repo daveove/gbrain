@@ -36,7 +36,7 @@ import { effectiveWriteTrust, type TaintInput, type TrustTier, type WriteTrust }
 import { operationsByName } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import type { WriteAttribution } from '../src/core/persistence/attribution.ts';
-import { runMigrations } from '../src/core/migrate.ts';
+import { LATEST_VERSION, MIGRATIONS, runMigrations } from '../src/core/migrate.ts';
 
 describe('TRUST_CONTENT_COLUMNS (ENG-2)', () => {
   test('facts, takes and timeline content is attribution content; the rest of attribution content is lifecycle or placement', () => {
@@ -306,11 +306,17 @@ for (const backendName of testBackends()) {
   });
 }
 
-test('v243 forward upgrade preserves trust for calendar provenance but still resets real content changes', async () => {
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  try {
+describe('trust schema forward upgrade', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
     await engine.initSchema();
+  }, 120_000);
+  afterAll(async () => { await engine?.disconnect(); });
+
+  test('v243 forward upgrade preserves trust for calendar provenance but still resets real content changes', async () => {
+    // This disposable engine is owned by the suite hooks, not the test body.
     // Reinstall the pinned v242 trigger semantics, then take the real forward path.
     expect(TRUST_STAMP_TIER_FUNCTION_SQL.match(/'_gbrain_date_instants',/g)).toHaveLength(2);
     await engine.executeRaw(`${TRUST_STAMP_TIER_FUNCTION_SQL.replaceAll("'_gbrain_date_instants',", '')};`);
@@ -321,7 +327,7 @@ test('v243 forward upgrade preserves trust for calendar provenance but still res
     const target = await newPage(engine, trust('operator_curated'), { date: '2026-09-24T00:00:00.000Z' });
     const before = await page(engine, target.slug);
     expect(before.trust_tier).toBe('operator_curated');
-    expect(await runMigrations(engine)).toEqual({ applied: 1, current: 243 });
+    expect(await runMigrations(engine)).toEqual({ applied: MIGRATIONS.filter(m => m.version > 242).length, current: LATEST_VERSION });
     const currentFunction = await engine.executeRaw<{ definition: string }>(
       "SELECT pg_get_functiondef('gbrain_stamp_trust_tier()'::regprocedure) AS definition");
     expect(currentFunction[0].definition).toContain('_gbrain_date_instants');
@@ -330,7 +336,5 @@ test('v243 forward upgrade preserves trust for calendar provenance but still res
     expect(await page(engine, target.slug)).toEqual(before);
     await engine.executeRaw("UPDATE pages SET compiled_truth='A genuinely changed synthetic observation.' WHERE id=$1", [target.id]);
     expect((await page(engine, target.slug)).trust_tier).toBe('unknown');
-  } finally {
-    await engine.disconnect();
-  }
-}, 120_000);
+  }, 120_000);
+});

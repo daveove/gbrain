@@ -338,22 +338,22 @@ describe('CLI explanation attribution through native dispatch', () => {
       expect(row.blend_norm_rrf).toBeUndefined();
     });
 
-    test.each([
-      ['negated', '--explain', '--no-explain'],
-      ['inline false', '--explain', '--explain=false'],
-      ['literal false', '--explain', '--explain', 'false'],
-    ])(`${command} applies the last disabling explain flag: %s`, async (_name, ...flags) => {
+    for (const { name, flags } of [
+      { name: 'negated', flags: ['--explain', '--no-explain'] },
+      { name: 'inline false', flags: ['--explain', '--explain=false'] },
+      { name: 'literal false', flags: ['--explain', '--explain', 'false'] },
+    ]) test(`${command} applies the last disabling explain flag: ${name}`, async () => {
       const [row] = JSON.parse(await runRanking([...flags, '--json']));
       expect(row.score_details).toBeUndefined();
       expect(row.rrf).toBeUndefined();
       expect(row.blend_norm_rrf).toBeUndefined();
     });
 
-    test.each([
-      ['negated', '--no-explain', '--explain'],
-      ['inline false', '--explain=false', '--explain'],
-      ['literal false', '--explain', 'false', '--explain'],
-    ])(`${command} applies the last enabling explain flag: %s`, async (_name, ...flags) => {
+    for (const { name, flags } of [
+      { name: 'negated', flags: ['--no-explain', '--explain'] },
+      { name: 'inline false', flags: ['--explain=false', '--explain'] },
+      { name: 'literal false', flags: ['--explain', 'false', '--explain'] },
+    ]) test(`${command} applies the last enabling explain flag: ${name}`, async () => {
       const [row] = JSON.parse(await runRanking([...flags, '--json']));
       expect(row.score_details?.arms.map((arm: { arm: string }) => arm.arm)).toEqual(['vector', 'keyword']);
       expect(row.score_details.final).toBeCloseTo(0.94, 6);

@@ -127,7 +127,8 @@ check('noSchemaPack bypasses the configured pack and noExtract queues no optiona
         const afterJobs = await engine.executeRaw<{ id: number; name: string }>('SELECT id,name FROM minion_jobs ORDER BY id');
         expect(afterJobs.slice(0, beforeJobs.length)).toEqual(beforeJobs);
         // noExtract suppresses optional extraction, not the required owner-index handoff.
-        expect(afterJobs.slice(beforeJobs.length).map(job => job.name)).toEqual(['autopilot-daily-memory', 'autopilot-daily-memory']);
+        expect(afterJobs.slice(beforeJobs.length).map(job => job.name)).toEqual(beforeJobs.length ? [] : ['autopilot-daily-memory']);
+        expect(afterJobs.map(job => job.name)).toEqual(['autopilot-daily-memory']);
         const [request] = await engine.executeRaw<{ intent: SyncIntent }>("SELECT intent FROM persistence_requests WHERE source_id=$1 AND intent->>'kind'='managed_sync_import'", [f.id]);
         expect(request.intent.processingOptions).toEqual({ noEmbed: true, noSchemaPack, noExtract: true });
       } finally { _resetPackLocatorForTests(); _resetPackCacheForTests(); }

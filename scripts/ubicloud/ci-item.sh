@@ -57,7 +57,7 @@ run_item() {
     gitleaks)
       bash scripts/test-gitleaks-config.sh &&
         bash scripts/scan-worktree-secrets.sh &&
-        gitleaks git . --redact --no-banner --log-opts="origin/master..HEAD"
+        gitleaks git . --redact --no-banner --log-opts="origin/main..HEAD"
       ;;
     *) echo "ci-item: unknown lane '$lane'" >&2; return 2 ;;
   esac

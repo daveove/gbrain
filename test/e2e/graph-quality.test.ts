@@ -29,9 +29,11 @@ afterAll(async () => {
 });
 
 async function truncateAll() {
-  for (const t of ['content_chunks', 'links', 'tags', 'raw_data', 'timeline_entries', 'page_versions', 'ingest_log', 'config', 'pages']) {
+  for (const t of ['content_chunks', 'links', 'tags', 'raw_data', 'timeline_entries', 'page_versions', 'ingest_log', 'pages']) {
     await (engine as any).db.exec(`DELETE FROM ${t}`);
   }
+  // Keep the migrated schema stamp required by the publication queue.
+  await engine.executeRaw("DELETE FROM config WHERE key <> 'version'");
   // Re-seed the two config keys this file touches back to their documented
   // defaults (both default to ON). This makes every test deterministic even if
   // an earlier test threw before its finally restored auto_link/auto_timeline,
