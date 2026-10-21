@@ -37,7 +37,7 @@ import { listRecipes, RECIPES } from './ai/recipes/index.ts';
 import type { Recipe } from './ai/types.ts';
 import { mergedProviderEnv } from './ai/provider-env.ts';
 import { paidModelApiBlocked, resolveAIBilling } from './ai/billing-policy.ts';
-import { DEFAULT_COLUMN_NAME } from './search/embedding-column.ts';
+import { DEFAULT_COLUMN_NAME, getEmbeddingColumnRegistry, isBuiltinColumn } from './search/embedding-column.ts';
 import { resolveSchemaEmbeddingDim } from './embedding-dim-check.ts';
 import { DEFAULT_EMBEDDING_DIMENSIONS, NEW_INSTALL_DEFAULT_EMBEDDING_MODEL } from './ai/defaults.ts';
 import { getCliOptions, parseGlobalFlags } from './cli-options.ts';
@@ -330,7 +330,10 @@ function subscriptionEmbeddingsEntry(cfg: GBrainConfig, model: string | undefine
   const columns: Record<string, string | undefined> = { ...(model ? { [DEFAULT_COLUMN_NAME]: model } : {}),
     ...Object.fromEntries(Object.entries(cfg.embedding_columns ?? {}).map(([name, column]) => [name, column?.provider])) };
   const searchColumn = cfg.search_embedding_column ?? DEFAULT_COLUMN_NAME;
-  const searchProvider: string | undefined = columns[searchColumn];
+  // Built-ins other than the primary (embedding_image, from embedding_multimodal_model) resolve as search resolves them;
+  // declared columns win, and they are left out here so an invalid declaration cannot throw out of readiness.
+  const searchProvider: string | undefined = columns[searchColumn] ?? (searchColumn !== DEFAULT_COLUMN_NAME && isBuiltinColumn(searchColumn)
+    ? getEmbeddingColumnRegistry({ ...cfg, embedding_columns: undefined })[searchColumn]?.provider : undefined);
   if (isLocal(searchProvider)) {
     if (searchColumn === DEFAULT_COLUMN_NAME && !cfg.embedding_columns?.[DEFAULT_COLUMN_NAME]) return null;
     return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searchProvider} column '${searchColumn}'. Paid embedding APIs are disabled (ai_billing=subscription).` };

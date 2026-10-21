@@ -115,6 +115,13 @@ describe('config plane: state and reason per capability', () => {
         const localDefault = { embedding: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const } };
         expect(entry(configReadiness(pglite({ ...paid, embedding_columns: localDefault }), { transport: 'stdio' }).entries, 'embeddings'))
           .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        // The built-in embedding_image column resolves its provider from embedding_multimodal_model, as search does.
+        const localImage = pglite({ ...paid, embedding_multimodal_model: 'ollama:mxbai-embed-large', search_embedding_column: 'embedding_image' });
+        expect(entry(configReadiness(localImage, { transport: 'stdio' }).entries, 'embeddings')).toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        expect(degradedRecallNotice(stage, { config: localImage, transport: 'stdio' })?.why).not.toContain('ai_billing=subscription');
+        const paidImage = entry(configReadiness(pglite({ ...paid, search_embedding_column: 'embedding_image' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(paidImage).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(paidImage.why).toContain("voyage:voyage-multimodal-3 (search column 'embedding_image') is not called");
         // A subscription-allowed recipe with no embedding touchpoint is unsupported, not refused by billing.
         const chatOnly = { embedding_codex: { provider: 'codex-cli:gpt-5.6-terra', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
         const codexCfg = pglite({ ...paid, embedding_columns: chatOnly, search_embedding_column: 'embedding_codex' });
