@@ -190,7 +190,7 @@ describe('release:restamp end to end', () => {
     expect(r.code).toBe(0);
     expect(performance.now() - started).toBeLessThan(300_000);
 
-    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto master v0.1.1.0');
+    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto origin/main v0.1.1.0');
     expect(parents(fx.work, 'HEAD^')).toBe(2);
     expect(status(fx.work)).toBe('');
     expect(existsSync(stateFile(fx.work))).toBe(false);
@@ -220,7 +220,7 @@ describe('release:restamp end to end', () => {
     const again = restamp(fx.work);
     expect(again.code).toBe(0);
     expect(again.out).toContain('Nothing to change');
-    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto master v0.1.1.0');
+    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto origin/main v0.1.1.0');
   }, 360_000);
 
   test('repeated restamp after master moves again renumbers and re-stamps once more', () => {
@@ -232,7 +232,7 @@ describe('release:restamp end to end', () => {
 
     const r = restamp(fx.work);
     expect(r.code).toBe(0);
-    expect(subject(fx.work)).toBe('v0.1.3.0 chore(release): restamp onto master v0.1.2.0');
+    expect(subject(fx.work)).toBe('v0.1.3.0 chore(release): restamp onto origin/main v0.1.2.0');
     expect(existsSync(join(fx.work, migrationFile(211, 'branch_widgets')))).toBe(true);
     expect(existsSync(join(fx.work, migrationFile(210, 'branch_widgets')))).toBe(false);
     const headers = splitChangelog(read(fx.work, 'CHANGELOG.md')).sections.map((s) => s.header);
@@ -319,7 +319,7 @@ describe('release:restamp end to end', () => {
     const done = restamp(fx.work, ['--continue', '--accept-references']);
     expect(done.code).toBe(0);
     expect(done.out).toContain('kept 1 reference line(s) as written');
-    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto master v0.1.1.0');
+    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto origin/main v0.1.1.0');
     expect(status(fx.work)).toBe('');
   }, 120_000);
 
@@ -389,6 +389,7 @@ describe('release:restamp end to end', () => {
     expect(r.out).toContain(`v209 -> v210  ${migrationFile(209, 'branch_widgets')} -> ${migrationFile(210, 'branch_widgets')}`);
     expect(r.out).toContain('docs/widgets.md:1: Migration v209 adds widgets.');
     expect(r.out).toContain('PR title: v0.1.2.0 feat(sync): faster widgets');
+    expect(r.out).toContain('chore(release): restamp onto origin/main v0.1.1.0');
   }, 120_000);
 
   test('an [Unreleased] branch entry is stamped to the target version; --dry-run runs the same rebuild', () => {
@@ -429,7 +430,7 @@ describe('release:restamp end to end', () => {
     const { preamble, sections } = splitChangelog(read(fx.work, 'CHANGELOG.md'));
     put(fx.work, { 'CHANGELOG.md': [preamble, release('0.1.2.0', '2026-10-05', 'Now with entry.'), ...sections.map((s) => s.text)].join('\n') });
     expect(restamp(fx.work, ['--continue']).code).toBe(0);
-    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto master v0.1.1.0');
+    expect(subject(fx.work)).toBe('v0.1.2.0 chore(release): restamp onto origin/main v0.1.1.0');
   }, 120_000);
 
   test('an edit to a published migration stops: published migrations are never renumbered or edited', () => {
