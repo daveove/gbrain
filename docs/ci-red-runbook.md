@@ -1,6 +1,6 @@
 # CI red runbook
 
-What to do when a CI check on master is red, which issue tracks it, and what
+What to do when a CI check on main is red, which issue tracks it, and what
 closes it. The watchers are `scripts/nightly-issue.ts` (run by
 `.github/workflows/nightly-watch.yml`), `scripts/ci-health-report.ts` (run by
 `.github/workflows/ci-health.yml`) and `scripts/release-gate.ts` (run by
@@ -113,7 +113,7 @@ writes it as `CI health (<since>..<until>)`. The weekly schedule writes
 - first-attempt pass rates for pull-request and push-to-main runs (a re-run
   counts as a failed first attempt; cancelled, skipped, dispatch and scheduled
   runs are excluded);
-- the exit criteria: master Test and E2E at least 95%, PR test.yml and e2e.yml
+- the exit criteria: main Test and E2E at least 95%, PR test.yml and e2e.yml
   at least 90%. A window that cannot be read in full is indeterminate, which is
   never satisfied. In an explicit window, a missed target opens
   `CI health targets missed (...)` listing the top failing files;
@@ -123,7 +123,7 @@ writes it as `CI health (<since>..<until>)`. The weekly schedule writes
   a member, a collaborator or a `--responders` login (bots do not count), or
   the first linked PR from anyone;
 - the nightly-watch residual: skipped watch runs, and watched-workflow runs on
-  master outside the schedule and push allowlist, which still start a skipped
+  main outside the schedule and push allowlist, which still start a skipped
   watch run.
 
 The agent on release duty dispatches the report on day 8 after a wave merges,
