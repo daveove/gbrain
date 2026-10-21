@@ -21,7 +21,7 @@
  *      (mirroring the baseline-gate's governance — a PR cannot add its own
  *      files to the list and self-exempt; working-tree additions are inert
  *      until merged) are excluded from the gate but still REPORTED with
- *      their tag. If the file is absent on master (first landing) the
+ *      their tag. If the file is absent on main (first landing) the
  *      working-tree copy is used; if git itself fails, exit 2 infra unless
  *      report-only (which warns and falls back to the working tree).
  *   c. Zero gate-scoped changed lines → PASS.
@@ -188,7 +188,7 @@ const EXEMPTIONS_REPO_PATH = "scripts/coverage-gate-exemptions.txt";
  * Resolution order:
  *   1. COVERAGE_GATE_EXEMPTIONS_OVERRIDE (test seam; literal file content).
  *   2. `git show origin/main:scripts/coverage-gate-exemptions.txt`.
- *   3. Path absent on master (first landing) → working-tree copy.
+ *   3. Path absent on main (first landing) → working-tree copy.
  *   4. git itself failed (unresolvable ref, ...) → exit 2 infra when
  *      enforcing; report-only warns and falls back to the working tree so
  *      the report still prints.
@@ -210,7 +210,7 @@ function resolveExemptionsText(enforcing: boolean): string {
     return readFileSync(worktreePath, "utf8");
   };
 
-  // Path errors mean the ref resolved but the file is not on master yet.
+  // Path errors mean the ref resolved but the file is not on main yet.
   if (!res.error && /does not exist in|exists on disk, but not in/.test(stderr)) {
     return readWorktree();
   }
