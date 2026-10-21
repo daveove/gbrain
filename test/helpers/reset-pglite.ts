@@ -42,9 +42,9 @@
  *      that register their own sources don't leak rows into the next test).
  *   2. Re-seed the default source row that pages.source_id's DEFAULT FKs
  *      against. Without this, the next page insert would fail FK validation.
- *   3. Preserve `schema_version` — it carries the migration ledger that
- *      initSchema() populates; wiping it would make migration helpers think
- *      the brain is on v0.
+ *   3. Preserve migration infrastructure: `schema_version` and config.version.
+ *      Queue admission reads config.version; wiping it misrepresents an initialized
+ *      schema as v1 and makes required publication handoffs fail.
  *
  * Cleanup bypasses row triggers, like TRUNCATE, and resets owned sequences.
  * DELETE avoids recreating every empty table/index's storage on each test.
@@ -91,6 +91,7 @@ export async function resetPgliteState(engine: PGLiteEngine): Promise<void> {
       target regclass;
       sequence record;
       original_role text := current_setting('session_replication_role');
+      schema_config_version text := (SELECT value FROM config WHERE key = 'version');
     BEGIN
       SELECT array_agg(c.oid::regclass), string_agg(format('%I.%I', n.nspname, c.relname), ', '),
           sum(pg_total_relation_size(c.oid))
@@ -122,6 +123,9 @@ export async function resetPgliteState(engine: PGLiteEngine): Promise<void> {
           EXECUTE format('ALTER SEQUENCE %I.%I RESTART', sequence.nspname, sequence.relname);
         END LOOP;
         PERFORM set_config('session_replication_role', original_role, true);
+      END IF;
+      IF schema_config_version IS NOT NULL THEN
+        INSERT INTO config (key, value) VALUES ('version', schema_config_version);
       END IF;
       UPDATE persistence_brain SET brain_id = gen_random_uuid(), enabled = false, activated_at = NULL WHERE singleton = 1;
       INSERT INTO sources (id, name, config)

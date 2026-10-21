@@ -261,7 +261,9 @@ describe('#6387 failed conversations are retained until they import', () => {
 
   test('--limit keeps capacity for due retries while new conversations keep arriving', async () => {
     const state = newFixtureState([conv('old-1', T0 - 30 * DAY_S), conv('new-0', T0)]);
-    await quarantine(state, ['old-1']);
+    const initial = await quarantine(state, ['old-1']);
+    expect(initial[2].quarantined).toContain('old-1');
+    expect(Object.keys(await failedLedger())).toEqual(['old-1']);
     state.script = [];
     for (let i = 1; i <= 5; i++) state.conversations.push(conv(`fresh-${i}`, T0 + i * 10));
 

@@ -11,8 +11,8 @@
  * rows, collation-sensitive text keys). A schema or handler change that
  * silently stops producing one of those states would turn those tests
  * vacuous; this file fails first and names the state.
- * Required daily-memory barriers and continuations from the managed writes
- * remain in the queue; the byte-heavy lease is checked by its fixture identity.
+ * Required daily-memory publication debt remains coalesced by day/timezone;
+ * the byte-heavy lease is checked by its fixture identity.
  * Regression it catches: a migration that changes a trigger the fixture
  * relies on (fact withdrawal stamping, generation bumps, projection queue),
  * activation absorbing the orphan states, or the target checker passing an
@@ -87,7 +87,7 @@ describe('graduation legacy fixture', () => {
     const mismatches = await legacyTargetMismatches(engine, before, token => provider.verifyAccessToken(token));
     const labels = mismatches.map(m => m.split(':')[0]).sort();
     expect(labels).toEqual([
-      'target count gbrain_cycle_locks', 'target count minion_jobs', 'target count pages', 'target daily jobs',
+      'target count gbrain_cycle_locks', 'target count pages',
       'target effect orphan_running', 'target gbrain_cycle_locks discarded',
       'target queued request', 'target stale job', 'target worktree heartbeat',
     ]);

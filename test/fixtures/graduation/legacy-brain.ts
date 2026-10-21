@@ -402,22 +402,16 @@ async function orderedKeys(engine: BrainEngine, sql: string): Promise<string[]> 
   return (await engine.executeRaw<{ k: string }>(sql)).map(r => r.k);
 }
 
-/** Required page-publication debt: each dated write accepts a day barrier and its continuation. */
+/** Required page-publication debt coalesces unclaimed writes by publication day and timezone. */
 async function dailyJobState(engine: BrainEngine) {
-  const rows = await engine.executeRaw<{ id: number; data: Record<string, unknown>; status: string; timeout_ms: number }>(
-    "SELECT id,data,status,timeout_ms FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
+  const rows = await engine.executeRaw<{ id: number; data: Record<string, unknown>; status: string; timeout_ms: number; idempotency_key: string }>(
+    "SELECT id,data,status,timeout_ms,idempotency_key FROM minion_jobs WHERE name='autopilot-daily-memory' ORDER BY id");
   const barriers = rows.filter(row => !('daily_memory_dates' in row.data));
   const continuations = rows.filter(row => 'daily_memory_dates' in row.data);
-  const valid_handoffs = barriers.every(row => row.data.daily_memory_only === true
-    && JSON.stringify(row.data.source_cycle_job_ids) === '[]'
-    && continuations.filter(child => Number(child.data.daily_memory_source_job_id) === Number(row.id)).length === 1)
-    && continuations.every(row => {
-      const parent = barriers.find(parent => Number(parent.id) === Number(row.data.daily_memory_source_job_id));
-      return parent !== undefined && row.data.daily_memory_date === parent.data.daily_memory_date
-        && JSON.stringify(row.data.daily_memory_dates) === JSON.stringify([parent.data.daily_memory_date])
-        && JSON.stringify(row.data.daily_memory_day_job_ids) === JSON.stringify([Number(parent.id)])
-        && row.data.daily_memory_cursor === 1 && row.data.daily_memory_replay_round === 0;
-    });
+  const valid_handoffs = barriers.length === 1 && continuations.length === 0
+    && barriers.every(row => row.data.daily_memory_only === true
+      && JSON.stringify(row.data.source_cycle_job_ids) === '[]'
+      && row.idempotency_key === `autopilot-daily:${row.data.daily_memory_date}:${row.data.daily_memory_timezone}:pending`);
   return {
     day: [...new Set(rows.map(row => row.data.daily_memory_date))].join(','),
     timezone: [...new Set(rows.map(row => row.data.daily_memory_timezone))].join(','),
