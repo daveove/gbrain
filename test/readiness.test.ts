@@ -100,20 +100,25 @@ describe('config plane: state and reason per capability', () => {
       await withKeys({ ...keys, GBRAIN_AI_BILLING: undefined } as Record<string, string>, () => {
         const pending = entry(configReadiness(pglite({ ...paid, embedding_columns: nomic }), { transport: 'stdio' }).entries, 'embeddings');
         expect(pending).toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
-        expect(pending.fix).toMatchObject({ actor: 'agent', consent: [] });
-        expect(pending.fix?.inputs).toBeUndefined();
-        expect(pending.fix?.user_message).toBe('Vector search is off until local nomic-embed-text embeddings finish filling in. Keyword search still works, and there is nothing you need to do.');
+        expect(pending.fix).toBeUndefined();
+        expect(pending.user_message).toBe('Vector search is off until local nomic-embed-text embeddings finish filling in. Keyword search still works, and there is nothing you need to do.');
 
-        const notice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }],
-          { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
-        expect(notice?.user_message).toBe(pending.fix?.user_message);
-        expect(notice?.user_message).not.toMatch(/api key|add (a|the|it)\b/i);
+        const stage = [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }];
+        const notice = degradedRecallNotice(stage, { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(notice?.user_message).toBe(pending.user_message);
+        expect(notice?.fix).toBeUndefined();
+        expect(notice?.why).toContain(pending.why);
 
         expect(entry(configReadiness(pglite({ ...paid, embedding_columns: nomic, search_embedding_column: 'embedding_nomic' }), { transport: 'stdio' }).entries, 'embeddings'))
           .toMatchObject({ state: 'ok', reason: 'local_search_column' });
         const noLocal = entry(configReadiness(pglite(paid), { transport: 'stdio' }).entries, 'embeddings');
         expect(noLocal).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
         expect(noLocal.fix).toBeUndefined();
+        const refused = degradedRecallNotice(stage, { config: pglite(paid), transport: 'stdio' });
+        expect(refused?.fix).toBeUndefined();
+        expect(refused?.user_message).toBeUndefined();
+        expect(refused?.why).toContain('ai_billing=subscription');
+        expect(refused?.why).not.toContain('names the enable command');
       });
     }
   });

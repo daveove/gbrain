@@ -125,14 +125,24 @@ export function doctorFix(why: string): Action {
   return { argv: ['gbrain', 'doctor', '--json'], mcp: { tool: 'run_doctor', arguments: {} }, consent: [], actor: 'agent', why, requires_exclusive: false };
 }
 
+/** Embedding readiness reasons where subscription billing refused the paid model: no key or enable command helps. */
+const BILLING_REFUSED_REASONS: Record<string, true> = { local_column_pending: true, paid_api_disabled: true };
+
+type EmbeddingsGuidance = { fix?: Action; byChoice: boolean; billing?: { why: string; user_message?: string } };
+
 /**
  * The embeddings fix for a keyword-only call. A brain the user set up keyless
  * (`disabled_by_choice`) gets none: notices never coach on a choice; the why
- * says so and doctor still shows the enable command.
+ * says so and doctor still shows the enable command. When subscription billing
+ * refused the paid model, the readiness entry's own why and user message are the
+ * guidance and there is no fix (a doctor run would add nothing).
  */
-function embeddingsFix(cfg: GBrainConfig | null | undefined, transport: 'stdio' | 'http' | 'cli'): { fix?: Action; byChoice: boolean } {
+function embeddingsFix(cfg: GBrainConfig | null | undefined, transport: 'stdio' | 'http' | 'cli'): EmbeddingsGuidance {
   if (!cfg) return { fix: doctorFix('Doctor reports why semantic search is unavailable.'), byChoice: false };
   const entry = configReadiness(cfg, { transport }).entries.find(e => e.capability === 'embeddings');
+  if (entry && BILLING_REFUSED_REASONS[entry.reason]) {
+    return { byChoice: false, billing: { why: entry.why, ...(entry.user_message ? { user_message: entry.user_message } : {}) } };
+  }
   if (entry?.state === 'disabled_by_choice') return { byChoice: true };
   return { fix: entry && entry.state !== 'ok' && entry.fix ? entry.fix : doctorFix('Embeddings are configured but did not answer; doctor reports the provider failure.'), byChoice: false };
 }
@@ -164,7 +174,7 @@ export function degradedRecallNotice(
   const guidance = names.map(n => DEGRADED_STAGE_GUIDANCE[n]);
   const fixKind: StageFix = guidance.some(g => g.fix === 'embeddings') ? 'embeddings' : guidance.some(g => g.fix === 'doctor') ? 'doctor' : null;
   const byChoice = opts.optedOut || entries.some(s => s.reason === 'embedding_disabled');
-  const emb = fixKind === 'embeddings' ? (byChoice ? { byChoice: true } as { fix?: Action; byChoice: boolean } : embeddingsFix(opts.config, opts.transport)) : undefined;
+  const emb = fixKind === 'embeddings' ? (byChoice ? { byChoice: true } as EmbeddingsGuidance : embeddingsFix(opts.config, opts.transport)) : undefined;
   const fix = emb ? emb.fix
     : fixKind === 'doctor' ? doctorFix('Doctor names the failing retrieval dependency and its fix.')
     : rerank ? rerankFix(rerank, opts.retry) : undefined;
@@ -172,9 +182,9 @@ export function degradedRecallNotice(
   return {
     code: 'degraded_recall',
     kind: 'degraded',
-    why: `Recall was degraded (${labels.join(', ')}): ${whys.join('; ')}. ${NOT_ABSENCE}${choice}`,
+    why: `Recall was degraded (${labels.join(', ')}): ${whys.join('; ')}. ${NOT_ABSENCE}${choice}${emb?.billing ? ` ${emb.billing.why}` : ''}`,
     ...(fix ? { fix } : {}),
-    ...(fix?.user_message ? { user_message: fix.user_message } : {}),
+    ...(fix?.user_message ? { user_message: fix.user_message } : emb?.billing?.user_message ? { user_message: emb.billing.user_message } : {}),
     ...(persistent ? { dedupe_key: pairs.join('|') } : {}),
   };
 }
