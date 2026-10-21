@@ -7,9 +7,19 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
 import { logRerankFailure } from '../src/core/rerank-audit.ts';
+import { resetGateway } from '../src/core/ai/gateway.ts';
 import { doctorSource, doctorFileSource } from './helpers/doctor-source.ts';
 
 describe('doctor command', () => {
+  // The reranker_health tests configure the gateway with OpenAI/Voyage test
+  // keys. bun runs a shard's files in one process, so restore the test
+  // baseline; otherwise a later file (extract-atoms-provenance-links) runs
+  // with the leaked `sk-test` keys, its embed calls fail and the phase reports
+  // `warn` instead of `ok`.
+  afterAll(() => {
+    resetGateway();
+  });
+
   test('doctor module exports runDoctor', async () => {
     const { runDoctor } = await import('../src/commands/doctor.ts');
     expect(typeof runDoctor).toBe('function');
