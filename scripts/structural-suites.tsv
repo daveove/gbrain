@@ -222,7 +222,7 @@ test/migrate.test.ts	migrate v14 — pages_updated_at_index (handler-based, engi
 test/migrate.test.ts	migrate v20 — sources_table_additive	6	readFileSync
 test/migrate.test.ts	migrate v23 — files_source_id_page_id_ledger	6	readFileSync
 test/migrate.test.ts	migrate v36 — subagent_provider_neutral_persistence_v0_27	7	source-surface-helper
-test/migrate.test.ts	migrate v66 — embed_stale_partial_index (D6)	4	readFileSync,source-surface-helper
+test/migrate.test.ts	migrate v66 — embed_stale_partial_index (D6)	3	readFileSync,source-surface-helper
 test/migrate.test.ts	migrate v89 — round-trip on PGLite	4	readFileSync
 test/migrate.test.ts	migrate — DROP INDEX CONCURRENTLY invalid-remnant cleanup (#1178, file-wide)	3	source-surface-helper
 test/migrate.test.ts	migrate — runner behavioral (v14 handler + v15 backfill)	2	readFileSync

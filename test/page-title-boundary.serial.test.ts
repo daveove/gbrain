@@ -96,7 +96,8 @@ for (const backend of testBackends()) describe(`page title boundaries (${backend
       for (const index of PAGE_ONLINE_INDEXES) await engine.executeRaw(`DROP INDEX ${index.name}`);
       await insertPage(engine, 'default', 'long/before-upgrade', `${title}前`);
       await engine.setConfig('version', '239');
-      await engine.initSchema();
+      // initSchema is single-flight per connection; this checkpoint explicitly exercises the forward runner.
+      await runMigrations(engine);
       expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
       expect((await engine.getPage('long/before-upgrade', { sourceId: 'default' }))?.title).toBe(`${title}前`);
       expect((await readPageIndexStates(engine)).map(index => index.state)).toEqual(['valid', 'valid', 'valid']);
