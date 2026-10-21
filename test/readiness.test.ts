@@ -25,7 +25,7 @@ const PROVIDER_ENVS = [...new Set(listRecipes().flatMap(r => r.auth_env?.require
 
 /** Run with every provider key cleared, then `keys` set (no ambient key can leak into a pick). */
 function withKeys<T>(keys: Record<string, string>, fn: () => T | Promise<T>): Promise<T> {
-  const env: Record<string, string | undefined> = { GBRAIN_MODEL: undefined, GBRAIN_BRAIN_ID: undefined };
+  const env: Record<string, string | undefined> = { GBRAIN_MODEL: undefined, GBRAIN_BRAIN_ID: undefined, GBRAIN_AI_BILLING: undefined };
   for (const k of PROVIDER_ENVS) env[k] = undefined;
   return withEnv({ ...env, ...keys }, async () => fn());
 }
@@ -96,8 +96,8 @@ describe('config plane: state and reason per capability', () => {
   test('embeddings under ai_billing=subscription never ask for a key', async () => {
     const nomic = { embedding_nomic: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
     const paid = { embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, ai_billing: 'subscription' as const };
-    for (const keys of [{}, { OPENAI_API_KEY: 'sk-test' }]) {
-      await withKeys({ ...keys, GBRAIN_AI_BILLING: undefined } as Record<string, string>, () => {
+    for (const keys of [{}, { OPENAI_API_KEY: 'sk-test' }] as Record<string, string>[]) {
+      await withKeys(keys, () => {
         const pending = entry(configReadiness(pglite({ ...paid, embedding_columns: nomic }), { transport: 'stdio' }).entries, 'embeddings');
         expect(pending).toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
         expect(pending.fix).toBeUndefined();
@@ -138,6 +138,16 @@ describe('config plane: state and reason per capability', () => {
         const mixed = degradedRecallNotice([...stage, { stage: 'embed_timeout' }], { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(mixed?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
         expect(mixed?.user_message).toBe(pending.user_message);
+        // A keyless-by-choice brain under subscription gets no paid enablement fix.
+        const keyless = entry(configReadiness(pglite({ ai_billing: 'subscription', embedding_disabled: true }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(keyless).toMatchObject({ state: 'disabled_by_choice', reason: 'embedding_disabled' });
+        expect(keyless.fix).toBeUndefined();
+        // The active search column's provider decides, not the primary model.
+        const localPrimary = { embedding_model: 'ollama:nomic-embed-text', embedding_dimensions: 768, ai_billing: 'subscription' as const };
+        const voyage = { embedding_voyage: { provider: 'voyage:voyage-3-large', dimensions: 1024, type: 'vector' as const, provenance: 'independent' as const } };
+        expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage, search_embedding_column: 'embedding_voyage' }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
+        expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage }), { transport: 'stdio' }).entries, 'embeddings').state).toBe('ok');
       });
     }
   });
