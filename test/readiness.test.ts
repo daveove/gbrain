@@ -16,6 +16,7 @@ import {
   type LockOwner, type ReadinessEntry,
 } from '../src/core/readiness.ts';
 import { renderAction, cliRenderContext, type Action } from '../src/core/agent-output.ts';
+import { degradedRecallNotice, recallInteropNotices } from '../src/core/interop-notices.ts';
 import { listRecipes } from '../src/core/ai/recipes/index.ts';
 import type { GBrainConfig } from '../src/core/config.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -24,7 +25,7 @@ const PROVIDER_ENVS = [...new Set(listRecipes().flatMap(r => r.auth_env?.require
 
 /** Run with every provider key cleared, then `keys` set (no ambient key can leak into a pick). */
 function withKeys<T>(keys: Record<string, string>, fn: () => T | Promise<T>): Promise<T> {
-  const env: Record<string, string | undefined> = { GBRAIN_MODEL: undefined, GBRAIN_BRAIN_ID: undefined };
+  const env: Record<string, string | undefined> = { GBRAIN_MODEL: undefined, GBRAIN_BRAIN_ID: undefined, GBRAIN_AI_BILLING: undefined };
   for (const k of PROVIDER_ENVS) env[k] = undefined;
   return withEnv({ ...env, ...keys }, async () => fn());
 }
@@ -90,6 +91,125 @@ describe('config plane: state and reason per capability', () => {
       expect(entry(configReadiness(pglite({ embedding_model: 'openai:text-embedding-3-small', embedding_dimensions: 1536 }), { transport: 'stdio' }).entries, 'embeddings'))
         .toMatchObject({ state: 'ok', reason: 'configured' });
     });
+  });
+
+  test('embeddings under ai_billing=subscription never ask for a key', async () => {
+    const nomic = { embedding_nomic: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
+    const paid = { embedding_model: 'openai:text-embedding-3-large', embedding_dimensions: 1536, ai_billing: 'subscription' as const };
+    for (const keys of [{}, { OPENAI_API_KEY: 'sk-test' }] as Record<string, string>[]) {
+      await withKeys(keys, () => {
+        const pending = entry(configReadiness(pglite({ ...paid, embedding_columns: nomic }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(pending).toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
+        expect(pending.fix).toBeUndefined();
+        expect(pending.user_message).toBe('Vector search is off until local nomic-embed-text embeddings finish filling in. Keyword search still works, and there is nothing you need to do.');
+
+        const stage = [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }];
+        const notice = degradedRecallNotice(stage, { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(notice?.user_message).toBe(pending.user_message);
+        expect(notice?.fix).toBeUndefined();
+        expect(notice?.why).toContain(pending.why);
+
+        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: nomic, search_embedding_column: 'embedding_nomic' }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        // An unset search column means the default `embedding` column; a local override of it is already live.
+        const localDefault = { embedding: { provider: 'ollama:nomic-embed-text', dimensions: 768, type: 'vector' as const } };
+        expect(entry(configReadiness(pglite({ ...paid, embedding_columns: localDefault }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        // The built-in embedding_image column resolves its provider from embedding_multimodal_model, as search does.
+        const localImage = pglite({ ...paid, embedding_multimodal_model: 'ollama:mxbai-embed-large', search_embedding_column: 'embedding_image' });
+        expect(entry(configReadiness(localImage, { transport: 'stdio' }).entries, 'embeddings')).toMatchObject({ state: 'ok', reason: 'local_search_column' });
+        expect(degradedRecallNotice(stage, { config: localImage, transport: 'stdio' })?.why).not.toContain('ai_billing=subscription');
+        const paidImage = entry(configReadiness(pglite({ ...paid, search_embedding_column: 'embedding_image' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(paidImage).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(paidImage.why).toContain("voyage:voyage-multimodal-3 (search column 'embedding_image') is not called");
+        // A subscription-allowed recipe with no embedding touchpoint is unsupported, not refused by billing.
+        const chatOnly = { embedding_codex: { provider: 'codex-cli:gpt-5.6-terra', dimensions: 768, type: 'vector' as const, provenance: 'independent' as const } };
+        const codexCfg = pglite({ ...paid, embedding_columns: chatOnly, search_embedding_column: 'embedding_codex' });
+        const codex = entry(configReadiness(codexCfg, { transport: 'stdio' }).entries, 'embeddings');
+        expect(codex).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(codex.why).toContain('codex-cli:gpt-5.6-terra cannot compute embeddings');
+        expect(codex.why).not.toContain('is not called');
+        expect(codex.fix).toBeUndefined();
+        const codexNotice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'no_touchpoint' }], { config: codexCfg, transport: 'stdio' });
+        expect(codexNotice?.why).not.toContain('refuses');
+        expect(codexNotice?.why).toContain(codex.why);
+        expect(codexNotice?.fix).toBeUndefined();
+        // With a local column staged, the unsupported search column still names its own cause.
+        const codexStaged = entry(configReadiness(pglite({ ...paid, embedding_columns: { ...chatOnly, ...nomic }, search_embedding_column: 'embedding_codex' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(codexStaged).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(codexStaged.why).toContain("local ollama:nomic-embed-text column 'embedding_nomic'");
+        const noLocal = entry(configReadiness(pglite(paid), { transport: 'stdio' }).entries, 'embeddings');
+        expect(noLocal).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(noLocal.fix).toBeUndefined();
+        const refused = degradedRecallNotice(stage, { config: pglite(paid), transport: 'stdio' });
+        expect(refused?.fix).toBeUndefined();
+        expect(refused?.user_message).toBeUndefined();
+        expect(refused?.why).toContain('ai_billing=subscription');
+        expect(refused?.why).not.toContain('names the enable command');
+
+        // A missing model under subscription never falls back to the key-asking enablement fix.
+        const none = entry(configReadiness(pglite({ ai_billing: 'subscription' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(none).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+        expect(none.fix).toBeUndefined();
+        // An unknown model under subscription is unsupported (no recipe), with no key-asking fix either.
+        const unknown = entry(configReadiness(pglite({ ai_billing: 'subscription', embedding_model: 'nope:model' }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(unknown).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
+        expect(unknown.why).toContain('nope:model cannot compute embeddings');
+        expect(unknown.fix).toBeUndefined();
+        // Billing guidance has no action, so a concurrent doctor-actionable stage keeps its doctor fix.
+        const mixed = degradedRecallNotice([...stage, { stage: 'embed_timeout' }], { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(mixed?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
+        expect(mixed?.user_message).toBe(pending.user_message);
+        // A keyless-by-choice brain under subscription gets no paid enablement fix.
+        const keyless = entry(configReadiness(pglite({ ai_billing: 'subscription', embedding_disabled: true }), { transport: 'stdio' }).entries, 'embeddings');
+        expect(keyless).toMatchObject({ state: 'disabled_by_choice', reason: 'embedding_disabled' });
+        expect(keyless.fix).toBeUndefined();
+        const keylessNotice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'embedding_disabled' }], { config: pglite({ ai_billing: 'subscription', embedding_disabled: true }), transport: 'stdio' });
+        expect(keylessNotice?.why).not.toContain('names the enable command');
+        expect(keylessNotice?.why).toContain('ai_billing=subscription');
+        // The active search column's provider decides, not the primary model.
+        const localPrimary = { embedding_model: 'ollama:nomic-embed-text', embedding_dimensions: 768, ai_billing: 'subscription' as const };
+        const voyage = { embedding_voyage: { provider: 'voyage:voyage-3-large', dimensions: 1024, type: 'vector' as const, provenance: 'independent' as const } };
+        expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage, search_embedding_column: 'embedding_voyage' }), { transport: 'stdio' }).entries, 'embeddings'))
+          .toMatchObject({ state: 'degraded', reason: 'local_column_pending' });
+        expect(entry(configReadiness(pglite({ ...localPrimary, embedding_columns: voyage }), { transport: 'stdio' }).entries, 'embeddings').state).toBe('ok');
+        // A per-call embedding_column override is the column that call searched: its provider decides the guidance.
+        const overrideMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }] } };
+        const [paidOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_voyage' },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' });
+        expect(paidOverride?.code).toBe('degraded_recall');
+        expect(paidOverride?.why).toContain("override 'embedding_voyage'");
+        expect(paidOverride?.why).toContain('without embedding_column');
+        expect(paidOverride?.why).not.toContain('becomes the search column');
+        expect(paidOverride?.fix).toBeUndefined();
+        expect(paidOverride?.user_message).toBeUndefined();
+        const mixedMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }, { stage: 'embed_timeout' }] } };
+        const [mixedOverride] = recallInteropNotices('search', [], mixedMeta, { query: 'q', embedding_column: 'embedding_voyage' },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' });
+        expect(mixedOverride?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
+        expect(mixedOverride?.why).toContain('embed_timeout');
+        expect(mixedOverride?.why).toContain("override 'embedding_voyage'");
+        // An unsupported (chat-only) override over a live configured column is told to drop the override, not to fill the live column.
+        const unsupportedMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'no_touchpoint' }] } };
+        const [codexOverride] = recallInteropNotices('search', [], unsupportedMeta, { query: 'q', embedding_column: 'embedding_codex' },
+          { config: pglite({ ...localPrimary, embedding_columns: chatOnly }), transport: 'stdio' });
+        expect(codexOverride?.why).toContain("override 'embedding_codex' uses a provider that cannot compute embeddings");
+        expect(codexOverride?.why).toContain('without embedding_column');
+        expect(codexOverride?.why).not.toContain('can take over once filled');
+        expect(codexOverride?.why).not.toContain('refuses');
+        expect(codexOverride?.fix).toBeUndefined();
+        const [localOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_nomic' },
+          { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(localOverride?.user_message).toBeUndefined();
+        expect(localOverride?.why).not.toContain('is filled and becomes the search column');
+        // no_provider is configuration-persistent; per-call overrides keep column-specific dedupe keys.
+        const persistentMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'no_provider' }] } };
+        const keyFor = (embedding_column?: string) => recallInteropNotices('search', [], persistentMeta, { query: 'q', ...(embedding_column ? { embedding_column } : {}) },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' })[0]?.dedupe_key;
+        expect(keyFor()).toBeDefined();
+        expect(new Set([keyFor(), keyFor('embedding_voyage'), keyFor('embedding_other')]).size).toBe(3);
+      });
+    }
   });
 
   test('chat, writeback, tool surface and thin-client rows', async () => {
