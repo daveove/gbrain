@@ -142,6 +142,9 @@ describe('config plane: state and reason per capability', () => {
         const keyless = entry(configReadiness(pglite({ ai_billing: 'subscription', embedding_disabled: true }), { transport: 'stdio' }).entries, 'embeddings');
         expect(keyless).toMatchObject({ state: 'disabled_by_choice', reason: 'embedding_disabled' });
         expect(keyless.fix).toBeUndefined();
+        const keylessNotice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'embedding_disabled' }], { config: pglite({ ai_billing: 'subscription', embedding_disabled: true }), transport: 'stdio' });
+        expect(keylessNotice?.why).not.toContain('names the enable command');
+        expect(keylessNotice?.why).toContain('ai_billing=subscription');
         // The active search column's provider decides, not the primary model.
         const localPrimary = { embedding_model: 'ollama:nomic-embed-text', embedding_dimensions: 768, ai_billing: 'subscription' as const };
         const voyage = { embedding_voyage: { provider: 'voyage:voyage-3-large', dimensions: 1024, type: 'vector' as const, provenance: 'independent' as const } };

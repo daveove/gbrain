@@ -13,6 +13,7 @@ import { isInteractive } from './interaction.ts';
 import type { GBrainConfig } from './config.ts';
 import type { ExplicitReadBinding } from './ops/contract.ts';
 import { configReadiness } from './readiness.ts';
+import { resolveAIBilling } from './ai/billing-policy.ts';
 import { affectsRecall, type DegradedStage } from './types.ts';
 import type { RerankFailedReason } from './search/rerank.ts';
 import { localTranscriptsFix } from './transcripts.ts';
@@ -179,7 +180,11 @@ export function degradedRecallNotice(
   const fix = emb && !emb.billing ? emb.fix
     : guidance.some(g => g.fix === 'doctor') ? doctorFix('Doctor names the failing retrieval dependency and its fix.')
     : rerank ? rerankFix(rerank, opts.retry) : undefined;
-  const choice = emb?.byChoice ? ' This brain was set up keyword-only by the user\'s choice; mention it only if the user asks why something was not found. No query text was sent to an embedding provider. If the user wants semantic search, `gbrain doctor --json` names the enable command; turning it on needs their consent.' : '';
+  // Under subscription billing readiness drops the paid enablement fix, so the notice must not point at it.
+  const enable = resolveAIBilling(opts.config) === 'subscription'
+    ? 'Paid embedding APIs are also disabled (ai_billing=subscription), so semantic search would need a local embedding model; that is the user\'s decision.'
+    : 'If the user wants semantic search, `gbrain doctor --json` names the enable command; turning it on needs their consent.';
+  const choice = emb?.byChoice ? ` This brain was set up keyword-only by the user's choice; mention it only if the user asks why something was not found. No query text was sent to an embedding provider. ${enable}` : '';
   return {
     code: 'degraded_recall',
     kind: 'degraded',
