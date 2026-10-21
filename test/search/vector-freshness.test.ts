@@ -93,7 +93,7 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
       actual.push({ vectorLegacyGuard, native, queries });
     }
     expect(actual).toEqual([false, true].map(vectorLegacyGuard => ({ vectorLegacyGuard, native: expected,
-      queries: ['postgres', 'pglite'].map(dialect => ({ dialect, hits: expected, exact: expected, witness: [{ eligible: 22 }] })) })));
+      queries: (['postgres', 'pglite'] as const).map(dialect => ({ dialect, hits: expected, exact: expected, witness: [{ eligible: 22 }] })) })));
   }, 60_000);
 
   test('the pre-migration branch (no model, no migration state) is unchanged: every model and hash is eligible', async () => {
@@ -179,7 +179,7 @@ describe('vector freshness outside the candidate CTE (PGLite)', () => {
         witness: await engine.executeRaw(narrowed.hasMoreSql, narrowed.params.slice(0, narrowed.innerLimitIdx + 1)) });
     }
     const expected = ['current-0', 'current-1', 'current-2'];
-    expect(results).toEqual(['postgres', 'pglite'].map(dialect => ({ dialect, walk: ['typed-0', ...expected],
+    expect(results).toEqual((['postgres', 'pglite'] as const).map(dialect => ({ dialect, walk: ['typed-0', ...expected],
       joined: expected, scoped: expected, exact: expected, witness: [{ eligible: 3 }] })));
   }, 60_000);
 
