@@ -95,7 +95,7 @@ export function planGate(root: string, input: GatePlanInput, weights = loadWeigh
     } else {
       base = input.stressBase!;
       head = input.stressHead || 'HEAD';
-      if (!validRef(base) || !validRef(head)) return { error: `stress_base/stress_head must be 40-hex SHAs or valid ref names (got ${JSON.stringify(base.slice(0, 80))}, ${JSON.stringify(head.slice(0, 80))}). Next: re-dispatch with e.g. stress_base=origin/master` };
+      if (!validRef(base) || !validRef(head)) return { error: `stress_base/stress_head must be 40-hex SHAs or valid ref names (got ${JSON.stringify(base.slice(0, 80))}, ${JSON.stringify(head.slice(0, 80))}). Next: re-dispatch with e.g. stress_base=origin/main` };
       const changed = changedFiles(root, base, head);
       if (changed.error) return { error: changed.error };
       const tests = changed.helpers.length ? allTestFiles(root) : [];
@@ -343,7 +343,7 @@ export function buildReport(r: ReportInput): { summary: string; errors: string[]
   const errors: string[] = [];
   if (r.planResult !== 'success' || !r.plan) {
     const why = 'the plan job failed, so the set of files to stress is unknown';
-    lines.push(`**Failed:** ${why}. Next: read the "Stress plan" job log; if it says the merge base is missing, fetch it (\`git fetch --no-tags origin master\`) and re-run. Docs: ${docs}`);
+    lines.push(`**Failed:** ${why}. Next: read the "Stress plan" job log; if it says the merge base is missing, fetch it (\`git fetch --no-tags origin main\`) and re-run. Docs: ${docs}`);
     errors.push(`stress plan did not succeed (${r.planResult}). Why: ${why}. Next: read the plan job log and re-run. Docs: ${docs}`);
     return { summary: lines.join('\n'), errors, exit: 1 };
   }

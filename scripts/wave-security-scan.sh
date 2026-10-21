@@ -12,7 +12,7 @@
 # Usage:
 #   scripts/wave-security-scan.sh <base>..<head>     # explicit range
 #   scripts/wave-security-scan.sh <base> <head>      # two refs
-#   scripts/wave-security-scan.sh                    # defaults to origin/master..HEAD
+#   scripts/wave-security-scan.sh                    # defaults to origin/main..HEAD
 #   scripts/wave-security-scan.sh --json <range>     # machine-readable summary
 #
 # Exit code: 0 = nothing high-signal; 1 = high-signal hit(s) worth review;
@@ -55,8 +55,8 @@ fi
 
 RANGE=""
 if [ "${#ARGS[@]}" -eq 0 ]; then
-  if git rev-parse --verify -q origin/master >/dev/null; then
-    RANGE="origin/master..HEAD"
+  if git rev-parse --verify -q origin/main >/dev/null; then
+    RANGE="origin/main..HEAD"
   else
     RANGE="HEAD~1..HEAD"
   fi

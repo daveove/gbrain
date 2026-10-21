@@ -10,7 +10,7 @@
  *
  * Behavior:
  *   - Reads the working-tree scripts/coverage-baseline.json (this is the
- *     WRITE side; the gate reads origin/master's copy, so an update only
+ *     WRITE side; the gate reads origin/main's copy, so an update only
  *     takes effect when it lands on master).
  *   - Replaces baseline[<corpus>] with {global, dirs, files, neverLoadedCount}
  *     derived from the summary; `files` is limited to the watchlist paths

@@ -204,7 +204,7 @@ export async function suspectRange(client: GitHubClient, from: string | null, to
     const prs = new Set<number>();
     for (const sha of shas.slice(-MAX_PR_LOOKUPS)) {
       const pulls = await client.request<Array<{ number: number; merged_at: string | null; base?: { ref: string } }>>('GET', `repos/{repo}/commits/${sha}/pulls`);
-      for (const p of pulls) if (p.merged_at && (!p.base || p.base.ref === 'master')) prs.add(p.number);
+      for (const p of pulls) if (p.merged_at && (!p.base || p.base.ref === 'main')) prs.add(p.number);
     }
     const complete = cmp.total_commits === shas.length && shas.length <= MAX_PR_LOOKUPS;
     return {
@@ -243,7 +243,7 @@ function nextStep(state: MasterRedState, repo: string, issue: number | undefined
   if (state.blocked.length) {
     lines.push(`**Not run since:** ${state.blocked.map(b => `\`${inert(b, 160)}\``).join(', ')} failed and has not run and passed on a later run with complete evidence, so ${ref} stays open. `
       + `If a job was renamed or removed, close ${ref} by hand with a comment naming its replacement. `
-      + (isE2E(state) ? `For an E2E file the selection skipped, dispatch a replay: \`gh workflow run e2e.yml --ref master -f full_corpus=true\`, then \`gh workflow run nightly-watch.yml -f run_id=<that run id> -f replay_issue=${issue ?? '<this issue>'}\`; the nightly scheduled run also counts.`
+      + (isE2E(state) ? `For an E2E file the selection skipped, dispatch a replay: \`gh workflow run e2e.yml --ref main -f full_corpus=true\`, then \`gh workflow run nightly-watch.yml -f run_id=<that run id> -f replay_issue=${issue ?? '<this issue>'}\`; the nightly scheduled run also counts.`
         : 'The next push run or the nightly scheduled run that runs it closes this issue.'));
   }
   if (state.evidence && !state.evidence.complete) {
@@ -329,10 +329,10 @@ async function newestIssue(client: GitHubClient, title: string): Promise<Issue |
 class CreateRace extends Error {}
 
 async function pushRuns(client: GitHubClient, run: RunInfo): Promise<RunInfo[]> {
-  const r = await client.request<{ workflow_runs: RunInfo[] }>('GET', `repos/{repo}/actions/workflows/${run.workflow_id}/runs?event=push&branch=master&per_page=100`);
-  const runs = r.workflow_runs.filter(x => x.event === 'push' && x.head_branch === 'master' && x.status === 'completed');
+  const r = await client.request<{ workflow_runs: RunInfo[] }>('GET', `repos/{repo}/actions/workflows/${run.workflow_id}/runs?event=push&branch=main&per_page=100`);
+  const runs = r.workflow_runs.filter(x => x.event === 'push' && x.head_branch === 'main' && x.status === 'completed');
   const listed = runs.findIndex(x => x.id === run.id);
-  if (run.event === 'push' && run.head_branch === 'master' && run.status === 'completed') {
+  if (run.event === 'push' && run.head_branch === 'main' && run.status === 'completed') {
     if (listed < 0) runs.push(run);
     else if (runs[listed]!.run_attempt < run.run_attempt) runs[listed] = run;
   }

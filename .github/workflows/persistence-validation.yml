@@ -291,7 +291,7 @@ jobs:
         timeout-minutes: 8
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       # Named exception (docs/TESTING.md#event-parity): pull requests and merge-queue
-      # runs soak 2,500 writes; pushes to master, the nightly Test schedule and manual
+      # runs soak 2,500 writes; pushes to main, the nightly Test schedule and manual
       # runs cover the full 10,000-write gate, whose PGLite run alone takes 15-28 minutes.
       - name: Execute 1000 schedules, eight SIGKILL boundaries and the process-separated write soak
         env:
@@ -360,7 +360,7 @@ jobs:
         run: bun scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       # The service password reaches every client through PGPASSWORD, so the URLs carry none.
       # Named exception (docs/TESTING.md#event-parity): ROBOT_SECONDS is 150 on pull
-      # requests and merge-queue runs; pushes to master, the nightly Test schedule and
+      # requests and merge-queue runs; pushes to main, the nightly Test schedule and
       # manual runs cover the 600 s budget that crashes every seam.
       - name: Crash every reachable seam of the generated sequences
         env:

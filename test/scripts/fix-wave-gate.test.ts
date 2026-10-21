@@ -132,7 +132,7 @@ describe('fix-wave gate workflow', () => {
   test('a PR that edits the workflow or the gate script cannot change its own result', async () => {
     // pull_request_target runs the default-branch copy of both files; a pull_request trigger would run the PR's copy.
     expect(Object.keys(wf.on)).toEqual(['pull_request_target']);
-    expect(wf.on.pull_request_target.branches).toEqual(['master']);
+    expect(wf.on.pull_request_target.branches).toEqual(['main']);
     expect([...wf.on.pull_request_target.types].sort()).toEqual(['edited', 'labeled', 'opened', 'reopened', 'synchronize', 'unlabeled']);
     for (const job of Object.values(wf.jobs)) {
       const checkout = job.steps.find(s => s.uses?.startsWith('actions/checkout@'))!;

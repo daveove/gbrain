@@ -2,13 +2,13 @@ name: Test
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
-  # Merge queue (inert until the queue is enabled on master): the PR profile,
+    branches: [main]
+  # Merge queue (inert until the queue is enabled on main): the PR profile,
   # run against the queued merge commit. docs/RELEASING.md#merge-queue.
   merge_group:
-  # Nightly full matrix: every Bun version and native target, like a push to master.
+  # Nightly full matrix: every Bun version and native target, like a push to main.
   schedule:
     - cron: '23 7 * * *'
   # Manual dispatch lets a local dev/agent offload the suite to GitHub's
@@ -72,7 +72,7 @@ jobs:
   # x64 smoke cell. Pushes, schedules and manual runs always run the full matrix.
   # Named exception (docs/TESTING.md#event-parity): the native-locks scope
   # reduction on pull requests and merge-queue runs (Bun 1.4.0 and cross-target
-  # cells) is covered by every push to master and the nightly Test schedule,
+  # cells) is covered by every push to main and the nightly Test schedule,
   # which both run scope=full.
   changes:
     runs-on: ubicloud-standard-2-ubuntu-2404
@@ -242,7 +242,7 @@ jobs:
   # Elsewhere a new upstream advisory is a warning, so it cannot turn every
   # open PR red at once; the push and nightly runs still fail on it (B11).
   # Named exception with its rule (docs/ci-event-parity.md#dependency-audit-rule): a
-  # push-to-master red from a newly published advisory opens the Test master-red
+  # push-to-main red from a newly published advisory opens the Test master-red
   # issue and a scheduled red the nightly-red issue; the repair PR bumps,
   # overrides, patches or removes the dependency; when no fix exists, an
   # expiring ignore entry needs Garry's approval.
@@ -353,8 +353,8 @@ jobs:
           restore-keys: |
             tsbuildinfo-${{ runner.os }}-${{ hashFiles('bun.lock', 'tsconfig.json') }}-
       # check:schema-migration-order compares new schema migrations with
-      # origin/master's latest version; a depth-1 fetch of the ref is enough.
-      - run: git fetch --no-tags --depth=1 origin +refs/heads/master:refs/remotes/origin/master
+      # origin/main's latest version; a depth-1 fetch of the ref is enough.
+      - run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
       # Receipts (X2): verify records every check's real outcome (pass, fail,
       # timeout, self-skip) as one JUnit testcase; logs stay on failure.
       - run: bun run verify
@@ -574,7 +574,7 @@ jobs:
     # BrainBench memory-conformance gate (Cathedral 2). Hermetic: in-memory
     # PGLite, zero API keys, ~15s for the full 141-fixture × 3-harness run.
     # Governance (decision 4): compares HEAD's run against MAIN's committed
-    # baseline via `git show origin/master:evals/brainbench/baselines/main.json`
+    # baseline via `git show origin/main:evals/brainbench/baselines/main.json`
     # — a PR cannot rewrite the thing it's compared against. Exit 1 blocks the
     # merge until the regression is fixed or blessed (justification in the
     # updated baseline / fixture diff in corpus-bless mode).
@@ -582,10 +582,10 @@ jobs:
     timeout-minutes: 10  # ~15s hermetic run; matches the per-job-timeout hardening (#2254)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
-      - name: Fetch origin/master baseline ref (shallow)
-        # The gate reads ONE file via `git show origin/master:...` — a depth-1
-        # fetch of the master ref replaces the previous full 3700-commit clone.
-        run: git fetch --no-tags --depth=1 origin +refs/heads/master:refs/remotes/origin/master
+      - name: Fetch origin/main baseline ref (shallow)
+        # The gate reads ONE file via `git show origin/main:...` — a depth-1
+        # fetch of the main ref replaces the previous full 3700-commit clone.
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: 1.4.3
@@ -659,7 +659,7 @@ jobs:
       # and fence normalization on 10,001 pages (~30s); pushes, schedules and
       # manual runs keep the 100,001-page scale (~4-10 minutes, one core).
       # Named exception (docs/TESTING.md#event-parity): covered by every push to
-      # master and the nightly Test schedule.
+      # main and the nightly Test schedule.
       - run: bash scripts/run-with-receipt.sh slow export-scale -- bun test test/export-scale.slow.test.ts --timeout=900000 --coverage --coverage-reporter=lcov --coverage-dir=${{ runner.temp }}/coverage/perf-c
         env:
           GBRAIN_TEST_EXPORT_SCALE_PAGES: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && '10001' || '100001' }}
@@ -815,7 +815,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
-          fetch-depth: 0  # diff gate needs origin/master; baseline gate reads git show origin/master:
+          fetch-depth: 0  # diff gate needs origin/main; baseline gate reads git show origin/main:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: 1.4.3

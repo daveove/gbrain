@@ -55,9 +55,9 @@ describe('ci-health-report', () => {
         calls.push(path);
         if (path.includes('/workflows/nightly-watch.yml/runs?status=skipped')) return { total_count: 9, workflow_runs: [] } as T;
         if (path.includes('/workflows/nightly-watch.yml/runs')) return { workflow_runs: [{ conclusion: 'success', status: 'completed' }] } as T;
-        if (path.includes('&branch=master&created=') && /per_page=1$/.test(path)) return { total_count: path.includes('event=workflow_dispatch') ? 1 : 0, workflow_runs: [] } as T;
+        if (path.includes('&branch=main&created=') && /per_page=1$/.test(path)) return { total_count: path.includes('event=workflow_dispatch') ? 1 : 0, workflow_runs: [] } as T;
         if (path.includes('event=push&status=success')) return { workflow_runs: [{ id: 555 }] } as T;
-        if (path.includes('event=push&branch=master')) return { workflow_runs: opts.push ?? [], total_count: (opts.push ?? []).length } as T;
+        if (path.includes('event=push&branch=main')) return { workflow_runs: opts.push ?? [], total_count: (opts.push ?? []).length } as T;
         if (path.includes('event=pull_request')) {
           const page = Number(/[?&]page=(\d+)/.exec(path)![1]);
           return (opts.pr ? opts.pr(page, path) : { workflow_runs: page === 1 ? [run(1, 'success')] : [], total_count: 1 }) as T;
@@ -125,7 +125,7 @@ describe('ci-health-report', () => {
   });
 
   test('push-to-master pass rate per workflow with exit criteria; stress-gate failures and failure classes are reported separately; cancellation coverage is counted', async () => {
-    const push = [run(14, 'failure'), run(15, 'failure'), run(16, 'success'), run(17, 'success', 2), run(18, 'cancelled'), ...Array.from({ length: 15 }, (_, i) => run(100 + i, 'success'))].map(r => ({ ...r, event: 'push', head_branch: 'master' }));
+    const push = [run(14, 'failure'), run(15, 'failure'), run(16, 'success'), run(17, 'success', 2), run(18, 'cancelled'), ...Array.from({ length: 15 }, (_, i) => run(100 + i, 'success'))].map(r => ({ ...r, event: 'push', head_branch: 'main' }));
     const { client } = fakeApi({ push, pr: p => ({ workflow_runs: p === 1 ? [run(21, 'failure'), run(22, 'success')] : [], total_count: 2 }) });
     const data = await collectHealth(client, W);
     const masterTest = data.master.find(s => s.workflow === 'test.yml')!;

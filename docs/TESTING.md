@@ -805,10 +805,10 @@ Two guards run in `bun run verify`:
   filename/version/name mismatch and on a version defined twice, naming both files
   with the `git mv` + `version:` + regenerate recipe.
 - `check:schema-migration-order` (`scripts/check-schema-migration-order.ts`) fails
-  when a migration origin/master does not have is numbered at or below origin/master's
+  when a migration origin/main does not have is numbered at or below origin/main's
   latest version (it would be skipped forever on current brains) or reuses a version
   with a different name. Base ref: `GBRAIN_MIGRATION_BASE_REF` (default
-  `origin/master`); skipped with a notice when the ref is missing, failed under `CI=true`.
+  `origin/main`); skipped with a notice when the ref is missing, failed under `CI=true`.
 
 Collision recovery: an unapplied branch migration is renumbered (`git mv`, edit
 `version`, regenerate); one already applied to a disposable dev DB means rebuilding
@@ -1102,7 +1102,7 @@ row, a baselined function grows, a baselined function drops to 300 lines or
 fewer (remove the row), a row has more than 50 lines of stale slack (lower
 it), a row names a function that no longer exists, or a row is malformed,
 duplicated or out of order. A row raised above, or added since, the baseline
-at the merge-base with `origin/master` needs an issue or TODO id (`#1234`,
+at the merge-base with `origin/main` needs an issue or TODO id (`#1234`,
 `TODOS.md:12`, `TODO: <slug>`) in its justification; the summary prints every
 raise.
 
@@ -1322,17 +1322,17 @@ with `lcovCount != 1` marks the summary `degraded: true`; the merge still exits
 0 and both gates print `WOULD PASS`/`WOULD FAIL` instead of enforcing.
 
 **Diff gate** (`scripts/coverage-diff-gate.ts`) requires at least 80% of the
-added or changed executable lines of `git diff origin/master...HEAD` in
+added or changed executable lines of `git diff origin/main...HEAD` in
 `src/**.ts` (minus tests, generated files and `.d.ts`) to be covered, and no
 changed gate-scoped file to be absent from the coverage data. Doc-only diffs
 pass. Escape hatches: a commit body with `[coverage-exempt: reason]` (loud
 warning), and `scripts/coverage-gate-exemptions.txt`, read from
-`origin/master` so a PR cannot self-exempt, shrink-only. Exit 0 is pass or
+`origin/main` so a PR cannot self-exempt, shrink-only. Exit 0 is pass or
 report-only, 1 a failure while `COVERAGE_GATE_ENFORCE=1`, 2 an infrastructure
 error.
 
 **Baseline gate** (`scripts/coverage-baseline-gate.ts`) reads
-`scripts/coverage-baseline.json` from `origin/master` and compares like for
+`scripts/coverage-baseline.json` from `origin/main` and compares like for
 like by corpus: a global drop over 0.5pp, a per-directory drop over 1.0pp or
 more never-loaded files fails. A `null` corpus section is an ungated first
 landing, and `provisional: true` keeps the gate report-only; the committed

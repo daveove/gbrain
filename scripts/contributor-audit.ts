@@ -234,9 +234,9 @@ export function parseArgs(argv: string[]): Options {
   }
   if (!o.help && !/^[^.\s]+\.\.[^.\s]+$/.test(o.range)) {
     throw opError('invalid_params', o.range ? `range must be <base>..<head> (got "${o.range}")` : 'a <base>..<head> range is required',
-      'Pass the range of merges to audit, e.g. the commit before the merge train and origin/master.', {
+      'Pass the range of merges to audit, e.g. the commit before the merge train and origin/main.', {
         why: 'The audit needs both ends of the range to list the merges it re-tests.',
-        fix: action(['bun', 'run', COMMAND, '<base>..<head>'], 'Audits every merge between the two refs.', { inputs: [{ name: 'base>..<head', how: 'base = the last commit before the merges to audit; head = usually origin/master' }] }),
+        fix: action(['bun', 'run', COMMAND, '<base>..<head>'], 'Audits every merge between the two refs.', { inputs: [{ name: 'base>..<head', how: 'base = the last commit before the merges to audit; head = usually origin/main' }] }),
       });
   }
   if (o.postgres && !isTestShapedDatabaseUrl(o.postgres)) {

@@ -301,10 +301,10 @@ async function jobsOf(client: GitHubClient, run: Run, attempt: number): Promise<
 }
 
 async function series(client: GitHubClient, wf: typeof WORKFLOWS[number], event: Series['event'], window: Window, truncated: string[]): Promise<{ s: Series; mine: Run[]; failed: Run[]; jobs: Map<number, Job[]> }> {
-  const query = event === 'push' ? 'event=push&branch=master' : 'event=pull_request';
+  const query = event === 'push' ? 'event=push&branch=main' : 'event=pull_request';
   const listed = await listRuns(client, wf.file, query, Date.parse(window.since), Date.parse(window.until));
   if (!listed.complete) truncated.push(`${wf.file} ${event}: the window could not be read in full (search cap), so its rate is indeterminate`);
-  const mine = listed.runs.filter(r => sameRepo(r) && r.event === event && (event !== 'push' || !r.head_branch || r.head_branch === 'master'));
+  const mine = listed.runs.filter(r => sameRepo(r) && r.event === event && (event !== 'push' || !r.head_branch || r.head_branch === 'main'));
   const fa = firstAttempt(mine);
   const failed = mine.filter(r => r.status === 'completed' && r.conclusion !== 'cancelled' && r.conclusion !== 'skipped' && (r.conclusion !== 'success' || r.run_attempt > 1));
   const classification: Classification = { stress_gate: 0, test: 0, infrastructure: 0, unread: 0 };
@@ -335,7 +335,7 @@ async function watchResidual(client: GitHubClient, window: Window): Promise<Heal
     for (const file of WATCHED) {
       for (const event of ['push', 'workflow_dispatch']) {
         if (event === 'push' && ALLOWLISTED_PUSH.has(file)) continue;
-        outside += await count(`repos/{repo}/actions/workflows/${file}/runs?event=${event}&branch=master&created=${range}&per_page=1`);
+        outside += await count(`repos/{repo}/actions/workflows/${file}/runs?event=${event}&branch=main&created=${range}&per_page=1`);
       }
     }
     const skipped = await count(`repos/{repo}/actions/workflows/nightly-watch.yml/runs?status=skipped&created=${range}&per_page=1`);

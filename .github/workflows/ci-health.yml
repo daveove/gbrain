@@ -1,7 +1,7 @@
 name: CI health
 
 # CI health report (scripts/ci-health-report.ts; docs/ci-red-runbook.md#ci-health-report):
-# first-attempt pass rate of same-repository PR runs and push-to-master runs,
+# first-attempt pass rate of same-repository PR runs and push-to-main runs,
 # the exit criteria (met / missed / indeterminate), stress-gate failures,
 # failure classes, cancellation and completion coverage, master-red time to
 # first response, the nightly-watch residual, the test files with the most

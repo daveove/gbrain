@@ -46,7 +46,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       # Full history: the gate diffs against the merge base, the race hunt
-      # reads which helpers changed on master since the last night.
+      # reads which helpers changed on main since the last night.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
           fetch-depth: 0

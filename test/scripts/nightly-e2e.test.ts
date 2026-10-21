@@ -199,7 +199,7 @@ describe('full E2E shard classification (#6040)', () => {
   const run = { repo: 'acme-example/brain', runId: '42', attempt: '1', serverUrl: 'https://example.test' };
   // Annotation texts recorded from real runs: 37273083933 (cancelled by a
   // newer push, concurrency) and 37371914954 (cancelled by a user).
-  const CONCURRENCY = 'Canceling since a higher priority waiting request for E2E Tests-refs/heads/master exists';
+  const CONCURRENCY = 'Canceling since a higher priority waiting request for E2E Tests-refs/heads/main exists';
   const USER = 'The run was canceled by @capy-ai[bot].';
   const TIMEOUT = 'The job running on runner ubicloud-runner-1 has exceeded the maximum execution time of 60 minutes.';
   const OP = 'The operation was canceled.';
@@ -221,7 +221,7 @@ describe('full E2E shard classification (#6040)', () => {
     const c = classifyShards(result, [...shards], run);
     expect(c.state).toBe(state);
     if (state !== 'complete') expect(c.message).toContain(CLASSIFY_DOCS);
-    if (state === 'cancelled') expect(c.message).toContain('gh workflow run e2e.yml --ref master -f full_corpus=true');
+    if (state === 'cancelled') expect(c.message).toContain('gh workflow run e2e.yml --ref main -f full_corpus=true');
     if (state === 'failed') expect(c.message).toContain('gh run view 42 --log-failed');
   });
 

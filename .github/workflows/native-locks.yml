@@ -11,7 +11,7 @@ on:
       # Named exception (docs/TESTING.md#event-parity): every `inputs.scope`
       # condition below (the openclaw/musl/Windows `if`s and the Bun 1.4.0 and
       # cross-target excludes) narrows pull requests and merge-queue runs only;
-      # every push to master and the nightly Test schedule run scope=full.
+      # every push to main and the nightly Test schedule run scope=full.
       scope:
         type: string
         default: full

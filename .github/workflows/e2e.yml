@@ -2,10 +2,10 @@ name: E2E Tests
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
-    branches: [master]
-  # Merge queue (inert until the queue is enabled on master): the PR profile.
+    branches: [main]
+  # Merge queue (inert until the queue is enabled on main): the PR profile.
   # prepare-e2e classifies the queued change from the compare API (base_sha...
   # head_sha). docs/RELEASING.md#merge-queue.
   merge_group:
@@ -35,7 +35,7 @@ permissions:
 # Cancel a superseded run when a newer commit lands on the same PR/branch.
 # PR number for pull_request events (fork-safe), github.ref fallback for
 # push runs. Scheduled runs get their own `-nightly` group (as in test.yml):
-# sharing refs/heads/master with push runs let the next merge cancel the
+# sharing refs/heads/main with push runs let the next merge cancel the
 # nightly full corpus mid-shard (#6040).
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'workflow_dispatch' && inputs.full_corpus && '-full-corpus' || '' }}${{ github.event_name == 'schedule' && '-nightly' || '' }}
@@ -166,7 +166,7 @@ jobs:
           BASE_SHA: ${{ github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         # Named exception (docs/TESTING.md#event-parity): a doc-only pull request
-        # selects no E2E file; every push to master runs the whole corpus (no
+        # selects no E2E file; every push to main runs the whole corpus (no
         # PR context, so ci-changed-files.sh fails closed) and the nightly
         # schedule runs the full-corpus lanes.
         run: |
@@ -349,7 +349,7 @@ jobs:
         # sync-reconcile-postgres joins for the same reason (#4568): it only
         # ran nightly via the coverage-full-e2e schedule-only glob, so a
         # regression in the reconcile's real-Postgres array-parameter
-        # binding path could reach master with every PR lane green. It
+        # binding path could reach main with every PR lane green. It
         # already uses the same setupDB/teardownDB TRUNCATE-reset pattern
         # (test/e2e/helpers.ts) as the other DB-backed files on this line.
         # Also added to the E2E_EXCLUSIONS in scripts/e2e-matrix.ts so a PR
@@ -411,7 +411,7 @@ jobs:
         # v121/#2626 wedge class, v0.46.26 private-queue lifecycle incl. the
         # token-only probe). Previously reachable only via the nightly
         # coverage-full-e2e glob, so a broken PostgresEngine bootstrap block
-        # could reach master with every PR lane green. Own invocation line
+        # could reach main with every PR lane green. Own invocation line
         # and its OWN database (see the step above). Named files only, no glob.
         run: bash scripts/run-with-receipt.sh tier1 postgres-bootstrap -- bun test --timeout=60000 test/e2e/postgres-bootstrap.test.ts
         env:
@@ -983,7 +983,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
-          fetch-depth: 0  # baseline gate reads git show origin/master:
+          fetch-depth: 0  # baseline gate reads git show origin/main:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
         with:
           bun-version: 1.4.3

@@ -10,17 +10,17 @@ name: Nightly watch
 #   previously failing job executed. Cells listed in
 #   .github/nightly-known-red.tsv keep the issue open with the `known-red`
 #   label instead of counting as green.
-# - Push-to-master runs of Test and E2E Tests (the allowlist below and in
+# - Push-to-main runs of Test and E2E Tests (the allowlist below and in
 #   scripts/lib/master-red.ts) keep one `master-red` issue per workflow with
 #   the suspect range (last green push SHA -> first red SHA + merged PRs).
 #   Every watch reconciles every unevaluated completed push run in
 #   (run_number, run_attempt) order, so a dropped pending watch loses nothing.
 #
-# Triggers: `branches: [master]` drops every pull-request completion before a
+# Triggers: `branches: [main]` drops every pull-request completion before a
 # run is created. The job guard then admits scheduled runs and push runs of
-# the allowlisted workflows whose head branch is master, from this repository
-# only (the head repository check keeps a fork branch named master out).
-# Push runs of other watched workflows on master still create a skipped
+# the allowlisted workflows whose head branch is main, from this repository
+# only (the head repository check keeps a fork branch named main out).
+# Push runs of other watched workflows on main still create a skipped
 # watch run (no trigger-level event filter exists); CI health counts them.
 #
 # Serialization: `resolve` turns every entry path (automatic or dispatch)
@@ -39,7 +39,7 @@ name: Nightly watch
 # Every workflow with a schedule trigger must be listed below
 # (test/scripts/nightly-issue.test.ts enforces it). Dispatch is for
 # post-merge checks:
-#   gh workflow run nightly-watch.yml -f run_id=<scheduled or push-to-master run id>
+#   gh workflow run nightly-watch.yml -f run_id=<scheduled or push-to-main run id>
 #   gh workflow run nightly-watch.yml -f run_id=<E2E dispatch run id> -f replay_issue=<master-red issue>
 
 on:
@@ -54,15 +54,15 @@ on:
       - OSV-Scanner
       - CI health
     types: [completed]
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
     inputs:
       run_id:
-        description: Scheduled or push-to-master run id to evaluate
+        description: Scheduled or push-to-main run id to evaluate
         required: true
         type: string
       replay_issue:
-        description: Open master-red issue an E2E Tests dispatch run on master replays (optional)
+        description: Open master-red issue an E2E Tests dispatch run on main replays (optional)
         required: false
         type: string
         default: ''
@@ -79,7 +79,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.head_repository.full_name == github.repository &&
        (github.event.workflow_run.event == 'schedule' ||
-        (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'master' &&
+        (github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main' &&
          contains(fromJSON('["Test","E2E Tests"]'), github.event.workflow_run.name))))
     runs-on: ubicloud-standard-2-ubuntu-2404
     timeout-minutes: 5

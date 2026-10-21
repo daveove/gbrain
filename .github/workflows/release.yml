@@ -1,11 +1,11 @@
 name: Release
 
-# Publishes a GitHub release for every VERSION bump that lands on master:
+# Publishes a GitHub release for every VERSION bump that lands on main:
 # tag + title `v<VERSION>`, notes from that version's CHANGELOG.md entry,
 # compiled binaries attached (#3521).
 #
 # Why every bump: `gbrain check-update` resolves the latest version from the
-# VERSION file on master, but binary self-update
+# VERSION file on main, but binary self-update
 # (src/core/binary-self-update.ts) downloads assets from `releases/latest`.
 # If releases lag VERSION, binary installs are told an upgrade exists that
 # self-update cannot apply. Keeping releases/latest == VERSION closes that gap.
@@ -20,17 +20,17 @@ name: Release
 # src/core/binary-self-update.ts, pinned by test/release-workflow.test.ts.
 #
 # CI gate (docs/RELEASING.md#release-ci-gate): the `ci-gate` job waits for
-# the push-to-master runs of Test and E2E Tests on the release commit
+# the push-to-main runs of Test and E2E Tests on the release commit
 # (scripts/release-gate.ts). Build, publication and the latest-stable move
 # run only after both succeed. A failed run publishes nothing and the job
 # fails with the next step; a run cancelled by a newer push is followed to
-# the next master commit with the same VERSION (published there) or marks
-# this version superseded; workflow_dispatch backfills master HEAD's VERSION
+# the next main commit with the same VERSION (published there) or marks
+# this version superseded; workflow_dispatch backfills main HEAD's VERSION
 # through the same gate.
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths: [VERSION]
   workflow_dispatch: {}  # manual first run / backfill of the current VERSION
 
@@ -185,7 +185,7 @@ jobs:
         with:
           path: artifacts
       - name: Extract CHANGELOG entry for release notes
-        # env-bound, not inlined into the script: VERSION comes from master so
+        # env-bound, not inlined into the script: VERSION comes from main so
         # it isn't attacker-reachable today, but a `${{ }}` inside `run:` is
         # shell injection by construction if that ever changes.
         env:
@@ -193,7 +193,7 @@ jobs:
         run: |
           v="$RELEASE_VERSION"
           if ! bash scripts/changelog-entry.sh "$v" > /tmp/release-notes.md || ! [ -s /tmp/release-notes.md ]; then
-            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/master/CHANGELOG.md) for v$v." > /tmp/release-notes.md
+            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md) for v$v." > /tmp/release-notes.md
           fi
       - name: Create release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2

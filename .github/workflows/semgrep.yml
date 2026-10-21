@@ -11,7 +11,7 @@ name: Semgrep
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   schedule:
     - cron: '30 7 * * 1'  # weekly, Monday 07:30 UTC
   workflow_dispatch:
@@ -50,8 +50,8 @@ jobs:
           # workspace so our merge-base lookup works before Semgrep starts.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           # Diff against the MERGE BASE, not the base-branch head captured at
-          # event time: the checkout is the merge ref against current master,
-          # so a finding master landed after the event would otherwise be
+          # event time: the checkout is the merge ref against current main,
+          # so a finding main landed after the event would otherwise be
           # attributed to this PR. merge-base is the true common ancestor.
           BASELINE="$(git merge-base "$BASE_SHA" HEAD || echo "$BASE_SHA")"
           echo "PR scan — failing only on findings new since $BASELINE"

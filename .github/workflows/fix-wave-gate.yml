@@ -1,7 +1,7 @@
 name: Fix-wave gate
 
 # Contributor PRs land only through a revised fix-wave PR (docs/RELEASING.md,
-# "Fix-wave gate"). This check fails every PR into master unless its head
+# "Fix-wave gate"). This check fails every PR into main unless its head
 # repository is garrytan/gbrain, or a human on the maintainer allowlist in
 # scripts/fix-wave-gate.ts applied the `maintainer-override` label (audited in
 # the run log and step summary).
@@ -14,7 +14,7 @@ name: Fix-wave gate
 
 on:
   pull_request_target:
-    branches: [master]
+    branches: [main]
     types: [opened, edited, reopened, synchronize, labeled, unlabeled]
 
 permissions: {}

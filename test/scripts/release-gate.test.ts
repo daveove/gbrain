@@ -15,7 +15,7 @@ import { evaluate, gate, GATED, type GateDeps, type GateRun } from '../../script
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
 const C = 'c'.repeat(40);
-const run = (id: number, n: number, sha: string, status: string, conclusion: string | null, attempt = 1): GateRun => ({ id, run_number: n, run_attempt: attempt, status, conclusion, head_sha: sha, head_branch: 'master', event: 'push' });
+const run = (id: number, n: number, sha: string, status: string, conclusion: string | null, attempt = 1): GateRun => ({ id, run_number: n, run_attempt: attempt, status, conclusion, head_sha: sha, head_branch: 'main', event: 'push' });
 
 function deps(runs: Record<string, GateRun[]>, versions: Record<string, string> = {}, outside: string[] = []): GateDeps & { calls: string[] } {
   const calls: string[] = [];
@@ -46,7 +46,7 @@ describe('release gate', () => {
     if (v.kind !== 'fail') return;
     expect(v.why).toContain('v0.60.70.0 is not published and latest-stable does not move');
     expect(v.next).toContain('Master red: Test');
-    expect(v.next).toContain('gh workflow run release.yml --ref master');
+    expect(v.next).toContain('gh workflow run release.yml --ref main');
     const rerunGreen = deps({ 'test.yml': [run(1, 10, A, 'completed', 'failure'), run(1, 10, A, 'completed', 'success', 2)], 'e2e.yml': [run(2, 20, A, 'completed', 'success')] });
     expect((await evaluate(rerunGreen, A, '0.60.70.0')).kind).toBe('publish');
   });
@@ -88,7 +88,7 @@ describe('release gate', () => {
     t = 0;
     const late = await gate(stuck, { sha: A, version: '0.60.70.0', timeoutMs: 3 * 60_000, pollMs: 60_000, log: () => {}, sleep: async ms => { t += ms; }, now: () => t });
     expect(late.kind).toBe('fail');
-    if (late.kind === 'fail') expect(late.next).toContain('gh workflow run release.yml --ref master');
+    if (late.kind === 'fail') expect(late.next).toContain('gh workflow run release.yml --ref main');
   });
 });
 

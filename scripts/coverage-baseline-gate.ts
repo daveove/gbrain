@@ -2,14 +2,14 @@
 /**
  * scripts/coverage-baseline-gate.ts — whole-corpus coverage regression gate
  * (containment sprint). Compares the merged summary against the committed
- * baseline AS IT EXISTS ON origin/master — never the working tree, so a PR
+ * baseline AS IT EXISTS ON origin/main — never the working tree, so a PR
  * cannot weaken its own bar by editing the baseline file.
  *
  * Usage:
  *   bun scripts/coverage-baseline-gate.ts --summary <json> --corpus <prCorpus|fullCorpus>
  *
  * Behavior:
- *   - Baseline source: `git show origin/master:scripts/coverage-baseline.json`.
+ *   - Baseline source: `git show origin/main:scripts/coverage-baseline.json`.
  *       * unresolvable ref            → exit 2 (infrastructure)
  *       * path absent on master      → 'ungated first landing', exit 0
  *       * present on master but the working-tree file was DELETED → exit 2
@@ -124,7 +124,7 @@ function fetchBaselineFromMaster(): BaselineFetch {
     if (override === "GIT_FAILURE") return { status: "git-failure", msg: "simulated by COVERAGE_BASELINE_JSON_OVERRIDE" };
     return { status: "ok", text: override };
   }
-  const res = spawnSync("git", ["show", "origin/master:scripts/coverage-baseline.json"], {
+  const res = spawnSync("git", ["show", "origin/main:scripts/coverage-baseline.json"], {
     encoding: "utf8",
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -180,9 +180,9 @@ function main(): void {
   }
 
   const fetched = fetchBaselineFromMaster();
-  if (fetched.status === "git-failure") infraFail(`cannot read baseline from origin/master: ${fetched.msg}`);
+  if (fetched.status === "git-failure") infraFail(`cannot read baseline from origin/main: ${fetched.msg}`);
   if (fetched.status === "absent") {
-    console.log("PASS: ungated first landing — scripts/coverage-baseline.json is not on origin/master yet.");
+    console.log("PASS: ungated first landing — scripts/coverage-baseline.json is not on origin/main yet.");
     process.exit(0);
   }
 
@@ -192,7 +192,7 @@ function main(): void {
     process.env.COVERAGE_BASELINE_WORKTREE_PATH || join(import.meta.dir, "coverage-baseline.json");
   if (!existsSync(worktreePath)) {
     infraFail(
-      `baseline exists on origin/master but the working-tree copy is missing (${worktreePath}) — restore scripts/coverage-baseline.json`,
+      `baseline exists on origin/main but the working-tree copy is missing (${worktreePath}) — restore scripts/coverage-baseline.json`,
     );
   }
 
@@ -200,7 +200,7 @@ function main(): void {
   try {
     baseline = JSON.parse(fetched.text) as BaselineJson;
   } catch (err) {
-    infraFail(`baseline JSON on origin/master is unparseable: ${String(err)}`);
+    infraFail(`baseline JSON on origin/main is unparseable: ${String(err)}`);
   }
 
   const section = baseline[corpus as "prCorpus" | "fullCorpus"];
@@ -233,10 +233,10 @@ function main(): void {
     process.exit(0);
   }
   if (report.pass) {
-    console.log("PASS: no coverage regression vs origin/master baseline.");
+    console.log("PASS: no coverage regression vs origin/main baseline.");
     process.exit(0);
   }
-  console.log("FAIL: coverage regression vs origin/master baseline.");
+  console.log("FAIL: coverage regression vs origin/main baseline.");
   process.exit(1);
 }
 
