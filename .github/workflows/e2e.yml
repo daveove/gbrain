@@ -275,9 +275,12 @@ jobs:
 
   tier1:
     name: Tier 1 (Mechanical)
-    # Tier 1 stays on 16 vCPUs: on 4 its CLI `init --url` spawns in
-    # mechanical.test.ts went from ~2s to past their 15-30s kill timeouts
-    # (measured September 29, 2026), while every other E2E lane ran as fast.
+    # Upstream keeps Tier 1 on 16 vCPUs: on 4 Ubicloud vCPUs the CLI
+    # `init --url` spawns in mechanical.test.ts ran past their 15-30s kill
+    # timeouts (measured September 29, 2026). On this fork's 4-vCPU
+    # GitHub-hosted runner the mechanical step passed (PR #43, run 39623386546);
+    # if it starts timing out, split the step across a shard matrix and raise
+    # timeout-minutes (docs/TESTING.md "CI runner capacity").
     runs-on: ubuntu-24.04
     timeout-minutes: 70
     services:

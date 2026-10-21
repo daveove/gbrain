@@ -59,7 +59,7 @@ export async function evaluate(deps: GateDeps, sha: string, version: string): Pr
     if (failed) {
       return {
         kind: 'fail', sha: candidate,
-        why: `${failed.wf.name} run ${failed.run!.id} (${failed.run!.html_url ?? `run ${failed.run!.run_number}`}) ended ${failed.run!.conclusion} on ${candidate.slice(0, 12)}, so v${version} is not published and latest-stable does not move. Releases publish only commits master CI passed.`,
+        why: `${failed.wf.name} run ${failed.run!.id} (${failed.run!.html_url ?? `run ${failed.run!.run_number}`}) ended ${failed.run!.conclusion} on ${candidate.slice(0, 12)}, so v${version} is not published and latest-stable does not move. Releases publish only commits main CI passed.`,
         next: `Repair main (the open "Master red: ${failed.wf.name}" issue names the failing tests; docs/RELEASING.md#master-red-issues). Once a later push-to-main run of Test and E2E Tests is green, publish the current VERSION with: gh workflow run release.yml --ref main`,
       };
     }
@@ -70,7 +70,7 @@ export async function evaluate(deps: GateDeps, sha: string, version: string): Pr
         .sort((a, b) => a.run_number - b.run_number)[0];
       if (!successor) return { kind: 'wait', sha: candidate, why: `${cancelled.wf.name} run ${cancelled.run!.id} was cancelled (superseded by a newer push); waiting for the newer push-to-main run` };
       const [moved, inside] = [await deps.versionAt(successor.head_sha), await deps.contains(sha, successor.head_sha)];
-      if (!inside) return { kind: 'fail', sha: candidate, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled and the next main run (${successor.head_sha.slice(0, 12)}) does not contain the release commit`, next: 'Re-run the gate after master settles: gh workflow run release.yml --ref main' };
+      if (!inside) return { kind: 'fail', sha: candidate, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled and the next main run (${successor.head_sha.slice(0, 12)}) does not contain the release commit`, next: 'Re-run the gate after main settles: gh workflow run release.yml --ref main' };
       if (moved !== version) return { kind: 'superseded', sha: successor.head_sha, why: `${cancelled.wf.name} on ${candidate.slice(0, 12)} was cancelled by a newer push that carries VERSION ${moved}; v${version} is superseded and v${moved}'s own release run publishes` };
       candidate = successor.head_sha;
       continue;

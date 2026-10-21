@@ -134,7 +134,7 @@ function resolveSha(root: string, ref: string): string {
   return spawnSync('git', ['rev-parse', ref], { cwd: root, encoding: 'utf8' }).stdout.trim() || ref;
 }
 
-/** Postgres-arm and E2E importers of helpers changed on master since the last night (the gate sampled them out). */
+/** Postgres-arm and E2E importers of helpers changed on main since the last night (the gate sampled them out). */
 export function raceHuntHelperImporters(root: string, since = '26 hours ago'): { helpers: string[]; files: string[] } {
   const r = spawnSync('git', ['log', `--since=${since}`, '--name-only', '--format=', 'HEAD', '--', 'test/helpers'], { cwd: root, encoding: 'utf8' });
   const helpers = [...new Set((r.stdout ?? '').split('\n').filter(p => p && !p.endsWith('.test.ts') && existsSync(join(root, p))))].sort();
@@ -439,7 +439,7 @@ async function main(argv: string[]): Promise<number> {
       const day = Number(env.GBRAIN_RACE_HUNT_DAY ?? Math.floor((Date.now() - Date.UTC(new Date().getUTCFullYear(), 0, 1)) / 86_400_000));
       const extra = raceHuntHelperImporters(ROOT);
       plan = planRaceHunt(ROOT, { day, extra: extra.files, diagnostic: env.EVENT === 'workflow_dispatch' });
-      if (extra.files.length) console.log(`race hunt: added ${extra.files.length} Postgres-arm importer(s) of ${extra.helpers.join(', ')} (changed on master since the last night)`);
+      if (extra.files.length) console.log(`race hunt: added ${extra.files.length} Postgres-arm importer(s) of ${extra.helpers.join(', ')} (changed on main since the last night)`);
     }
     const dir = join(env.RUNNER_TEMP ?? join(ROOT, '.context'), 'stress-plan');
     mkdirSync(dir, { recursive: true });
