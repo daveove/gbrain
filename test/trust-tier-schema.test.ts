@@ -306,11 +306,17 @@ for (const backendName of testBackends()) {
   });
 }
 
-test('v243 forward upgrade preserves trust for calendar provenance but still resets real content changes', async () => {
-  const engine = new PGLiteEngine();
-  await engine.connect({});
-  try {
+describe('trust schema forward upgrade', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
     await engine.initSchema();
+  }, 120_000);
+  afterAll(async () => { await engine?.disconnect(); });
+
+  test('v243 forward upgrade preserves trust for calendar provenance but still resets real content changes', async () => {
+    // This disposable engine is owned by the suite hooks, not the test body.
     // Reinstall the pinned v242 trigger semantics, then take the real forward path.
     expect(TRUST_STAMP_TIER_FUNCTION_SQL.match(/'_gbrain_date_instants',/g)).toHaveLength(2);
     await engine.executeRaw(`${TRUST_STAMP_TIER_FUNCTION_SQL.replaceAll("'_gbrain_date_instants',", '')};`);
@@ -330,7 +336,5 @@ test('v243 forward upgrade preserves trust for calendar provenance but still res
     expect(await page(engine, target.slug)).toEqual(before);
     await engine.executeRaw("UPDATE pages SET compiled_truth='A genuinely changed synthetic observation.' WHERE id=$1", [target.id]);
     expect((await page(engine, target.slug)).trust_tier).toBe('unknown');
-  } finally {
-    await engine.disconnect();
-  }
-}, 120_000);
+  }, 120_000);
+});
