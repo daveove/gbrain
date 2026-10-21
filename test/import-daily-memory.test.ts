@@ -547,6 +547,52 @@ test('concurrent renewals leave one live lease', async () => {
   expect(await engine.executeRaw("SELECT op FROM op_checkpoints WHERE op='import-daily-memory'")).toHaveLength(0);
 });
 
+// DAV-7110: before() and imported() renew the lease once per file, so a renewal
+// that scanned every banked row made a long import quadratic (scale tier
+// import_rate: last-10% per-file cost 4x the first). Renewal must stay keyed.
+test('lease renewal does not scan banked debt', async () => {
+  const { createHash } = await import('node:crypto');
+  const dir = root();
+  const fingerprint = createHash('sha256').update(JSON.stringify(['default', dir])).digest('hex').slice(0, 16);
+  const daily = (await createImportDailyMemory(engine, { sourceId: 'default', dir }))!;
+  const backlog = 2000;
+  // One before: and one slug: row per imported file, as a long import banks them.
+  await engine.executeRawDirect(
+    `INSERT INTO op_checkpoint_paths (op, fingerprint, path)
+     SELECT 'import-daily-memory', $1, jsonb_build_object('origin', 'synthetic-peer', 'value', 'slug:notes/n' || n)::text
+     FROM generate_series(1, $2::int) AS n`,
+    [fingerprint, backlog]);
+  await engine.executeRawDirect('ANALYZE op_checkpoint_paths');
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+  const execute = engine.executeRaw, executeDirect = engine.executeRawDirect;
+  const raw = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
+    if (sql.includes('op_checkpoint')) statements.push({ sql, params: params ?? [] });
+    return execute.call(this, sql, params) as Promise<T[]>;
+  });
+  const direct = spyOn(engine, 'executeRawDirect').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
+    if (sql.includes('op_checkpoint')) statements.push({ sql, params: params ?? [] });
+    return executeDirect.call(this, sql, params) as Promise<T[]>;
+  });
+  setSystemTime(new Date(Date.now() + 1_000));
+  try { await daily.renew(); } finally { setSystemTime(); raw.mockRestore(); direct.mockRestore(); }
+  expect(statements.some(s => /^\s*DELETE FROM op_checkpoint_paths/.test(s.sql))).toBe(true);
+  const filtered = (node: Record<string, unknown>): number =>
+    Number(node['Rows Removed by Filter'] ?? 0) + Number(node['Rows Removed by Index Recheck'] ?? 0)
+    + ((node.Plans as Array<Record<string, unknown>> | undefined) ?? []).reduce((sum, child) => sum + filtered(child), 0);
+  for (const statement of statements) {
+    // Replaying is idempotent here: the new marker already exists and the retired one is gone.
+    const [row] = await engine.executeRaw<{ 'QUERY PLAN': unknown }>(`EXPLAIN (ANALYZE, FORMAT JSON) ${statement.sql}`, statement.params);
+    const planJson = row!['QUERY PLAN'];
+    const [plan] = (typeof planJson === 'string' ? JSON.parse(planJson) : planJson) as Array<{ Plan: Record<string, unknown> }>;
+    expect({ sql: statement.sql, rowsFiltered: filtered(plan!.Plan) }).toEqual({ sql: statement.sql, rowsFiltered: 0 });
+  }
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'live:%'")).toHaveLength(1);
+  expect(await engine.executeRaw(
+    "SELECT path FROM op_checkpoint_paths WHERE op='import-daily-memory' AND path::jsonb->>'value' LIKE 'slug:%'")).toHaveLength(backlog);
+  await daily.release();
+});
+
 test('renew keeps live lease after cancellation stops admission', async () => {
   const dir = root();
   const file = join(dir, 'note.md');
