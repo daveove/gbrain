@@ -22,13 +22,13 @@ export function fail(what: string, why: string, fix: string | string[], see = RE
 
 const VERSION_RE = /^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:-[0-9A-Za-z.-]+)?$/;
 
-/** master's MAJOR.MINOR.(PATCH+1).0 */
-export function nextPatchVersion(masterVersion: string): string {
-  const m = VERSION_RE.exec(masterVersion.trim());
+/** The selected base's MAJOR.MINOR.(PATCH+1).0. */
+export function nextPatchVersion(baseVersion: string, baseRef: string): string {
+  const m = VERSION_RE.exec(baseVersion.trim());
   if (!m) {
-    fail(`master's VERSION "${masterVersion.trim()}" is not MAJOR.MINOR.PATCH.MICRO`,
-      'restamp derives the branch version from master\'s VERSION file.',
-      'fix VERSION on master first (CLAUDE.md "Version locations"), then rerun: bun run release:restamp');
+    fail(`${baseRef}'s VERSION "${baseVersion.trim()}" is not MAJOR.MINOR.PATCH.MICRO`,
+      `restamp derives the branch version from ${baseRef}'s VERSION file.`,
+      `fix VERSION on ${baseRef} first (CLAUDE.md "Version locations"), then rerun: bun run release:restamp`);
   }
   return `${m[1]}.${m[2]}.${Number(m[3]) + 1}.0`;
 }
@@ -54,15 +54,15 @@ export function splitChangelog(text: string): { preamble: string; sections: Chan
  * The branch's own CHANGELOG entry: the sections above the merge base's top
  * section header. Returns [] when the branch has not written one yet.
  */
-export function branchEntrySections(branchText: string, baseText: string): ChangelogSection[] {
+export function branchEntrySections(branchText: string, baseText: string, baseRef: string): ChangelogSection[] {
   const baseTop = splitChangelog(baseText).sections[0]?.header;
   const branch = splitChangelog(branchText).sections;
   if (!baseTop) return [];
   const idx = branch.findIndex((s) => s.header === baseTop);
   if (idx < 0) {
     fail(`CHANGELOG.md on this branch no longer contains the merge base's top entry "${baseTop}"`,
-      'restamp finds the branch\'s own entry as the sections above the newest entry the branch shares with master; a rewritten or reordered master entry hides it.',
-      ['restore master\'s entries (git checkout origin/main -- CHANGELOG.md, then re-add only your entry on top), commit,',
+      `restamp finds the branch's own entry as the sections above the newest entry the branch shares with ${baseRef}; a rewritten or reordered base entry hides it.`,
+      [`restore ${baseRef}'s entries (git checkout ${baseRef} -- CHANGELOG.md, then re-add only your entry on top), commit,`,
         'then rerun: bun run release:restamp']);
   }
   return branch.slice(0, idx);
