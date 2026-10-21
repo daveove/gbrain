@@ -16,6 +16,14 @@
  * from memory. The snapshot lives for one resolution pass, not for the life of
  * the process, so a `gbrain config set` from another process is picked up by
  * the next command exactly as before.
+ *
+ * Invariant: the snapshot holds user and runtime config only. Keys under
+ * `internal.` are excluded by every engine's `getAllConfig()`, and internal
+ * queues must not live in the snapshot. This read runs on every CLI and MCP
+ * startup; when a deferred-link queue was stored as `internal.pending-links.*`
+ * rows, 1,453 of them (~667 KB) rode along on each of ~548k startups in 12
+ * days on a hosted brain, roughly 365 GB of egress. Code that keeps state
+ * under `internal.` reads it with `getConfig()` or `listConfigKeys()`.
  */
 
 /** The only thing config resolution needs from an engine. */
@@ -29,7 +37,7 @@ export interface BulkConfigReader extends ConfigReader {
 }
 
 /**
- * Read the whole config table as a key -> value map.
+ * Read the whole config table, minus `internal.*` keys, as a key -> value map.
  *
  * Returns null when the bulk read is unavailable or fails — a brain
  * mid-migration has no config table, and an engine implemented outside this

@@ -1,11 +1,11 @@
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, afterAll } from 'bun:test';
 import { versionRoot, maybeAttachVersionSuffixHint } from '../src/core/ai/base-url-probe.ts';
 import {
   probeModel,
   probeEmbeddingReachability,
   probeRerankerReachability,
 } from '../src/commands/models.ts';
-import { configureGateway } from '../src/core/ai/gateway.ts';
+import { configureGateway, resetGateway } from '../src/core/ai/gateway.ts';
 import type { AIGatewayConfig } from '../src/core/ai/types.ts';
 
 /**
@@ -310,6 +310,13 @@ describe('gate exclusions (no probe at all)', () => {
 // these drive the wiring end-to-end at ALL THREE probe sites; reverting any
 // site's hint call drops exactly one test.
 describe('probe-site wiring (discrimination — fails if a hint call is reverted)', () => {
+  // The embedding probe below reconfigures the gateway to a litellm embedding
+  // model that resolves to 1280 dims. bun runs a shard's files in one process, so restore the
+  // test baseline or the next file's PGLite schema is sized for 1280 and every
+  // 1536-d fixture fails with `expected 1280 dimensions, not 1536`.
+  afterAll(() => {
+    resetGateway();
+  });
   test('probeModel: a chat 401 attaches the /v1 hint', async () => {
     const r = await probeModel(LITELLM_CHAT, 'chat', {
       chat: throwAuth, cfg: cfg('http://localhost:4000'), fetchImpl: stubFetch(V1_CONFIRMED),
