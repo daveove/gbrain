@@ -2,7 +2,7 @@
 
 The classification table [docs/TESTING.md](TESTING.md#event-parity) links to.
 
-A red that only a push to master can produce is a red no PR could have
+A red that only a push to main can produce is a red no PR could have
 caught. So every event-conditional behavior in the workflows is either
 parity (pull requests and merge-queue runs do the same work) or a named
 exception whose comment, beside the condition, names the scheduled run that
@@ -18,19 +18,19 @@ and `e2e-status` aggregators, never on per-cell matrix names.
 | Workflow | Condition | Class | Covered by |
 | --- | --- | --- | --- |
 | `test.yml` | `security-regressions` Bun matrix | Parity: both Bun versions on every OS, every event | — |
-| `test.yml` | `changes` native scope (`smoke`/`primary`/`full`) | Named exception | Every push to master and the nightly Test schedule (`full`) |
+| `test.yml` | `changes` native scope (`smoke`/`primary`/`full`) | Named exception | Every push to main and the nightly Test schedule (`full`) |
 | `test.yml` | `gitleaks` commit range by event | Parity: each event scans the range it introduces | — |
-| `test.yml` | `dependency-audit` blocking scope | Named exception with a rule ([below](#dependency-audit-rule)) | Every push to master and the nightly Test schedule (always blocking) |
-| `test.yml` | `export-scale` pages, 10,001 vs 100,001 | Named exception | Every push to master and the nightly Test schedule |
+| `test.yml` | `dependency-audit` blocking scope | Named exception with a rule ([below](#dependency-audit-rule)) | Every push to main and the nightly Test schedule (always blocking) |
+| `test.yml` | `export-scale` pages, 10,001 vs 100,001 | Named exception | Every push to main and the nightly Test schedule |
 | `test.yml`, `stress.yml` | `stress-changed-tests` file set | Named exception: PR-only gate; succeeds with "not a PR event" elsewhere | Push and nightly runs run every file; the nightly race hunt repeats the Postgres arms |
 | `test.yml` | `race-hunt` | Named exception: schedule and dispatch only, outside `test-status` | Itself (nightly Test schedule) |
 | `e2e.yml` | `order-hunt` | Named exception: schedule and `order_hunt` dispatch only, outside `e2e-status` | Itself (nightly E2E schedule) |
 | `test.yml` | `native_only`, `race_hunt`, `stress_*` dispatch inputs; concurrency suffixes | Parity: manual modes and run grouping, never applied to PR, push or schedule events | — |
 | `persistence-validation.yml` | Bun matrix of read latency, deployment matrix, unit-lane PostgreSQL arms, soak, crash robot, reconciliation | Parity: both Bun versions on every event | — |
-| `persistence-validation.yml` | `SOAK_OPERATIONS` 2,500 vs 10,000 | Named exception | Every push to master and the nightly Test schedule |
-| `persistence-validation.yml` | `ROBOT_SECONDS` 150 vs 600 | Named exception | Every push to master and the nightly Test schedule |
-| `native-locks.yml` | `inputs.scope` (OpenClaw, musl, Windows probes, Bun 1.4.0 and cross-target cells) | Named exception | Every push to master and the nightly Test schedule (`full`) |
-| `e2e.yml` | Doc-only pull request selects no E2E file | Named exception | Every push to master (whole corpus) and the nightly E2E schedule |
+| `persistence-validation.yml` | `SOAK_OPERATIONS` 2,500 vs 10,000 | Named exception | Every push to main and the nightly Test schedule |
+| `persistence-validation.yml` | `ROBOT_SECONDS` 150 vs 600 | Named exception | Every push to main and the nightly Test schedule |
+| `native-locks.yml` | `inputs.scope` (OpenClaw, musl, Windows probes, Bun 1.4.0 and cross-target cells) | Named exception | Every push to main and the nightly Test schedule (`full`) |
+| `e2e.yml` | Doc-only pull request selects no E2E file | Named exception | Every push to main (whole corpus) and the nightly E2E schedule |
 | `e2e.yml` | Full-corpus coverage lanes and their `e2e-status` checks | Named exception | Nightly E2E schedule (or a `full_corpus` dispatch) |
 | `heavy-tests.yml` | Label-gated jobs on pull requests | Named exception | Nightly Heavy Tests schedule |
 | `heavy-tests.yml` | `grok-door` (label or input only) | Recorded decision: no scheduled run until the `XAI_API_KEY` secret exists | None yet, by decision |
@@ -48,7 +48,7 @@ and `e2e-status` aggregators, never on per-cell matrix names.
 or merge-queue entries that change a dependency manifest or carry the
 `dependency-audit` label; on other pull requests a new upstream advisory is a
 warning, so one published advisory cannot turn every open PR red at once.
-The red it produces lands on master instead, and is handled like any other:
+The red it produces lands on main instead, and is handled like any other:
 a push-to-main red opens the Test `master-red` issue, a scheduled red the
 `nightly-red` issue. The repair PR bumps, overrides, patches or removes the
 dependency. When no fix exists, an ignore entry needs Garry's approval and an

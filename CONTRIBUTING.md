@@ -707,7 +707,7 @@ accepted contribution is credited in `CHANGELOG.md`.
 ### gstack repo config (`.gstack/`)
 
 Two committed files tell gstack (1.91.98.0 or later) about gbrain's own gates;
-gstack reads both from master, so a branch's edits take effect after it merges.
+gstack reads both from the default branch, so edits take effect after they merge.
 
 - `.gstack/pregate.json`: `gstack-pregate run --allow-repo-commands` runs a
   guard when the branch touches its files: the serial-lane manifest test, the
@@ -722,6 +722,9 @@ gstack reads both from master, so a branch's edits take effect after it merges.
   that passed the gate.
 
 ### How a contributor PR lands
+
+This subsection describes upstream `garrytan/gbrain` policy on its `master`
+branch. The upstream-only Fix-wave gate does not run in `daveove/gbrain`.
 
 Contributor PRs are never merged into master as-is. A maintainer folds the
 change into a fix-wave PR, revises it there (tests, agent-facing errors,
