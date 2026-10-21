@@ -283,14 +283,14 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
   if (cfg.embedding_disabled) {
     return { ...base, state: 'disabled_by_choice', reason: 'embedding_disabled', why: 'This brain was set up keyless (`--no-embedding`): search is keyword-only by choice.', fix: embeddingEnablement(cfg) };
   }
-  const model = cfg.embedding_model?.trim();
+  const model = cfg.embedding_model?.trim() || undefined;
+  const recipe = model ? RECIPES.get(model.split(':')[0]) : undefined;
+  // Under subscription billing only a local embedding recipe can run, so the key-asking fixes below never apply.
+  if (resolveAIBilling(cfg) === 'subscription' && !(recipe && isLocalEmbeddingRecipe(recipe))) return subscriptionEmbeddingsEntry(cfg, model);
   if (!model) return { ...base, state: 'missing', reason: 'not_configured', why: 'No embedding model is configured, so search is keyword-only.', fix: embeddingEnablement(cfg) };
-  const providerId = model.includes(':') ? model.slice(0, model.indexOf(':')) : model;
-  const recipe = RECIPES.get(providerId);
   if (!recipe?.touchpoints.embedding) {
     return { ...base, state: 'degraded', reason: 'unknown_model', why: `The configured embedding model '${model}' is not a known embedding provider, so vectors cannot be computed.`, fix: embeddingEnablement({ ...cfg, embedding_model: undefined }) };
   }
-  if (paidModelApiBlocked(recipe, resolveAIBilling(cfg))) return paidEmbeddingsRefusedEntry(cfg, model);
   const env = mergedProviderEnv(cfg);
   if (embeddingProviderConfigured(model, k => !!env[k]) && detectCapabilities({ config: cfg }).embeddings.available) {
     return { ...base, state: 'ok', reason: 'configured', why: `Embeddings run on ${model}.` };
@@ -308,35 +308,40 @@ function embeddingsEntry(cfg: GBrainConfig): ReadinessEntry {
   };
 }
 
+/** A recipe that can embed and bills nothing under subscription (ollama, llama-server, lmstudio; not codex-cli, which cannot embed). */
+function isLocalEmbeddingRecipe(recipe: Recipe): boolean {
+  return !!recipe.touchpoints.embedding && !paidModelApiBlocked(recipe, 'subscription');
+}
+
 /**
- * `ai_billing=subscription` refuses the configured paid embedding model before any request, so an API key
- * changes nothing and the entry never asks for one. A registered column on a local (non-billing) provider
- * decides what search does: it is the search column (vector search runs on it), or it is still being filled
- * by the operator (vector search is off for now; no fix, and the user has nothing to do).
+ * `ai_billing=subscription` with no local embedding model configured: a paid model is refused before any
+ * request, so an API key changes nothing and the entry never asks for one. A registered local column decides
+ * what search does: it is the search column (vector search runs on it), or it is still being filled by the
+ * operator (vector search is off for now; no fix, and the user has nothing to do).
  */
-function paidEmbeddingsRefusedEntry(cfg: GBrainConfig, model: string): ReadinessEntry {
+function subscriptionEmbeddingsEntry(cfg: GBrainConfig, model: string | undefined): ReadinessEntry {
   const base = { capability: 'embeddings' as const, tier: 'config' as const, http_visible: true };
-  // Local means a recipe that can embed and bills nothing under subscription (not e.g. codex-cli, which has no embedding touchpoint).
+  const refused = model ? `, so ${model} is not called` : ' and no local embedding model is configured';
   const local = Object.entries(cfg.embedding_columns ?? {})
     .filter(([, column]) => {
       if (typeof column?.provider !== 'string') return false;
       const recipe = RECIPES.get(column.provider.split(':')[0]);
-      return !!recipe?.touchpoints.embedding && !paidModelApiBlocked(recipe, 'subscription');
+      return !!recipe && isLocalEmbeddingRecipe(recipe);
     })
     .map(([name, column]) => ({ name, provider: column.provider }));
   const searchColumn = cfg.search_embedding_column ?? DEFAULT_COLUMN_NAME;
   const searching = local.find(column => column.name === searchColumn);
   if (searching) {
-    return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searching.provider} column '${searching.name}'. Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called.` };
+    return { ...base, state: 'ok', reason: 'local_search_column', why: `Vector search runs on the local ${searching.provider} column '${searching.name}'. Paid embedding APIs are disabled (ai_billing=subscription)${refused}.` };
   }
   const staged = local[0];
   if (!staged) {
-    return { ...base, state: 'disabled_by_choice', reason: 'paid_api_disabled', why: `Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called and search is keyword-only. An API key does not change this; vector search needs a registered local embedding column (ollama, llama-server or lmstudio) or ai_billing=api, and both are the user's decision.` };
+    return { ...base, state: 'disabled_by_choice', reason: 'paid_api_disabled', why: `Paid embedding APIs are disabled (ai_billing=subscription)${refused}, and search is keyword-only. An API key does not change this; vector search needs a local embedding model or column (ollama, llama-server or lmstudio) or ai_billing=api, and both are the user's decision.` };
   }
   const localModel = staged.provider.slice(staged.provider.indexOf(':') + 1);
   return {
     ...base, state: 'degraded', reason: 'local_column_pending',
-    why: `Vector search is off. Paid embedding APIs are disabled (ai_billing=subscription), so ${model} is not called, and search stays keyword-only until the local ${staged.provider} column '${staged.name}' is filled and becomes the search column. No API key is needed and nothing is asked of the user: the brain operator fills it with \`gbrain embed --stale --catch-up --embedding-column ${staged.name}\` and switches search with \`gbrain config set search_embedding_column ${staged.name}\`.`,
+    why: `Vector search is off. Paid embedding APIs are disabled (ai_billing=subscription)${refused}, and search stays keyword-only until the local ${staged.provider} column '${staged.name}' is filled and becomes the search column. No API key is needed and nothing is asked of the user: the brain operator fills it with \`gbrain embed --stale --catch-up --embedding-column ${staged.name}\` and switches search with \`gbrain config set search_embedding_column ${staged.name}\`.`,
     user_message: `Vector search is off until local ${localModel} embeddings finish filling in. Keyword search still works, and there is nothing you need to do.`,
   };
 }

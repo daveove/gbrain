@@ -175,8 +175,9 @@ export function degradedRecallNotice(
   const fixKind: StageFix = guidance.some(g => g.fix === 'embeddings') ? 'embeddings' : guidance.some(g => g.fix === 'doctor') ? 'doctor' : null;
   const byChoice = opts.optedOut || entries.some(s => s.reason === 'embedding_disabled');
   const emb = fixKind === 'embeddings' ? (byChoice ? { byChoice: true } as EmbeddingsGuidance : embeddingsFix(opts.config, opts.transport)) : undefined;
-  const fix = emb ? emb.fix
-    : fixKind === 'doctor' ? doctorFix('Doctor names the failing retrieval dependency and its fix.')
+  // Billing guidance carries no action, so another stage's fix (doctor, then rerank) still applies.
+  const fix = emb && !emb.billing ? emb.fix
+    : guidance.some(g => g.fix === 'doctor') ? doctorFix('Doctor names the failing retrieval dependency and its fix.')
     : rerank ? rerankFix(rerank, opts.retry) : undefined;
   const choice = emb?.byChoice ? ' This brain was set up keyword-only by the user\'s choice; mention it only if the user asks why something was not found. No query text was sent to an embedding provider. If the user wants semantic search, `gbrain doctor --json` names the enable command; turning it on needs their consent.' : '';
   return {

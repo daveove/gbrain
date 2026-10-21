@@ -127,6 +127,17 @@ describe('config plane: state and reason per capability', () => {
         expect(refused?.user_message).toBeUndefined();
         expect(refused?.why).toContain('ai_billing=subscription');
         expect(refused?.why).not.toContain('names the enable command');
+
+        // A missing or unknown model under subscription never falls back to the key-asking enablement fix.
+        for (const cfg of [pglite({ ai_billing: 'subscription' }), pglite({ ai_billing: 'subscription', embedding_model: 'nope:model' })]) {
+          const e = entry(configReadiness(cfg, { transport: 'stdio' }).entries, 'embeddings');
+          expect(e).toMatchObject({ state: 'disabled_by_choice', reason: 'paid_api_disabled' });
+          expect(e.fix).toBeUndefined();
+        }
+        // Billing guidance has no action, so a concurrent doctor-actionable stage keeps its doctor fix.
+        const mixed = degradedRecallNotice([...stage, { stage: 'embed_timeout' }], { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
+        expect(mixed?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
+        expect(mixed?.user_message).toBe(pending.user_message);
       });
     }
   });
