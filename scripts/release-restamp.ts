@@ -2,20 +2,20 @@
 /**
  * bun run release:restamp — make a branch next-to-merge in one command.
  *
- *   bun run release:restamp              merge origin/master, restamp, regenerate, check, commit
- *   bun run release:restamp --dry-run    print every planned edit; change nothing (fetches origin/master)
+ *   bun run release:restamp              merge origin/main, restamp, regenerate, check, commit
+ *   bun run release:restamp --dry-run    print every planned edit; change nothing (fetches origin/main)
  *   bun run release:restamp --no-commit  same, but leave the restamp edits staged
  *   bun run release:restamp --continue   resume after resolving a stop (conflicts, references, generator, drift)
  *   bun run release:restamp --continue --accept-references
  *                                        resume and keep the listed reference lines as written
  *   bun run release:restamp --abort      return the branch to its pre-run commit
  *
- * Steps: refuse a dirty tree; fetch origin/master; capture the branch's
- * CHANGELOG entry and migration inventory; merge origin/master with a merge
+ * Steps: refuse a dirty tree; fetch origin/main; capture the branch's
+ * CHANGELOG entry and migration inventory; merge origin/main with a merge
  * commit (version-only stamp hunks, CHANGELOG and generated files resolve
  * mechanically, anything else stops with the file list); set VERSION to
  * master's MAJOR.MINOR.(PATCH+1).0; renumber the branch's own schema
- * migrations (files origin/master does not have) consecutively from master's
+ * migrations (files origin/main does not have) consecutively from master's
  * latest + 1, changing only the filename, the export name and the `version:`
  * literal, with a payload identity check; rewrite every required stamp from
  * the CLAUDE.md "Version locations" table; run the generators; stop on any
@@ -46,7 +46,7 @@ interface Step { name: string; argv: string[]; env?: Record<string, string>; mig
 
 const USAGE = `Usage: bun run release:restamp [--dry-run] [--no-commit] [--continue [--accept-references] | --abort] [--remote <name>] [--base <branch>]
 
-Merges origin/master with a merge commit, sets VERSION to master's MAJOR.MINOR.(PATCH+1).0,
+Merges origin/main with a merge commit, sets VERSION to master's MAJOR.MINOR.(PATCH+1).0,
 renumbers this branch's own schema migrations after master's latest, rewrites every required
 version stamp (CLAUDE.md "Version locations"), regenerates derived files, runs the drift checks
 and commits once. Run it when your PR is next to merge.
@@ -488,7 +488,7 @@ export function main(argv: string[], opts: { cwd?: string; env?: Record<string, 
   const known = new Set(['--dry-run', '--no-commit', '--continue', '--abort', '--accept-references', '--remote', '--base', '--help']);
   const valueOf = (flag: string, fallback: string) => (argv.includes(flag) ? argv[argv.indexOf(flag) + 1] ?? '' : fallback);
   const remote = valueOf('--remote', 'origin');
-  const base = valueOf('--base', 'master');
+  const base = valueOf('--base', 'main');
   const stray = argv.filter((a, i) => !a.startsWith('--') && argv[i - 1] !== '--remote' && argv[i - 1] !== '--base');
   if (flags.has('--help')) {
     log(USAGE);

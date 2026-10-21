@@ -58,7 +58,7 @@ raising it again.
 | Shards | Report | Job | Next step |
 |---|---|---|---|
 | All succeeded | Merges, renders and gates the full corpus | per gates | none |
-| Every unfinished shard carries GitHub's run-cancel annotation (`Canceling since a higher priority waiting request …` or `The run was canceled by …`) | `Full E2E shards cancelled` warning and step summary; no coverage | success | `gh workflow run e2e.yml --ref master -f full_corpus=true`, or wait for the next schedule |
+| Every unfinished shard carries GitHub's run-cancel annotation (`Canceling since a higher priority waiting request …` or `The run was canceled by …`) | `Full E2E shards cancelled` warning and step summary; no coverage | success | `gh workflow run e2e.yml --ref main -f full_corpus=true`, or wait for the next schedule |
 | A shard failed, hit its `timeout-minutes`, or the evidence cannot be read | `Full E2E shards failed` error | failure | `gh run view <run-id> --log-failed`, fix the shard, `gh run rerun <run-id> --failed` |
 
 The workflow cannot decide this from expressions. `cancelled()` reads false in

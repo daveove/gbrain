@@ -39,7 +39,7 @@ and `e2e-status` aggregators, never on per-cell matrix names.
 | `scale-tier.yml` | Path- or label-gated 10k on pull requests | Named exception | Nightly Scale tier schedule (10k-50k) |
 | `semgrep.yml` | PR diff scan vs full-tree scan | Named exception | Weekly Semgrep schedule |
 | `osv-scanner.yml` | Pull requests scan only on a manifest change | Named exception | Weekly OSV schedule; `dependency-audit` on every PR |
-| `nightly-watch.yml` | `workflow_run` event guard | Not a test scope: it files issues from qualifying scheduled and push-to-master runs | — |
+| `nightly-watch.yml` | `workflow_run` event guard | Not a test scope: it files issues from qualifying scheduled and push-to-main runs | — |
 | `fix-wave-gate.yml`, `fix-wave-closeout.yml` | Pull-request action and merge state | Not a test scope: merge-process automation | — |
 
 ## Dependency-audit rule
@@ -49,7 +49,7 @@ or merge-queue entries that change a dependency manifest or carry the
 `dependency-audit` label; on other pull requests a new upstream advisory is a
 warning, so one published advisory cannot turn every open PR red at once.
 The red it produces lands on master instead, and is handled like any other:
-a push-to-master red opens the Test `master-red` issue, a scheduled red the
+a push-to-main red opens the Test `master-red` issue, a scheduled red the
 `nightly-red` issue. The repair PR bumps, overrides, patches or removes the
 dependency. When no fix exists, an ignore entry needs Garry's approval and an
 expiry date.

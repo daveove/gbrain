@@ -31,7 +31,7 @@ because:
 
 ### Merge-conflict recovery procedure (memorize this)
 
-When `git merge origin/master` reports conflicts on VERSION,
+When `git merge origin/main` reports conflicts on VERSION,
 package.json, or CHANGELOG.md, resolve in this exact order:
 
 1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"

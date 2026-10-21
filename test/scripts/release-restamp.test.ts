@@ -99,12 +99,12 @@ function fixture(): Fixture {
   const origin = join(root, 'origin.git');
   const master = join(root, 'master');
   const work = join(root, 'work');
-  git(root, 'init', '-q', '--bare', '-b', 'master', origin);
+  git(root, 'init', '-q', '--bare', '-b', 'main', origin);
   git(root, 'clone', '-q', origin, master);
   for (const r of [master]) {
     git(r, 'config', 'user.email', 't@t.co');
     git(r, 'config', 'user.name', 't');
-    git(r, 'checkout', '-q', '-b', 'master');
+    git(r, 'checkout', '-q', '-b', 'main');
   }
   put(master, {
     ...stamps('0.1.0.0'),
@@ -117,7 +117,7 @@ function fixture(): Fixture {
   });
   regen(master);
   commit(master, 'v0.1.0.0 seed');
-  git(master, 'push', '-q', 'origin', 'master');
+  git(master, 'push', '-q', 'origin', 'main');
   git(root, 'clone', '-q', origin, work);
   git(work, 'config', 'user.email', 't@t.co');
   git(work, 'config', 'user.name', 't');
@@ -137,7 +137,7 @@ function landOnMaster(fx: Fixture, version: string, mig: [number, string] | null
   });
   regen(fx.master);
   commit(fx.master, `v${version} master release`);
-  git(fx.master, 'push', '-q', 'origin', 'master');
+  git(fx.master, 'push', '-q', 'origin', 'main');
 }
 
 /** The branch bumps to `version`, writes its CHANGELOG entry and adds `files`. */
@@ -270,7 +270,7 @@ describe('release:restamp end to end', () => {
     branchWork(fx, '0.1.1.0', { [migrationFile(209, 'branch_widgets')]: migration(209, 'branch_widgets') });
     landOnMaster(fx, '0.1.1.0', [209, 'master_hotfix']);
     git(fx.work, 'fetch', '-q', 'origin');
-    const pick = git(fx.work, 'rev-parse', 'origin/master').trim();
+    const pick = git(fx.work, 'rev-parse', 'origin/main').trim();
     put(fx.work, { [migrationFile(209, 'master_hotfix')]: git(fx.work, 'show', `${pick}:${migrationFile(209, 'master_hotfix')}`) });
     commit(fx.work, 'cherry-pick master hotfix migration');
     const r = restamp(fx.work);
@@ -366,8 +366,8 @@ describe('release:restamp end to end', () => {
     git(fx.work, 'remote', 'set-url', 'origin', join(fx.origin, 'missing.git'));
     const offline = restamp(fx.work);
     expect(offline.code).toBe(1);
-    expect(offline.out).toContain('FAIL: could not fetch origin/master');
-    expect(offline.out).toContain('git fetch origin master && bun run release:restamp');
+    expect(offline.out).toContain('FAIL: could not fetch origin/main');
+    expect(offline.out).toContain('git fetch origin main && bun run release:restamp');
   }, 120_000);
 
   test('--dry-run prints every planned edit and changes nothing', () => {
@@ -438,7 +438,7 @@ describe('release:restamp end to end', () => {
     landOnMaster(fx, '0.1.1.0', null);
     const r = restamp(fx.work);
     expect(r.code).toBe(1);
-    expect(r.out).toContain(`FAIL: ${migrationFile(208, 'seed_two')} is published on origin/master but this branch changes its payload`);
+    expect(r.out).toContain(`FAIL: ${migrationFile(208, 'seed_two')} is published on origin/main but this branch changes its payload`);
   }, 120_000);
 });
 
@@ -450,9 +450,9 @@ describe('release:restamp helpers', () => {
   });
 
   test('version-only conflict hunks resolve; real edits stay conflicted', () => {
-    const versionOnly = '{\n<<<<<<< HEAD\n  "version": "0.1.1.0",\n=======\n  "version": "0.1.2.0",\n>>>>>>> origin/master\n}\n';
+    const versionOnly = '{\n<<<<<<< HEAD\n  "version": "0.1.1.0",\n=======\n  "version": "0.1.2.0",\n>>>>>>> origin/main\n}\n';
     expect(resolveVersionOnlyHunks(versionOnly)).toEqual({ text: '{\n  "version": "0.1.1.0",\n}\n', unresolved: 0 });
-    const real = '<<<<<<< HEAD\n"dep": "1"\n=======\n"dep": "2"\n>>>>>>> origin/master\n';
+    const real = '<<<<<<< HEAD\n"dep": "1"\n=======\n"dep": "2"\n>>>>>>> origin/main\n';
     expect(resolveVersionOnlyHunks(real).unresolved).toBe(1);
   });
 

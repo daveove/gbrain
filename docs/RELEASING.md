@@ -90,7 +90,7 @@ re-check, and a "Next step for the agent" block plus a JSON block.
 - **Closing:** nightly-watch closes the issue only when a later scheduled run is
   green with complete evidence and every previously failing job executed. A
   skipped job never closes it.
-- **Re-check after a fix:** `gh workflow run <workflow>.yml --ref master`, then
+- **Re-check after a fix:** `gh workflow run <workflow>.yml --ref main`, then
   `gh workflow run nightly-watch.yml -f run_id=<that scheduled run id>` to preview
   (`-f dry_run=true`) or apply the issue update.
 - **Dependency advisories:** pull requests block on `bun audit` only when they change
@@ -101,7 +101,7 @@ re-check, and a "Next step for the agent" block plus a JSON block.
 ## Master-red issues
 
 nightly-watch keeps one `master-red` issue per workflow (`Master red: Test`,
-`Master red: E2E Tests`) for push-to-master runs; scheduled runs stay in
+`Master red: E2E Tests`) for push-to-main runs; scheduled runs stay in
 `nightly-red`. The body names each failing job, every failing test file with
 its `bun run test:stress` reproduce line, and the suspect range (last green
 push SHA, first red SHA, merged PRs). Labels, close rules and recovery steps:
@@ -128,7 +128,7 @@ the newest Bun version only in the security and persistence matrices, the
 2,500-write soak and the 10,001-page export scale; the E2E selector diffs the
 queued commit against `master`.
 
-- Without the queue, a release rebases onto the latest `origin/master` and re-runs
+- Without the queue, a release rebases onto the latest `origin/main` and re-runs
   the full CI (`test.yml`, `e2e.yml`, persistence-validation) immediately before
   merging, because a stale base can break master even when the PR was green.
 - With the queue on, `gh pr merge` only enqueues the PR. Wait until the PR is
@@ -193,10 +193,10 @@ and the commit it would make, and changes nothing.
 **Say to your agent:** *"Restamp this branch onto master, it's next to merge."*
 
 1. Refuses a dirty working tree (commit or `git stash -u` first) and a
-   failed fetch (offline: `git fetch origin master`, then rerun).
+   failed fetch (offline: `git fetch origin main`, then rerun).
 2. Captures the branch's CHANGELOG entry (the sections above the newest entry
    it shares with master; one entry per branch) and its migration inventory.
-3. Merges `origin/master` with a merge commit. Version-only hunks in the stamp
+3. Merges `origin/main` with a merge commit. Version-only hunks in the stamp
    files, `CHANGELOG.md` and generated files (migration registry,
    `llms*.txt`, plugin trees, the template repo,
    `bun.lock`) resolve mechanically; any other conflict stops with the file
@@ -206,7 +206,7 @@ and the commit it would make, and changes nothing.
    `package.json`, the three plugin manifests, the BOOTSTRAP runbook stamp,
    the CHANGELOG entry (re-stamped on top of master's entries with today's
    date), and branch-added TODOS lines naming the old version.
-5. Renumbers the branch's own schema migrations (files `origin/master` does
+5. Renumbers the branch's own schema migrations (files `origin/main` does
    not have) consecutively from master's latest + 1, in their original order.
    It changes only the filename, the `export const v<NNN>` name and the
    `version:` literal, and proves the rest of the file is token-identical.
@@ -542,17 +542,17 @@ jobs pin the same Bun version.
 ### Release CI gate
 
 The `ci-gate` job (`scripts/release-gate.ts`) holds build, publication and the
-`latest-stable` move until the push-to-master runs of Test and E2E Tests both
+`latest-stable` move until the push-to-main runs of Test and E2E Tests both
 succeed on the release commit.
 
 - **Failed run:** nothing is published and the job fails with the run and the
   master-red issue. After master is green again, publish the current VERSION
-  with `gh workflow run release.yml --ref master`.
+  with `gh workflow run release.yml --ref main`.
 - **Run cancelled by a newer push:** the gate follows the next master commit.
   If it contains the release commit and carries the same VERSION, that commit
   is gated and published. If VERSION moved on, this version is skipped and the
   newer VERSION's release run publishes.
-- **Backfill:** `gh workflow run release.yml --ref master` gates and publishes
+- **Backfill:** `gh workflow run release.yml --ref main` gates and publishes
   master HEAD's VERSION. Other refs are refused.
 - The gate waits up to 110 minutes, then fails with the backfill command.
 
