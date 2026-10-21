@@ -363,9 +363,17 @@ export function recallInteropNotices(
     // A per-call embedding_column override is the column this call searched, so the embeddings guidance describes it.
     const column = typeof params.embedding_column === 'string' && params.embedding_column ? params.embedding_column : undefined;
     const config = column && opts.config ? { ...opts.config, search_embedding_column: column } : opts.config;
+    const embeddings = (cfg: GBrainConfig) => configReadiness(cfg, { transport: opts.transport }).entries.find(e => e.capability === 'embeddings');
+    // Billing refused only the override while the configured search column is live: say so instead of "wait for a fill".
+    const overrideRefused = !!(config && opts.config && config !== opts.config && BILLING_REFUSED_REASONS[embeddings(config)?.reason ?? '']
+      && embeddings(opts.config)?.state === 'ok');
     const degraded = degradedRecallNotice(stages, { ...opts, config, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
+    const notice = degraded && overrideRefused
+      ? { code: degraded.code, kind: degraded.kind, ...(degraded.dedupe_key ? { dedupe_key: degraded.dedupe_key } : {}),
+        why: `Recall was degraded: this call's embedding_column override '${column}' uses a provider that ai_billing=subscription refuses, so its vector search did not run. The configured search column is live; repeat the call without embedding_column (or with a local column). ${NOT_ABSENCE}` }
+      : degraded;
     // The guidance is column-specific, so a session must not dedupe one override's notice against another's.
-    if (degraded) out.push(column && degraded.dedupe_key ? { ...degraded, dedupe_key: `${degraded.dedupe_key}|column:${column}` } : degraded);
+    if (notice) out.push(column && notice.dedupe_key ? { ...notice, dedupe_key: `${notice.dedupe_key}|column:${column}` } : notice);
     const narrowed = opts.transport === 'stdio' ? sourceBindingNarrowedNotice(op, params, result, opts.binding) : null;
     if (narrowed) out.push(narrowed);
     return out;

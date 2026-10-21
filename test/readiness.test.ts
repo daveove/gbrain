@@ -156,8 +156,11 @@ describe('config plane: state and reason per capability', () => {
         const [paidOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_voyage' },
           { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' });
         expect(paidOverride?.code).toBe('degraded_recall');
-        expect(paidOverride?.why).toContain("search column 'embedding_voyage'");
+        expect(paidOverride?.why).toContain("override 'embedding_voyage'");
+        expect(paidOverride?.why).toContain('without embedding_column');
+        expect(paidOverride?.why).not.toContain('becomes the search column');
         expect(paidOverride?.fix).toBeUndefined();
+        expect(paidOverride?.user_message).toBeUndefined();
         const [localOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_nomic' },
           { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(localOverride?.user_message).toBeUndefined();
