@@ -287,7 +287,7 @@ test/scripts/ci-local-rendering.test.ts	local test configuration through run-e2e
 test/scripts/ci-local-rendering.test.ts	required PgBouncer execution through run-e2e	1	readFileSync
 test/scripts/ci-manifest-diff.test.ts	test.yml dependency-audit scope	2	readFileSync
 test/scripts/ci-pr-scope.test.ts	pull-request CI scope	11	readFileSync
-test/scripts/ci-runner-routing.test.ts	CI runner routing	7	readFileSync
+test/scripts/ci-runner-routing.test.ts	CI runner routing	4	readFileSync
 test/scripts/classify-tests.test.ts	classify-tests detectors	23	bun-file,doctor-source-helper,exec-scan,readFileSync,source-surface-helper
 test/scripts/coverage-diff-gate.test.ts	exemptions	3	readFileSync
 test/scripts/data-safety-native-workflow.test.ts	data-safety native CI coverage	13	readFileSync
