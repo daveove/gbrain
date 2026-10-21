@@ -5,7 +5,8 @@
  * `SELECT value FROM config WHERE key=$1` from one `SELECT key,value FROM
  * config` taken when preparation starts, as one batch's shared reads do
  * (page-mutations.ts `batchSharedReads`). Every other call reaches the engine
- * unchanged (`getAllConfig` answers from the same read). Publication reads its config again inside its transaction.
+ * unchanged. `getAllConfig` answers from the same read minus `internal.*` keys,
+ * matching the engines (src/core/config-snapshot.ts). Publication reads its config again inside its transaction.
  */
 import type { BrainEngine } from '../engine.ts';
 import { registerEngineView } from './switches.ts';
@@ -19,7 +20,7 @@ export async function preparationConfigView(engine: BrainEngine): Promise<BrainE
   const value = (key: string) => values.has(key) ? values.get(key)! : null;
   return registerEngineView(new Proxy(engine, { get(target, key) {
     if (key === 'getConfig') return async (name: string) => value(name);
-    if (key === 'getAllConfig') return async () => Object.fromEntries(values);
+    if (key === 'getAllConfig') return async () => Object.fromEntries([...values].filter(([k]) => !k.startsWith('internal.')));
     if (key === 'executeRaw') return (sql: string, params?: unknown[], opts?: { signal?: AbortSignal }) =>
       flat(sql) === KEY_READ && typeof params?.[0] === 'string'
         ? Promise.resolve(values.has(params[0]) ? [{ value: values.get(params[0]) }] : [])

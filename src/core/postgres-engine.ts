@@ -2698,7 +2698,7 @@ export class PostgresEngine implements BrainEngine {
   async getAllConfig(): Promise<Record<string, string>> {
     return this.connRetry(async () => {
       const rows = await this.sql<{ key: string; value: string }[]>`
-        SELECT key, value FROM config
+        SELECT key, value FROM config WHERE key NOT LIKE 'internal.%'
       `;
       const out: Record<string, string> = {};
       for (const row of rows) out[row.key] = row.value;

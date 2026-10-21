@@ -2593,8 +2593,8 @@ export interface BrainEngine {
    * total. The config table is a handful of rows, so fetching all of it is
    * cheaper than fetching any meaningful subset of it.
    *
-   * Callers that need a single key still use getConfig(). This is for the
-   * bulk-read path only.
+   * Callers that need a single key still use getConfig(). Bulk path only; it
+   * skips `internal.*` keys (machine-owned queues, cursors). See config-snapshot.ts.
    */
   getAllConfig(): Promise<Record<string, string>>;
 
