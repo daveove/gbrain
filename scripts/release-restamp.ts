@@ -14,8 +14,8 @@
  * CHANGELOG entry and migration inventory; merge origin/main with a merge
  * commit (version-only stamp hunks, CHANGELOG and generated files resolve
  * mechanically, anything else stops with the file list); set VERSION to
- * master's MAJOR.MINOR.(PATCH+1).0; renumber the branch's own schema
- * migrations (files origin/main does not have) consecutively from master's
+ * the base branch's MAJOR.MINOR.(PATCH+1).0; renumber the branch's own schema
+ * migrations (files origin/main does not have) consecutively from the base's
  * latest + 1, changing only the filename, the export name and the `version:`
  * literal, with a payload identity check; rewrite every required stamp from
  * the CLAUDE.md "Version locations" table; run the generators; stop on any
@@ -46,8 +46,8 @@ interface Step { name: string; argv: string[]; env?: Record<string, string>; mig
 
 const USAGE = `Usage: bun run release:restamp [--dry-run] [--no-commit] [--continue [--accept-references] | --abort] [--remote <name>] [--base <branch>]
 
-Merges origin/main with a merge commit, sets VERSION to master's MAJOR.MINOR.(PATCH+1).0,
-renumbers this branch's own schema migrations after master's latest, rewrites every required
+Merges origin/main with a merge commit, sets VERSION to the base's MAJOR.MINOR.(PATCH+1).0,
+renumbers this branch's own schema migrations after the base's latest, rewrites every required
 version stamp (CLAUDE.md "Version locations"), regenerates derived files, runs the drift checks
 and commits once. Run it when your PR is next to merge.
 
@@ -193,7 +193,7 @@ function analyzeMigrations(ctx: Ctx, masterRef: string, head: Map<string, string
     const twin = masterKeys.get(migrationPayloadKey(text, m.path));
     if (twin) {
       fail(`${m.path} has the same payload as ${twin}, which ${masterRef} already publishes`,
-        'the migration already landed on master under another number (squash-merged or cherry-picked and renumbered); renumbering this copy would apply it twice.',
+        'the migration already landed on the base branch under another number (squash-merged or cherry-picked and renumbered); renumbering this copy would apply it twice.',
         [`drop this branch's copy: git rm ${m.path} && bun run build:schema-migrations`, `point references at ${twin}, commit, then rerun: bun run release:restamp`], COLLISION_DOCS);
     }
     branch.push(m);
@@ -239,7 +239,7 @@ function capture(ctx: Ctx, masterRef: string): State {
   const mergeBase = ctx.git('merge-base', 'HEAD', masterRef).trim();
   const entries = branchEntrySections(ctx.git('show', 'HEAD:CHANGELOG.md'), ctx.git('show', `${mergeBase}:CHANGELOG.md`));
   if (entries.length > 1) {
-    fail(`this branch has ${entries.length} CHANGELOG entries above master's (${entries.map((e) => versionOfHeader(e.header)).join(', ')})`,
+    fail(`this branch has ${entries.length} CHANGELOG entries above ${masterRef}'s (${entries.map((e) => versionOfHeader(e.header)).join(', ')})`,
       'a branch ships one unified entry (docs/RELEASING.md "CHANGELOG + VERSION are branch-scoped"); restamp re-stamps exactly one.',
       'fold them into one `## [X.Y.Z.W] - date` entry, commit, then rerun: bun run release:restamp');
   }
@@ -257,7 +257,7 @@ function merge(ctx: Ctx, state: State): void {
   const conflicted = ctx.git('diff', '--name-only', '--diff-filter=U').split('\n').filter(Boolean);
   if (attempt.exitCode !== 0 && conflicted.length === 0 && !ctx.gitOk('rev-parse', '-q', '--verify', 'MERGE_HEAD')) {
     stop(state, ctx, `git merge ${state.masterRef} did not start: ${attempt.stderr.toString().trim().split('\n').slice(-3).join(' ')}`,
-      'restamp merges master before allocating numbers; git refused the merge before any conflict resolution.',
+      'restamp merges the base branch before allocating numbers; git refused the merge before any conflict resolution.',
       ['fix what git reports (for example move an untracked file it would overwrite)']);
   }
   const genuine: string[] = [];
@@ -408,9 +408,9 @@ function driftProblems(ctx: Ctx, version: string, masterVersion: string, state: 
   if (top !== version) {
     out.push(state.entry
       ? `CHANGELOG.md top entry is ${top}, expected ${version}`
-      : `CHANGELOG.md has no entry for this branch (top entry ${top} is master's); write one with /ship: \`## [${version}] - <date>\` on top`);
+      : `CHANGELOG.md has no entry for this branch (top entry ${top} is ${state.masterRef}'s); write one with /ship: \`## [${version}] - <date>\` on top`);
   }
-  if (version === masterVersion) out.push(`VERSION ${version} is not newer than master's ${masterVersion}`);
+  if (version === masterVersion) out.push(`VERSION ${version} is not newer than ${state.masterRef}'s ${masterVersion}`);
   return out;
 }
 
@@ -427,8 +427,8 @@ function printDryRun(ctx: Ctx, state: State, date: string): void {
     const files = r.stdout.toString().split('\n').slice(1).filter(Boolean);
     const stampFiles = new Set(STAMPS.map((s) => s.file));
     for (const f of files) {
-      const how = f === 'CHANGELOG.md' ? 'mechanical: master\'s file plus this branch\'s entry on top'
-        : isGenerated(f) ? 'mechanical: take master\'s side, then regenerate'
+      const how = f === 'CHANGELOG.md' ? `mechanical: ${state.masterRef}'s file plus this branch's entry on top`
+        : isGenerated(f) ? `mechanical: take ${state.masterRef}'s side, then regenerate`
           : stampFiles.has(f) ? 'mechanical when the hunks differ only in version strings, otherwise a stop'
             : 'genuine: the run stops for you to resolve it, then --continue';
       L(`  predicted conflict ${f} (${how})`);
@@ -441,11 +441,11 @@ function printDryRun(ctx: Ctx, state: State, date: string): void {
   }
   if (state.entry) rebuildChangelog(ctx.git('show', 'HEAD:CHANGELOG.md'), state.entry, versionOfHeader(state.entry.header) ?? state.branchVersion, version, date);
   L(state.entry
-    ? `  CHANGELOG.md: "${state.entry.header}" -> "## [${version}] - ${date}", kept above master's entries`
+    ? `  CHANGELOG.md: "${state.entry.header}" -> "## [${version}] - ${date}", kept above ${state.masterRef}'s entries`
     : '  CHANGELOG.md: this branch has no entry yet; the drift check will stop until /ship writes one');
   L(`  TODOS.md: branch-added lines naming v${state.branchVersion} -> v${version}`);
   const plan = planRenumber(state.inventory, analyzeMigrations(ctx, state.masterRef, headMigrations(ctx)).masterMax);
-  if (plan.length === 0) L(`Migrations: ${state.inventory.length ? `${state.inventory.length} branch migration(s) already follow master's latest` : 'none on this branch'}; nothing to renumber.`);
+  if (plan.length === 0) L(`Migrations: ${state.inventory.length ? `${state.inventory.length} branch migration(s) already follow ${state.masterRef}'s latest` : 'none on this branch'}; nothing to renumber.`);
   else {
     L('Migrations (filename, export name and version literal only):');
     for (const r of plan) L(`  v${r.from.version} -> v${r.toVersion}  ${r.from.path} -> ${r.toPath}`);
@@ -458,14 +458,14 @@ function printDryRun(ctx: Ctx, state: State, date: string): void {
   for (const s of ctx.steps('GBRAIN_RESTAMP_STEPS', DEFAULT_STEPS)) L(`  ${s.argv.join(' ')}${s.migrationsOnly ? ' (branch has migrations only)' : ''}`);
   L('Drift checks:');
   for (const s of ctx.steps('GBRAIN_RESTAMP_CHECKS', DEFAULT_CHECKS)) L(`  ${s.argv.join(' ')}`);
-  L(`Commit: one commit "v${version} chore(release): restamp onto master v${masterVersion}" (--no-commit leaves it staged).`);
+  L(`Commit: one commit "v${version} chore(release): restamp onto ${state.masterRef} v${masterVersion}" (--no-commit leaves it staged).`);
   L(`PR title: ${prTitle(ctx, version)}`);
   L('Run it: bun run release:restamp');
 }
 
 function report(ctx: Ctx, state: State, outcome: Outcome, committed: string | null, staged: boolean): void {
   const L = ctx.log;
-  L(`restamp: ${state.branchVersion} -> ${outcome.version} (master ${outcome.masterVersion}).`);
+  L(`restamp: ${state.branchVersion} -> ${outcome.version} (${state.masterRef} ${outcome.masterVersion}).`);
   if (state.mapping.length > 0) {
     L('Migration renumbering (source only; no database was touched):');
     for (const m of state.mapping) L(`  v${m.from} -> v${m.to}  ${m.fromPath} -> ${m.toPath}`);
@@ -474,9 +474,9 @@ function report(ctx: Ctx, state: State, outcome: Outcome, committed: string | nu
     L(`  Collision recovery: ${COLLISION_DOCS}`);
   }
   L(`Drift checks: VERSION, package.json, plugin manifests, BOOTSTRAP stamp, CHANGELOG, plugin and template trees agree on ${outcome.version}.`);
-  if (committed) L(`Committed ${committed.slice(0, 12)}: v${outcome.version} chore(release): restamp onto master v${outcome.masterVersion}`);
-  else if (!staged) L(`Nothing to change: the branch was already restamped onto current master${state.merged ? ' (only the merge commit was added)' : ''}; no restamp commit.`);
-  else L(`Edits are staged (--no-commit). Commit them: git commit -m "v${outcome.version} chore(release): restamp onto master v${outcome.masterVersion}"`);
+  if (committed) L(`Committed ${committed.slice(0, 12)}: v${outcome.version} chore(release): restamp onto ${state.masterRef} v${outcome.masterVersion}`);
+  else if (!staged) L(`Nothing to change: the branch was already restamped onto current ${state.masterRef}${state.merged ? ' (only the merge commit was added)' : ''}; no restamp commit.`);
+  else L(`Edits are staged (--no-commit). Commit them: git commit -m "v${outcome.version} chore(release): restamp onto ${state.masterRef} v${outcome.masterVersion}"`);
   L(`PR title: ${prTitle(ctx, outcome.version)}   (set it: gh pr edit --title "<that title>")`);
   L('Verify: bun run verify   (full gate before merge: bun run ci:ubicloud or bun run ci:local), then git push');
 }
@@ -534,7 +534,7 @@ export function main(argv: string[], opts: { cwd?: string; env?: Record<string, 
       const fetch = Bun.spawnSync(['git', 'fetch', '--quiet', remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: ctx.root, stdout: 'pipe', stderr: 'pipe' });
       if (fetch.exitCode !== 0) {
         fail(`could not fetch ${remote}/${base}: ${fetch.stderr.toString().trim().split('\n').pop()}`,
-          'restamp numbers the version and migrations after the latest master; a stale ref would allocate a taken number.',
+          'restamp numbers the version and migrations after the latest base branch; a stale ref would allocate a taken number.',
           `check network access and the remote, then run: git fetch ${remote} ${base} && bun run release:restamp`);
       }
       state = capture(ctx, `${remote}/${base}`);
@@ -553,7 +553,7 @@ export function main(argv: string[], opts: { cwd?: string; env?: Record<string, 
     let committed: string | null = null;
     if (staged && !flags.has('--no-commit')) {
       const body = state.mapping.length ? `\n\nMigrations renumbered (filename, export name, version literal):\n${state.mapping.map((m) => `  v${m.from} -> v${m.to} ${m.toPath}`).join('\n')}` : '';
-      ctx.git('commit', '--quiet', '-m', `v${outcome.version} chore(release): restamp onto master v${outcome.masterVersion}${body}`);
+      ctx.git('commit', '--quiet', '-m', `v${outcome.version} chore(release): restamp onto ${state.masterRef} v${outcome.masterVersion}${body}`);
       committed = ctx.git('rev-parse', 'HEAD').trim();
     }
     rmSync(ctx.statePath, { force: true });
