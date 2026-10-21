@@ -161,6 +161,12 @@ describe('config plane: state and reason per capability', () => {
         expect(paidOverride?.why).not.toContain('becomes the search column');
         expect(paidOverride?.fix).toBeUndefined();
         expect(paidOverride?.user_message).toBeUndefined();
+        const mixedMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'paid_api_disabled' }, { stage: 'embed_timeout' }] } };
+        const [mixedOverride] = recallInteropNotices('search', [], mixedMeta, { query: 'q', embedding_column: 'embedding_voyage' },
+          { config: pglite({ ...localPrimary, embedding_columns: voyage }), transport: 'stdio' });
+        expect(mixedOverride?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
+        expect(mixedOverride?.why).toContain('embed_timeout');
+        expect(mixedOverride?.why).toContain("override 'embedding_voyage'");
         const [localOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_nomic' },
           { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(localOverride?.user_message).toBeUndefined();

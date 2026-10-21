@@ -368,10 +368,11 @@ export function recallInteropNotices(
     const overrideRefused = !!(config && opts.config && config !== opts.config && BILLING_REFUSED_REASONS[embeddings(config)?.reason ?? '']
       && embeddings(opts.config)?.state === 'ok');
     const degraded = degradedRecallNotice(stages, { ...opts, config, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
+    // Keep the other stages and their fix; only the billing explanation is replaced.
     const notice = degraded && overrideRefused
-      ? { code: degraded.code, kind: degraded.kind, ...(degraded.dedupe_key ? { dedupe_key: degraded.dedupe_key } : {}),
-        why: `Recall was degraded: this call's embedding_column override '${column}' uses a provider that ai_billing=subscription refuses, so its vector search did not run. The configured search column is live; repeat the call without embedding_column (or with a local column). ${NOT_ABSENCE}` }
+      ? { ...degraded, why: degraded.why.replace(embeddings(config!)!.why, `This call's embedding_column override '${column}' uses a provider that ai_billing=subscription refuses, so its vector search did not run. The configured search column is live; repeat the call without embedding_column (or with a local column).`) }
       : degraded;
+    if (notice && overrideRefused) delete notice.user_message;
     // The guidance is column-specific, so a session must not dedupe one override's notice against another's.
     if (notice) out.push(column && notice.dedupe_key ? { ...notice, dedupe_key: `${notice.dedupe_key}|column:${column}` } : notice);
     const narrowed = opts.transport === 'stdio' ? sourceBindingNarrowedNotice(op, params, result, opts.binding) : null;
