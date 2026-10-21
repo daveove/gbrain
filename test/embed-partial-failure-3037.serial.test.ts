@@ -102,8 +102,8 @@ describe('#3037 — one bad chunk no longer darkens its page', () => {
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(2);
-    expect(updates.map((call: any) => call.args[1][5])).toEqual(['good-a', 'good-b']);
-    expect(updates.every((call: any) => JSON.parse(call.args[1][1]).length === 1536)).toBe(true);
+    expect(updates.map(update => update.text)).toEqual(['good-a', 'good-b']);
+    expect(updates.every(update => JSON.parse(update.vector!).length === 1536)).toBe(true);
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
     expect(result.embedded).toBe(2);
     expect(result.failures).toBe(1);
@@ -126,8 +126,8 @@ describe('#3037 — one bad chunk no longer darkens its page', () => {
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(2);
-    expect(updates.map((call: any) => call.args[1][5])).toEqual(['good-a', 'good-b']);
-    expect(updates.every((call: any) => JSON.parse(call.args[1][1]).length === 1536)).toBe(true);
+    expect(updates.map(update => update.text)).toEqual(['good-a', 'good-b']);
+    expect(updates.every(update => JSON.parse(update.vector!).length === 1536)).toBe(true);
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
     expect(result.embedded).toBe(2);
     expect(result.failures).toBe(1);

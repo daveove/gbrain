@@ -523,24 +523,27 @@ function makeServiceEngine(chunks: ChunkInput[]) {
       };
     },
     async executeRaw(sql: string, params: unknown[] = []) {
-      if (sql.includes('FROM config')) return [
+      const config = [
         { key: 'embedding_columns', value: JSON.stringify({ embedding: {
           type: 'vector', dimensions: TEST_DIMS, provider: TEST_EMBEDDING_MODEL,
         } }) },
         { key: 'embedding_dimensions', value: String(TEST_DIMS) },
         { key: 'embedding_model', value: TEST_EMBEDDING_MODEL },
       ];
-      if (sql.startsWith('SELECT chunker_version')) {
-        return [{ chunker_version: MARKDOWN_CHUNKER_VERSION, corpus_generation: null }];
-      }
+      if (sql.startsWith('SELECT (SELECT json_agg(')) return [{ config: JSON.stringify(config), found: true,
+        chunker_version: MARKDOWN_CHUNKER_VERSION, corpus_generation: null, page_kind: 'markdown' }];
+      if (sql.includes('FROM config')) return config;
       if (sql.startsWith('UPDATE content_chunks SET')) {
-        const original = storedChunks.find(chunk => chunk.id === params[0]);
-        if (!original || params[4] !== original.page_id || params[5] !== original.chunk_text) {
-          throw new Error('Embedding update must address the existing chunk row and text');
-        }
-        embeddedChunks.push({ ...original,
-          embedding: params[1] == null ? undefined : new Float32Array(JSON.parse(String(params[1]))),
-          model: typeof params[3] === 'string' ? params[3] : undefined,
+        const [pageId, ids, vectors, , models, texts] = params as [number, number[], Array<string | null>, unknown, Array<string | null>, string[]];
+        ids.forEach((id, i) => {
+          const original = storedChunks.find(chunk => chunk.id === id);
+          if (!original || pageId !== original.page_id || texts[i] !== original.chunk_text) {
+            throw new Error('Embedding update must address the existing chunk row and text');
+          }
+          embeddedChunks.push({ ...original,
+            embedding: vectors[i] == null ? undefined : new Float32Array(JSON.parse(vectors[i]!)),
+            model: models[i] ?? undefined,
+          });
         });
         return [];
       }
