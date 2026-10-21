@@ -237,7 +237,7 @@ function prTitle(ctx: Ctx, version: string): string {
 function capture(ctx: Ctx, masterRef: string): State {
   const preHead = ctx.git('rev-parse', 'HEAD').trim();
   const mergeBase = ctx.git('merge-base', 'HEAD', masterRef).trim();
-  const entries = branchEntrySections(ctx.git('show', 'HEAD:CHANGELOG.md'), ctx.git('show', `${mergeBase}:CHANGELOG.md`));
+  const entries = branchEntrySections(ctx.git('show', 'HEAD:CHANGELOG.md'), ctx.git('show', `${mergeBase}:CHANGELOG.md`), masterRef);
   if (entries.length > 1) {
     fail(`this branch has ${entries.length} CHANGELOG entries above ${masterRef}'s (${entries.map((e) => versionOfHeader(e.header)).join(', ')})`,
       'a branch ships one unified entry (docs/RELEASING.md "CHANGELOG + VERSION are branch-scoped"); restamp re-stamps exactly one.',
@@ -332,7 +332,7 @@ interface Outcome { version: string; masterVersion: string }
 
 function restampTree(ctx: Ctx, state: State, opts: { acceptRefs: boolean; date: string }): Outcome {
   const masterVersion = ctx.git('show', `${state.masterRef}:VERSION`).trim();
-  const version = nextPatchVersion(masterVersion);
+  const version = nextPatchVersion(masterVersion, state.masterRef);
 
   const migrations = analyzeMigrations(ctx, state.masterRef, workingMigrations(ctx));
   applyRenumber(ctx, state, migrations.plan);
@@ -416,7 +416,7 @@ function driftProblems(ctx: Ctx, version: string, masterVersion: string, state: 
 
 function printDryRun(ctx: Ctx, state: State, date: string): void {
   const masterVersion = ctx.git('show', `${state.masterRef}:VERSION`).trim();
-  const version = nextPatchVersion(masterVersion);
+  const version = nextPatchVersion(masterVersion, state.masterRef);
   const L = ctx.log;
   L(`restamp --dry-run: nothing will be changed. ${state.masterRef} is at VERSION ${masterVersion}; this branch becomes ${version}.`);
   if (ctx.gitOk('merge-base', '--is-ancestor', state.masterRef, 'HEAD')) L(`Merge: the branch already contains ${state.masterRef}; no merge commit.`);

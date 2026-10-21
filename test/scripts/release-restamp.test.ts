@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { main } from '../../scripts/release-restamp.ts';
 import {
-  COLLISION_DOCS, OTHER_STAMPED_FILES, RESTAMP_DOCS, STAMPS, findLeftoverRefs, migrationPayloadKey, nextPatchVersion,
+  COLLISION_DOCS, OTHER_STAMPED_FILES, RESTAMP_DOCS, STAMPS, branchEntrySections, findLeftoverRefs, migrationPayloadKey, nextPatchVersion,
   rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, splitChangelog,
 } from '../../scripts/lib/restamp.ts';
 
@@ -444,10 +444,16 @@ describe('release:restamp end to end', () => {
 });
 
 describe('release:restamp helpers', () => {
-  test('version: master MAJOR.MINOR.(PATCH+1).0', () => {
-    expect(nextPatchVersion('0.60.69.0\n')).toBe('0.60.70.0');
-    expect(nextPatchVersion('0.31.1.1-fixwave')).toBe('0.31.2.0');
-    expect(() => nextPatchVersion('banana')).toThrow(/is not MAJOR.MINOR.PATCH.MICRO/);
+  test('version: selected base MAJOR.MINOR.(PATCH+1).0', () => {
+    expect(nextPatchVersion('0.60.69.0\n', 'origin/main')).toBe('0.60.70.0');
+    expect(nextPatchVersion('0.31.1.1-fixwave', 'origin/release')).toBe('0.31.2.0');
+    expect(() => nextPatchVersion('banana', 'origin/main')).toThrow(/is not MAJOR.MINOR.PATCH.MICRO/);
+  });
+
+  test.each(['origin/main', 'origin/release'])('recovery guidance names the selected base %s', (baseRef) => {
+    expect(() => nextPatchVersion('banana', baseRef)).toThrow(`fix VERSION on ${baseRef} first`);
+    expect(() => branchEntrySections('## [Unreleased]\n', '## [0.1.0.0]\n', baseRef))
+      .toThrow(`restore ${baseRef}'s entries (git checkout ${baseRef} -- CHANGELOG.md`);
   });
 
   test('version-only conflict hunks resolve; real edits stay conflicted', () => {
