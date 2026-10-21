@@ -2065,10 +2065,12 @@ async function embedAllStale(
           // The last batch stamps from complete DB provenance (#4825).
           // Keep both stamps with vector installation so later contextual
           // work cannot commit between installation and title-tier demotion.
-          if (!await observed(pacer, () => engine.transaction(async tx => {
+          // A staging target has neither stamp, and installPageEmbeddings opens
+          // its own transaction; only a lock fence needs the outer one.
+          const signatureStamp = (target || prepared.embeddingColumn.provenance) && failed === 0 ? embeddingColumnSignature(prepared.embeddingColumn) : undefined;
+          if (!await observed(pacer, () => target && !staleOpts?.assertOwned ? installPageEmbeddings(engine, prepared, merged, signatureStamp) : engine.transaction(async tx => {
             await staleOpts?.assertOwned?.(tx);
-            if (!await installPageEmbeddings(tx, prepared, merged,
-              (target || prepared.embeddingColumn.provenance) && failed === 0 ? embeddingColumnSignature(prepared.embeddingColumn) : undefined)) return false;
+            if (!await installPageEmbeddings(tx, prepared, merged, signatureStamp)) return false;
             if (stamp && failed === 0 && !prepared.embeddingColumn.provenance) await stampIfPageProvenanceComplete(tx, slug, keySourceId, stamp);
             if (!target && !prepared.embeddingColumn.provenance && failed === 0 && stale.length === existing.length) {
               await restampIfDemotedToTitleTier(tx, prepared.snapshot.page, slug, keySourceId);

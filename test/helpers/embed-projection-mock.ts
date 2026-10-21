@@ -12,6 +12,7 @@ export function mockEmbedProjectionEngine(overrides: Partial<Record<string, any>
     executeRaw: async (sql: string) => sql.startsWith('SELECT count(*)::int AS n FROM pages p')
       && sql.includes('p.text_projection_revision IS DISTINCT FROM p.knowledge_revision') ? [{ n: 0 }] : [],
     getConfigKeys: async () => [],
+    listAllSources: async () => [],
     transaction: async (run: (tx: BrainEngine) => Promise<unknown>) => run(engine),
     readPageSnapshot: async (slug: string, opts?: { sourceId?: string }) => {
       const page = overrides.getPage ? await overrides.getPage(slug, opts) : { slug, compiled_truth: 'Fixture body', timeline: '' };
@@ -26,11 +27,17 @@ export function mockEmbedProjectionEngine(overrides: Partial<Record<string, any>
     ...overrides,
   };
   const executeRaw = overrides.executeRaw;
-  overrides.executeRaw = async (sql: string, params?: unknown[]) => sql.startsWith('SELECT page_kind FROM pages WHERE id=')
-    ? [{ page_kind: pageKinds.get(Number(params?.[0])) ?? 'markdown' }]
-    : sql === 'SELECT archived FROM sources WHERE id=$1' ? [{ archived: false }]
-    : sql.includes('FROM persistence_brain') ? [{ enabled: false }]
-    : executeRaw(sql, params);
+  overrides.executeRaw = async (sql: string, params?: unknown[]) => {
+    // The one-statement indexing context: a test that models config answers it; others read defaults.
+    if (sql.startsWith('SELECT (SELECT json_agg(')) {
+      const [modeled] = await executeRaw(sql, params) ?? [];
+      return [modeled?.found ? modeled : { config: null, found: true, chunker_version: null, corpus_generation: null,
+        page_kind: pageKinds.get(Number(params?.[0])) ?? 'markdown' }];
+    }
+    return sql === 'SELECT archived FROM sources WHERE id=$1' ? [{ archived: false }]
+      : sql.includes('FROM persistence_brain') ? [{ enabled: false }]
+      : executeRaw(sql, params);
+  };
   const calls: { method: string; args: any[] }[] = [];
   const track = (method: string) => (...args: any[]) => {
     calls.push({ method, args });
@@ -47,7 +54,12 @@ export function mockEmbedProjectionEngine(overrides: Partial<Record<string, any>
   return engine;
 }
 
-export function embeddingUpdates(engine: BrainEngine) {
-  return (engine as any)._calls.filter((call: any) => call.method === 'executeRaw'
-    && /^UPDATE content_chunks SET/.test(call.args[0]));
+/** One entry per chunk the batched installPageEmbeddings UPDATE wrote: its id, vector text and chunk text. */
+export function embeddingUpdates(engine: BrainEngine): Array<{ id: number; vector: string | null; text: string }> {
+  // mockEmbedProjectionEngine's Proxy records every call under _calls.
+  const recorded = engine as unknown as { _calls: Array<{ method: string; args: [string, unknown[]] }> };
+  return recorded._calls.filter(call => call.method === 'executeRaw' && /^UPDATE content_chunks SET/.test(call.args[0])).flatMap(({ args: [, params] }) => {
+    const [, ids, vectors, , , texts] = params as [number, number[], Array<string | null>, unknown, unknown, string[]];
+    return ids.map((id, i) => ({ id, vector: vectors[i]!, text: texts[i]! }));
+  });
 }

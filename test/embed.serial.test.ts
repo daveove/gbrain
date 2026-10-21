@@ -576,8 +576,8 @@ describe('runEmbedCore --stale egress fix (SQL-side filter)', () => {
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(3);
-    expect(updates.map((call: any) => call.args[1][5]).sort()).toEqual(['x', 'y', 'z']);
-    expect(updates.every((call: any) => JSON.parse(call.args[1][1]).length === 1536)).toBe(true);
+    expect(updates.map(update => update.text).sort()).toEqual(['x', 'y', 'z']);
+    expect(updates.every(update => JSON.parse(update.vector!).length === 1536)).toBe(true);
     expect(fullChunks['page-b'][0]).toMatchObject({ chunk_text: 'fresh', embedded_at: '2026-01-01' });
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
   });
@@ -1241,8 +1241,8 @@ describe('runEmbed preserves code-chunk metadata across re-embed (regression for
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(1);
-    expect(updates[0].args[1][5]).toBe(fullCodeChunk.chunk_text);
-    expect(JSON.parse(updates[0].args[1][1])).toHaveLength(1536);
+    expect(updates[0]!.text).toBe(fullCodeChunk.chunk_text);
+    expect(JSON.parse(updates[0]!.vector!)).toHaveLength(1536);
     expect(metadataOf((await engine.getChunks('code-page'))[0])).toEqual(metadataOf(fullCodeChunk));
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
   });
@@ -1259,8 +1259,8 @@ describe('runEmbed preserves code-chunk metadata across re-embed (regression for
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(1);
-    expect(updates[0].args[1][5]).toBe(fullCodeChunk.chunk_text);
-    expect(JSON.parse(updates[0].args[1][1])).toHaveLength(1536);
+    expect(updates[0]!.text).toBe(fullCodeChunk.chunk_text);
+    expect(JSON.parse(updates[0]!.vector!)).toHaveLength(1536);
     expect(metadataOf((await engine.getChunks('code-page'))[0])).toEqual(metadataOf(fullCodeChunk));
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
   });
@@ -1277,8 +1277,8 @@ describe('runEmbed preserves code-chunk metadata across re-embed (regression for
 
     const updates = embeddingUpdates(engine);
     expect(updates).toHaveLength(1);
-    expect(updates[0].args[1][5]).toBe(fullCodeChunk.chunk_text);
-    expect(JSON.parse(updates[0].args[1][1])).toHaveLength(1536);
+    expect(updates[0]!.text).toBe(fullCodeChunk.chunk_text);
+    expect(JSON.parse(updates[0]!.vector!)).toHaveLength(1536);
     expect(metadataOf((await engine.getChunks('code-page'))[0])).toEqual(metadataOf(fullCodeChunk));
     expect((engine as any)._calls.some((call: any) => call.method === 'upsertChunks')).toBe(false);
   });
