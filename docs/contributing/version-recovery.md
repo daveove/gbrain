@@ -4,8 +4,8 @@ Read [release rules](../RELEASING.md) before shipping.
 
 ### Mandatory version-consistency audit (run after EVERY merge or commit that touches VERSION, package.json, or CHANGELOG)
 
-**The trio MUST agree.** Every merge from master will hit conflicts on
-VERSION + package.json + CHANGELOG.md because master ships its own
+**The trio MUST agree.** Every merge from main will hit conflicts on
+VERSION + package.json + CHANGELOG.md because main ships its own
 version bumps. Auto-merge sometimes resolves these silently in unexpected
 ways. After any merge, branch update, or version-related edit, run this
 audit. It's three lines and never lies:
@@ -35,15 +35,15 @@ When `git merge origin/main` reports conflicts on VERSION,
 package.json, or CHANGELOG.md, resolve in this exact order:
 
 1. **VERSION** — overwrite with the wave's version (`echo -n "X.Y.Z.W"
-   > VERSION`). Highest semver wins; do NOT take master's lower version.
+   > VERSION`). Highest semver wins; do NOT take main's lower version.
 2. **package.json** — strip the conflict markers, keep the wave's
    version line. Sed pattern:
    `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/,/^>>>>>>> /d' package.json && rm package.json.bak`
    (assumes ours is above the `=======`).
 3. **CHANGELOG.md** — strip ALL three conflict markers; both your entry
-   and master's entry stay. Sed pattern:
-   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/master$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
-   Then verify your entry is the topmost `## [X.Y.Z.W]` and master's
+   and main's entry stay. Sed pattern:
+   `sed -i.bak '/^<<<<<<< HEAD$/d; /^=======$/d; /^>>>>>>> origin\/main$/d' CHANGELOG.md && rm CHANGELOG.md.bak`
+   Then verify your entry is the topmost `## [X.Y.Z.W]` and main's
    newer-than-yours entries (if any) sit below.
 4. **Run the 3-line audit above.** If it doesn't show your version on
    all three lines, you missed a marker.
@@ -62,7 +62,7 @@ commit. The selective directional resolution is fine, but on
 VERSION/package.json/CHANGELOG specifically, ALWAYS use the explicit
 `echo > VERSION` + sed-strip-markers pattern above. The directional
 checkout flags have bitten us when the conflict shape was unexpected
-(e.g. master stripped a section we expected to keep).
+(e.g. main stripped a section we expected to keep).
 
 ### Pre-push gate (manual; tighten when you remember to)
 
