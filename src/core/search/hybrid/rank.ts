@@ -24,6 +24,7 @@ import type { SearchResult } from '../../types.ts';
 import { applyAliasHop, applyAliasHopLookup } from '../alias-hop.ts';
 import { type IdentityLookups, type RerankGateMeta, prepareRerankGate } from './rerank-gate.ts';
 import { effectiveRrfK } from '../intent-weights.ts';
+import { applyLexicalAnchor } from '../lexical-anchor.ts';
 import { enforceTokenBudget } from '../token-budget.ts';
 import { expandAnchors, hydrateChunks } from '../two-pass.ts';
 import { isRelationalQuery } from '../relational-plan.ts';
@@ -184,6 +185,12 @@ export async function fuseArms(
     // v0.32.x search-lite: intent exact-match boost (entity/event intents).
     // No-op when boost factor is 1.0 (general intent or weighting disabled).
     await applyIdentityBoosts(req, fused);
+    fused.sort((a, b) => b.score - a.score);
+    // DAV-7120: short query whose rank-1 row has no lexical vote → the
+    // strict keyword arm's #1 page takes rank 1 (lexical-anchor.ts).
+    await applyLexicalAnchor(engine, fused, query, {
+      keywordFusionList, titleFusionList, relationalList: effectiveModality !== 'image' ? relationalList : [],
+    });
     fused.sort((a, b) => b.score - a.score);
   });
   trace?.observe('fused', fused);
