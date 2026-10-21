@@ -144,7 +144,8 @@ describeE2E('E2E sync-parallel: P4 benchmark serial vs concurrency=4', () => {
 
     // Wipe pages before second run so neither one is "incremental".
     await conn.unsafe(`TRUNCATE pages CASCADE`);
-    await conn.unsafe(`TRUNCATE config CASCADE`);
+    // Clearing sync config must not erase the installed queue schema stamp.
+    await conn.unsafe(`DELETE FROM config WHERE key <> 'version'`);
 
     const t2 = Date.now();
     await performSync(engine, {
