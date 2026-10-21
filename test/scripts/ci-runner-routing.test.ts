@@ -34,7 +34,7 @@ describe('CI runner routing', () => {
 
   test('verify bounds contention on the fork runner without extending check deadlines', () => {
     const step = load('test.yml').jobs.verify.steps!.find(step => step.run === 'bun run verify')!;
-    expect(step.env?.GBRAIN_VERIFY_MAX_PARALLEL).toBe(2);
+    expect(step.env?.GBRAIN_VERIFY_MAX_PARALLEL).toBe(1);
     expect(step.env?.GBRAIN_VERIFY_TIMEOUT).toBeUndefined();
     expect(readFileSync(join(root, 'scripts/run-verify-parallel.sh'), 'utf8'))
       .toContain('TIMEOUT="${GBRAIN_VERIFY_TIMEOUT:-120}"');

@@ -29,7 +29,7 @@ identifiers and attribution are available in the pre-removal Git revision
 - DAV-7022: `main` is this fork's default branch. CI workflow triggers (`push`, `pull_request`, `pull_request_target`, `workflow_run`) run on `main`, and the CI tooling that keys off the default branch follows: baseline and diff gates read `origin/main`, nightly-watch, master-red, ci-health and the release gate count push runs on `main`, and the release gate publishes only from `refs/heads/main`. The `master-red` issue label keeps its name; the old `master` branch is archived as tag `archive/master-v0.48.3`.
 - DAV-7022: this fork's CI runs on GitHub-hosted `ubuntu-24.04` / `ubuntu-24.04-arm` runners instead of upstream's Ubicloud labels, which have no runners here. The upstream-only fix-wave gate runs only in garrytan/gbrain, so it no longer fails every same-repository PR into the fork's `main`.
 - DAV-7022: restamp VERSION and CHANGELOG recovery diagnostics name the selected base ref, including an explicit `--base`, rather than directing operators to the archived branch.
-- DAV-7022: limit this fork's verify job to two concurrent checks on its 4-vCPU runner after repeated cold typecheck contention timeouts. Every guard, the 120-second per-check deadline and the local CPU-adaptive dispatcher remain unchanged.
+- DAV-7022: run this fork's verify checks one at a time on its 4-vCPU runner after repeated cold typecheck contention timeouts at four-way and two-way fanout. Every guard, the 120-second per-check deadline and the local CPU-adaptive dispatcher remain unchanged.
 
 ### Fixed
 
