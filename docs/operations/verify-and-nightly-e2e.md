@@ -67,7 +67,7 @@ hits `timeout-minutes` also reports `cancelled` through `needs`. Unreadable
 evidence is a failure, never a cancellation on a guess.
 
 Scheduled E2E runs use their own `-nightly` concurrency group, as `test.yml`
-does, so a push to master does not cancel the nightly full corpus.
+does, so a push to main does not cancel the nightly full corpus.
 
 ## Changelog
 
