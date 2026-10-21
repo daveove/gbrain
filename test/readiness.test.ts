@@ -125,7 +125,8 @@ describe('config plane: state and reason per capability', () => {
         expect(codex.fix).toBeUndefined();
         const codexNotice = degradedRecallNotice([{ stage: 'embed_unavailable', reason: 'no_touchpoint' }], { config: codexCfg, transport: 'stdio' });
         expect(codexNotice?.why).not.toContain('refuses');
-        expect(codexNotice?.fix?.why).toBe(codex.why);
+        expect(codexNotice?.why).toContain(codex.why);
+        expect(codexNotice?.fix).toBeUndefined();
         // With a local column staged, the unsupported search column still names its own cause.
         const codexStaged = entry(configReadiness(pglite({ ...paid, embedding_columns: { ...chatOnly, ...nomic }, search_embedding_column: 'embedding_codex' }), { transport: 'stdio' }).entries, 'embeddings');
         expect(codexStaged).toMatchObject({ state: 'degraded', reason: 'unknown_model' });
@@ -181,6 +182,15 @@ describe('config plane: state and reason per capability', () => {
         expect(mixedOverride?.fix?.argv).toEqual(['gbrain', 'doctor', '--json']);
         expect(mixedOverride?.why).toContain('embed_timeout');
         expect(mixedOverride?.why).toContain("override 'embedding_voyage'");
+        // An unsupported (chat-only) override over a live configured column is told to drop the override, not to fill the live column.
+        const unsupportedMeta = { retrieval: { degraded: [{ stage: 'embed_unavailable', reason: 'no_touchpoint' }] } };
+        const [codexOverride] = recallInteropNotices('search', [], unsupportedMeta, { query: 'q', embedding_column: 'embedding_codex' },
+          { config: pglite({ ...localPrimary, embedding_columns: chatOnly }), transport: 'stdio' });
+        expect(codexOverride?.why).toContain("override 'embedding_codex' uses a provider that cannot compute embeddings");
+        expect(codexOverride?.why).toContain('without embedding_column');
+        expect(codexOverride?.why).not.toContain('can take over once filled');
+        expect(codexOverride?.why).not.toContain('refuses');
+        expect(codexOverride?.fix).toBeUndefined();
         const [localOverride] = recallInteropNotices('search', [], overrideMeta, { query: 'q', embedding_column: 'embedding_nomic' },
           { config: pglite({ ...paid, embedding_columns: nomic }), transport: 'stdio' });
         expect(localOverride?.user_message).toBeUndefined();

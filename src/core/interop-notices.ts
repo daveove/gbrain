@@ -129,24 +129,24 @@ export function doctorFix(why: string): Action {
 /** Embedding readiness reasons where subscription billing refused the paid model: no key or enable command helps. */
 const BILLING_REFUSED_REASONS: Record<string, true> = { local_column_pending: true, paid_api_disabled: true };
 
-type EmbeddingsGuidance = { fix?: Action; byChoice: boolean; billing?: { why: string; user_message?: string } };
+type EmbeddingsGuidance = { fix?: Action; byChoice: boolean; explained?: { why: string; user_message?: string } };
 
 /**
  * The embeddings fix for a keyword-only call. A brain the user set up keyless
- * (`disabled_by_choice`) gets none: notices never coach on a choice; the why
- * says so and doctor still shows the enable command. When subscription billing
- * refused the paid model, the readiness entry's own why and user message are the
- * guidance and there is no fix (a doctor run would add nothing).
+ * (`embedding_disabled`) gets none: notices never coach on a choice; the why
+ * says so and doctor still shows the enable command. An entry that is not ok and
+ * carries no fix (subscription billing refused the paid model, or the search
+ * column's provider cannot embed) is explained by its own why and user message,
+ * with no fix (a doctor run would add nothing).
  */
 function embeddingsFix(cfg: GBrainConfig | null | undefined, transport: 'stdio' | 'http' | 'cli'): EmbeddingsGuidance {
   if (!cfg) return { fix: doctorFix('Doctor reports why semantic search is unavailable.'), byChoice: false };
   const entry = configReadiness(cfg, { transport }).entries.find(e => e.capability === 'embeddings');
-  if (entry && BILLING_REFUSED_REASONS[entry.reason]) {
-    return { byChoice: false, billing: { why: entry.why, ...(entry.user_message ? { user_message: entry.user_message } : {}) } };
+  if (entry && entry.state !== 'ok' && !entry.fix && entry.reason !== 'embedding_disabled') {
+    return { byChoice: false, explained: { why: entry.why, ...(entry.user_message ? { user_message: entry.user_message } : {}) } };
   }
   if (entry?.state === 'disabled_by_choice') return { byChoice: true };
-  if (entry && entry.state !== 'ok') return { fix: entry.fix ?? doctorFix(entry.why), byChoice: false };
-  return { fix: doctorFix('Embeddings are configured but did not answer; doctor reports the provider failure.'), byChoice: false };
+  return { fix: entry && entry.state !== 'ok' && entry.fix ? entry.fix : doctorFix('Embeddings are configured but did not answer; doctor reports the provider failure.'), byChoice: false };
 }
 
 /**
@@ -177,8 +177,8 @@ export function degradedRecallNotice(
   const fixKind: StageFix = guidance.some(g => g.fix === 'embeddings') ? 'embeddings' : guidance.some(g => g.fix === 'doctor') ? 'doctor' : null;
   const byChoice = opts.optedOut || entries.some(s => s.reason === 'embedding_disabled');
   const emb = fixKind === 'embeddings' ? (byChoice ? { byChoice: true } as EmbeddingsGuidance : embeddingsFix(opts.config, opts.transport)) : undefined;
-  // Billing guidance carries no action, so another stage's fix (doctor, then rerank) still applies.
-  const fix = emb && !emb.billing ? emb.fix
+  // Explained guidance carries no action, so another stage's fix (doctor, then rerank) still applies.
+  const fix = emb && !emb.explained ? emb.fix
     : guidance.some(g => g.fix === 'doctor') ? doctorFix('Doctor names the failing retrieval dependency and its fix.')
     : rerank ? rerankFix(rerank, opts.retry) : undefined;
   // Under subscription billing readiness drops the paid enablement fix, so the notice must not point at it.
@@ -189,9 +189,9 @@ export function degradedRecallNotice(
   return {
     code: 'degraded_recall',
     kind: 'degraded',
-    why: `Recall was degraded (${labels.join(', ')}): ${whys.join('; ')}. ${NOT_ABSENCE}${choice}${emb?.billing ? ` ${emb.billing.why}` : ''}`,
+    why: `Recall was degraded (${labels.join(', ')}): ${whys.join('; ')}. ${NOT_ABSENCE}${choice}${emb?.explained ? ` ${emb.explained.why}` : ''}`,
     ...(fix ? { fix } : {}),
-    ...(fix?.user_message ? { user_message: fix.user_message } : emb?.billing?.user_message ? { user_message: emb.billing.user_message } : {}),
+    ...(fix?.user_message ? { user_message: fix.user_message } : emb?.explained?.user_message ? { user_message: emb.explained.user_message } : {}),
     ...(persistent ? { dedupe_key: pairs.join('|') } : {}),
   };
 }
@@ -365,15 +365,17 @@ export function recallInteropNotices(
     const column = typeof params.embedding_column === 'string' && params.embedding_column ? params.embedding_column : undefined;
     const config = column && opts.config ? { ...opts.config, search_embedding_column: column } : opts.config;
     const embeddings = (cfg: GBrainConfig) => configReadiness(cfg, { transport: opts.transport }).entries.find(e => e.capability === 'embeddings');
-    // Billing refused only the override while the configured search column is live: say so instead of "wait for a fill".
-    const overrideRefused = !!(config && opts.config && config !== opts.config && BILLING_REFUSED_REASONS[embeddings(config)?.reason ?? '']
-      && embeddings(opts.config)?.state === 'ok');
+    // Billing refused the override, or its provider cannot embed, while the configured search column is live:
+    // say so instead of "wait for a fill" of the column that is already searching.
+    const overrideEntry = config && config !== opts.config ? embeddings(config) : undefined;
+    const overrideFailed = !!(overrideEntry && overrideEntry.state !== 'ok' && !overrideEntry.fix && opts.config && embeddings(opts.config)?.state === 'ok');
     const degraded = degradedRecallNotice(stages, { ...opts, config, optedOut: embeddingOptedOutFor(op, result, meta), retry: { op, args } });
-    // Keep the other stages and their fix; only the billing explanation is replaced.
-    const notice = degraded && overrideRefused
-      ? { ...degraded, why: degraded.why.replace(embeddings(config!)!.why, `This call's embedding_column override '${column}' uses a provider that ai_billing=subscription refuses, so its vector search did not run. The configured search column is live; repeat the call without embedding_column (or with a local column).`) }
+    const cause = BILLING_REFUSED_REASONS[overrideEntry?.reason ?? ''] ? 'uses a provider that ai_billing=subscription refuses' : 'uses a provider that cannot compute embeddings';
+    // Keep the other stages and their fix; only the override's explanation is replaced.
+    const notice = degraded && overrideFailed
+      ? { ...degraded, why: degraded.why.replace(overrideEntry!.why, `This call's embedding_column override '${column}' ${cause}, so its vector search did not run. The configured search column is live; repeat the call without embedding_column (or with a local column).`) }
       : degraded;
-    if (notice && overrideRefused) delete notice.user_message;
+    if (notice && overrideFailed) delete notice.user_message;
     // The guidance is column-specific, so a session must not dedupe one override's notice against another's.
     if (notice) out.push(column && notice.dedupe_key ? { ...notice, dedupe_key: `${notice.dedupe_key}|column:${column}` } : notice);
     const narrowed = opts.transport === 'stdio' ? sourceBindingNarrowedNotice(op, params, result, opts.binding) : null;
