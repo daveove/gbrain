@@ -145,7 +145,7 @@ Point it at any conforming corpus; parse `result.json` against
 ## Baseline governance (how the CI gate works)
 
 CI compares HEAD's run against **main's** copy of `baselines/main.json`
-(fetched via `git show origin/master:...` — a PR cannot rewrite the thing it's
+(fetched via `git show origin/main:...` — a PR cannot rewrite the thing it's
 compared against). Same `fixtures_hash` ⇒ count-aware gate (any newly-failed
 gold item fails). Different hash (you changed fixtures) ⇒ corpus-bless mode:
 the gate verifies your committed baseline exactly matches HEAD's actual run,

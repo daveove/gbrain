@@ -132,7 +132,7 @@ describe('fix-wave gate workflow', () => {
   test('a PR that edits the workflow or the gate script cannot change its own result', async () => {
     // pull_request_target runs the default-branch copy of both files; a pull_request trigger would run the PR's copy.
     expect(Object.keys(wf.on)).toEqual(['pull_request_target']);
-    expect(wf.on.pull_request_target.branches).toEqual(['master']);
+    expect(wf.on.pull_request_target.branches).toEqual(['main']);
     expect([...wf.on.pull_request_target.types].sort()).toEqual(['edited', 'labeled', 'opened', 'reopened', 'synchronize', 'unlabeled']);
     for (const job of Object.values(wf.jobs)) {
       const checkout = job.steps.find(s => s.uses?.startsWith('actions/checkout@'))!;
@@ -148,7 +148,8 @@ describe('fix-wave gate workflow', () => {
     expect(wf.permissions).toEqual({});
     expect(wf.jobs['contributor-gate'].permissions).toEqual({ contents: 'read', 'pull-requests': 'read' });
     expect(wf.jobs['welcome-comment'].permissions).toEqual({ contents: 'read', 'pull-requests': 'write' });
-    expect(wf.jobs['welcome-comment'].if).toBe("github.event.action == 'opened'");
+    expect(wf.jobs['contributor-gate'].if).toBe("github.repository == 'garrytan/gbrain'");
+    expect(wf.jobs['welcome-comment'].if).toBe("github.repository == 'garrytan/gbrain' && github.event.action == 'opened'");
     for (const job of Object.values(wf.jobs)) for (const s of job.steps) if (s.uses) expect(s.uses).toMatch(/@[0-9a-f]{40}$/);
     const script = readFileSync(join(ROOT, 'scripts', 'fix-wave-gate.ts'), 'utf8');
     const imports = [...script.matchAll(/^import .* from '([^']+)';$/gm)].map(m => m[1]);

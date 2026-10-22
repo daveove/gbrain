@@ -30,7 +30,7 @@ log's absolute path. A failing `bun run verify` keeps each failed check's log
 and prints it. In CI, each red job's step summary lists the failing tests with a
 `bun test … -t` reproduce command.
 
-**Red CI on master:** [CI red runbook](ci-red-runbook.md).
+**Red CI on main:** [CI red runbook](ci-red-runbook.md).
 
 | File suffix or location | Lane | Command | Runs in PR CI |
 |---|---|---|---|
@@ -44,43 +44,23 @@ and prints it. In CI, each red job's step summary lists the failing tests with a
 
 ## CI runner capacity
 
-Repository-owned Linux validation jobs use ephemeral Ubicloud runners pinned to
-Ubuntu 24.04. The Ubicloud Managed Runners GitHub App must have access to this
-repository and active billing in its connected project; runner labels alone do
-not grant access. No Ubicloud API token is passed to workflow jobs.
+This fork (daveove/gbrain) has no Ubicloud installation, so every Linux job runs
+on GitHub-hosted runners: `ubuntu-24.04` (4 vCPU, 16 GB RAM on a public
+repository) and `ubuntu-24.04-arm` for the native ARM64 glibc and musl cells.
+macOS and Windows matrices keep their GitHub-hosted labels. The pinned upstream
+OSV reusable workflow does not expose a runner override, so its runner remains
+upstream-owned.
 
-| Workload | Runner | Capacity |
-| --- | --- | --- |
-| Unit shards, slow and eval jobs, BrainBench, admin browser, shared-skills compatibility, persistence soak, reconciliation crashes and read latency, native Linux cells, OpenClaw startup, JSONB parity, PR serial pool, E2E backend matrix, Tier 2, coverage reports and Semgrep | `ubicloud-standard-4-ubuntu-2404` | 4 vCPU, 16 GB RAM |
-| Nightly coverage serial pool, `verify`, PgBouncer/RLS deployment matrix | `ubicloud-standard-8-ubuntu-2404` | 8 vCPU, 32 GB RAM |
-| E2E Tier 1 (its CLI `init` spawns exceed their timeouts on 4 vCPUs), label-gated and nightly heavy-tests jobs | `ubicloud-standard-16-ubuntu-2404` | 16 vCPU, 64 GB RAM |
-| Label-gated heavy test suite | `ubicloud-standard-30-ubuntu-2404` | 30 vCPU, 120 GB RAM |
-| Native ARM64 glibc and musl tests | `ubicloud-standard-4-arm-ubuntu-2404` | 4 vCPU |
-| Selected E2E (one Bun process each), planning, status aggregation, dependency audit, gitleaks, security regressions and actionlint | `ubicloud-standard-2-ubuntu-2404` | 2 vCPU, 8 GB RAM |
-
-macOS and Windows matrices stay on GitHub-hosted runners. Release building and
-publishing also stay unchanged. The pinned upstream OSV reusable workflow does
-not expose a runner override, so its runner remains upstream-owned.
-
-Sizes come from measured CPU use, not guesses. Each Ubicloud project shares one
-vCPU quota between pull-request CI and agent `ci:ubicloud` VMs, so an oversized
-runner makes every other job wait, and an undersized one lengthens the PR
-critical path. A unit shard is one Bun process that averages 1.1-1.5 busy
-cores, yet on 2 vCPUs the unit shard mean rose from 542s to 608s on a full PR
-run and made Test the critical path, so unit shards stay on 4 vCPUs. On matched
-VMs a unit shard takes the same time on 4, 8 and 16 vCPUs; the serial pool and
-`verify` take the same time on 8 and 16 vCPUs (serial shard 2: 222s and 224s;
-277s on 4); the 2,500-write PGLite soak averages 1.3-1.8 busy cores and takes
-523s on 4 vCPUs and 500s on 16. Selected E2E workers run one file at a time and
-fit on 2 vCPUs. Re-measure with `scripts/ubicloud/ubi-runner.sh run -s standard-N`
-before resizing a runner: more CPU does not shorten a single-process job, and
-the decision rule is critical path first, vCPU-minutes second.
-`test/scripts/ci-runner-routing.test.ts` pins capacity and platform routing;
-`.github/actionlint.yaml` declares the exact custom runner labels.
+Upstream sizes its jobs across Ubicloud runners of 2 to 30 vCPUs. An upstream
+sync brings those `ubicloud-standard-*` labels back, so a sync must keep this
+fork's `ubuntu-24.04` / `ubuntu-24.04-arm` runners, the empty label list in
+`.github/actionlint.yaml` and `test/scripts/ci-runner-routing.test.ts`, which
+fails on any Ubicloud label. If a job outgrows a 4-vCPU runner, raise its
+`timeout-minutes` or split it across the existing shard matrix.
 
 ### Event parity
 
-Every test file runs on every push to master, on the nightly schedule and on
+Every test file runs on every push to main, on the nightly schedule and on
 manual dispatch, and pull requests and merge-queue runs (`merge_group`) run
 every Bun-version cell too. Each narrower PR behavior is a named exception
 whose comment names the scheduled run that covers it
@@ -805,10 +785,10 @@ Two guards run in `bun run verify`:
   filename/version/name mismatch and on a version defined twice, naming both files
   with the `git mv` + `version:` + regenerate recipe.
 - `check:schema-migration-order` (`scripts/check-schema-migration-order.ts`) fails
-  when a migration origin/master does not have is numbered at or below origin/master's
+  when a migration origin/main does not have is numbered at or below origin/main's
   latest version (it would be skipped forever on current brains) or reuses a version
   with a different name. Base ref: `GBRAIN_MIGRATION_BASE_REF` (default
-  `origin/master`); skipped with a notice when the ref is missing, failed under `CI=true`.
+  `origin/main`); skipped with a notice when the ref is missing, failed under `CI=true`.
 
 Collision recovery: an unapplied branch migration is renumbered (`git mv`, edit
 `version`, regenerate); one already applied to a disposable dev DB means rebuilding
@@ -1102,7 +1082,7 @@ row, a baselined function grows, a baselined function drops to 300 lines or
 fewer (remove the row), a row has more than 50 lines of stale slack (lower
 it), a row names a function that no longer exists, or a row is malformed,
 duplicated or out of order. A row raised above, or added since, the baseline
-at the merge-base with `origin/master` needs an issue or TODO id (`#1234`,
+at the merge-base with `origin/main` needs an issue or TODO id (`#1234`,
 `TODOS.md:12`, `TODO: <slug>`) in its justification; the summary prints every
 raise.
 
@@ -1322,17 +1302,17 @@ with `lcovCount != 1` marks the summary `degraded: true`; the merge still exits
 0 and both gates print `WOULD PASS`/`WOULD FAIL` instead of enforcing.
 
 **Diff gate** (`scripts/coverage-diff-gate.ts`) requires at least 80% of the
-added or changed executable lines of `git diff origin/master...HEAD` in
+added or changed executable lines of `git diff origin/main...HEAD` in
 `src/**.ts` (minus tests, generated files and `.d.ts`) to be covered, and no
 changed gate-scoped file to be absent from the coverage data. Doc-only diffs
 pass. Escape hatches: a commit body with `[coverage-exempt: reason]` (loud
 warning), and `scripts/coverage-gate-exemptions.txt`, read from
-`origin/master` so a PR cannot self-exempt, shrink-only. Exit 0 is pass or
+`origin/main` so a PR cannot self-exempt, shrink-only. Exit 0 is pass or
 report-only, 1 a failure while `COVERAGE_GATE_ENFORCE=1`, 2 an infrastructure
 error.
 
 **Baseline gate** (`scripts/coverage-baseline-gate.ts`) reads
-`scripts/coverage-baseline.json` from `origin/master` and compares like for
+`scripts/coverage-baseline.json` from `origin/main` and compares like for
 like by corpus: a global drop over 0.5pp, a per-directory drop over 1.0pp or
 more never-loaded files fails. A `null` corpus section is an ungated first
 landing, and `provisional: true` keeps the gate report-only; the committed
