@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import { LATEST_VERSION } from '../../src/core/migrate.ts';
 import { resetPgliteState } from './reset-pglite.ts';
 
 let engine: PGLiteEngine;
@@ -85,10 +86,11 @@ describe('resetPgliteState', () => {
       await resetPgliteState(engine);
       const tables = await engine.executeRaw<{ tablename: string }>("SELECT tablename FROM pg_tables WHERE schemaname='public'");
       for (const { tablename } of tables) {
-        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources'].includes(tablename)) continue;
+        if (['schema_version', 'page_generation_clock', 'persistence_brain', 'sources', 'config'].includes(tablename)) continue;
         const rows = await engine.executeRaw(`SELECT count(*)::int AS n FROM public."${tablename.replaceAll('"', '""')}"`);
         expect(rows).toEqual([{ n: 0 }]);
       }
+      expect(await engine.executeRaw('SELECT key,value FROM config')).toEqual([{ key: 'version', value: String(LATEST_VERSION) }]);
       expect(await engine.executeRaw('SELECT id, name, config, local_path FROM sources')).toEqual([
         { id: 'default', name: 'default', config: { federated: true }, local_path: null },
       ]);
@@ -106,6 +108,7 @@ describe('resetPgliteState', () => {
     await engine.executeRaw('UPDATE persistence_brain SET enabled = true, activated_at = now() WHERE singleton = 1');
     await resetPgliteState(engine);
     expect(await engine.executeRaw('SELECT * FROM schema_version')).toEqual(version);
+    expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
     expect(await engine.executeRaw('SELECT * FROM page_generation_clock')).toEqual(clock);
     expect(await engine.executeRaw('SELECT last_value, is_called FROM page_generation_clock_seq')).toEqual(generation);
     const [fresh] = await engine.executeRaw<{ brain_id: string; enabled: boolean; activated_at: string | null }>('SELECT brain_id, enabled, activated_at FROM persistence_brain');

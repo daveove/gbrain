@@ -49,10 +49,11 @@ async function truncateAll() {
   for (const t of [
     'content_chunks', 'links', 'tags', 'raw_data',
     'timeline_entries', 'page_versions', 'ingest_log', 'pages',
-    'config',
   ]) {
     try { await (engine as any).db.exec(`DELETE FROM ${t}`); } catch { /* ok */ }
   }
+  // Keep the migrated schema stamp required by the publication queue.
+  await engine.executeRaw("DELETE FROM config WHERE key <> 'version'");
 }
 
 function writeContext(): OperationContext {

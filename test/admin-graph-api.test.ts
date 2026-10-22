@@ -337,12 +337,20 @@ describe('admin graph API', () => {
     expect(both.slice(0, 2).map(h => h.source_id)).toEqual(['logseq-fixture', 'tana-fixture']);
     // The title arm never matches slugs, so the title trigram index serves it.
     expect(GRAPH_TITLE_SEARCH_SQL).not.toMatch(/slug\s+ILIKE/i);
-    // With sequential scans off, the only index that can serve the match scan
-    // is the title trigram index (no OR on slug, no deleted_at beside it).
-    const scratch = new PGLiteEngine();
-    await scratch.connect({});
-    try {
+  }, 60_000);
+
+  describe('title search index plan', () => {
+    let scratch: PGLiteEngine;
+    beforeAll(async () => {
+      scratch = new PGLiteEngine();
+      await scratch.connect({});
       await scratch.initSchema();
+    });
+    afterAll(async () => { await scratch?.disconnect(); });
+
+    test('title trigram index serves the title-only match scan', async () => {
+      // With sequential scans off, the only index that can serve the match scan
+      // is the title trigram index (no OR on slug, no deleted_at beside it).
       await scratch.executeRaw(`INSERT INTO pages (source_id, slug, type, title, compiled_truth)
         SELECT 'default', 'n/' || g, 'note', 'Note ' || md5(g::text), '' FROM generate_series(1, 2000) g`);
       await scratch.executeRaw('ANALYZE pages');
@@ -352,10 +360,8 @@ describe('admin graph API', () => {
       const text = plan.map(r => r['QUERY PLAN']).join('\n');
       expect(text).toContain('Bitmap Index Scan on idx_pages_trgm');
       expect(text).not.toContain('pages_dedup_idx');
-    } finally {
-      await scratch.disconnect();
-    }
-  }, 60_000);
+    }, 60_000);
+  });
 
   test('disabling graph.edge_validity restores ended edges in every graph view', async () => {
     const previous = await engine.getConfig('graph.edge_validity');

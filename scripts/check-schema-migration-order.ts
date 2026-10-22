@@ -4,12 +4,12 @@
  *
  * The runner applies every migration whose version is above the brain's
  * recorded schema_version. A migration merged with a version at or below the
- * latest one already on origin/master would be skipped forever on every brain
- * that is already current. So every migration on this branch that origin/master
- * does not have must carry a version greater than origin/master's maximum, and
- * a version origin/master already uses must keep origin/master's name.
+ * latest one already on origin/main would be skipped forever on every brain
+ * that is already current. So every migration on this branch that origin/main
+ * does not have must carry a version greater than origin/main's maximum, and
+ * a version origin/main already uses must keep origin/main's name.
  *
- * Base ref: $GBRAIN_MIGRATION_BASE_REF, default origin/master. When the ref is
+ * Base ref: $GBRAIN_MIGRATION_BASE_REF, default origin/main. When the ref is
  * missing the check is skipped locally (with a notice) and fails under CI=true.
  * Until W3 is on the base ref, the base's versions are read from its
  * src/core/migrate.ts MIGRATIONS literals. Test seam: GBRAIN_GUARD_ROOT (repo root).
@@ -63,11 +63,11 @@ export function baseMigrations(ref: string): Map<number, string> {
 }
 
 function main(): number {
-  const ref = process.env.GBRAIN_MIGRATION_BASE_REF || 'origin/master';
+  const ref = process.env.GBRAIN_MIGRATION_BASE_REF || 'origin/main';
   if (!git(['rev-parse', '--verify', '-q', `${ref}^{commit}`]).ok) {
-    const msg = `check-schema-migration-order: base ref ${ref} is not available (git fetch origin master)`;
+    const msg = `check-schema-migration-order: base ref ${ref} is not available (git fetch origin main)`;
     if (process.env.CI === 'true') {
-      console.error(`FAIL: ${msg}\nWhy:  without the base ref the out-of-order landing check cannot run.\nFix:  fetch it in the workflow (fetch-depth: 0, or git fetch origin +refs/heads/master:refs/remotes/origin/master)\n${SEE}`);
+      console.error(`FAIL: ${msg}\nWhy:  without the base ref the out-of-order landing check cannot run.\nFix:  fetch it in the workflow (fetch-depth: 0, or git fetch origin +refs/heads/main:refs/remotes/origin/main)\n${SEE}`);
       return 1;
     }
     console.log(`skip: ${msg}`);
