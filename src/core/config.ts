@@ -1921,6 +1921,17 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
   };
 }
 
+/**
+ * The operator's home directory for default-path resolution. Reads an absolute
+ * `process.env.HOME` at call time, because Bun freezes `os.homedir()` at process
+ * start and an in-process HOME change (tests) would not move it. Any other HOME
+ * value falls back to `os.homedir()`, as before.
+ */
+export function userHomeDir(): string {
+  const fromEnv = process.env.HOME?.trim();
+  return fromEnv && isAbsolute(fromEnv) ? fromEnv : homedir();
+}
+
 export function configDir(): string {
   // Allow override for tests, Docker, and multi-tenant deployments.
   // GBRAIN_HOME is a parent dir; we always append '.gbrain' ourselves so
@@ -1937,7 +1948,7 @@ export function configDir(): string {
     }
     return join(trimmed, '.gbrain');
   }
-  return join(homedir(), '.gbrain');
+  return join(userHomeDir(), '.gbrain');
 }
 
 export function configPath(): string {

@@ -15,98 +15,97 @@
  *   - Linux crontab still writes the same every-5-min line.
  */
 
-import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from 'fs';
+import { describe, test, expect, spyOn } from 'bun:test';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, realpathSync } from 'fs';
 import { spawnSync } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
 import { detectInstallTarget, writeWrapperScript, chatBootWarning } from '../src/commands/autopilot.ts';
 import { gbrainPath } from '../src/core/config.ts';
+import { resolveAutopilotJob } from '../src/core/autopilot-paths.ts';
 import { surfaceFileSource, surfaceSource } from './helpers/source-surface.ts';
+import { withEnv } from './helpers/with-env.ts';
 
-let tmp: string;
-const envSnapshot: Record<string, string | undefined> = {};
+const INSTALL_HOME_ENV = {
+  RENDER: undefined,
+  RAILWAY_ENVIRONMENT: undefined,
+  FLY_APP_NAME: undefined,
+  OPENCLAW_HOME: undefined,
+} as const;
 
-function envKeys() {
-  return ['HOME', 'GBRAIN_HOME', 'RENDER', 'RAILWAY_ENVIRONMENT', 'FLY_APP_NAME', 'OPENCLAW_HOME'] as const;
+async function withInstallHome<T>(fn: (ctx: { tmp: string }) => T | Promise<T>): Promise<T> {
+  const tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
+  try {
+    return await withEnv({ HOME: tmp, GBRAIN_HOME: tmp, ...INSTALL_HOME_ENV }, () => fn({ tmp }));
+  } finally {
+    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 }
 
-beforeEach(() => {
-  for (const k of envKeys()) envSnapshot[k] = process.env[k];
-  tmp = mkdtempSync(join(tmpdir(), 'gbrain-install-test-'));
-  process.env.HOME = tmp;
-  process.env.GBRAIN_HOME = tmp;
-  // Start each test with a clean slate for ephemeral env vars.
-  delete process.env.RENDER;
-  delete process.env.RAILWAY_ENVIRONMENT;
-  delete process.env.FLY_APP_NAME;
-  delete process.env.OPENCLAW_HOME;
-});
+/** Fails if install paths would escape the isolated temp home (real ~/.gbrain leak). */
+function assertAutopilotInstallWritesStayUnderHome(wrapperPath: string, home: string): void {
+  const gbrainRoot = realpathSync(join(home, '.gbrain'));
+  expect(realpathSync(wrapperPath).startsWith(gbrainRoot)).toBe(true);
+  const job = resolveAutopilotJob();
+  expect(realpathSync(job.wrapperPath).startsWith(gbrainRoot)).toBe(true);
+  expect(realpathSync(job.homeDir)).toBe(gbrainRoot);
+}
 
-afterEach(() => {
-  for (const k of envKeys()) {
-    if (envSnapshot[k] === undefined) delete process.env[k];
-    else process.env[k] = envSnapshot[k];
-  }
-  try { rmSync(tmp, { recursive: true, force: true }); } catch { /* best-effort */ }
-});
-
-function makeFakeGbrainOnPath(): { binDir: string; restore: () => void } {
+async function withFakeGbrainOnPath<T>(fn: () => T | Promise<T>): Promise<T> {
   // writeWrapperScript() calls resolveGbrainCliPath(), which shells out to
   // `which gbrain`. Put a harmless shim on PATH so the test is deterministic
   // regardless of whether the CI/dev machine has a real gbrain on PATH.
   const binDir = mkdtempSync(join(tmpdir(), 'gbrain-fake-bin-'));
   writeFileSync(join(binDir, 'gbrain'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-  const originalPath = process.env.PATH;
-  process.env.PATH = `${binDir}:${originalPath ?? ''}`;
-  return {
-    binDir,
-    restore: () => {
-      process.env.PATH = originalPath;
-      rmSync(binDir, { recursive: true, force: true });
-    },
-  };
+  try {
+    return await withEnv({ PATH: `${binDir}:${process.env.PATH ?? ''}` }, fn);
+  } finally {
+    rmSync(binDir, { recursive: true, force: true });
+  }
 }
 
-test('wrapper and env template stay under the per-test GBRAIN_HOME', () => {
-  const fakeBin = makeFakeGbrainOnPath();
-  try {
-    const repoDir = join(tmp, 'repo-isolated');
-    mkdirSync(repoDir, { recursive: true });
-    const wrapper = writeWrapperScript(repoDir, 'linux-cron');
-    expect(wrapper).toBe(join(tmp, '.gbrain', 'autopilot-run.sh'));
-    expect(existsSync(join(tmp, '.gbrain', 'env'))).toBe(true);
-    expect(readFileSync(wrapper, 'utf8')).toContain(`export GBRAIN_HOME='${tmp}'`);
-  } finally {
-    fakeBin.restore();
-  }
+test('wrapper and env template stay under the per-test GBRAIN_HOME', async () => {
+  await withInstallHome(async ({ tmp }) => {
+    await withFakeGbrainOnPath(() => {
+      const repoDir = join(tmp, 'repo-isolated');
+      mkdirSync(repoDir, { recursive: true });
+      const wrapper = writeWrapperScript(repoDir, 'linux-cron');
+      assertAutopilotInstallWritesStayUnderHome(wrapper, tmp);
+      expect(wrapper).toBe(join(tmp, '.gbrain', 'autopilot-run.sh'));
+      expect(existsSync(join(tmp, '.gbrain', 'env'))).toBe(true);
+      expect(readFileSync(wrapper, 'utf8')).toContain(`export GBRAIN_HOME='${tmp}'`);
+    });
+  });
 });
 
 describe('detectInstallTarget', () => {
-  test('returns "macos" on darwin regardless of env', () => {
+  test('returns "macos" on darwin regardless of env', async () => {
     if (process.platform !== 'darwin') return; // Skip on non-mac CI
-    // Even if RENDER is set, darwin wins (user is probably dev-testing).
-    process.env.RENDER = 'true';
-    expect(detectInstallTarget()).toBe('macos');
+    await withEnv({ RENDER: 'true' }, () => {
+      expect(detectInstallTarget()).toBe('macos');
+    });
   });
 
-  test('returns "ephemeral-container" when RENDER is set', () => {
+  test('returns "ephemeral-container" when RENDER is set', async () => {
     if (process.platform === 'darwin') return; // darwin shortcircuits first
-    process.env.RENDER = 'true';
-    expect(detectInstallTarget()).toBe('ephemeral-container');
+    await withEnv({ RENDER: 'true' }, () => {
+      expect(detectInstallTarget()).toBe('ephemeral-container');
+    });
   });
 
-  test('returns "ephemeral-container" when RAILWAY_ENVIRONMENT is set', () => {
+  test('returns "ephemeral-container" when RAILWAY_ENVIRONMENT is set', async () => {
     if (process.platform === 'darwin') return;
-    process.env.RAILWAY_ENVIRONMENT = 'production';
-    expect(detectInstallTarget()).toBe('ephemeral-container');
+    await withEnv({ RAILWAY_ENVIRONMENT: 'production' }, () => {
+      expect(detectInstallTarget()).toBe('ephemeral-container');
+    });
   });
 
-  test('returns "ephemeral-container" when FLY_APP_NAME is set', () => {
+  test('returns "ephemeral-container" when FLY_APP_NAME is set', async () => {
     if (process.platform === 'darwin') return;
-    process.env.FLY_APP_NAME = 'myapp';
-    expect(detectInstallTarget()).toBe('ephemeral-container');
+    await withEnv({ FLY_APP_NAME: 'myapp' }, () => {
+      expect(detectInstallTarget()).toBe('ephemeral-container');
+    });
   });
 
   // Note: direct testing of linux-systemd / linux-cron requires mocking
@@ -189,19 +188,17 @@ describe('autopilot showStatus — wrapper-path detection', () => {
 // the gbrain-owned env file pinned by the suite below.
 describe('autopilot wrapper script — key sourcing (#2608)', () => {
   test('wrapper sources zshrc AND bashrc independently (no || chain)', async () => {
-    // PATH shim like the env-file suite below: writeWrapperScript resolves
-    // the gbrain CLI path and throws on CI runners with no gbrain on PATH.
-    const fakeBin = makeFakeGbrainOnPath();
-    try {
-      const { writeWrapperScript } = await import('../src/commands/autopilot.ts');
-      const path = writeWrapperScript(join(tmp, 'fake-repo'), 'linux-cron');
-      const text = readFileSync(path, 'utf8');
-      expect(text).toContain('[ -f ~/.zshrc ] && source ~/.zshrc');
-      expect(text).toContain('[ -f ~/.bashrc ] && source ~/.bashrc');
-      expect(text).not.toContain('|| source ~/.bashrc');
-    } finally {
-      fakeBin.restore();
-    }
+    await withInstallHome(async ({ tmp }) => {
+      await withFakeGbrainOnPath(async () => {
+        const { writeWrapperScript } = await import('../src/commands/autopilot.ts');
+        const path = writeWrapperScript(join(tmp, 'fake-repo'), 'linux-cron');
+        assertAutopilotInstallWritesStayUnderHome(path, tmp);
+        const text = readFileSync(path, 'utf8');
+        expect(text).toContain('[ -f ~/.zshrc ] && source ~/.zshrc');
+        expect(text).toContain('[ -f ~/.bashrc ] && source ~/.bashrc');
+        expect(text).not.toContain('|| source ~/.bashrc');
+      });
+    });
   });
 });
 
@@ -214,13 +211,14 @@ describe('autopilot wrapper script — key sourcing (#2608)', () => {
 // GBRAIN_HOME) after the profiles, and silently no-ops when that file is
 // absent.
 describe('autopilot wrapper script — gbrain-owned env file (#2608)', () => {
-  test('wrapper additively sources <gbrainDir>/env after the rc-file profiles, before PATH export/exec', () => {
-    const fakeBin = makeFakeGbrainOnPath();
-    try {
-      const repoDir = join(tmp, 'repo');
-      mkdirSync(repoDir, { recursive: true });
-      const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
-      const src = readFileSync(wrapperPath, 'utf8');
+  test('wrapper additively sources <gbrainDir>/env after the rc-file profiles, before PATH export/exec', async () => {
+    await withInstallHome(async ({ tmp }) => {
+      await withFakeGbrainOnPath(() => {
+        const repoDir = join(tmp, 'repo');
+        mkdirSync(repoDir, { recursive: true });
+        const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
+        assertAutopilotInstallWritesStayUnderHome(wrapperPath, tmp);
+        const src = readFileSync(wrapperPath, 'utf8');
 
       // Ground truth: ask the SAME resolver the production code uses for the
       // gbrain-owned home, rather than hand-assuming ~/.gbrain — this is what
@@ -249,40 +247,37 @@ describe('autopilot wrapper script — gbrain-owned env file (#2608)', () => {
       expect(envFileIdx).toBeLessThan(pathExportIdx);
       expect(pathExportIdx).toBeGreaterThan(-1);
       expect(pathExportIdx).toBeLessThan(execIdx);
-    } finally {
-      fakeBin.restore();
-    }
+      });
+    });
   });
 
-  test('honors GBRAIN_HOME: sources <GBRAIN_HOME>/.gbrain/env, not a hardcoded ~/.gbrain', () => {
-    const fakeBin = makeFakeGbrainOnPath();
+  test('honors GBRAIN_HOME: sources <GBRAIN_HOME>/.gbrain/env, not a hardcoded ~/.gbrain', async () => {
     const customHome = mkdtempSync(join(tmpdir(), 'gbrain-custom-home-'));
-    const originalGbrainHome = process.env.GBRAIN_HOME;
-    process.env.GBRAIN_HOME = customHome;
     try {
-      const repoDir = join(tmp, 'repo-custom');
-      mkdirSync(repoDir, { recursive: true });
-      const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
-      const src = readFileSync(wrapperPath, 'utf8');
-      const expectedEnvFile = join(customHome, '.gbrain', 'env');
-      expect(src).toContain(`[ -f '${expectedEnvFile}' ] && { set -a; source '${expectedEnvFile}' 2>/dev/null; set +a; }`);
-      // Must NOT fall back to a bare ~/.gbrain/env guess that ignores GBRAIN_HOME.
-      expect(src).not.toContain(`[ -f '${join(tmp, '.gbrain', 'env')}'`);
+      await withEnv({ GBRAIN_HOME: customHome, HOME: customHome, ...INSTALL_HOME_ENV }, async () => {
+        await withFakeGbrainOnPath(() => {
+          const repoDir = join(customHome, 'repo-custom');
+          mkdirSync(repoDir, { recursive: true });
+          const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
+          assertAutopilotInstallWritesStayUnderHome(wrapperPath, customHome);
+          const src = readFileSync(wrapperPath, 'utf8');
+          const expectedEnvFile = join(customHome, '.gbrain', 'env');
+          expect(src).toContain(`[ -f '${expectedEnvFile}' ] && { set -a; source '${expectedEnvFile}' 2>/dev/null; set +a; }`);
+        });
+      });
     } finally {
-      if (originalGbrainHome === undefined) delete process.env.GBRAIN_HOME;
-      else process.env.GBRAIN_HOME = originalGbrainHome;
       rmSync(customHome, { recursive: true, force: true });
-      fakeBin.restore();
     }
   });
 
-  test('behavior: real bash actually sets the var when the file is present, and no-ops (exit 0, var unset) when absent', () => {
-    const fakeBin = makeFakeGbrainOnPath();
-    try {
-      const repoDir = join(tmp, 'repo-behavior');
-      mkdirSync(repoDir, { recursive: true });
-      const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
-      const fullSrc = readFileSync(wrapperPath, 'utf8');
+  test('behavior: real bash actually sets the var when the file is present, and no-ops (exit 0, var unset) when absent', async () => {
+    await withInstallHome(async ({ tmp }) => {
+      await withFakeGbrainOnPath(() => {
+        const repoDir = join(tmp, 'repo-behavior');
+        mkdirSync(repoDir, { recursive: true });
+        const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
+        assertAutopilotInstallWritesStayUnderHome(wrapperPath, tmp);
+        const fullSrc = readFileSync(wrapperPath, 'utf8');
 
       // Execute the REAL generated sourcing preamble (everything up to, but
       // excluding, the final `exec '<gbrain>' autopilot ...` line) so this
@@ -321,84 +316,75 @@ describe('autopilot wrapper script — gbrain-owned env file (#2608)', () => {
       const dotenv = runPreamble();
       expect(dotenv.status).toBe(0);
       expect(dotenv.stdout).toContain('MARKER=[dotenv-style]');
-    } finally {
-      fakeBin.restore();
-    }
+      });
+    });
   });
 
   // #2608 hardening: --install writes a fully-commented 0600 template at
   // <gbrainDir>/env so the boot warning points at a file that exists, with
-  // secret-safe perms from birth. GBRAIN_HOME (not HOME) scopes these tests:
-  // config's homedir() fallback ignores runtime HOME mutation under bun, but
-  // GBRAIN_HOME is read at call time — proven by the test above.
-  test('install creates a 0600 fully-commented env template (no GBRAIN_HOME example), never overwrites', () => {
-    const fakeBin = makeFakeGbrainOnPath();
+  // secret-safe perms from birth.
+  test('install creates a 0600 fully-commented env template (no GBRAIN_HOME example), never overwrites', async () => {
     const customHome = mkdtempSync(join(tmpdir(), 'gbrain-tpl-home-'));
-    const originalGbrainHome = process.env.GBRAIN_HOME;
-    process.env.GBRAIN_HOME = customHome;
     try {
-      const repoDir = join(tmp, 'repo-template');
-      mkdirSync(repoDir, { recursive: true });
-      writeWrapperScript(repoDir, 'linux-cron');
+      await withEnv({ GBRAIN_HOME: customHome, HOME: customHome, ...INSTALL_HOME_ENV }, async () => {
+        await withFakeGbrainOnPath(() => {
+          const repoDir = join(customHome, 'repo-template');
+          mkdirSync(repoDir, { recursive: true });
+          const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
+          assertAutopilotInstallWritesStayUnderHome(wrapperPath, customHome);
 
-      const envFile = join(customHome, '.gbrain', 'env');
-      expect(existsSync(envFile)).toBe(true);
-      expect(statSync(envFile).mode & 0o777).toBe(0o600);
+          const envFile = join(customHome, '.gbrain', 'env');
+          expect(existsSync(envFile)).toBe(true);
+          expect(statSync(envFile).mode & 0o777).toBe(0o600);
 
-      const body = readFileSync(envFile, 'utf8');
-      // Every non-empty line is a comment: the install must never ship a
-      // live secret or a live assignment.
-      for (const line of body.split('\n')) {
-        if (line.trim() === '') continue;
-        expect(line.startsWith('#')).toBe(true);
-      }
-      // Names the key lanes and the process-level vars that justify the file.
-      expect(body).toContain('ANTHROPIC_API_KEY');
-      expect(body).toContain('NODE_EXTRA_CA_CERTS');
-      // GBRAIN_HOME must NOT be offered as an example: the wrapper bakes it
-      // AFTER sourcing this file, so a value here is clobbered/divergent.
-      expect(body).toContain('Do NOT set GBRAIN_HOME here');
-      expect(body).not.toMatch(/^#?\s*export GBRAIN_HOME=/m);
+          const body = readFileSync(envFile, 'utf8');
+          for (const line of body.split('\n')) {
+            if (line.trim() === '') continue;
+            expect(line.startsWith('#')).toBe(true);
+          }
+          expect(body).toContain('ANTHROPIC_API_KEY');
+          expect(body).toContain('NODE_EXTRA_CA_CERTS');
+          expect(body).toContain('Do NOT set GBRAIN_HOME here');
+          expect(body).not.toMatch(/^#?\s*export GBRAIN_HOME=/m);
 
-      // Reinstall must never overwrite a user's existing env file.
-      writeFileSync(envFile, '# user-owned sentinel\nexport USER_KEY=real\n', { mode: 0o600 });
-      writeWrapperScript(repoDir, 'linux-cron');
-      expect(readFileSync(envFile, 'utf8')).toContain('user-owned sentinel');
+          writeFileSync(envFile, '# user-owned sentinel\nexport USER_KEY=real\n', { mode: 0o600 });
+          writeWrapperScript(repoDir, 'linux-cron');
+          expect(readFileSync(envFile, 'utf8')).toContain('user-owned sentinel');
+        });
+      });
     } finally {
-      if (originalGbrainHome === undefined) delete process.env.GBRAIN_HOME;
-      else process.env.GBRAIN_HOME = originalGbrainHome;
       rmSync(customHome, { recursive: true, force: true });
-      fakeBin.restore();
     }
   });
 
-  test('install warns on a loose-permission pre-existing env file but never chmods it', () => {
-    const fakeBin = makeFakeGbrainOnPath();
+  test('install warns on a loose-permission pre-existing env file but never chmods it', async () => {
     const customHome = mkdtempSync(join(tmpdir(), 'gbrain-perm-home-'));
-    const originalGbrainHome = process.env.GBRAIN_HOME;
-    process.env.GBRAIN_HOME = customHome;
-    const errSpy = spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const repoDir = join(tmp, 'repo-perms');
-      mkdirSync(repoDir, { recursive: true });
-      const gbrainDir = join(customHome, '.gbrain');
-      mkdirSync(gbrainDir, { recursive: true });
-      const envFile = join(gbrainDir, 'env');
-      writeFileSync(envFile, 'export USER_KEY=real\n', { mode: 0o644 });
+      await withEnv({ GBRAIN_HOME: customHome, HOME: customHome, ...INSTALL_HOME_ENV }, async () => {
+        const errSpy = spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          await withFakeGbrainOnPath(() => {
+          const repoDir = join(customHome, 'repo-perms');
+          mkdirSync(repoDir, { recursive: true });
+          const gbrainDir = join(customHome, '.gbrain');
+          mkdirSync(gbrainDir, { recursive: true });
+          const envFile = join(gbrainDir, 'env');
+          writeFileSync(envFile, 'export USER_KEY=real\n', { mode: 0o644 });
 
-      writeWrapperScript(repoDir, 'linux-cron');
+          const wrapperPath = writeWrapperScript(repoDir, 'linux-cron');
+          assertAutopilotInstallWritesStayUnderHome(wrapperPath, customHome);
 
-      // File untouched: content AND mode are the user's business.
-      expect(readFileSync(envFile, 'utf8')).toContain('USER_KEY=real');
-      expect(statSync(envFile).mode & 0o777).toBe(0o644);
-      const warned = errSpy.mock.calls.some((c) => String(c[0]).includes('group/world-readable'));
-      expect(warned).toBe(true);
+          expect(readFileSync(envFile, 'utf8')).toContain('USER_KEY=real');
+          expect(statSync(envFile).mode & 0o777).toBe(0o644);
+          const warned = errSpy.mock.calls.some((c) => String(c[0]).includes('group/world-readable'));
+          expect(warned).toBe(true);
+          });
+        } finally {
+          errSpy.mockRestore();
+        }
+      });
     } finally {
-      errSpy.mockRestore();
-      if (originalGbrainHome === undefined) delete process.env.GBRAIN_HOME;
-      else process.env.GBRAIN_HOME = originalGbrainHome;
       rmSync(customHome, { recursive: true, force: true });
-      fakeBin.restore();
     }
   });
 });
