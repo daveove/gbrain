@@ -1,6 +1,6 @@
 name: Fix-wave closeout
 
-# When a fix wave (a same-repo PR) merges into master, close every pull request
+# When a fix wave (a same-repo PR) merges into main, close every pull request
 # its body names on a `Supersedes #N` line, with a thank-you comment linking the
 # wave (docs/RELEASING.md, "Fix-wave closeout"). `Fixes #N` closes issues
 # through GitHub itself.
@@ -11,7 +11,7 @@ name: Fix-wave closeout
 
 on:
   pull_request_target:
-    branches: [master]
+    branches: [main]
     types: [closed]
 
 permissions: {}
@@ -19,7 +19,7 @@ permissions: {}
 jobs:
   close-superseded:
     if: github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == 'garrytan/gbrain'
-    runs-on: ubicloud-standard-2-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
