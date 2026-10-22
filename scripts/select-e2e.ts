@@ -6,7 +6,7 @@
 // imports most of src/, so a file-to-test map selected every file on 40 of 40
 // merged pull requests while half of them had to edit it.
 //
-// Changed files come from git (the working-tree diff vs origin/master plus
+// Changed files come from git (the working-tree diff vs origin/main plus
 // untracked files) or, with --changed-files <path|->, from a newline-separated
 // list (CI passes the pull request's file list from the GitHub API).
 //
@@ -69,7 +69,7 @@ function splitLines(text: string): string[] {
 function readChangedFiles(repoRoot: string, listPath: string | undefined): string[] {
   if (listPath !== undefined) return [...new Set(splitLines(readFileSync(listPath === "-" ? 0 : listPath, "utf8")))].sort();
   const set = new Set<string>();
-  for (const args of [["diff", "--name-only", "origin/master...HEAD"], ["diff", "--name-only", "HEAD"], ["ls-files", "--others", "--exclude-standard"]]) {
+  for (const args of [["diff", "--name-only", "origin/main...HEAD"], ["diff", "--name-only", "HEAD"], ["ls-files", "--others", "--exclude-standard"]]) {
     for (const line of splitLines(runGit(args, repoRoot))) set.add(line);
   }
   return [...set].sort();

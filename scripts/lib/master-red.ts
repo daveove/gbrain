@@ -1,9 +1,9 @@
 /**
  * Master-red incidents (green master wave, Lane 4 + E4): one `master-red`
- * issue per workflow (Test, E2E Tests) for push-to-master runs only;
+ * issue per workflow (Test, E2E Tests) for push-to-main runs only;
  * scheduled runs stay in nightly-red (scripts/nightly-issue.ts).
  *
- * Reconciliation: every watch reads the completed push-to-master runs of its
+ * Reconciliation: every watch reads the completed push-to-main runs of its
  * workflow and evaluates, in (run_number, run_attempt) order, every run above
  * the high-water mark stored in the JSON block of the newest master-red issue
  * of that workflow (open or closed). A dropped watch therefore loses nothing,
@@ -204,7 +204,7 @@ export async function suspectRange(client: GitHubClient, from: string | null, to
     const prs = new Set<number>();
     for (const sha of shas.slice(-MAX_PR_LOOKUPS)) {
       const pulls = await client.request<Array<{ number: number; merged_at: string | null; base?: { ref: string } }>>('GET', `repos/{repo}/commits/${sha}/pulls`);
-      for (const p of pulls) if (p.merged_at && (!p.base || p.base.ref === 'master')) prs.add(p.number);
+      for (const p of pulls) if (p.merged_at && (!p.base || p.base.ref === 'main')) prs.add(p.number);
     }
     const complete = cmp.total_commits === shas.length && shas.length <= MAX_PR_LOOKUPS;
     return {
@@ -243,7 +243,7 @@ function nextStep(state: MasterRedState, repo: string, issue: number | undefined
   if (state.blocked.length) {
     lines.push(`**Not run since:** ${state.blocked.map(b => `\`${inert(b, 160)}\``).join(', ')} failed and has not run and passed on a later run with complete evidence, so ${ref} stays open. `
       + `If a job was renamed or removed, close ${ref} by hand with a comment naming its replacement. `
-      + (isE2E(state) ? `For an E2E file the selection skipped, dispatch a replay: \`gh workflow run e2e.yml --ref master -f full_corpus=true\`, then \`gh workflow run nightly-watch.yml -f run_id=<that run id> -f replay_issue=${issue ?? '<this issue>'}\`; the nightly scheduled run also counts.`
+      + (isE2E(state) ? `For an E2E file the selection skipped, dispatch a replay: \`gh workflow run e2e.yml --ref main -f full_corpus=true\`, then \`gh workflow run nightly-watch.yml -f run_id=<that run id> -f replay_issue=${issue ?? '<this issue>'}\`; the nightly scheduled run also counts.`
         : 'The next push run or the nightly scheduled run that runs it closes this issue.'));
   }
   if (state.evidence && !state.evidence.complete) {
@@ -257,7 +257,7 @@ export function renderMasterRed(state: MasterRedState, repo: string, issue?: num
   const s = state.suspect;
   const short = (sha: string | null | undefined) => (sha ? `\`${sha.slice(0, 12)}\`` : 'unknown');
   const lines = [
-    `Workflow **${state.workflow}** (\`.github/workflows/${state.workflow_file}\`) on master push runs — state: **${state.status}**. Scheduled runs report in \`nightly-red\` issues.`,
+    `Workflow **${state.workflow}** (\`.github/workflows/${state.workflow_file}\`) on main push runs — state: **${state.status}**. Scheduled runs report in \`nightly-red\` issues.`,
     '',
     `- Latest evaluated run: ${state.evaluated ? `${runUrl(repo, state.evaluated.run_id)} (run ${state.evaluated.run_number}, attempt ${state.evaluated.run_attempt}, ${short(state.evaluated.sha)})` : 'none'}`,
     `- First red run: ${state.first_red ? `${runUrl(repo, state.first_red.run_id)} (${short(state.first_red.sha)})` : 'unknown'}`,
@@ -297,7 +297,7 @@ export function flakeFor(state: MasterRedState, t: FailedTest, issue: number, to
   const title = `Flake: ${inert(`${t.file}${t.test ? ` › ${t.test}` : ''}`, 200)}`;
   const owner = /runner|no space left|lost communication|secret/i.test(record.signature);
   const body = [
-    `\`${t.file}\`${t.test ? ` › \`${inert(t.test, 200)}\`` : ''}${t.arm ? ` [${inert(t.arm, 40)}]` : ''} failed on master (${state.workflow}, first seen in https://github.com/{repo}/actions/runs/${record.first_seen.run_id}) and passed later without a repair PR, so master-red #${issue} closed on green. The failure is intermittent.`,
+    `\`${t.file}\`${t.test ? ` › \`${inert(t.test, 200)}\`` : ''}${t.arm ? ` [${inert(t.arm, 40)}]` : ''} failed on main (${state.workflow}, first seen in https://github.com/{repo}/actions/runs/${record.first_seen.run_id}) and passed later without a repair PR, so master-red #${issue} closed on green. The failure is intermittent.`,
     '',
     `- Reproduce: ${reproduce ? `\`${reproduce}\`` : '(path failed validation; read the job log)'}`,
     `- Failure signature: ${record.signature ? `\`${record.signature}\`` : 'see the master-red issue'}`,
@@ -329,10 +329,10 @@ async function newestIssue(client: GitHubClient, title: string): Promise<Issue |
 class CreateRace extends Error {}
 
 async function pushRuns(client: GitHubClient, run: RunInfo): Promise<RunInfo[]> {
-  const r = await client.request<{ workflow_runs: RunInfo[] }>('GET', `repos/{repo}/actions/workflows/${run.workflow_id}/runs?event=push&branch=master&per_page=100`);
-  const runs = r.workflow_runs.filter(x => x.event === 'push' && x.head_branch === 'master' && x.status === 'completed');
+  const r = await client.request<{ workflow_runs: RunInfo[] }>('GET', `repos/{repo}/actions/workflows/${run.workflow_id}/runs?event=push&branch=main&per_page=100`);
+  const runs = r.workflow_runs.filter(x => x.event === 'push' && x.head_branch === 'main' && x.status === 'completed');
   const listed = runs.findIndex(x => x.id === run.id);
-  if (run.event === 'push' && run.head_branch === 'master' && run.status === 'completed') {
+  if (run.event === 'push' && run.head_branch === 'main' && run.status === 'completed') {
     if (listed < 0) runs.push(run);
     else if (runs[listed]!.run_attempt < run.run_attempt) runs[listed] = run;
   }
@@ -466,7 +466,7 @@ export async function openFlakes(client: GitHubClient, repo: string, step: Maste
   const existing = (await listLabeled(client, FLAKE_LABEL, 'open')).map(i => readJsonBlock<FlakeRecord>(i.body, FLAKE_MARKER)).filter(Boolean) as FlakeRecord[];
   const have = new Set(existing.map(r => testKey(r)));
   const opened: number[] = [];
-  await ensureLabel(client, FLAKE_LABEL, 'd93f0b', 'An intermittent master failure that passed without a repair (nightly-watch)');
+  await ensureLabel(client, FLAKE_LABEL, 'd93f0b', 'An intermittent main failure that passed without a repair (nightly-watch)');
   for (const f of step.flakes) {
     if (have.has(testKey(f.record))) continue;
     const record = { ...f.record, master_red_issue: step.issue };
@@ -498,7 +498,7 @@ export async function watchMasterRed(client: GitHubClient, repo: string, run: Ru
 }
 
 async function writePlan(client: GitHubClient, repo: string, plan: MasterRedPlan): Promise<void> {
-  await ensureLabel(client, MR_LABEL, 'b60205', 'A push-to-master run of Test or E2E Tests is red (nightly-watch)');
+  await ensureLabel(client, MR_LABEL, 'b60205', 'A push-to-main run of Test or E2E Tests is red (nightly-watch)');
   for (const step of plan.steps) {
     if (step.action === 'create' || step.action === 'record-closed') {
       step.issue = (await createIssue(client, plan.title, renderMasterRed(step.state, repo), [MR_LABEL])).number;

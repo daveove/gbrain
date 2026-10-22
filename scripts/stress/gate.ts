@@ -95,7 +95,7 @@ export function planGate(root: string, input: GatePlanInput, weights = loadWeigh
     } else {
       base = input.stressBase!;
       head = input.stressHead || 'HEAD';
-      if (!validRef(base) || !validRef(head)) return { error: `stress_base/stress_head must be 40-hex SHAs or valid ref names (got ${JSON.stringify(base.slice(0, 80))}, ${JSON.stringify(head.slice(0, 80))}). Next: re-dispatch with e.g. stress_base=origin/master` };
+      if (!validRef(base) || !validRef(head)) return { error: `stress_base/stress_head must be 40-hex SHAs or valid ref names (got ${JSON.stringify(base.slice(0, 80))}, ${JSON.stringify(head.slice(0, 80))}). Next: re-dispatch with e.g. stress_base=origin/main` };
       const changed = changedFiles(root, base, head);
       if (changed.error) return { error: changed.error };
       const tests = changed.helpers.length ? allTestFiles(root) : [];
@@ -134,7 +134,7 @@ function resolveSha(root: string, ref: string): string {
   return spawnSync('git', ['rev-parse', ref], { cwd: root, encoding: 'utf8' }).stdout.trim() || ref;
 }
 
-/** Postgres-arm and E2E importers of helpers changed on master since the last night (the gate sampled them out). */
+/** Postgres-arm and E2E importers of helpers changed on main since the last night (the gate sampled them out). */
 export function raceHuntHelperImporters(root: string, since = '26 hours ago'): { helpers: string[]; files: string[] } {
   const r = spawnSync('git', ['log', `--since=${since}`, '--name-only', '--format=', 'HEAD', '--', 'test/helpers'], { cwd: root, encoding: 'utf8' });
   const helpers = [...new Set((r.stdout ?? '').split('\n').filter(p => p && !p.endsWith('.test.ts') && existsSync(join(root, p))))].sort();
@@ -343,7 +343,7 @@ export function buildReport(r: ReportInput): { summary: string; errors: string[]
   const errors: string[] = [];
   if (r.planResult !== 'success' || !r.plan) {
     const why = 'the plan job failed, so the set of files to stress is unknown';
-    lines.push(`**Failed:** ${why}. Next: read the "Stress plan" job log; if it says the merge base is missing, fetch it (\`git fetch --no-tags origin master\`) and re-run. Docs: ${docs}`);
+    lines.push(`**Failed:** ${why}. Next: read the "Stress plan" job log; if it says the merge base is missing, fetch it (\`git fetch --no-tags origin main\`) and re-run. Docs: ${docs}`);
     errors.push(`stress plan did not succeed (${r.planResult}). Why: ${why}. Next: read the plan job log and re-run. Docs: ${docs}`);
     return { summary: lines.join('\n'), errors, exit: 1 };
   }
@@ -439,7 +439,7 @@ async function main(argv: string[]): Promise<number> {
       const day = Number(env.GBRAIN_RACE_HUNT_DAY ?? Math.floor((Date.now() - Date.UTC(new Date().getUTCFullYear(), 0, 1)) / 86_400_000));
       const extra = raceHuntHelperImporters(ROOT);
       plan = planRaceHunt(ROOT, { day, extra: extra.files, diagnostic: env.EVENT === 'workflow_dispatch' });
-      if (extra.files.length) console.log(`race hunt: added ${extra.files.length} Postgres-arm importer(s) of ${extra.helpers.join(', ')} (changed on master since the last night)`);
+      if (extra.files.length) console.log(`race hunt: added ${extra.files.length} Postgres-arm importer(s) of ${extra.helpers.join(', ')} (changed on main since the last night)`);
     }
     const dir = join(env.RUNNER_TEMP ?? join(ROOT, '.context'), 'stress-plan');
     mkdirSync(dir, { recursive: true });

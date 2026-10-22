@@ -63,7 +63,7 @@ describe('gate plan', () => {
     expect('error' in result && result.error).toContain('Next: git fetch');
     const report = buildReport({ plan: undefined, planResult: 'failure', shardsResult: 'skipped', manifests: [], exemptions: { exemptions: [], openIssues: [] }, today: '2026-10-05', artifact: '' });
     expect(report.exit).toBe(1);
-    expect(report.summary).toContain('fetch it (`git fetch --no-tags origin master`)');
+    expect(report.summary).toContain('fetch it (`git fetch --no-tags origin main`)');
   });
 
   test('dispatch inputs are validated before use and the run is labeled diagnostic', () => {
