@@ -11,7 +11,7 @@ on:
   # dependency manifest changes; the weekly schedule scans every run, and
   # test.yml's dependency-audit covers every pull request.
   pull_request:
-    branches: [master]
+    branches: [main]
     paths:
       - 'bun.lock'
       - 'package.json'

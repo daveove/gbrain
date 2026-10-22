@@ -145,7 +145,7 @@ and `--llm` published runs, which are model-stochastic.
 
 CI (`.github/workflows/test.yml` `brainbench` job, local parity
 `scripts/ci-brainbench-gate.sh`) fetches the baseline **from main**
-(`git show origin/master:evals/brainbench/baselines/main.json`) and compares
+(`git show origin/main:evals/brainbench/baselines/main.json`) and compares
 HEAD's fresh run against it:
 
 - **Same `fixtures_hash`** → count-aware gate: any newly-failed gold item, any

@@ -77,7 +77,7 @@ describe('reproduce lines and inputs', () => {
   test('dispatch values are validated: test paths only, refs by git check-ref-format or 40-hex', () => {
     expect(parseFileList('test/a.test.ts, test/b/c.serial.test.ts test/a.test.ts')).toEqual({ files: ['test/a.test.ts', 'test/b/c.serial.test.ts'], invalid: [] });
     expect(parseFileList('test/a.test.ts;rm -rf / ../x.test.ts test/../etc.test.ts').invalid).toEqual(['test/a.test.ts;rm', '-rf', '/', '../x.test.ts', 'test/../etc.test.ts']);
-    expect(validRef('origin/master')).toBe(true);
+    expect(validRef('origin/main')).toBe(true);
     expect(validRef('a'.repeat(40))).toBe(true);
     expect(validRef('$(id)')).toBe(false);
     expect(validRef('-x')).toBe(false);
@@ -113,9 +113,9 @@ describe('changed files', () => {
 
   test('an unreachable merge base fails with the next step instead of guessing', () => {
     const root = repo({ 'test/a.test.ts': 'a' });
-    const changed = changedFiles(root, 'origin/master', 'HEAD');
+    const changed = changedFiles(root, 'origin/main', 'HEAD');
     expect(changed.error).toContain('cannot compute the merge base');
-    expect(changed.error).toContain('git fetch --no-tags origin master');
+    expect(changed.error).toContain('git fetch --no-tags origin main');
   });
 });
 
