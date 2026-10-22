@@ -79,7 +79,7 @@ function usage(): void {
       `  --out FILE                  Write the full JSON result to FILE (canonical CI artifact).\n` +
       `  --compare BASE [CURRENT]    Gate against BASE baseline. With CURRENT: pure\n` +
       `                              file-vs-file diff, no run. CI passes MAIN's baseline\n` +
-      `                              as BASE (git show origin/master:${DEFAULT_BASELINE_RELATIVE}).\n` +
+      `                              as BASE (git show origin/main:${DEFAULT_BASELINE_RELATIVE}).\n` +
       `  --committed-baseline FILE   Bless-mode verification target (default: bundled ${DEFAULT_BASELINE_RELATIVE}).\n` +
       `  --update-baseline [FILE]    Write this run as the canonical committed baseline.\n` +
       `  --justification "reason"    Recorded in the baseline written by --update-baseline\n` +

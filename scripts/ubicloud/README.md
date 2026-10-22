@@ -58,7 +58,7 @@ script waits for a marker file before the steps that need the checkout. apt
 skips fsync, man-db, needrestart and the translation, AppStream and
 command-not-found indexes. Database containers start only after apt finishes,
 because a package's systemd reload during `docker run` fails the container.
-The tarball carries a slim `.git` holding only what `HEAD` and `origin/master`
+The tarball carries a slim `.git` holding only what `HEAD` and `origin/main`
 reach, plus the branch, index and config, so a checkout that fetched many
 branches uploads about 80 MB instead of 250 MB. The critical path is now apt's
 package installs (about 23 seconds of dpkg work); downloads take two seconds.
