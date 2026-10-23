@@ -79,12 +79,20 @@ export interface ConversationSecretAuditRecord extends TranscriptSecretAuditSumm
   affected_pages_capped: boolean;
 }
 
-/** Frontmatter keys and string values, depth first, as the monitor scanned them. */
-function frontmatterStrings(value: unknown, out: string[] = []): string[] {
-  if (typeof value === 'string') out.push(value);
-  else if (Array.isArray(value)) for (const child of value) frontmatterStrings(child, out);
-  else if (value && typeof value === 'object') {
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) { out.push(key); frontmatterStrings(child, out); }
+/**
+ * Frontmatter entries as `key: value` strings, depth first, so a labeled
+ * credential keeps the delimiter between its label and value
+ * (`password: hunter2`). Nested entries carry their full key path.
+ */
+function frontmatterStrings(value: unknown, prefix = '', out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const child of value) frontmatterStrings(child, prefix, out);
+  } else if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      frontmatterStrings(child, prefix ? `${prefix}.${key}` : key, out);
+    }
+  } else if (value !== null && value !== undefined) {
+    out.push(prefix ? `${prefix}: ${String(value)}` : String(value));
   }
   return out;
 }
