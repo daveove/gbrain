@@ -10,6 +10,14 @@
  * cached in the config row `transcripts.secret_audit` so the
  * `transcript_secret_exposure` doctor check reads it instead of scanning.
  *
+ * Scope `conversations` (DAV-7162) scans every conversation page, imported
+ * or not, including its frontmatter keys and string values, and stores a
+ * result record in the config row `conversations.secret_audit`. A read-only
+ * monitor reads that row and never needs read access to conversation text.
+ * The record holds counts, pattern names, affected page ids with their
+ * content hashes and the scan start time; never a slug, a matched value or a
+ * preview.
+ *
  * Bounded memory: conversation parts run to ~300 KB, so pages stream in id
  * order in small keyset batches.
  */
@@ -19,22 +27,37 @@ import { scanText } from '../secret-scan.ts';
 /** Bump when the transcript-lane detectors change, so doctor asks for a fresh audit. */
 export const TRANSCRIPT_SECRET_AUDIT_VERSION = 1;
 export const TRANSCRIPT_SECRET_AUDIT_KEY = 'transcripts.secret_audit';
+/** Config row the conversations-scope audit writes for the read-only monitor (DAV-7162). */
+export const CONVERSATION_SECRET_AUDIT_KEY = 'conversations.secret_audit';
+export const CONVERSATION_SECRET_AUDIT_SCHEMA = 1;
 const BATCH = 25;
 const LINES_PER_PAGE = 20;
+/** The stored record lists at most this many affected pages; `affected_pages_capped` says when more exist. */
+const AFFECTED_PAGES_STORED = 500;
 
 /** The page set the importer writes: conversation pages stamped with `transcript_import`. */
 export const TRANSCRIPT_PAGE_PREDICATE = `type = 'conversation' AND deleted_at IS NULL AND frontmatter ? 'transcript_import'`;
+/** Every live conversation page, imported or not. */
+export const CONVERSATION_PAGE_PREDICATE = `type = 'conversation' AND deleted_at IS NULL`;
+
+export type SecretAuditScope = 'transcripts' | 'conversations';
 
 export interface TranscriptSecretAuditPage {
+  id: number;
   slug: string;
   source_id: string;
+  /** The page's stored content hash, so a reader can tell an edited page from an unchanged one. */
+  content_hash: string | null;
   hits: Record<string, number>;
   /** 1-based body line numbers of the hits (first 20), so a reviewer can find them; never the text. */
   lines: number[];
 }
 
 export interface TranscriptSecretAuditSummary {
+  scope: SecretAuditScope;
   detector_version: number;
+  /** When the scan began: every page write committed before it is in this result. */
+  started_at: string;
   scanned_at: string;
   source_id: string | null;
   pages_scanned: number;
@@ -47,10 +70,53 @@ export interface TranscriptSecretAuditResult extends TranscriptSecretAuditSummar
   pages: TranscriptSecretAuditPage[];
 }
 
+/** The monitor-readable record in `conversations.secret_audit`: no slugs, no text. */
+export interface ConversationSecretAuditRecord extends TranscriptSecretAuditSummary {
+  schema_version: number;
+  scope: 'conversations';
+  complete: true;
+  affected_pages: Array<{ id: number; source_id: string; content_hash: string | null; hits: Record<string, number> }>;
+  affected_pages_capped: boolean;
+}
+
+/**
+ * Frontmatter entries as `key: value` strings, depth first, so a labeled
+ * credential keeps the delimiter between its label and value
+ * (`password: hunter2`). A nested entry carries its full key path AND every
+ * ancestor boundary with the descendant scalar: a credential label can be an
+ * ancestor of the value (`{ password: { prod: 'hunter2' } }`), and the
+ * labeled detector needs the delimiter right after that ancestor label, not
+ * after the dotted path (`password: hunter2` as well as `password.prod:
+ * hunter2`).
+ */
+function frontmatterStrings(value: unknown, path: string[] = [], out: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    for (const child of value) frontmatterStrings(child, path, out);
+  } else if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      frontmatterStrings(child, [...path, key], out);
+    }
+  } else if (value !== null && value !== undefined) {
+    const scalar = String(value);
+    if (path.length === 0) {
+      out.push(scalar);
+    } else {
+      out.push(`${path.join('.')}: ${scalar}`);
+      for (let i = 0; i < path.length - 1; i++) {
+        out.push(`${path.slice(0, i + 1).join('.')}: ${scalar}`);
+      }
+    }
+  }
+  return out;
+}
+
 export async function auditTranscriptSecrets(
   engine: BrainEngine,
-  opts: { sourceId?: string; now?: () => Date } = {},
+  opts: { sourceId?: string; scope?: SecretAuditScope; now?: () => Date } = {},
 ): Promise<TranscriptSecretAuditResult> {
+  const scope = opts.scope ?? 'transcripts';
+  const conversations = scope === 'conversations';
+  const startedAt = (opts.now?.() ?? new Date()).toISOString();
   const pages: TranscriptSecretAuditPage[] = [];
   const byPattern: Record<string, number> = {};
   let pagesScanned = 0;
@@ -58,9 +124,9 @@ export async function auditTranscriptSecrets(
   for (;;) {
     const params: unknown[] = [cursor, BATCH];
     if (opts.sourceId) params.push(opts.sourceId);
-    const rows = await engine.executeRaw<{ id: number | string; slug: string; source_id: string; title: string; compiled_truth: string }>(
-      `SELECT id, slug, source_id, title, compiled_truth FROM pages
-        WHERE ${TRANSCRIPT_PAGE_PREDICATE} AND id > $1${opts.sourceId ? ' AND source_id = $3' : ''}
+    const rows = await engine.executeRaw<{ id: number | string; slug: string; source_id: string; content_hash: string | null; title: string; compiled_truth: string; frontmatter?: unknown }>(
+      `SELECT id, slug, source_id, content_hash, title, compiled_truth${conversations ? ', frontmatter' : ''} FROM pages
+        WHERE ${conversations ? CONVERSATION_PAGE_PREDICATE : TRANSCRIPT_PAGE_PREDICATE} AND id > $1${opts.sourceId ? ' AND source_id = $3' : ''}
         ORDER BY id LIMIT $2`,
       params,
     );
@@ -68,9 +134,14 @@ export async function auditTranscriptSecrets(
     for (const row of rows) {
       cursor = Number(row.id);
       pagesScanned++;
+      const scan = { highEntropy: true, labeledCredentials: true };
+      const frontmatter = conversations
+        ? frontmatterStrings(typeof row.frontmatter === 'string' ? JSON.parse(row.frontmatter) : row.frontmatter)
+        : [];
       const findings = [
-        ...scanText(row.title ?? '', { highEntropy: true, labeledCredentials: true }).map((f) => ({ ...f, line: 0 })),
-        ...scanText(row.compiled_truth ?? '', { highEntropy: true, labeledCredentials: true }),
+        ...scanText(row.title ?? '', scan).map((f) => ({ ...f, line: 0 })),
+        ...scanText(row.compiled_truth ?? '', scan),
+        ...frontmatter.flatMap((text) => scanText(text, scan).map((f) => ({ ...f, line: 0 }))),
       ];
       if (findings.length === 0) continue;
       const hits: Record<string, number> = {};
@@ -79,12 +150,14 @@ export async function auditTranscriptSecrets(
         byPattern[f.pattern] = (byPattern[f.pattern] ?? 0) + 1;
       }
       const lines = [...new Set(findings.map((f) => f.line).filter((l) => l > 0))].slice(0, LINES_PER_PAGE);
-      pages.push({ slug: row.slug, source_id: row.source_id, hits, lines });
+      pages.push({ id: Number(row.id), slug: row.slug, source_id: row.source_id, content_hash: row.content_hash ?? null, hits, lines });
     }
     if (rows.length < BATCH) break;
   }
   return {
+    scope,
     detector_version: TRANSCRIPT_SECRET_AUDIT_VERSION,
+    started_at: startedAt,
     scanned_at: (opts.now?.() ?? new Date()).toISOString(),
     source_id: opts.sourceId ?? null,
     pages_scanned: pagesScanned,
@@ -95,12 +168,54 @@ export async function auditTranscriptSecrets(
   };
 }
 
-/** Cache the summary (no slugs, no values) for the doctor check. Best effort. */
+/** The monitor record for a brain-wide conversations-scope result: ids and counts only. */
+export function conversationSecretAuditRecord(result: TranscriptSecretAuditResult): ConversationSecretAuditRecord {
+  if (result.scope !== 'conversations' || result.source_id !== null) {
+    throw new Error('Only a brain-wide conversations-scope audit makes a monitor record.');
+  }
+  const { pages, ...summary } = result;
+  return {
+    schema_version: CONVERSATION_SECRET_AUDIT_SCHEMA,
+    ...summary,
+    scope: 'conversations',
+    complete: true,
+    affected_pages: pages.slice(0, AFFECTED_PAGES_STORED).map((p) => ({ id: p.id, source_id: p.source_id, content_hash: p.content_hash, hits: p.hits })),
+    affected_pages_capped: pages.length > AFFECTED_PAGES_STORED,
+  };
+}
+
+/**
+ * Store an audit record only when it is not older than the stored one. Two
+ * audits can overlap (a daily job and a manual run); the one that STARTS
+ * later has the newer view, so an earlier run that finishes last must not
+ * replace it with a stale, falsely clean result. The comparison and the
+ * write are one statement, so two finishers cannot interleave a read and a
+ * write. Returns false when a newer record already won.
+ */
+async function saveNewestAuditRecord(engine: BrainEngine, key: string, value: string): Promise<boolean> {
+  const rows = await engine.executeRaw<{ value: string }>(
+    `INSERT INTO config (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+     WHERE (config.value::jsonb ->> 'started_at') IS NULL
+        OR (config.value::jsonb ->> 'started_at') <= (EXCLUDED.value::jsonb ->> 'started_at')
+     RETURNING value`,
+    [key, value],
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Cache the result for its reader. Best effort.
+ * `transcripts` scope: the doctor summary (no slugs, no values) in `transcripts.secret_audit`.
+ * `conversations` scope: the monitor record (no slugs, no values) in `conversations.secret_audit`.
+ */
 export async function saveTranscriptSecretAudit(engine: BrainEngine, result: TranscriptSecretAuditResult): Promise<boolean> {
-  const { pages: _pages, ...summary } = result;
   try {
-    await engine.setConfig(TRANSCRIPT_SECRET_AUDIT_KEY, JSON.stringify(summary));
-    return true;
+    if (result.scope === 'conversations') {
+      return await saveNewestAuditRecord(engine, CONVERSATION_SECRET_AUDIT_KEY, JSON.stringify(conversationSecretAuditRecord(result)));
+    }
+    const { pages: _pages, ...summary } = result;
+    return await saveNewestAuditRecord(engine, TRANSCRIPT_SECRET_AUDIT_KEY, JSON.stringify(summary));
   } catch {
     return false;
   }

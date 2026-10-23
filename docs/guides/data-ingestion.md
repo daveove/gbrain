@@ -150,6 +150,16 @@ asking the user. Rotate any real credential that reached a page (see
 ["If a secret reached the brain"](../../SECURITY.md#if-a-secret-reached-the-brain)),
 then re-run the audit.
 
+`gbrain transcripts audit-secrets --scope conversations --json` scans every
+conversation page in every source, imported or not, including frontmatter
+keys and string values. It stores a result record in the config row
+`conversations.secret_audit`: scan start and end times, pages scanned, hit
+counts per pattern and the affected page ids. The record holds no slug and no
+matched text. A read-only monitor reads that row instead of reading
+conversation pages, and reports a missing or old record as unknown, so
+schedule the command at least once a day. It exits 1 if the record is not
+saved.
+
 **Say to your agent:** *"Check my imported transcripts for passwords"* (your agent runs the audit, lists the pages by slug and asks before changing any).
 
 Or connect the account and skip the manual export entirely. `gbrain connectors`
