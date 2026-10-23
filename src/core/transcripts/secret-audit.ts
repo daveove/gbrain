@@ -82,17 +82,30 @@ export interface ConversationSecretAuditRecord extends TranscriptSecretAuditSumm
 /**
  * Frontmatter entries as `key: value` strings, depth first, so a labeled
  * credential keeps the delimiter between its label and value
- * (`password: hunter2`). Nested entries carry their full key path.
+ * (`password: hunter2`). A nested entry carries its full key path AND every
+ * ancestor boundary with the descendant scalar: a credential label can be an
+ * ancestor of the value (`{ password: { prod: 'hunter2' } }`), and the
+ * labeled detector needs the delimiter right after that ancestor label, not
+ * after the dotted path (`password: hunter2` as well as `password.prod:
+ * hunter2`).
  */
-function frontmatterStrings(value: unknown, prefix = '', out: string[] = []): string[] {
+function frontmatterStrings(value: unknown, path: string[] = [], out: string[] = []): string[] {
   if (Array.isArray(value)) {
-    for (const child of value) frontmatterStrings(child, prefix, out);
+    for (const child of value) frontmatterStrings(child, path, out);
   } else if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      frontmatterStrings(child, prefix ? `${prefix}.${key}` : key, out);
+      frontmatterStrings(child, [...path, key], out);
     }
   } else if (value !== null && value !== undefined) {
-    out.push(prefix ? `${prefix}: ${String(value)}` : String(value));
+    const scalar = String(value);
+    if (path.length === 0) {
+      out.push(scalar);
+    } else {
+      out.push(`${path.join('.')}: ${scalar}`);
+      for (let i = 0; i < path.length - 1; i++) {
+        out.push(`${path.slice(0, i + 1).join('.')}: ${scalar}`);
+      }
+    }
   }
   return out;
 }
@@ -172,6 +185,26 @@ export function conversationSecretAuditRecord(result: TranscriptSecretAuditResul
 }
 
 /**
+ * Store an audit record only when it is not older than the stored one. Two
+ * audits can overlap (a daily job and a manual run); the one that STARTS
+ * later has the newer view, so an earlier run that finishes last must not
+ * replace it with a stale, falsely clean result. The comparison and the
+ * write are one statement, so two finishers cannot interleave a read and a
+ * write. Returns false when a newer record already won.
+ */
+async function saveNewestAuditRecord(engine: BrainEngine, key: string, value: string): Promise<boolean> {
+  const rows = await engine.executeRaw<{ value: string }>(
+    `INSERT INTO config (key, value) VALUES ($1, $2)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+     WHERE (config.value::jsonb ->> 'started_at') IS NULL
+        OR (config.value::jsonb ->> 'started_at') <= (EXCLUDED.value::jsonb ->> 'started_at')
+     RETURNING value`,
+    [key, value],
+  );
+  return rows.length > 0;
+}
+
+/**
  * Cache the result for its reader. Best effort.
  * `transcripts` scope: the doctor summary (no slugs, no values) in `transcripts.secret_audit`.
  * `conversations` scope: the monitor record (no slugs, no values) in `conversations.secret_audit`.
@@ -179,12 +212,10 @@ export function conversationSecretAuditRecord(result: TranscriptSecretAuditResul
 export async function saveTranscriptSecretAudit(engine: BrainEngine, result: TranscriptSecretAuditResult): Promise<boolean> {
   try {
     if (result.scope === 'conversations') {
-      await engine.setConfig(CONVERSATION_SECRET_AUDIT_KEY, JSON.stringify(conversationSecretAuditRecord(result)));
-      return true;
+      return await saveNewestAuditRecord(engine, CONVERSATION_SECRET_AUDIT_KEY, JSON.stringify(conversationSecretAuditRecord(result)));
     }
     const { pages: _pages, ...summary } = result;
-    await engine.setConfig(TRANSCRIPT_SECRET_AUDIT_KEY, JSON.stringify(summary));
-    return true;
+    return await saveNewestAuditRecord(engine, TRANSCRIPT_SECRET_AUDIT_KEY, JSON.stringify(summary));
   } catch {
     return false;
   }
