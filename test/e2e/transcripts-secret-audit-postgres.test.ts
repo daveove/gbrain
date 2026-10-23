@@ -5,7 +5,7 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { hasDatabase, setupDB, teardownDB } from './helpers.ts';
-import { auditTranscriptSecrets, saveTranscriptSecretAudit } from '../../src/core/transcripts/secret-audit.ts';
+import { CONVERSATION_SECRET_AUDIT_KEY, auditTranscriptSecrets, saveTranscriptSecretAudit } from '../../src/core/transcripts/secret-audit.ts';
 import { transcriptSecretExposureCheck } from '../../src/commands/doctor/checks/transcript-secrets.ts';
 import type { DoctorContext } from '../../src/commands/doctor/context.ts';
 import type { PostgresEngine } from '../../src/core/postgres-engine.ts';
@@ -35,5 +35,19 @@ describe.skipIf(!RUN)('transcripts audit-secrets (Postgres)', () => {
     expect((await transcriptSecretExposureCheck(ctx))?.message).toContain('never been audited');
     await saveTranscriptSecretAudit(engine, result);
     expect((await transcriptSecretExposureCheck(ctx))?.message).toContain('found 3 credential hit(s) on 3 conversation page(s)');
+  });
+
+  test('conversations scope reads jsonb frontmatter and stores a record with page ids, never text (DAV-7162)', async () => {
+    await engine.putPage('conversations/manual/frontmatter-hit', {
+      type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { setup: `password: ${PW}` },
+    });
+    const result = await auditTranscriptSecrets(engine, { scope: 'conversations' });
+    expect(result.pages_scanned).toBe(31);
+    expect(result.pages_affected).toBe(4);
+    expect(await saveTranscriptSecretAudit(engine, result)).toBe(true);
+    const raw = (await engine.getConfig(CONVERSATION_SECRET_AUDIT_KEY)) ?? '';
+    expect(raw).not.toContain(PW);
+    expect(raw).not.toContain('conversations/');
+    expect(JSON.parse(raw).affected_pages).toHaveLength(4);
   });
 });
