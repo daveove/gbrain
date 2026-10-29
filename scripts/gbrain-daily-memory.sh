@@ -273,3 +273,16 @@ if [[ $seat_failure -ne 0 ]]; then
 fi
 [[ $facts_failure -eq 0 ]] || exit "$facts_failure"
 echo 'daily-memory ok' >> "$LOG"
+# DAV-7417: one private day-out page per agent role from the sessions captured
+# above. It runs only after a clean scheduled capture. A failure is logged and
+# never changes the exit code: the capture, not the summary, is what the night
+# is judged on.
+if [[ "$scheduled_run" -eq 1 ]]; then
+  agent_day_ec=0
+  run_command bun "$REPO/scripts/write-agent-day-digests.ts" "$day" || agent_day_ec=$?
+  if [[ $agent_day_ec -eq 0 ]]; then
+    printf 'agent-day ok %s\n' "$day" >> "$LOG"
+  else
+    printf 'agent-day failed (exit %s)\n' "$agent_day_ec" >> "$LOG"
+  fi
+fi
