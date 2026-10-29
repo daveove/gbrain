@@ -1,9 +1,9 @@
 /**
  * Write one private day-out page per agent role (DAV-7417).
  *
- *   bun scripts/write-agent-day-digests.ts [YYYY-MM-DD] [--dry-run]
+ *   bun scripts/write-agent-day-digests.ts [YYYY-MM-DD] [--zone Asia/Manila] [--dry-run]
  *
- * Reads `conversations/sessions/<date>-*` pages that the nightly daily-memory
+ * Reads the `conversations/sessions/*` pages that the nightly daily-memory
  * run captured, groups them by agent role, and writes
  * `digests/agent-day/<date>/<role>` through the normal `put` operation. No model
  * call, no network. `--dry-run` prints the pages and writes nothing.
@@ -13,8 +13,9 @@ import { loadConfig, toEngineConfig } from '../src/core/config.ts';
 import { createEngine } from '../src/core/engine-factory.ts';
 import { connectWithRetry } from '../src/core/db.ts';
 import { calendarDateInTimeZone } from '../src/core/cycle/cycle-date.ts';
+import type { BrainEngine } from '../src/core/engine.ts';
 import {
-  agentDaySlug, attributeRole, buildRoleDay, renderRoleDay, AGENT_ROLES,
+  agentDaySlug, attributeRole, buildRoleDay, dayStartUtc, renderRoleDay, AGENT_ROLES,
   type AgentRole, type SessionInput,
 } from '../src/core/digests/agent-day.ts';
 
@@ -47,42 +48,66 @@ async function putPage(slug: string, content: string): Promise<void> {
   if (code !== 0) throw new Error(`put ${slug} exited ${code}: ${err.slice(-400).replace(/postgres(ql)?:\/\/\S+/g, '[redacted-url]')}`);
 }
 
+export interface AgentDayBuild {
+  pages: { role: AgentRole; slug: string; content: string; sessions: number }[];
+  unattributed: number;
+}
+
+/**
+ * Day-out pages for one calendar day in `zone`. A slug carries the UTC date a
+ * session started, so a session that began on an earlier day and ran past
+ * midnight is not under today's prefix. Sessions are found by when their pages
+ * last changed; every part is read and only the day's turns are kept.
+ */
+export async function buildAgentDayPages(engine: BrainEngine, date: string, zone: string): Promise<AgentDayBuild> {
+  const touched = await engine.listPages({
+    slugPrefix: 'conversations/sessions/', updated_after: dayStartUtc(date, zone).toISOString(), limit: 20000, sort: 'updated_asc',
+  });
+  const bases = [...new Set(touched.map((row) => row.slug.replace(/-p\d+$/, '')))];
+  const pages = [];
+  for (const base of bases) {
+    for (let part = 1; ; part++) {
+      const page = await engine.getPage(part === 1 ? base : `${base}-p${part}`, { sourceId: SOURCE_ID });
+      if (!page) break;
+      const imported = page.frontmatter?.transcript_import as { session_id?: string } | undefined;
+      pages.push({ slug: page.slug, body: `${page.compiled_truth}\n${page.timeline}`, sessionId: imported?.session_id });
+    }
+  }
+  const byRole = new Map<AgentRole, SessionInput[]>();
+  let unattributed = 0;
+  for (const session of groupSessions(pages)) {
+    const role = attributeRole(session.text);
+    if (!role) { unattributed++; continue; }
+    byRole.set(role, [...(byRole.get(role) ?? []), session]);
+  }
+  const out = [];
+  for (const role of AGENT_ROLES) {
+    const day = buildRoleDay(role, date, byRole.get(role) ?? [], zone);
+    if (!day.sessions.length) continue;
+    out.push({ role, slug: agentDaySlug(date, role), content: renderRoleDay(day), sessions: day.sessions.length });
+  }
+  return { pages: out, unattributed };
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
-  const date = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a))
-    ?? calendarDateInTimeZone(new Date(), process.env.GBRAIN_DAILY_MEMORY_ZONE || process.env.TZ || 'Asia/Manila');
+  const zoneFlag = args.indexOf('--zone');
+  const zone = (zoneFlag >= 0 ? args[zoneFlag + 1] : undefined)
+    || process.env.GBRAIN_DAILY_MEMORY_ZONE || process.env.TZ || 'Asia/Manila';
+  const date = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a)) ?? calendarDateInTimeZone(new Date(), zone);
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
   const engineConfig = { ...toEngineConfig(config), poolSize: 1 };
   const engine = await createEngine(engineConfig);
-  const rendered: { role: AgentRole; slug: string; content: string; sessions: number }[] = [];
-  let unattributed = 0;
+  let built: AgentDayBuild;
   try {
     await connectWithRetry(engine, engineConfig);
-    const listed = await engine.listPages({ slugPrefix: `conversations/sessions/${date}-`, limit: 5000, sort: 'slug' });
-    const pages = [];
-    for (const row of listed) {
-      const page = await engine.getPage(row.slug, { sourceId: SOURCE_ID });
-      if (!page) continue;
-      const imported = page.frontmatter?.transcript_import as { session_id?: string } | undefined;
-      pages.push({ slug: page.slug, body: `${page.compiled_truth}\n${page.timeline}`, sessionId: imported?.session_id });
-    }
-    const byRole = new Map<AgentRole, SessionInput[]>();
-    for (const session of groupSessions(pages)) {
-      const role = attributeRole(session.text);
-      if (!role) { unattributed++; continue; }
-      byRole.set(role, [...(byRole.get(role) ?? []), session]);
-    }
-    for (const role of AGENT_ROLES) {
-      const day = buildRoleDay(role, date, byRole.get(role) ?? []);
-      if (!day.sessions.length) continue;
-      const slug = agentDaySlug(date, role);
-      rendered.push({ role, slug, content: renderRoleDay(day), sessions: day.sessions.length });
-    }
+    built = await buildAgentDayPages(engine, date, zone);
   } finally {
     await engine.disconnect();
   }
+  const { pages: rendered, unattributed } = built;
   const written: string[] = [];
   const failed: string[] = [];
   for (const page of rendered) {

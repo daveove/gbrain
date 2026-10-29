@@ -1,8 +1,10 @@
-import { describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  agentDaySlug, attributeRole, askText, buildRoleDay, renderRoleDay, splitTurns,
+  agentDaySlug, attributeRole, askText, buildRoleDay, dayStartUtc, renderRoleDay, splitTurns,
 } from '../src/core/digests/agent-day.ts';
-import { groupSessions, partNumber } from '../scripts/write-agent-day-digests.ts';
+import { buildAgentDayPages, groupSessions, partNumber } from '../scripts/write-agent-day-digests.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { resetPgliteState } from './helpers/reset-pglite.ts';
 
 const BUZZ_PROMPT = [
   'You are an agent operating inside Buzz. Start with the `Content:` field in the current `<buzz-event>`.',
@@ -85,5 +87,73 @@ describe('agent day-out digest', () => {
       { slug: 'd-omp-z', body: 'Z', sessionId: 's2' },
     ]);
     expect(grouped.find((g) => g.sessionId === 's1')).toEqual({ sessionId: 's1', slugs: ['d-omp-h', 'd-omp-h-p2'], text: 'A\nB' });
+  });
+});
+
+describe('agent day-out digest day boundaries (DAV-7417)', () => {
+  test('turn anchors are UTC and convert to the digest zone', () => {
+    const [early] = splitTurns('**Assistant** (2026-10-29 2:02 AM): a', 'Asia/Manila');
+    expect([early.date, early.time]).toEqual(['2026-10-29', '10:02']);
+    // 17:00 UTC on 29 Oct is 01:00 on 30 Oct in Manila.
+    const [late] = splitTurns('**Assistant** (2026-10-29 5:00 PM): b', 'Asia/Manila');
+    expect([late.date, late.time]).toEqual(['2026-10-30', '01:00']);
+  });
+
+  test('a day starts at local midnight, also across a daylight-saving change', () => {
+    expect(dayStartUtc('2026-10-29', 'Asia/Manila').toISOString()).toBe('2026-10-28T16:00:00.000Z');
+    expect(dayStartUtc('2026-11-01', 'America/New_York').toISOString()).toBe('2026-11-01T04:00:00.000Z');
+    expect(dayStartUtc('2026-11-02', 'America/New_York').toISOString()).toBe('2026-11-02T05:00:00.000Z');
+  });
+
+  test('a session spanning midnight keeps only the digest day, in Manila time', () => {
+    const text = [
+      `**User** (2026-10-28 3:00 PM): <base>\n${BUZZ_PROMPT}`,
+      '**Assistant** (2026-10-28 3:05 PM): I merged https://github.com/a/b/pull/1 before midnight.',
+      '**Assistant** (2026-10-29 3:05 AM): I opened https://github.com/a/b/pull/2 on the day.',
+      '**Assistant** (2026-10-29 5:00 PM): I opened https://github.com/a/b/pull/3 after Manila midnight.',
+    ].join('\n');
+    const day = buildRoleDay('yoda', '2026-10-29', [{ sessionId: 's', slugs: ['x'], text }], 'Asia/Manila');
+    expect(day.shipped.map((i) => i.text)).toEqual(['I opened https://github.com/a/b/pull/2 on the day.']);
+    expect(day.shipped[0].time).toBe('11:05');
+    expect(renderRoleDay(day)).toContain('Times are Asia/Manila.');
+  });
+});
+
+describe('agent day-out discovery (DAV-7417)', () => {
+  let engine: PGLiteEngine, version: string | null;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    version = await engine.getConfig('version');
+  }, 60_000);
+  afterAll(async () => { await engine.disconnect(); });
+  beforeEach(async () => {
+    await resetPgliteState(engine);
+    if (version) await engine.setConfig('version', version);
+  });
+
+  const seed = async (slug: string, body: string, sessionId: string, updatedAt: string) => {
+    await engine.putPage(slug, {
+      type: 'conversation', title: slug, compiled_truth: body, frontmatter: { transcript_import: { session_id: sessionId } },
+    });
+    await engine.executeRaw('UPDATE pages SET updated_at=$1::timestamptz WHERE source_id=$2 AND slug=$3', [updatedAt, 'default', slug]);
+  };
+
+  test('finds a session that started the day before by its updated pages, and reads every part', async () => {
+    // Slug date 28 Oct (UTC start); part 1 holds the prompt, part 2 holds 29 Oct turns.
+    await seed('conversations/sessions/2026-10-28-omp-aaaaaaaaaaaa',
+      `**User** (2026-10-28 3:00 PM): <base>\n${BUZZ_PROMPT}`, 's-span', '2026-10-28T20:00:00Z');
+    await seed('conversations/sessions/2026-10-28-omp-aaaaaaaaaaaa-p2',
+      '**Assistant** (2026-10-29 3:05 AM): I opened https://github.com/a/b/pull/9 today.', 's-span', '2026-10-29T10:00:00Z');
+    // Untouched since 20 Oct: out of the window even though it has a Manila 29 Oct anchor.
+    await seed('conversations/sessions/2026-10-20-omp-bbbbbbbbbbbb',
+      `**User** (2026-10-29 3:00 AM): <base>\n${BUZZ_PROMPT}\n**Assistant** (2026-10-29 3:05 AM): I opened https://github.com/a/b/pull/8.`,
+      's-old', '2026-10-20T00:00:00Z');
+    const built = await buildAgentDayPages(engine, '2026-10-29', 'Asia/Manila');
+    expect(built.pages.map((p) => p.slug)).toEqual(['digests/agent-day/2026-10-29/yoda']);
+    expect(built.pages[0].content).toContain('pull/9');
+    expect(built.pages[0].content).not.toContain('pull/8');
+    expect(built.pages[0].sessions).toBe(1);
   });
 });
