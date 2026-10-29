@@ -25,6 +25,13 @@ identifiers and attribution are available in the pre-removal Git revision
 - Restore complete local agent-session capture and deterministic daily-memory indexes on the current managed publication APIs, including OMP, Pi, OpenCode, and Cursor adapters.
 - Add repository-only nightly launcher helpers and the spend-capped facts runner; reuse current canonical wanted-link wakeups rather than the retired pending-reference registry.
 
+### Changed
+
+- DAV-7022: `main` is this fork's default branch. CI workflow triggers (`push`, `pull_request`, `pull_request_target`, `workflow_run`) run on `main`, and the CI tooling that keys off the default branch follows: baseline and diff gates read `origin/main`, nightly-watch, master-red, ci-health and the release gate count push runs on `main`, and the release gate publishes only from `refs/heads/main`. The `master-red` issue label keeps its name; the old `master` branch is archived as tag `archive/master-v0.48.3`.
+- DAV-7022: this fork's CI runs on GitHub-hosted `ubuntu-24.04` / `ubuntu-24.04-arm` runners instead of upstream's Ubicloud labels, which have no runners here. The upstream-only fix-wave gate runs only in garrytan/gbrain, so it no longer fails every same-repository PR into the fork's `main`.
+- DAV-7022: restamp VERSION and CHANGELOG recovery diagnostics name the selected base ref, including an explicit `--base`, rather than directing operators to the archived branch.
+- DAV-7022: run this fork's verify checks one at a time on its 4-vCPU runner after repeated cold typecheck contention timeouts at four-way and two-way fanout. Every guard, the 120-second per-check deadline and the local CPU-adaptive dispatcher remain unchanged.
+
 ### Fixed
 
 - DAV-7404: the nightly daily-memory writer no longer exits 1 for three non-failures. A queued `autopilot-daily-memory` job that outlives its own timeout is retried or dead-lettered by the queue, logged, and the drain continues with the next job. The job timeout is now 20 minutes (was 10; a heavy historical day rewrite passed 600 s), and migration v245 raises pending jobs still at 10 minutes. A generated daily-index backlog left because the extract time budget ran out ends as success with a log line; pages left although the budget was not used up still fail the run. A userless Codex subagent rollout (`session_meta` `source.subagent`) is skipped, reported in `skippedFiles`, and no longer holds the codex seat watermark as drift; a top-level userless rollout stays drift.
