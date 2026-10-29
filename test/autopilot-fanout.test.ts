@@ -295,7 +295,7 @@ describe('dispatchPerSource — integration with stubbed engine + queue', () => 
           idempotency_key: `autopilot-daily:${day}:legacy:2026-05-22T12:00:00.000Z${suffix}:${dependencies}`,
           delay: 0,
           max_attempts: 2,
-          timeout_ms: 600_000,
+          timeout_ms: 1_200_000,
         },
       })),
     ]);

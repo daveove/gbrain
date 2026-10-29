@@ -129,6 +129,8 @@ export interface IngestFileOutcome {
   drift: boolean;
   /** E-N4: assistant turns parsed with zero user turns (counted in driftFiles). */
   userTurnsMissing?: boolean;
+  /** Understood and deliberately not imported (a userless Codex subagent rollout); not drift. */
+  skipped?: FileDiagnostics['skipped'];
   /** Adapter degraded to a bounded read (e.g. codex head+tail) — part of the file was never scanned. */
   truncated: boolean;
   error?: string;
@@ -147,6 +149,8 @@ export interface TranscriptsIngestResult {
   imperatives: number;
   partsDeleted: number;
   driftFiles: number;
+  /** Files skipped as understood (see IngestFileOutcome.skipped); they never hold the watermark. */
+  skippedFiles: number;
   /** Files whose adapter reported a truncated (partially-unscanned) read. */
   truncatedFiles: number;
   erroredFiles: number;
@@ -204,6 +208,7 @@ export async function runTranscriptsIngest(
     imperatives: 0,
     partsDeleted: 0,
     driftFiles: 0,
+    skippedFiles: 0,
     truncatedFiles: 0,
     erroredFiles: 0,
     slugsTouched: [],
@@ -644,6 +649,10 @@ async function adoptExistingBaseSlug(engine: BrainEngine, sourceId: string, rend
 /** Fold one file's adapter diagnostics into its outcome and the run result (drift, skipped lines, truncation). */
 function applyFileDiagnostics(diag: FileDiagnostics, fileOutcome: IngestFileOutcome, result: TranscriptsIngestResult): void {
   fileOutcome.skippedLines = diag.skippedLines;
+  if (diag.skipped) {
+    fileOutcome.skipped = diag.skipped;
+    result.skippedFiles++;
+  }
   if (diag.bytesRead > 0 && diag.sessions === 0 && !diag.expectedEmpty) {
     fileOutcome.drift = true;
     result.driftFiles++;
