@@ -35,6 +35,8 @@ export interface DayItem {
 export interface RoleDay {
   role: AgentRole;
   date: string;
+  /** IANA zone of `date` and of every rendered time. */
+  zone: string;
   sessions: string[];
   sessionSlugs: string[];
   asked: DayItem[];
@@ -57,15 +59,42 @@ const WAIT_RE = /(dave must(?! do:? ?nothing)|waiting on dave|needs dave|parked 
 const NOTHING_RE = /dave must do:?\s*nothing|nothing blocked|not blocked|no blocker/i;
 const FAIL_RE = /\b(failed|failure|exit [1-9]\d?|timed out|time out|not verified|crashed|rejected|could not|cannot)\b/i;
 
-export function splitTurns(text: string): Turn[] {
+/** Calendar date and 24-hour time of an instant in an IANA zone. */
+export function zonedParts(instantMs: number, zone: string): { date: string; time: string } {
+  const parts: Record<string, string> = {};
+  for (const p of new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(instantMs))) parts[p.type] = p.value;
+  return { date: `${parts.year}-${parts.month}-${parts.day}`, time: `${parts.hour}:${parts.minute}` };
+}
+
+/** The UTC instant at which a calendar day starts in an IANA zone. */
+export function dayStartUtc(date: string, zone: string): Date {
+  const midnightUtc = Date.parse(`${date}T00:00:00Z`);
+  const offsetAt = (instantMs: number): number => {
+    const local = zonedParts(instantMs, zone);
+    return Date.parse(`${local.date}T${local.time}:00Z`) - instantMs;
+  };
+  // The second pass uses the offset in force at the first answer, which is
+  // right on a day where the zone changes its offset.
+  return new Date(midnightUtc - offsetAt(midnightUtc - offsetAt(midnightUtc)));
+}
+
+/**
+ * Captured turn anchors are UTC (`**User** (2026-10-29 2:02 AM):`). They are
+ * converted to `zone` here so the day filter and the rendered times agree.
+ */
+export function splitTurns(text: string, zone = 'UTC'): Turn[] {
   const marks = [...text.matchAll(TURN_RE)];
   return marks.map((m, i) => {
     const start = (m.index ?? 0) + m[0].length;
     const end = i + 1 < marks.length ? (marks[i + 1].index ?? text.length) : text.length;
+    const hour = Number(m[3]) % 12 + (m[5] === 'PM' ? 12 : 0);
+    const local = zonedParts(Date.parse(`${m[2]}T${String(hour).padStart(2, '0')}:${m[4]}:00Z`), zone);
     return {
       role: m[1] === 'User' ? 'user' as const : 'assistant' as const,
-      date: m[2],
-      time: `${String(Number(m[3]) % 12 + (m[5] === 'PM' ? 12 : 0)).padStart(2, '0')}:${m[4]}`,
+      date: local.date,
+      time: local.time,
       text: text.slice(start, end).trim(),
     };
   });
@@ -126,14 +155,14 @@ function dedupe(items: DayItem[]): DayItem[] {
   });
 }
 
-export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInput[]): RoleDay {
+export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInput[], zone = 'UTC'): RoleDay {
   const out: RoleDay = {
-    role, date, sessions: [], sessionSlugs: [], asked: [], shipped: [], waiting: [], failed: [],
+    role, date, zone, sessions: [], sessionSlugs: [], asked: [], shipped: [], waiting: [], failed: [],
     links: { prs: [], issues: [] },
   };
   const prs = new Set<string>(), issues = new Set<string>();
   for (const s of sessions) {
-    const turns = splitTurns(s.text).filter((t) => t.date === date);
+    const turns = splitTurns(s.text, zone).filter((t) => t.date === date);
     if (!turns.length) continue;
     const firstAsk = turns.find((t) => t.role === 'user');
     if (firstAsk && MEETING_RE.test(firstAsk.text.slice(0, 4000))) continue;
@@ -191,7 +220,7 @@ export function renderRoleDay(day: RoleDay): string {
     '',
     `# ${name} day-out ${day.date}`,
     '',
-    `Extractive summary of ${day.sessions.length} captured session(s). Lines are copied from the session text, not paraphrased. Times are Asia/Manila.`,
+    `Extractive summary of ${day.sessions.length} captured session(s). Lines are copied from the session text, not paraphrased. Times are ${day.zone}.`,
     '',
     section('Asked', day.asked, 'No ask found in captured sessions.'),
     section('Shipped', day.shipped, 'No merged, opened or posted item with a PR or Linear link.'),
