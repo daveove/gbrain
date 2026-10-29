@@ -5,8 +5,12 @@ import { MinionQueue } from '../minions/queue.ts';
 import { calculateBackoff } from '../minions/backoff.ts';
 import { runDailyMemoryJob, type DailyMemoryAfterWrite } from './daily-memory-followup.ts';
 
+export type DailyMemoryJobTimeout = { id: number; day: unknown; terminal: boolean };
+
 export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
   signal?: AbortSignal; afterWrite: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
+  /** Called after a job that outlived its own timeout is recorded as failed. */
+  onJobTimeout?: (timeout: DailyMemoryJobTimeout) => void;
 }): Promise<number> {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
   const deadline = Date.now() + (opts.timeBudgetMs ?? 60_000);
@@ -82,11 +86,17 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
         return processed;
       }
       if (shutdown || leaseLost || renewalFailed) throw error;
+      // A job that outlives its own timeout fails like any worker-run timeout:
+      // failJob retries or dead-letters it. That is the job's outcome, not the
+      // drain's, so the drain records it and moves on to the next job.
+      const jobTimedOut = message === 'Inline daily memory job timed out'
+        || abortReason === 'Inline daily memory job timed out';
       const terminal = job.attempts_made + 1 >= job.max_attempts;
       const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));
       if (!failed) throw new Error('Inline daily memory failure fence lost', { cause: error });
-      throw error;
+      if (!jobTimedOut) throw error;
+      opts.onJobTimeout?.({ id: job.id, day: job.data.daily_memory_date, terminal });
     } finally {
       stopped = true;
       clearInterval(timer); clearTimeout(timeout);

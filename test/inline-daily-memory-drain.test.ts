@@ -89,17 +89,39 @@ test('consumer deadline defers debt and returns cleanly without burning an attem
   expect(row?.data.daily_memory_date).toBe(day);
 });
 
-test('a job outliving its own timeout fails through the retry path instead of staying active', async () => {
-  const queue = new MinionQueue(engine), day = '2026-01-25'; await seed(day);
+test('a job outliving its own timeout fails through the retry path and the drain moves on', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-25', next = '2026-01-26';
+  await seed(day); await seed(next);
   await writeDailyMemoryFromSources(engine, { date: day });
   const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 2, timeout_ms: 1_200 });
-  await expect(drainInlineDailyMemory(engine, { timeBudgetMs: 60_000, afterWrite: async (_daily, signal) => {
-    signal!.throwIfAborted();
-    await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
-  } })).rejects.toThrow('Inline daily memory job timed out');
+  const later = await queue.add('autopilot-daily-memory', dailyData(next), { max_attempts: 2 });
+  const timeouts: unknown[] = [];
+  await expect(drainInlineDailyMemory(engine, { timeBudgetMs: 60_000, onJobTimeout: timeout => { timeouts.push(timeout); },
+    afterWrite: async (daily, signal) => {
+      if (daily.day !== day) return;
+      signal!.throwIfAborted();
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+    } })).resolves.toBe(1);
+  expect(timeouts).toEqual([{ id: job.id, day, terminal: false }]);
   const row = await queue.getJob(job.id);
   expect(row?.status).toBe('delayed');
   expect(row?.attempts_made).toBe(1);
+  expect(row?.error_text).toContain('Inline daily memory job timed out');
+  expect((await queue.getJob(later.id))?.status).toBe('completed');
+});
+
+test('a timeout on the last attempt dead-letters the job without failing the drain', async () => {
+  const queue = new MinionQueue(engine), day = '2026-01-27'; await seed(day);
+  await writeDailyMemoryFromSources(engine, { date: day });
+  const job = await queue.add('autopilot-daily-memory', dailyData(day), { max_attempts: 1, timeout_ms: 1_200 });
+  const timeouts: unknown[] = [];
+  await expect(drainInlineDailyMemory(engine, { timeBudgetMs: 60_000, onJobTimeout: timeout => { timeouts.push(timeout); },
+    afterWrite: async (_daily, signal) => {
+      signal!.throwIfAborted();
+      await new Promise<void>((_resolve, reject) => signal!.addEventListener('abort', () => reject(signal!.reason), { once: true }));
+    } })).resolves.toBe(0);
+  expect(timeouts).toEqual([{ id: job.id, day, terminal: true }]);
+  expect((await queue.getJob(job.id))?.status).toBe('dead');
 });
 
 test('insufficient shared budget stops claiming without touching waiting work', async () => {

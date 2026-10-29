@@ -11,8 +11,11 @@ export type DailyJob = { id: number; data: Record<string, unknown>; signal?: Abo
 const TERMINAL = new Set(['completed', 'failed', 'dead', 'cancelled']);
 const PENDING = new Set(['waiting', 'active', 'delayed', 'waiting-children', 'paused']);
 // A first write of a busy day is many round trips to a remote database (about
-// a minute on a hosted Postgres), so 60 seconds timed out every attempt.
-const DAILY_MEMORY_JOB_TIMEOUT_MS = 10 * 60_000;
+// a minute on a hosted Postgres), so 60 seconds timed out every attempt. A
+// rewrite of a heavy historical day took 381 s and later passed 600 s
+// (DAV-7404). 20 minutes stays inside the nightly writer's 30-minute drain
+// budget, so the job's own timeout still bounds one slow day.
+const DAILY_MEMORY_JOB_TIMEOUT_MS = 20 * 60_000;
 function isDay(day: unknown): day is string {
   return typeof day === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(day)
     && Number.isFinite(Date.parse(day)) && utcDate(new Date(day)) === day;

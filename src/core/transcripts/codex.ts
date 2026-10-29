@@ -94,7 +94,7 @@ export function isRepeatedCodexUserTurn(previous: { role: string; text: string }
  * result rather than with an inferred one.
  */
 export type CodexLineResult =
-  | { kind: 'session'; sessionId?: string; cwd?: string; startedAt?: string; cliVersion?: string; modelProvider?: string }
+  | { kind: 'session'; sessionId?: string; cwd?: string; startedAt?: string; cliVersion?: string; modelProvider?: string; subagent: boolean }
   | { kind: 'user'; message: TranscriptMessage }
   | { kind: 'assistant'; message: TranscriptMessage }
   | { kind: 'tool_call'; name: string; input: unknown }
@@ -131,6 +131,9 @@ export function mapCodexLine(entry: unknown): CodexLineResult {
       startedAt: typeof payload.timestamp === 'string' ? utcTimestamp(payload.timestamp) : lineTs || undefined,
       cliVersion: typeof payload.cli_version === 'string' ? payload.cli_version : undefined,
       modelProvider: typeof payload.model_provider === 'string' ? payload.model_provider : undefined,
+      // A thread spawned by another agent records source {subagent: {...}};
+      // a top-level session records a string such as "cli" or "exec".
+      subagent: typeof payload.source === 'object' && payload.source !== null && 'subagent' in payload.source,
     };
   }
   if (e.type === 'compacted') return { kind: 'boundary' };
@@ -197,6 +200,7 @@ export const codexAdapter: TranscriptAdapter = {
     let startedAt = '';
     const messages: TranscriptMessage[] = [];
     let rawMeta: Record<string, unknown> | undefined;
+    let subagent = false;
 
     for (const line of raw.split('\n')) {
       const t = line.trim();
@@ -216,6 +220,7 @@ export const codexAdapter: TranscriptAdapter = {
         if (mapped.sessionId) sessionId = mapped.sessionId;
         if (mapped.cwd) cwd = mapped.cwd;
         if (mapped.startedAt) startedAt = mapped.startedAt;
+        subagent = mapped.subagent;
         rawMeta = {
           session_id: sessionId,
           cwd: cwd ?? null,
@@ -235,6 +240,12 @@ export const codexAdapter: TranscriptAdapter = {
       // the consumer that keeps calls and boundary positions.
     }
 
+    const userTurnsMissing = messages.length > 0 && !messages.some((m) => m.role === 'user');
+    if (userTurnsMissing && subagent) {
+      // DAV-7404: the parent agent is this rollout's only "user", so there is
+      // no human turn to remember. Skip it as understood, not as drift.
+      return { bytesRead, skippedLines, truncated, sessions: 0, expectedEmpty: true, skipped: 'subagent_without_user_turns' };
+    }
     let sessions = 0;
     if (messages.length > 0) {
       sessions = 1;
@@ -257,7 +268,7 @@ export const codexAdapter: TranscriptAdapter = {
       sessions,
       zeroSessionsReason:
         sessions === 0 ? 'no user turns (user_message or item_completed UserMessage) or assistant message items in rollout' : undefined,
-      userTurnsMissing: messages.length > 0 && !messages.some((m) => m.role === 'user') ? true : undefined,
+      userTurnsMissing: userTurnsMissing ? true : undefined,
     };
   },
 };

@@ -84,6 +84,41 @@ test('one-shot extract retries when selected daily indexes remain stale', async 
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
+/** An extract stub that uses up its whole time budget by moving a mocked clock past it. */
+const budgetBurner = () => {
+  const realNow = Date.now;
+  let skew = 0;
+  const clock = spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+  const extract: typeof extractStaleFromDB = async (_engine, opts) => {
+    skew += (opts?.timeBudgetMs ?? 0) + 1;
+    return { linksCreated: 0, timelineCreated: 0, pagesProcessed: 0, staleRemaining: 1 };
+  };
+  return { clock, extract };
+};
+
+test('one-shot writer succeeds when the extract time budget runs out with generated debt left', async () => {
+  await seed();
+  const { clock, extract } = budgetBurner();
+  try {
+    const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', { timeBudgetMs: 50, extract });
+    expect(result.written || result.needs_extract).toBe(true);
+  } finally { clock.mockRestore(); }
+  expect(await engine.countStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID })).toBe(1);
+  expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
+});
+
+test('extractOneShotDailyMemory throws on a budget-deferred backlog unless deferral is allowed', async () => {
+  await seed();
+  await writeDailyMemoryFromSources(engine, { date: '2026-09-30' });
+  const { clock, extract } = budgetBurner();
+  try {
+    await expect(extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { timeBudgetMs: 50, extract }))
+      .rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+    expect(await extractOneShotDailyMemory(engine, { written: false, needs_extract: true },
+      { timeBudgetMs: 50, extract, allowBudgetDeferral: true })).toBe(1);
+  } finally { clock.mockRestore(); }
+});
+
 test('one-shot extract fails when a generated index lands during the sweep', async () => {
   await seed();
   await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
@@ -460,7 +495,7 @@ test('historical one-shot recovery preserves same-source human graph and waterma
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);
 });
 
-test('historical one-shot exhausted budget reports retained generated debt without touching human pages', async () => {
+test('historical one-shot exhausted budget retains generated debt as success without touching human pages', async () => {
   await ensureDailyMemorySource(engine);
   await engine.putPage('daily-memory/2026-09-28', {
     type: 'note', title: 'Historical fixture', compiled_truth: '', frontmatter: { dream_generated: true },
@@ -470,8 +505,8 @@ test('historical one-shot exhausted budget reports retained generated debt witho
   }, { sourceId: DAILY_MEMORY_SOURCE_ID });
   const before = await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
     [DAILY_MEMORY_SOURCE_ID]);
-  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', { timeBudgetMs: 0 }))
-    .rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+  const result = await runOneShotDailyMemoryWrite(engine, '2026-09-30', { timeBudgetMs: 0 });
+  expect(result.reason).toBe('human_page');
   expect(await engine.executeRaw('SELECT slug,knowledge_revision,updated_at,links_extracted_at FROM pages WHERE source_id=$1 ORDER BY slug',
     [DAILY_MEMORY_SOURCE_ID])).toEqual(before);
   expect(await engine.executeRaw('SELECT id FROM minion_jobs')).toHaveLength(0);

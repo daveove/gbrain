@@ -194,12 +194,16 @@ export async function runOneShotDailyMemoryWrite(
   // The callback defers each day's extraction to the single pass below; without
   // one, the drained job would queue an extract job no worker here runs. A day
   // write takes over a minute on a large brain, so the nightly run drains under
-  // its own budget instead of the inline autopilot's 60 seconds.
+  // its own budget instead of the inline autopilot's 60 seconds. A queued job
+  // that outlives its own timeout is retried or dead-lettered by the queue and
+  // does not fail the night.
   let drainError: unknown;
   try {
     await drainInlineDailyMemory(engine, {
       signal: deps.signal, afterWrite: async () => {}, maxJobs: Number.MAX_SAFE_INTEGER,
       timeBudgetMs: Number(process.env.GBRAIN_DAILY_MEMORY_DRAIN_MS) || 30 * 60_000,
+      onJobTimeout: ({ id, day, terminal }) => console.error(
+        `daily-memory: queued job ${id} (day ${String(day)}) timed out; ${terminal ? 'dead-lettered' : 'retry scheduled'}`),
     });
   } catch (error) {
     if (deps.signal?.aborted) throw error;
@@ -219,7 +223,9 @@ export async function runOneShotDailyMemoryWrite(
   // Extract once after every write so the whole-brain link setup is paid once
   // and stale generated indexes drain with tonight's. A failed job still
   // extracts what was written, then fails; budget-deferred backlog is not failure.
-  await extractOneShotDailyMemory(engine, { written: false, needs_extract: true }, { ...extractDeps, signal: deps.signal });
+  const deferred = await extractOneShotDailyMemory(engine, { written: false, needs_extract: true },
+    { ...extractDeps, signal: deps.signal, allowBudgetDeferral: true });
+  if (deferred > 0) console.error(`daily-memory: extract time budget reached; ${deferred} generated daily-index pages wait for the next run`);
   if (drainError) throw drainError;
   return result;
 }
