@@ -23,8 +23,9 @@ interface MockState {
 function makeMockEngine(state: MockState): BrainEngine {
   const config = state.config ?? (state.config = new Map());
   const order = state.order ?? (state.order = []);
+  const builtIndexes = new Set<string>();
   const engine = {
-    executeRaw: async (sql: string) => {
+    executeRaw: async (sql: string, params?: unknown[]) => {
       state.calls.push(sql);
       order.push(sql);
       if (state.failOn && state.failOn.test(sql)) throw new Error(`injected failure: ${state.failOn}`);
@@ -32,11 +33,16 @@ function makeMockEngine(state: MockState): BrainEngine {
       if (sql.includes('SELECT') && sql.includes('FROM pages WHERE search_vector')) {
         return [{ pages: state.rowsToReturn.pages, chunks: state.rowsToReturn.chunks }];
       }
+      if (sql.includes('FROM pg_index')) {
+        return builtIndexes.has(String(params?.[0])) ? [{ valid: true, ready: true, building: false }] : [];
+      }
       return [];
     },
     runMigration: async (_version: number, sql: string) => {
       state.calls.push(sql);
       order.push(sql);
+      const created = sql.match(/CREATE INDEX IF NOT EXISTS (\w+)/);
+      if (created) builtIndexes.add(created[1]);
     },
     transaction: async <T>(fn: (tx: BrainEngine) => Promise<T>) => fn(engine),
     getConfig: async (key: string) => config.get(key) ?? null,
@@ -52,13 +58,14 @@ function makeMockEngine(state: MockState): BrainEngine {
   return engine;
 }
 
-/** The facts keyword index swap the command ends with (facts/fts-index.ts on a non-Postgres engine with no index yet): 8 statements. */
+/** Facts keyword swap on a non-Postgres engine: includes pre/post-build VALID+READY probes. */
 function expectFactsSwap(calls: string[], lang: string): void {
   expect(calls.map(sql => sql.trim().split(/\s+/).slice(0, 6).join(' '))).toEqual([
-    'SELECT i.indisvalid AS valid, pg_get_indexdef(i.indexrelid) AS',
-    'SELECT i.indisvalid AS valid, pg_get_indexdef(i.indexrelid) AS',
-    'SELECT to_regclass($1) IS NOT NULL AS',
+    'SELECT i.indisvalid AS valid, i.indisready AS',
+    'SELECT i.indisvalid AS valid, i.indisready AS',
+    'SELECT i.indisvalid AS valid, i.indisready AS',
     'CREATE INDEX IF NOT EXISTS idx_facts_fts_next',
+    'SELECT i.indisvalid AS valid, i.indisready AS',
     'DROP INDEX IF EXISTS idx_facts_fts_old',
     'ALTER INDEX IF EXISTS idx_facts_fts RENAME',
     'ALTER INDEX idx_facts_fts_next RENAME TO idx_facts_fts',
@@ -143,8 +150,8 @@ describe('runReindexSearchVector', () => {
 
     // 1 inventory + 2 CREATE + 2 backfill batches (mock returns no rows, so
     // the keyset loop terminates after the first batch per table) + the facts
-    // keyword index swap (8) = 13 calls
-    expect(state.calls.length).toBe(13);
+    // keyword index swap (9) = 14 calls
+    expect(state.calls.length).toBe(14);
     expect(state.calls[1]).toContain('CREATE OR REPLACE FUNCTION update_page_search_vector');
     expect(state.calls[1]).toContain("to_tsvector('pt_br'");
     expect(state.calls[2]).toContain('CREATE OR REPLACE FUNCTION update_chunk_search_vector');
@@ -171,7 +178,7 @@ describe('runReindexSearchVector', () => {
 
     expect(result.status).toBe('ok');
     expect(result.language).toBe('english');
-    expect(state.calls.length).toBe(13);
+    expect(state.calls.length).toBe(14);
 
     // Trigger recreates (calls 1, 2) and chunks backfill (call 4) embed the
     // language literal. Pages backfill (call 3) is UPDATE-to-self that
@@ -303,7 +310,7 @@ describe('runReindexSearchVector', () => {
       expect([...state.config!.keys()]).toEqual([]);
       // The existing executeRaw shape is untouched (config goes through
       // get/set/unsetConfig, not executeRaw).
-      expect(state.calls.length).toBe(13);
+      expect(state.calls.length).toBe(14);
     });
 
     test('resumes the chunks backfill from the persisted checkpoint when the marker matches the language', async () => {

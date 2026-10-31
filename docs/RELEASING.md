@@ -90,7 +90,7 @@ re-check, and a "Next step for the agent" block plus a JSON block.
 - **Closing:** nightly-watch closes the issue only when a later scheduled run is
   green with complete evidence and every previously failing job executed. A
   skipped job never closes it.
-- **Re-check after a fix:** `gh workflow run <workflow>.yml --ref master`, then
+- **Re-check after a fix:** `gh workflow run <workflow>.yml --ref main`, then
   `gh workflow run nightly-watch.yml -f run_id=<that scheduled run id>` to preview
   (`-f dry_run=true`) or apply the issue update.
 - **Dependency advisories:** pull requests block on `bun audit` only when they change
@@ -101,7 +101,7 @@ re-check, and a "Next step for the agent" block plus a JSON block.
 ## Master-red issues
 
 nightly-watch keeps one `master-red` issue per workflow (`Master red: Test`,
-`Master red: E2E Tests`) for push-to-master runs; scheduled runs stay in
+`Master red: E2E Tests`) for push-to-main runs; scheduled runs stay in
 `nightly-red`. The body names each failing job, every failing test file with
 its `bun run test:stress` reproduce line, and the suspect range (last green
 push SHA, first red SHA, merged PRs). Labels, close rules and recovery steps:
@@ -121,23 +121,23 @@ push SHA, first red SHA, merged PRs). Labels, close rules and recovery steps:
 ## Merge queue
 
 `test.yml` and `e2e.yml` carry `merge_group` triggers. They are inert until the
-merge queue is enabled for `master` in the repository settings; check with
-`gh api repos/garrytan/gbrain/rulesets` (or the branch protection page). Queue runs use
+merge queue is enabled for `main` in the repository settings; check with
+`gh api repos/daveove/gbrain/rulesets` (or the branch protection page). Queue runs use
 the pull-request profile against the queued merge commit: primary native scope,
 the newest Bun version only in the security and persistence matrices, the
 2,500-write soak and the 10,001-page export scale; the E2E selector diffs the
-queued commit against `master`.
+queued commit against `main`.
 
-- Without the queue, a release rebases onto the latest `origin/master` and re-runs
+- Without the queue, a release rebases onto the latest `origin/main` and re-runs
   the full CI (`test.yml`, `e2e.yml`, persistence-validation) immediately before
-  merging, because a stale base can break master even when the PR was green.
+  merging, because a stale base can break main even when the PR was green.
 - With the queue on, `gh pr merge` only enqueues the PR. Wait until the PR is
   actually merged (`gh pr view <n> --json state,mergedAt`) before tagging,
   announcing or starting dependent work.
 
 ## CHANGELOG + VERSION are branch-scoped
 
-**VERSION and CHANGELOG describe what THIS branch adds vs master, not how we got
+**VERSION and CHANGELOG describe what THIS branch adds vs main, not how we got
 here.** Every feature branch that ships gets its own version bump and CHANGELOG
 entry. The entry is product release notes for users; it is not a log of internal
 decisions, review rounds, or codex findings.
@@ -147,14 +147,14 @@ iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
 in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
 per branch, covering what the branch added vs the base branch.
 
-**Never edit a CHANGELOG entry that already landed on master.** If master has
+**Never edit a CHANGELOG entry that already landed on main.** If main has
 v0.18.2.0 and your branch adds features, bump to the next PATCH version
-(v0.18.3.0, never MINOR) instead of editing master's v0.18.2.0. When merging master into your branch, master may
-bring new CHANGELOG entries above yours — push your entry above master's
+(v0.18.3.0, never MINOR) instead of editing main's v0.18.2.0. When merging main into your branch, main may
+bring new CHANGELOG entries above yours; push your entry above main's
 latest and verify:
 
-- Does CHANGELOG have your branch's own entry separate from master's entries?
-- Is VERSION higher than master's VERSION?
+- Does CHANGELOG have your branch's own entry separate from main's entries?
+- Is VERSION higher than main's VERSION?
 - Is your entry the topmost `## [X.Y.Z]` entry?
 - `grep "^## \[" CHANGELOG.md` shows a contiguous version sequence?
 
@@ -190,28 +190,28 @@ and migration numbers without races. Preview first with `--dry-run`, which
 prints every planned edit, predicted merge conflict, migration renumbering
 and the commit it would make, and changes nothing.
 
-**Say to your agent:** *"Restamp this branch onto master, it's next to merge."*
+**Say to your agent:** *"Restamp this branch onto main, it's next to merge."*
 
 1. Refuses a dirty working tree (commit or `git stash -u` first) and a
-   failed fetch (offline: `git fetch origin master`, then rerun).
+   failed fetch (offline: `git fetch origin main`, then rerun).
 2. Captures the branch's CHANGELOG entry (the sections above the newest entry
-   it shares with master; one entry per branch) and its migration inventory.
-3. Merges `origin/master` with a merge commit. Version-only hunks in the stamp
+   it shares with main; one entry per branch) and its migration inventory.
+3. Merges `origin/main` with a merge commit. Version-only hunks in the stamp
    files, `CHANGELOG.md` and generated files (migration registry,
    `llms*.txt`, plugin trees, the template repo,
    `bun.lock`) resolve mechanically; any other conflict stops with the file
    list.
-4. Sets VERSION to master's `MAJOR.MINOR.(PATCH+1).0` and rewrites every
+4. Sets VERSION to main's `MAJOR.MINOR.(PATCH+1).0` and rewrites every
    required row of the CLAUDE.md "Version locations" table: VERSION,
    `package.json`, the three plugin manifests, the BOOTSTRAP runbook stamp,
-   the CHANGELOG entry (re-stamped on top of master's entries with today's
+   the CHANGELOG entry (re-stamped on top of main's entries with today's
    date), and branch-added TODOS lines naming the old version.
-5. Renumbers the branch's own schema migrations (files `origin/master` does
-   not have) consecutively from master's latest + 1, in their original order.
+5. Renumbers the branch's own schema migrations (files `origin/main` does
+   not have) consecutively from main's latest + 1, in their original order.
    It changes only the filename, the `export const v<NNN>` name and the
    `version:` literal, and proves the rest of the file is token-identical.
    Published migrations are never renumbered or edited; a branch file whose
-   payload matches a migration master already published under another number
+   payload matches a migration main already published under another number
    (squash-merged or cherry-picked) stops with the `git rm` fix.
 6. Regenerates the migration registry, `bun.lock`, the bootstrap template
    repo and everything `bun run regen:all` covers. Migration behavior runs
@@ -224,7 +224,7 @@ and the commit it would make, and changes nothing.
    with `--continue` when a line means the published migration.
 8. Runs the drift checks (version stamps and CHANGELOG agree, bootstrap
    stamp, plugin tree, template repo, migration registry and order), commits
-   once as `v<new> chore(release): restamp onto master v<master>`, and prints
+   once as `v<new> chore(release): restamp onto main v<main>`, and prints
    the old-to-new migration mapping with the collision-recovery steps, the
    golden-regeneration reason for the PR body, the PR title and
    `bun run verify`.
@@ -248,7 +248,7 @@ wrong, so the files stay stamped and one command rewrites them.
 
 **Why migration IDs stay sequential.** A brain records one integer,
 `schema_version`, and the runner applies every migration above it in order.
-A migration numbered at or below master's latest is skipped forever on
+A migration numbered at or below main's latest is skipped forever on
 current brains, which `check:schema-migration-order` rejects. Unordered IDs
 (timestamps, hashes) would need a per-migration applied-set table and a
 bookkeeping migration for every existing brain. Renumbering at merge time,
@@ -525,7 +525,7 @@ If any SHA differs from what's in the workflow files, update the pin and version
 ## GitHub releases (binary assets + self-update) — #3521
 
 `.github/workflows/release.yml` publishes a GitHub release automatically for
-**every VERSION bump that lands on master** (trigger: push to master touching
+**every VERSION bump that lands on main** (trigger: push to main touching
 `VERSION`, plus `workflow_dispatch` for a manual first run or repair). No
 manual tag push is part of the ship flow — the workflow reads `VERSION` (the
 single source of truth), mints tag `v<VERSION>` at the pushed commit, titles
@@ -542,18 +542,18 @@ jobs pin the same Bun version.
 ### Release CI gate
 
 The `ci-gate` job (`scripts/release-gate.ts`) holds build, publication and the
-`latest-stable` move until the push-to-master runs of Test and E2E Tests both
+`latest-stable` move until the push-to-main runs of Test and E2E Tests both
 succeed on the release commit.
 
 - **Failed run:** nothing is published and the job fails with the run and the
-  master-red issue. After master is green again, publish the current VERSION
-  with `gh workflow run release.yml --ref master`.
-- **Run cancelled by a newer push:** the gate follows the next master commit.
+  master-red issue. After main is green again, publish the current VERSION
+  with `gh workflow run release.yml --ref main`.
+- **Run cancelled by a newer push:** the gate follows the next main commit.
   If it contains the release commit and carries the same VERSION, that commit
   is gated and published. If VERSION moved on, this version is skipped and the
   newer VERSION's release run publishes.
-- **Backfill:** `gh workflow run release.yml --ref master` gates and publishes
-  master HEAD's VERSION. Other refs are refused.
+- **Backfill:** `gh workflow run release.yml --ref main` gates and publishes
+  main HEAD's VERSION. Other refs are refused.
 - The gate waits up to 110 minutes, then fails with the backfill command.
 
 ### The `latest-stable` tag
@@ -597,7 +597,7 @@ Configure it as a repo secret; when absent, template publishing is disabled
 and the job skips cleanly.
 
 Why every bump, not selective: `gbrain check-update` resolves the latest
-version from `VERSION` on master, while binary self-update
+version from `VERSION` on upstream `garrytan/gbrain`'s `master`, while binary self-update
 (`src/core/binary-self-update.ts`) downloads assets from `releases/latest`.
 Any release that lags `VERSION` tells binary installs an upgrade exists that
 self-update cannot apply. `releases/latest` must track `VERSION`.
@@ -612,7 +612,7 @@ Invariants:
 - **Idempotent + self-repairing.** The version job skips when a release for
   `v<VERSION>` already exists with all expected assets; a partial release
   (tag but no release, or missing assets) is completed on re-run. Racing
-  master pushes queue via the `release` concurrency group — a skipped
+  main pushes queue via the `release` concurrency group; a skipped
   intermediate version is fine, latest is what matters.
 - **Historical tags are never rewritten.** Old 3-segment versions keep their
   history; every new 4-segment `VERSION` mints a fresh tag.
@@ -639,6 +639,10 @@ When in doubt, run `gh pr view <N> --json commits --jq '[.commits[].messageHeadl
 to see what's actually in the PR before writing the body.
 
 ## Community PR wave process
+
+This section describes upstream `garrytan/gbrain` policy and its `master`
+branch. The contributor gate is disabled in this fork; it is not a setup
+instruction for `daveove/gbrain`'s `main`.
 
 Never merge external PRs directly into master. Instead, use the "fix wave" workflow:
 

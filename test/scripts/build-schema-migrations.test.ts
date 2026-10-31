@@ -6,7 +6,7 @@
  * became one file per migration. Fails when the generator silently sorts, drops
  * or duplicates a file, when a filename and its version/name disagree, when the
  * committed registry drifts from the directory, or when the out-of-order rule
- * stops catching a version at or below origin/master's latest.
+ * stops catching a version at or below origin/main's latest.
  */
 import { afterEach, describe, expect, test } from 'bun:test';
 import { spawnSync } from 'node:child_process';
@@ -175,9 +175,9 @@ describe('generator diagnostics (FAIL/Why/Fix/See)', () => {
 
 describe('out-of-order landing check', () => {
   test('reads the base ref versions (pre-W3 base parses migrate.ts literals)', () => {
-    const r = spawnSync('git', ['rev-parse', '--verify', '-q', 'origin/master^{commit}'], { cwd: REPO });
-    if (r.status !== 0) return; // no origin/master in this checkout; the CI verify job fetches it
-    const base = baseMigrations('origin/master');
+    const r = spawnSync('git', ['rev-parse', '--verify', '-q', 'origin/main^{commit}'], { cwd: REPO });
+    if (r.status !== 0) return; // no origin/main in this checkout; the CI verify job fetches it
+    const base = baseMigrations('origin/main');
     expect(base.size).toBeGreaterThan(150);
     expect(base.get(2)).toBe('slugify_existing_pages');
   });
