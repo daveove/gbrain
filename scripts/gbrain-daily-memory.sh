@@ -245,6 +245,22 @@ raise SystemExit(0 if clean is True else 1)
   # without dropping the pinned day across a midnight boundary.
   export GBRAIN_DAILY_MEMORY_LOOKBACK=1
   set -- "$day"
+  # The writer also refreshes the predecessor day and any capped lookback
+  # backlog. Read its watermark before the writer advances it, so the digest
+  # step below rebuilds those same days; a session imported after its own
+  # night then still reaches that day's agent digest.
+  lookback_watermark="$(bun "$REPO/src/cli.ts" config get cycle.daily_memory_last_lookback_day 2> >(sed -E 's#postgres(ql)?://[^[:space:]]+#[redacted-url]#g' >> "$LOG") || true)"
+  lookback_watermark="${lookback_watermark%%$'\n'*}"
+  digest_days=()
+  while IFS= read -r digest_day; do
+    [[ -n "$digest_day" ]] && digest_days+=("$digest_day")
+  done < <(bun -e '
+const { lookbackRecoveryDays } = await import(process.argv[1]);
+for (const day of lookbackRecoveryDays(process.argv[2], process.argv[3])) console.log(day);
+' "$REPO/scripts/write-daily-memory.ts" "$day" "$lookback_watermark" 2>> "$LOG")
+  if [[ ${#digest_days[@]} -eq 0 ]]; then
+    digest_days=("$day")
+  fi
 fi
 printf 'daily-memory start %s zone=%s\n' "$(TZ="$zone" date '+%Y-%m-%d %H:%M:%S %z')" "$zone" >> "$LOG"
 run_command bun "$REPO/scripts/write-daily-memory.ts" "$@"
@@ -273,3 +289,18 @@ if [[ $seat_failure -ne 0 ]]; then
 fi
 [[ $facts_failure -eq 0 ]] || exit "$facts_failure"
 echo 'daily-memory ok' >> "$LOG"
+# DAV-7417: one private day-out page per agent role from the sessions captured
+# above. It runs only after a clean scheduled capture. A failure is logged and
+# never changes the exit code: the capture, not the summary, is what the night
+# is judged on.
+if [[ "$scheduled_run" -eq 1 ]]; then
+  for digest_day in "${digest_days[@]}"; do
+    agent_day_ec=0
+    run_command bun "$REPO/scripts/write-agent-day-digests.ts" "$digest_day" || agent_day_ec=$?
+    if [[ $agent_day_ec -eq 0 ]]; then
+      printf 'agent-day ok %s\n' "$digest_day" >> "$LOG"
+    else
+      printf 'agent-day failed (exit %s)\n' "$agent_day_ec" >> "$LOG"
+    fi
+  done
+fi
