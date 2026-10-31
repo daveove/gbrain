@@ -539,7 +539,8 @@
         "loadConfigFileOnly",
         "loadConfigWithEngine",
         "saveConfig",
-        "toEngineConfig"
+        "toEngineConfig",
+        "userHomeDir"
       ],
       "./core/guardrails": [
         "GuardrailLoadError",

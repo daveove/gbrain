@@ -2882,6 +2882,13 @@
         "signature": [
           "(config: GBrainConfig) => EngineConfig"
         ]
+      },
+      {
+        "kind": "function",
+        "name": "userHomeDir",
+        "signature": [
+          "() => string"
+        ]
       }
     ],
     "./core/guardrails": [
