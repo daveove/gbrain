@@ -71,7 +71,7 @@ bun install -g github:garrytan/gbrain#latest-stable
 gbrain init --pglite --no-embedding
 ```
 
-> **If `bun install -g` hits a postinstall error** (Bun blocks postinstall hooks in some environments), the CLI prints a recovery hint pointing at [#218](https://github.com/garrytan/gbrain/issues/218). Run `gbrain doctor` to diagnose, then `gbrain apply-migrations --yes --no-autopilot-install` manually. The deterministic fallback is `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && GBRAIN_NO_AUTOPILOT_INSTALL=1 bun install && bun link`.
+> **If `gbrain doctor` reports `schema_version: 0` or `bun install -g` hits a postinstall error:** the package postinstall hook applies no migrations unless `GBRAIN_POSTINSTALL_APPLY_MIGRATIONS=1` is set on the install command (it prints one line saying so), and Bun blocks postinstall hooks in some environments. `gbrain init` applies the schema; the CLI also prints a recovery hint pointing at [#218](https://github.com/garrytan/gbrain/issues/218). Run `gbrain doctor` to diagnose, then `gbrain apply-migrations --yes --no-autopilot-install` manually. The deterministic fallback is `git clone https://github.com/garrytan/gbrain.git ~/gbrain && cd ~/gbrain && GBRAIN_NO_AUTOPILOT_INSTALL=1 bun install && bun link`.
 
 The init flow detects your repo size and suggests Supabase for brains > 1000 markdown files. Agent-harness installs that want Postgres first can run the ladder instead:
 
