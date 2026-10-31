@@ -151,7 +151,10 @@ export function collidingSlugOwner(existing: Pick<Page, 'source_path' | 'deleted
   sourceRoot: string | undefined, sourcePath: string | undefined): string | null {
   const owner = existing?.source_path;
   if (!owner || existing?.deleted_at || sourceRoot === undefined || sourcePath === undefined) return null;
-  if (owner === sourcePath || sourcePath === `${slug}.md` || slugifyPath(owner) !== slug) return null;
+  // The owner counts when its path designates this slug. A page restored to a
+  // non-normalized slug (`a--b`, see storedSlugForPath) is designated through
+  // slugifyPath, so compare the normalized forms rather than the raw slug.
+  if (owner === sourcePath || sourcePath === `${slug}.md` || slugifyPath(owner) !== slugifyPath(`${slug}.md`)) return null;
   const ownerFile = pathUnderRoot(sourceRoot, owner);
   const candidateFile = pathUnderRoot(sourceRoot, sourcePath);
   if (ownerFile === null || candidateFile === null) return null;

@@ -157,4 +157,24 @@ describe('import updates the stored page for a double-hyphen slug', () => {
     const result = await importFromFile(engine, write(rel, text), rel, { noEmbed: true, sourceId: SOURCE });
     expect(result.slug).toBe('notes/i-j');
   });
+
+  // A--B.md and a--b.md are two files only on a case-sensitive filesystem.
+  const caseSensitive = (() => {
+    const probe = mkdtempSync(join(tmpdir(), 'gbrain-case-probe-'));
+    writeFileSync(join(probe, 'p.md'), '');
+    try { realpathSync.native(join(probe, 'P.md')); return false; } catch { return true; }
+  })();
+  test.skipIf(!caseSensitive)('a differently cased file does not take over the page another file owns', async () => {
+    await seed('k--l', SOURCE);
+    const owned = 'k--l.md';
+    expect((await importFromFile(engine, write(owned, doc('Owner', 'Owner body.')), owned, { noEmbed: true, sourceId: SOURCE })).status).toBe('imported');
+    const intruder = 'K--L.md';
+    const result = await importFromFile(engine, write(intruder, doc('Intruder', 'Intruder body.')), intruder, { noEmbed: true, sourceId: SOURCE });
+    expect(result.status).toBe('skipped');
+    expect(result.skip_reason).toBe('slug_collision');
+    const [page] = await engine.executeRaw<{ compiled_truth: string; source_path: string }>(
+      `SELECT compiled_truth, source_path FROM pages WHERE source_id = $1 AND slug = 'k--l'`, [SOURCE]);
+    expect(page.source_path).toBe(owned);
+    expect(page.compiled_truth).toContain('Owner body.');
+  });
 });
