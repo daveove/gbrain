@@ -19,7 +19,7 @@
       "page_projection_jobs": 3,
       "persistence_requests": 4,
       "persistence_effects": 6,
-      "minion_jobs": 7,
+      "minion_jobs": 2,
       "access_tokens": 2,
       "oauth_clients": 2,
       "oauth_tokens": 1,
@@ -74,7 +74,7 @@
       "orphan_running": { "state": "running", "attempts": 1, "execution_token": "00000000-0000-4000-8000-0000000000c1", "claim_expires_at": "2026-03-10T00:05:00.000Z" }
     },
     "stale_job": { "status": "active", "claim_generation": 1, "lock_token": "legacy-fixture-stale-lease", "lock_until": "2026-03-10T00:00:00.000Z" },
-    "daily_jobs": { "day": "2026-03-09", "timezone": "UTC", "status": "waiting", "barriers": 3, "continuations": 3, "timeout_ms": 1200000, "valid_handoffs": true },
+    "daily_jobs": { "day": "2026-03-09", "timezone": "UTC", "status": "waiting", "barriers": 1, "continuations": 0, "timeout_ms": 1200000, "valid_handoffs": true },
     "queued_request": { "request_id": "00000000-0000-4000-8000-0000000000a1", "state": "queued", "slug": "notes/queued-request", "source_id": "managed-wiki" },
     "managed_requests": { "state": "committed", "count": 3 },
     "tokens": {
@@ -98,7 +98,7 @@
       "oauth_clients": 2,
       "oauth_tokens": 1,
       "persistence_local_writers": 3,
-      "minion_jobs": 9,
+      "minion_jobs": 2,
       "gbrain_cycle_locks": 0
     },
     "absent_tables": ["gbrain_cycle_locks"],
@@ -108,7 +108,7 @@
       "orphan_running": { "state": "queued", "attempts": 1, "execution_token": null, "claim_expires_at": null }
     },
     "stale_job": { "status": "waiting", "claim_generation": 1, "lock_token": null, "lock_until": null },
-    "daily_jobs": { "day": "2026-03-09", "timezone": "UTC", "status": "waiting", "barriers": 4, "continuations": 4, "timeout_ms": 1200000, "valid_handoffs": true },
+    "daily_jobs": { "day": "2026-03-09", "timezone": "UTC", "status": "waiting", "barriers": 1, "continuations": 0, "timeout_ms": 1200000, "valid_handoffs": true },
     "worktree_heartbeat_at": null,
     "queued_request": { "state": "committed", "replay_creates_row": false },
     "tokens_authorize": {
