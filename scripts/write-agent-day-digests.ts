@@ -42,7 +42,8 @@ export function groupSessions(pages: { slug: string; body: string; sessionId?: s
 /** The generator owns these pages, so a rerun replaces the whole page (`--force`), as the Grok Bot digests do. */
 async function putPage(slug: string, content: string): Promise<void> {
   const cli = new URL('../src/cli.ts', import.meta.url).pathname;
-  const args = ['put', slug, '--source-id', SOURCE_ID, '--force', '--request-id', randomUUID()];
+  // The default 30 s commit wait ends as exit 10 (pending) while the nightly run loads the DB.
+  const args = ['put', slug, '--source-id', SOURCE_ID, '--force', '--wait', '300', '--request-id', randomUUID()];
   const proc = Bun.spawn([process.execPath, cli, ...args], { stdin: new TextEncoder().encode(content), stdout: 'pipe', stderr: 'pipe' });
   const [code, err] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
   if (code !== 0) throw new Error(`put ${slug} exited ${code}: ${err.slice(-400).replace(/postgres(ql)?:\/\/\S+/g, '[redacted-url]')}`);
