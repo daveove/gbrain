@@ -162,6 +162,43 @@ export function collidingSlugOwner(existing: Pick<Page, 'source_path' | 'deleted
   }
 }
 
+export type StoredSlugDecision =
+  | { kind: 'none' }
+  | { kind: 'stored'; slug: string }
+  | { kind: 'ambiguous'; slugs: string[] };
+
+/**
+ * The slug a stored page already has for a file whose path-derived slug is
+ * `expectedSlug` (path-to-stored-slug lookup). slugifyPath collapses runs of
+ * hyphens and strips accents and case, so a page stored as `a--b` (a source
+ * that keys pages by a slug with `--`) is re-derived from its own file name
+ * `a--b.md` as `a-b`, and the import would mint a twin instead of updating
+ * the stored page. This looks the page up by the file's own stem (the stored
+ * slug) and then by `source_path`, inside `sourceId` only.
+ *
+ * Anti-spoof matches the #3772 identity restore: a candidate counts only when
+ * its slug normalizes (slugifyPath) to the path-derived slug, so a file can
+ * only reach pages its own path already designates. The stem hit wins; a
+ * live row beats a soft-deleted one; two different `source_path` owners are
+ * ambiguous and the caller skips the file. No query runs when the stem is
+ * already the path-derived slug, so ordinary imports pay nothing.
+ */
+export async function storedSlugForPath(engine: BrainEngine, sourceId: string | undefined, sourcePath: string, expectedSlug: string): Promise<StoredSlugDecision> {
+  const stem = sourcePath.replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\.mdx?$/i, '').toLowerCase();
+  if (!expectedSlug || !stem || stem === expectedSlug) return { kind: 'none' };
+  const rows = await engine.executeRaw<{ slug: string; deleted: boolean }>(
+    `SELECT slug, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id = $1 AND (slug = $2 OR source_path = $3)`,
+    [sourceId ?? 'default', stem, sourcePath],
+  );
+  const reachable = rows.filter(row => row.slug !== expectedSlug && slugifyPath(`${row.slug}.md`) === expectedSlug);
+  const live = reachable.filter(row => !row.deleted);
+  const pool = live.length > 0 ? live : reachable;
+  if (pool.some(row => row.slug === stem)) return { kind: 'stored', slug: stem };
+  const slugs = [...new Set(pool.map(row => row.slug))];
+  if (slugs.length === 1) return { kind: 'stored', slug: slugs[0]! };
+  return slugs.length > 1 ? { kind: 'ambiguous', slugs } : { kind: 'none' };
+}
+
 /**
  * A repo-relative path joined to its (absolute, normalized) import root, or
  * null when it would escape the root.
