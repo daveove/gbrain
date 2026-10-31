@@ -974,7 +974,10 @@ describe('#3374 — transient network retry branch', () => {
 describe('runEmbed CLI flag wiring (--stale --source)', () => {
   test('--source <id> on CLI threads sourceId into countStaleChunks', async () => {
     let receivedOpts: unknown;
+    // --stale takes a single-flight lock per source; a granting stub keeps this test on the flag wiring.
     const engine = mockEngine({
+      kind: 'pglite',
+      db: { query: async () => ({ rows: [{ id: 'media-corpus', fence: '1' }] }) },
       countStaleChunks: async (opts: unknown) => {
         receivedOpts = opts;
         return 0; // short-circuit so we don't hit listStaleChunks
