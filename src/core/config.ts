@@ -1671,9 +1671,9 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   // set auto_link false` — same unregistered-key class as auto_chronicle.
   'auto_link',
   // Entity mention index (core/mentions/policy.ts): off switch, +type/-type linkable types, names never linked, pages never linked (#5829),
-  // aliases never derived, multi-word declared aliases, identity siblings; search's alias fan-out cap and generated-page demotion.
+  // aliases never derived, multi-word declared aliases, identity siblings; search's alias fan-out cap, generated-page demotion and short-query lexical anchor (DAV-7120).
   'mentions.auto_link', 'mentions.entity_types', 'mentions.ignore', 'mentions.exclude_slugs', 'mentions.alias_deny', 'mentions.multiword_aliases',
-  'mentions.sibling_merge', 'search.alias_fanout_max', 'search.demote_generated',
+  'mentions.sibling_merge', 'search.alias_fanout_max', 'search.demote_generated', 'search.lexical_anchor',
   // #4987: the write-path timeline extractor's off switch (read by
   // isAutoTimelineEnabled); registered so `gbrain config set auto_timeline off`
   // works without --force, as the compiled-truth guide documents.
@@ -1921,6 +1921,17 @@ export function toEngineConfig(config: GBrainConfig): EngineConfig {
   };
 }
 
+/**
+ * The operator's home directory for default-path resolution. Reads an absolute
+ * `process.env.HOME` at call time, because Bun freezes `os.homedir()` at process
+ * start and an in-process HOME change (tests) would not move it. Any other HOME
+ * value falls back to `os.homedir()`, as before.
+ */
+export function userHomeDir(): string {
+  const fromEnv = process.env.HOME?.trim();
+  return fromEnv && isAbsolute(fromEnv) ? fromEnv : homedir();
+}
+
 export function configDir(): string {
   // Allow override for tests, Docker, and multi-tenant deployments.
   // GBRAIN_HOME is a parent dir; we always append '.gbrain' ourselves so
@@ -1937,7 +1948,7 @@ export function configDir(): string {
     }
     return join(trimmed, '.gbrain');
   }
-  return join(homedir(), '.gbrain');
+  return join(userHomeDir(), '.gbrain');
 }
 
 export function configPath(): string {

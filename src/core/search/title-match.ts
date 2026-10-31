@@ -43,7 +43,7 @@ export function tokenizeTitle(s: string): string[] {
 }
 
 /** Content tokens = tokens that aren't stopwords. */
-function contentTokens(tokens: string[]): string[] {
+export function contentTokens(tokens: string[]): string[] {
   return tokens.filter(t => !STOPWORDS.has(t));
 }
 

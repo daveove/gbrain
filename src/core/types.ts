@@ -1019,6 +1019,8 @@ export interface SearchResult {
   chronicle_boost?: number;
   /** Multiplier applied by applyExactMatchBoost. */
   exact_match_boost?: number;
+  /** DAV-7120 — lift applied by applyLexicalAnchor (short query: keyword arm #1 over a vector-only rank 1). */
+  lexical_anchor_boost?: number;
   /** Multiplier applied by applyGraphSignals (adjacency hit). */
   graph_adjacency_boost?: number;
   /** Multiplier applied by applyGraphSignals (cross-source hit). */

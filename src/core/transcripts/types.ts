@@ -92,6 +92,14 @@ export interface FileDiagnostics {
    * ingest reports it as drift and holds the watermark.
    */
   userTurnsMissing?: boolean;
+  /**
+   * The file was understood and deliberately not imported. A Codex subagent
+   * rollout (session_meta source.subagent) talks only to its parent agent, so
+   * it has assistant turns and no human user turn. It is reported as skipped,
+   * never as drift, so the seat watermark advances past it. A top-level
+   * rollout with no user turn stays drift (userTurnsMissing).
+   */
+  skipped?: 'subagent_without_user_turns';
 }
 
 export interface ParseSessionsOpts {

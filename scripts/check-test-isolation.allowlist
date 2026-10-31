@@ -20,7 +20,6 @@
 # patterns it is testing detection of. The file does NOT mutate
 # process.env at runtime. Permanent — do not remove.
 test/scripts/check-test-isolation.test.ts
-test/autopilot-install.test.ts
 test/bootstrap.test.ts
 test/brain-resolver.test.ts
 test/check-resolvable-cli.test.ts

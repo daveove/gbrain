@@ -15,6 +15,7 @@ import { KNOWN_CONFIG_KEYS } from '../src/core/config.ts';
 import { KNOB_CONFIG_KEY, SEARCH_MODE_CONFIG_KEYS, SEARCH_MODE_KEY } from '../src/core/search/mode.ts';
 import { REMOTE_PRIVATE_PAGES_KEY } from '../src/core/search/private-visibility.ts';
 import { PAGE_RANK_CUT_FACTOR_KEY, PAGE_RANK_CUT_KEY } from '../src/core/search/page-rank-cut.ts';
+import { LEXICAL_ANCHOR_KEY } from '../src/core/search/lexical-anchor.ts';
 
 /** search.* keys read directly via engine.getConfig (not mode-bundle knobs). */
 const DIRECTLY_READ_SINGLETONS = [
@@ -41,6 +42,7 @@ const DIRECTLY_READ_SINGLETONS = [
   'search.crag_escalation',                  // ops/search.ts
   'search.alias_fanout_max',                 // search/alias-fanout.ts
   'search.demote_generated',                 // search/provenance-demotion.ts
+  LEXICAL_ANCHOR_KEY,                        // search/lexical-anchor.ts
   'search.crag_think',                       // ops/search.ts
   'search.return_unit',                      // search/evidence-delivery.ts
   'search.return_window',

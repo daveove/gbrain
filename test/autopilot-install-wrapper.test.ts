@@ -25,7 +25,9 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 
 import { writeWrapperScript } from '../src/commands/autopilot.ts';
+import { resolveAutopilotJob } from '../src/core/autopilot-paths.ts';
 import { withEnv } from './helpers/with-env.ts';
+import { realpathSync } from 'fs';
 
 const NO_GBRAIN_PATH = '/usr/bin:/bin';
 
@@ -58,6 +60,9 @@ async function withRig(fn: (rig: Rig) => void | Promise<void>): Promise<void> {
         let wrapperPath: string;
         try {
           wrapperPath = writeWrapperScript(repoDir, 'ephemeral-container');
+          const gbrainRoot = realpathSync(join(gbrainHome, '.gbrain'));
+          expect(realpathSync(wrapperPath).startsWith(gbrainRoot)).toBe(true);
+          expect(realpathSync(resolveAutopilotJob().wrapperPath).startsWith(gbrainRoot)).toBe(true);
         } finally {
           process.execPath = originalExecPath;
         }

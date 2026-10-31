@@ -29,6 +29,7 @@ import { scopeDeniedError } from '../core/ops/op-fix.ts';
 import { resolveStrictParamsMode } from '../mcp/validate-params.ts';
 import { GBRAIN_CLIENT_HEADER, resolveResultRowsMode, resultRowsForRequest, type ResultRowsMode } from '../mcp/result-rows.ts';
 import { buildToolDefs } from '../mcp/tool-defs.ts';
+import { requestIngress, withIngress, type RequestIngress } from '../mcp/request-ingress.ts';
 import {
   filterOpsForSurface,
   advertisedOps,
@@ -57,6 +58,8 @@ interface McpRequestState {
   surfaceAllowedOps: ReadonlySet<string> | undefined;
   /** C1: search/query row shape for this request (thin-client header, else host `mcp.result_rows`). */
   resultRows: ResultRowsMode;
+  /** DAV-7074: Funnel / tailnet / loopback / network, logged as params.ingress on every row. */
+  ingress: RequestIngress;
 }
 
 export function mountMcp(app: Express, ctx: ServeHttpContext): void {
@@ -161,7 +164,8 @@ export function mountMcp(app: Express, ctx: ServeHttpContext): void {
     authInfo.effectiveSurface = surface;
     const surfaceAllowedOps: ReadonlySet<string> | undefined =
       surface === 'full' && authInfo.allowedOperations == null ? undefined : new Set(mcpOperations.map(o => o.name));
-    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows };
+    const ingress = requestIngress(header => req.get(header), req.socket.remoteAddress);
+    const state: McpRequestState = { authInfo, agentName, startTime, mcpOperations, surface, surfaceCeiling, surfaceAllowedOps, resultRows, ingress };
     const server = createMcpRequestServer(ctx, state, writeback);
     await serveMcpRequest(server, req, res);
   });
@@ -272,7 +276,7 @@ async function listMcpTools(ctx: ServeHttpContext, state: McpRequestState) {
       `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [authInfo.clientId, agentName, 'tools/list', latency, 'success'],
-      [{ tool_count: tools.length }],
+      [withIngress({ tool_count: tools.length }, state.ingress)],
     );
   } catch { /* best effort */ }
   broadcastEvent({
@@ -430,7 +434,7 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
         `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
         [authInfo.clientId, agentName, name, latency, 'error', errorPayload.message],
-        [logParamsObj],
+        [withIngress(logParamsObj, state.ingress)],
       );
     } catch { /* best effort */ }
     broadcastEvent({
@@ -463,7 +467,7 @@ async function rejectUnknownMcpOperation(ctx: ServeHttpContext, state: McpReques
       `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [authInfo.clientId, agentName, name, latency, 'error', `unknown_operation: ${name}`],
-      [null],
+      [withIngress(null, state.ingress)],
     );
   } catch { /* best effort */ }
   broadcastEvent({
@@ -506,7 +510,7 @@ async function rejectInsufficientMcpScope(
       `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [authInfo.clientId, agentName, name, latency, 'denied_after_list', `insufficient_scope: requires '${requiredScope}'`],
-      [null],
+      [withIngress(null, state.ingress)],
     );
   } catch { /* best effort */ }
   broadcastEvent({
@@ -562,7 +566,7 @@ async function recordMcpToolResult(
         `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
          VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
         [authInfo.clientId, agentName, name, latency, errStatus, errMsg],
-        [pending ? { ...(logParamsObj && typeof logParamsObj === 'object' ? logParamsObj : {}), write_request_id: pending.request_id } : logParamsObj],
+        [withIngress(pending ? { ...(logParamsObj && typeof logParamsObj === 'object' ? logParamsObj : {}), write_request_id: pending.request_id } : logParamsObj, state.ingress)],
       );
     } catch { /* best effort */ }
     broadcastEvent({
@@ -589,7 +593,7 @@ async function recordMcpToolResult(
       `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, params)
        VALUES ($1, $2, $3, $4, $5, $6::jsonb)`,
       [authInfo.clientId, agentName, name, latency, successStatus],
-      [logParamsObj],
+      [withIngress(logParamsObj, state.ingress)],
     );
   } catch { /* best effort */ }
   broadcastEvent({

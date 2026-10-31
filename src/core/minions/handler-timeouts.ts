@@ -48,6 +48,7 @@
 const THIRTY_MIN_MS = 30 * 60 * 1000;
 const SIXTY_MIN_MS = 60 * 60 * 1000;
 const TEN_MIN_MS = 10 * 60 * 1000;
+const TWENTY_MIN_MS = 20 * 60 * 1000;
 
 /**
  * Default wall-clock budget (ms) for long-running handler types. A handler
@@ -62,7 +63,8 @@ export const HANDLER_DEFAULT_TIMEOUT_MS: Readonly<Record<string, number>> = {
   // #2194 fix #3: brain-wide maintenance (embed-all/orphans/purge/…) can run
   // longer than a single source cycle; give it the same 30-min budget.
   'autopilot-global-maintenance': THIRTY_MIN_MS,
-  'autopilot-daily-memory': TEN_MIN_MS,
+  // A heavy historical day rewrite passed 10 minutes (DAV-7404).
+  'autopilot-daily-memory': TWENTY_MIN_MS,
   // #5761: a brain-wide `extract --stale` pass (the remediation plan submits it
   // without --timeout-ms) walks every stale page; same 30-min budget.
   extract: THIRTY_MIN_MS,

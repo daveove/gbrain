@@ -20,6 +20,7 @@ import { hookStatusPath, readHeartbeatTail, runHook } from '../src/commands/hook
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { runTranscriptsIngest } from '../src/core/transcripts/ingest.ts';
+import { fmtSummary } from '../src/commands/transcripts.ts';
 
 const FIXTURE_0154 = join(import.meta.dir, 'fixtures', 'transcripts', 'codex-rollout-0154.jsonl');
 
@@ -165,6 +166,43 @@ describe('E-N4: assistant turns with no user turn are flagged, never silent', ()
     expect(diag.userTurnsMissing).toBe(true);
   });
 
+  // DAV-7404: a thread spawned by another agent has the parent agent as its
+  // only "user". The first session_meta marks it (source.subagent); the
+  // inherited parent header and the injected role-user response_item follow.
+  const subagentMeta = JSON.stringify({
+    timestamp: '2026-10-01T09:00:00.000Z',
+    type: 'session_meta',
+    payload: { id: 'r-sub', session_id: 'r-sub', timestamp: '2026-10-01T09:00:00.000Z', cwd: '/repo', cli_version: '0.162.0',
+      source: { subagent: { thread_spawn: { parent_thread_id: 'r-parent', depth: 1, agent_path: '/root/review' } } } },
+  });
+  const parentMeta = JSON.stringify({
+    timestamp: '2026-10-01T09:00:00.000Z',
+    type: 'session_meta',
+    payload: { id: 'r-parent', session_id: 'r-parent', timestamp: '2026-10-01T08:59:00.000Z', cwd: '/repo', cli_version: '0.162.0', source: 'cli' },
+  });
+  const injected = JSON.stringify({
+    timestamp: '2026-10-01T09:00:01.000Z',
+    type: 'response_item',
+    payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'task from the parent agent' }] },
+  });
+
+  test('codex adapter: a userless subagent rollout is skipped as understood, not flagged', async () => {
+    const p = writeRollout('subagent-userless.jsonl', [subagentMeta, parentMeta, injected, assistant('ok')]);
+    const { sessions, diag } = await drain(codexAdapter.parse(p));
+    expect(sessions).toHaveLength(0);
+    expect(diag).toMatchObject({ sessions: 0, expectedEmpty: true, skipped: 'subagent_without_user_turns' });
+    expect(diag.userTurnsMissing).toBeUndefined();
+  });
+
+  test('codex adapter: a subagent rollout with a typed user turn still imports', async () => {
+    const typed = JSON.stringify({ timestamp: '2026-10-01T09:00:02.000Z', type: 'event_msg', payload: { type: 'user_message', message: 'human follow-up' } });
+    const p = writeRollout('subagent-typed.jsonl', [subagentMeta, parentMeta, injected, typed, assistant('ok')]);
+    const { sessions, diag } = await drain(codexAdapter.parse(p));
+    expect(sessions).toHaveLength(1);
+    expect(diag.skipped).toBeUndefined();
+    expect(diag.userTurnsMissing).toBeUndefined();
+  });
+
   test('claude-code adapter: an assistant-only session reports userTurnsMissing', async () => {
     const p = writeRollout('claude-assistant-only.jsonl', [
       JSON.stringify({ type: 'assistant', sessionId: 's-1', isSidechain: false, timestamp: '2026-10-01T09:00:00.000Z', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } }),
@@ -226,6 +264,25 @@ describe('E-N4: assistant turns with no user turn are flagged, never silent', ()
       const ok = await runTranscriptsIngest(engine, { paths: [FIXTURE_0154], sourceId: 'default', userPatternsPath: '/nonexistent-patterns.txt' });
       expect(ok.driftFiles).toBe(0);
       expect(ok.cleanScan).toBe(true);
+    });
+
+    test('a userless subagent file is skipped, not drift, and the scan stays clean', async () => {
+      await resetPgliteState(engine);
+      await engine.setConfig('version', schemaVersion);
+      const sub = writeRollout('subagent-userless.jsonl', [subagentMeta, parentMeta, injected, assistant('ok')]);
+      const r = await runTranscriptsIngest(engine, { paths: [sub, FIXTURE_0154], sourceId: 'default', userPatternsPath: '/nonexistent-patterns.txt' });
+      expect(r.skippedFiles).toBe(1);
+      expect(r.files[0]).toMatchObject({ skipped: 'subagent_without_user_turns', drift: false, sessions: [] });
+      expect(r.driftFiles).toBe(0);
+      expect(r.cleanScan).toBe(true);
+      expect(fmtSummary(r)).toContain('skipped: 1 subagent rollout file(s) with no user turns');
+      // A top-level userless rollout in the same run is still drift (format-change guard).
+      const top = writeRollout('assistant-only.jsonl', [meta, assistant('ok')]);
+      const mixed = await runTranscriptsIngest(engine, { paths: [sub, top], sourceId: 'default', userPatternsPath: '/nonexistent-patterns.txt' });
+      expect(mixed.skippedFiles).toBe(1);
+      expect(mixed.driftFiles).toBe(1);
+      expect(mixed.files[1]!.userTurnsMissing).toBe(true);
+      expect(mixed.cleanScan).toBe(false);
     });
   });
 });

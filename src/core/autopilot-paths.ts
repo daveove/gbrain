@@ -21,10 +21,9 @@
  * otherwise has readers looking in a different directory than the writer.
  */
 import { existsSync, linkSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'fs';
-import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { randomBytes } from 'crypto';
-import { configDir, gbrainPath } from './config.ts';
+import { configDir, gbrainPath, userHomeDir } from './config.ts';
 
 /**
  * The daemon's lock file. Its mtime IS the liveness heartbeat — the tick loop
@@ -86,7 +85,7 @@ export function canonicalDir(path: string): string {
  * installs need no migration; every other brain gets its own job.
  */
 export function isDefaultBrainHome(): boolean {
-  return canonicalDir(configDir()) === canonicalDir(join(homedir(), '.gbrain'));
+  return canonicalDir(configDir()) === canonicalDir(join(userHomeDir(), '.gbrain'));
 }
 
 /** Where a non-default brain records the random id its job names derive from. */

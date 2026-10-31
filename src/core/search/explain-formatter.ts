@@ -81,6 +81,10 @@ export function formatResultExplain(
     anyBoost = true;
     lines.push(`   + exact-match ×${fmt(result.exact_match_boost)}`);
   }
+  if (result.lexical_anchor_boost !== undefined) {
+    anyBoost = true;
+    lines.push(`   + lexical-anchor ×${fmt(result.lexical_anchor_boost)} (short query: keyword #1 lifted to rank 1)`);
+  }
   if (result.graph_adjacency_boost !== undefined) {
     anyBoost = true;
     const hits = result.graph_adjacency_hits ?? '?';
@@ -264,6 +268,7 @@ export function buildScoreDetails(result: SearchResult): ScoreDetails {
   add('alias_resolved', result.alias_resolved_boost);
   add('supersede', result.supersede_penalty, { superseded_by: result.superseded_by });
   add('exact_match', result.exact_match_boost);
+  add('lexical_anchor', result.lexical_anchor_boost);
   const rerank: ScoreDetails['rerank'] = result.rerank_score !== undefined
     ? { state: 'applied', score: result.rerank_score, delta: result.reranker_delta ?? null, pinned: result.relational_pinned === true }
     : { state: 'not_run', reason: 'reranker_off_or_outside_head' };
