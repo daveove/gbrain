@@ -68,6 +68,33 @@ describe('agent day-out digest', () => {
     expect(JSON.stringify(day)).not.toMatch(/circleback|pocket/i);
   });
 
+  test('a later line that mentions a Circleback meeting adds no link, fact or ask', () => {
+    const text = [
+      '**User** (2026-10-29 3:00 PM): Fix the build',
+      '**Assistant** (2026-10-29 3:01 PM): I opened https://github.com/a/b/pull/10 for the build.\nFrom the Circleback meeting I opened https://github.com/a/b/pull/11 and https://linear.app/x/issue/DAV-9001.\n- The Circleback action item failed: https://github.com/a/b/pull/12',
+      '**User** (2026-10-29 3:05 PM): What did Circleback say about the launch?',
+      '**Assistant** (2026-10-29 3:06 PM): I opened https://github.com/a/b/pull/13 from that.',
+    ].join('\n');
+    const day = buildRoleDay('spock', '2026-10-29', [{ sessionId: 'k', slugs: ['b'], text }]);
+    expect(day.links.prs).toEqual(['https://github.com/a/b/pull/10']);
+    expect(day.links.issues).toEqual([]);
+    expect(day.asked.map((i) => i.text)).toEqual(['Fix the build']);
+    expect(day.shipped).toHaveLength(1);
+    expect(JSON.stringify(day)).not.toMatch(/circleback|pull\/1[123]|DAV-9001/i);
+  });
+
+  test('a negated outcome is not shipped, a done sentence beside a negated one still is', () => {
+    const text = [
+      '**User** (2026-10-29 3:00 PM): Land the fix',
+      '**Assistant** (2026-10-29 3:01 PM): I could not merge https://github.com/a/b/pull/20; it was not merged.',
+      '**Assistant** (2026-10-29 3:02 PM): The merge of https://github.com/a/b/pull/21 failed and it did not land.',
+      '**Assistant** (2026-10-29 3:03 PM): I opened draft https://github.com/a/b/pull/22. I did not request a review or merge it.',
+    ].join('\n');
+    const day = buildRoleDay('spock', '2026-10-29', [{ sessionId: 'k', slugs: ['b'], text }]);
+    expect(day.shipped.map((i) => i.text)).toEqual(['I opened draft https://github.com/a/b/pull/22. I did not request a review or merge it.']);
+    expect(day.failed.map((i) => i.text)).toContain('The merge of https://github.com/a/b/pull/21 failed and it did not land.');
+  });
+
   test('renders private, deterministic pages with the contract slug', () => {
     const day = buildRoleDay('yoda', '2026-10-29', [{ sessionId: '01a18578-daf', slugs: ['conversations/sessions/2026-10-29-omp-x'], text: session }]);
     const page = renderRoleDay(day);
