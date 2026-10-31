@@ -106,7 +106,7 @@ export function splitTurns(text: string, zone = 'UTC'): Turn[] {
 /**
  * Which role a session belongs to. Buzz primaries say "You are <Name>, the Buzz
  * agent"; crew workers say "reporting to <Name>"; AgentWorld worktrees carry
- * `aw-<role>-`. Gandalf was Scotty's name until 23 Oct 2026.
+ * `aw-<role>-`. Legacy alias names map to the current role.
  */
 export function attributeRole(text: string): AgentRole | null {
   const head = text.slice(0, 60_000);
@@ -161,7 +161,8 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
   };
   const prs = new Set<string>(), issues = new Set<string>();
   for (const s of sessions) {
-    const turns = splitTurns(s.text, zone).filter((t) => t.date === date);
+    const allTurns = splitTurns(s.text, zone);
+    const turns = allTurns.filter((t) => t.date === date);
     if (!turns.length) continue;
     const firstAsk = turns.find((t) => t.role === 'user');
     if (firstAsk && MEETING_RE.test(firstAsk.text.slice(0, 4000))) continue;
@@ -169,15 +170,15 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
     out.sessionSlugs.push(...s.slugs);
     const tag = s.sessionId.slice(0, 8);
     let meetingThread = false;
-    for (const t of turns) {
+    for (const t of allTurns) {
       if (t.role === 'user') {
         const ask = askText(t.text);
-        // The assistant turns that answer a meeting ask are skipped whole.
+        // The assistant turns that answer a meeting ask are skipped whole, also across midnight.
         meetingThread = Boolean(ask && MEETING_RE.test(ask));
-        if (ask && ask.length >= 12 && !meetingThread) out.asked.push({ time: t.time, text: ask, session: tag });
+        if (t.date === date && ask && ask.length >= 12 && !meetingThread) out.asked.push({ time: t.time, text: ask, session: tag });
         continue;
       }
-      if (meetingThread) continue;
+      if (meetingThread || t.date !== date) continue;
       // Meeting content never feeds a page: this check runs on every line before
       // a link or a fact is read from it, so a later meeting line adds nothing.
       for (const line of t.text.split('\n').map((l) => l.trim()).filter((l) => l && !MEETING_RE.test(l))) {

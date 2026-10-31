@@ -144,6 +144,19 @@ describe('agent day-out digest day boundaries (DAV-7417)', () => {
     expect(day.shipped[0].time).toBe('11:05');
     expect(renderRoleDay(day)).toContain('Times are Asia/Manila.');
   });
+
+  test('a meeting ask before midnight keeps its reply out of the next day', () => {
+    const text = [
+      '**User** (2026-10-29 11:59 PM): Summarize the Circleback meeting',
+      '**Assistant** (2026-10-30 12:01 AM): I opened https://github.com/a/b/pull/2 from those action items.',
+      '**User** (2026-10-30 12:05 AM): Fix the build',
+      '**Assistant** (2026-10-30 12:06 AM): I opened https://github.com/a/b/pull/3 for the build.',
+    ].join('\n');
+    const day = buildRoleDay('spock', '2026-10-30', [{ sessionId: 'k', slugs: ['b'], text }]);
+    expect(day.links.prs).toEqual(['https://github.com/a/b/pull/3']);
+    expect(day.shipped).toHaveLength(1);
+    expect(day.asked.map((i) => i.text)).toEqual(['Fix the build']);
+  });
 });
 
 describe('agent day-out discovery (DAV-7417)', () => {
