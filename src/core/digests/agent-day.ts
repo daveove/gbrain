@@ -53,11 +53,14 @@ const TURN_RE = /^\*\*(User|Assistant)\*\* \((\d{4}-\d{2}-\d{2}) (\d{1,2}):(\d{2
 const PR_URL_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g;
 const ISSUE_URL_RE = /https:\/\/linear\.app\/[\w-]+\/issue\/DAV-\d+/g;
 /** Dave's personal meetings (Circleback, Pocket) never enter a digest page. */
-const MEETING_RE = /circleback|pocket\.|pocket (?:meeting|recording|transcript)|personal meeting/i;
+const MEETING_RE = /circleback|\bpocket\b|personal meeting/i;
 const DONE_RE = /\b(merged|opened|created|posted|deployed|shipped|filed|fixed|pushed|landed|closed|resolved|result:|installed|published|wrote|updated)\b/i;
 const WAIT_RE = /(dave must(?! do:? ?nothing)|waiting on dave|needs dave|parked on dave|passkey|(?:for|from) dave'?s? (?:approval|decision|go\b|sign-?in|tap))/i;
 const NOTHING_RE = /dave must do:?\s*nothing|nothing blocked|not blocked|no blocker/i;
 const FAIL_RE = /\b(failed|failure|exit [1-9]\d?|timed out|time out|not verified|crashed|rejected|could not|cannot)\b/i;
+/** Outcome words that a negation turns around; a sentence with one has not shipped. */
+const NEGATED_RE = /\b(not|never|unable|cannot|failed|without)\b|n't\b/i;
+const SHIP_LINK_RE = /https:\/\/(?:github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+|linear\.app\/[\w-]+\/issue\/DAV-\d+)/;
 
 /** Calendar date and 24-hour time of an instant in an IANA zone. */
 export function zonedParts(instantMs: number, zone: string): { date: string; time: string } {
@@ -139,10 +142,6 @@ export function askText(turnText: string): string | null {
   return squash(goal?.[1] ?? turnText.split('\n\n')[0] ?? '');
 }
 
-function sentenceLines(text: string): string[] {
-  return text.split('\n').map((l) => l.replace(/^\s*[-*•]\s*/, '').trim()).filter((l) => l.length >= 12);
-}
-
 const cap = <T,>(xs: T[]): T[] => xs.slice(0, MAX_ITEMS_PER_SECTION);
 
 function dedupe(items: DayItem[]): DayItem[] {
@@ -169,22 +168,31 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
     out.sessions.push(s.sessionId);
     out.sessionSlugs.push(...s.slugs);
     const tag = s.sessionId.slice(0, 8);
+    let meetingThread = false;
     for (const t of turns) {
       if (t.role === 'user') {
         const ask = askText(t.text);
-        if (ask && ask.length >= 12 && !MEETING_RE.test(ask)) out.asked.push({ time: t.time, text: ask, session: tag });
+        // The assistant turns that answer a meeting ask are skipped whole.
+        meetingThread = Boolean(ask && MEETING_RE.test(ask));
+        if (ask && ask.length >= 12 && !meetingThread) out.asked.push({ time: t.time, text: ask, session: tag });
         continue;
       }
-      for (const url of t.text.match(PR_URL_RE) ?? []) prs.add(url);
-      for (const url of t.text.match(ISSUE_URL_RE) ?? []) issues.add(url);
-      for (const line of sentenceLines(t.text)) {
-        if (MEETING_RE.test(line) || line.startsWith('|')) continue;
-        const item = { time: t.time, text: squash(line), session: tag };
-        const hasLink = PR_URL_RE.test(line) || ISSUE_URL_RE.test(line);
-        PR_URL_RE.lastIndex = 0; ISSUE_URL_RE.lastIndex = 0;
-        if (hasLink && DONE_RE.test(line)) out.shipped.push(item);
-        if (WAIT_RE.test(line) && !NOTHING_RE.test(line)) out.waiting.push(item);
-        else if (FAIL_RE.test(line) && line.length < 400) out.failed.push(item);
+      if (meetingThread) continue;
+      // Meeting content never feeds a page: this check runs on every line before
+      // a link or a fact is read from it, so a later meeting line adds nothing.
+      for (const line of t.text.split('\n').map((l) => l.trim()).filter((l) => l && !MEETING_RE.test(l))) {
+        for (const url of line.match(PR_URL_RE) ?? []) prs.add(url);
+        for (const url of line.match(ISSUE_URL_RE) ?? []) issues.add(url);
+        if (line.length < 12 || line.startsWith('|')) continue;
+        const bullet = line.replace(/^[-*•]\s*/, '');
+        const item = { time: t.time, text: squash(bullet), session: tag };
+        // A done word counts only in a sentence that also holds the link and no negation:
+        // "I could not merge <PR>. It was not merged." ships nothing.
+        const shippedHere = bullet.split(/(?<=[.!?])\s+/).some((sentence) =>
+          SHIP_LINK_RE.test(sentence) && DONE_RE.test(sentence) && !NEGATED_RE.test(sentence));
+        if (shippedHere) out.shipped.push(item);
+        if (WAIT_RE.test(bullet) && !NOTHING_RE.test(bullet)) out.waiting.push(item);
+        else if (FAIL_RE.test(bullet) && bullet.length < 400) out.failed.push(item);
       }
     }
   }
