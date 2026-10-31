@@ -1565,9 +1565,9 @@
             "category": "ops",
             "details": {
               "by_queue": {
-                "default": 40
+                "default": 1
               },
-              "depth": 40,
+              "depth": 1,
               "engine": "pglite",
               "worker_alive": false
             },
@@ -1591,7 +1591,7 @@
               },
               "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
             },
-            "message": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "message": "no_worker: 1 job(s) are waiting (default=1; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
             "status": "warn"
           },
@@ -3143,7 +3143,7 @@
               },
               "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
             },
-            "fix": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "fix": "no_worker: 1 job(s) are waiting (default=1; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
             "status": "warn",
             "tier": "symptom"
@@ -4764,9 +4764,9 @@
             "category": "ops",
             "details": {
               "by_queue": {
-                "default": 40
+                "default": 1
               },
-              "depth": 40,
+              "depth": 1,
               "engine": "pglite",
               "worker_alive": false
             },
@@ -4790,7 +4790,7 @@
               },
               "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
             },
-            "message": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "message": "no_worker: 1 job(s) are waiting (default=1; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
             "status": "warn"
           },
@@ -6342,7 +6342,7 @@
               },
               "why": "PGLite has no background worker: `gbrain jobs work` runs the waiting jobs in the foreground and exits once the queue is drained. It needs the brain to itself, so any running `gbrain serve` must stop first."
             },
-            "fix": "no_worker: 40 job(s) are waiting (default=40; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+            "fix": "no_worker: 1 job(s) are waiting (default=1; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
             "name": "queue_health",
             "status": "warn",
             "tier": "symptom"
