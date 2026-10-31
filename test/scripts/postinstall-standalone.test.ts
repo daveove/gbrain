@@ -15,7 +15,7 @@ describe('scripts/postinstall.ts exits 0 on every path', () => {
       copyFileSync(join(REPO, 'scripts', 'postinstall.ts'), join(dir, 'scripts', 'postinstall.ts'));
       const result = spawnSync(process.execPath, ['--no-env-file', join(dir, 'scripts', 'postinstall.ts')], {
         cwd: dir,
-        env: { HOME: dir, GBRAIN_HOME: dir, PATH: '/usr/bin:/bin' },
+        env: { HOME: dir, GBRAIN_HOME: dir, PATH: '/usr/bin:/bin', GBRAIN_POSTINSTALL_APPLY_MIGRATIONS: '1' },
         encoding: 'utf8',
         timeout: 30_000,
       });
