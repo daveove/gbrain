@@ -11,5 +11,6 @@
 {"type":"custom","id":"c2","parentId":"c1","timestamp":"2026-09-30T02:01:34.000Z","customType":"todo","data":{"items":["CUSTOM-DATA"]}}
 {"type":"message","id":"broken",
 {"type":"message","id":"m5","parentId":"c2","timestamp":"2026-09-30T02:02:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"PRIVATE-THINKING again"},{"type":"toolCall","id":"t2","name":"bash","arguments":{"command":"ls"}}],"timestamp":1790733720000}}
+{"type":"message","id":"f1","parentId":"m5","timestamp":"2026-09-30T02:02:10.000Z","message":{"role":"fileMention","content":null,"timestamp":1790733730000}}
 {"type":"title_change","id":"tc1","parentId":"m5","timestamp":"2026-09-30T02:02:30.000Z","title":"Widget launch plan","source":"user"}
 {"type":"message","id":"m6","parentId":"tc1","timestamp":"2026-09-30T02:03:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Launch in three phases: beta, partners, general."}],"timestamp":1790733780000}}
