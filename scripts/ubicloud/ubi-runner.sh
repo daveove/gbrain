@@ -356,7 +356,7 @@ cmd_down() {
 }
 
 # slim_git SRC DIR: build DIR/.git holding only the objects HEAD and
-# origin/master reach, with SRC's branch, index and config, so a checkout that
+# origin/main reach, with SRC's branch, index and config, so a checkout that
 # fetched many branches does not upload all of them to every VM. Fails (and
 # the caller ships SRC's own .git) on anything unexpected.
 slim_git() {
@@ -365,8 +365,8 @@ slim_git() {
   common=$(cd "$src" && cd "$(git rev-parse --git-common-dir)" && pwd) || return 1
   branch=$(git -C "$src" symbolic-ref -q HEAD) || branch=""
   specs=("+HEAD:${branch:-refs/heads/ubi-pack-head}")
-  if git -C "$src" rev-parse -q --verify refs/remotes/origin/master >/dev/null; then
-    specs+=("+refs/remotes/origin/master:refs/remotes/origin/master")
+  if git -C "$src" rev-parse -q --verify refs/remotes/origin/main >/dev/null; then
+    specs+=("+refs/remotes/origin/main:refs/remotes/origin/main")
   fi
   git init -q "$dir" &&
     # --update-head-ok: the fresh repo's unborn HEAD names init's default branch
@@ -496,7 +496,7 @@ usage: ubi-runner.sh <command> [args]
                          create a VM and wait for SSH; prints its name
   ssh NAME [COMMAND]     shell or login-shell command on the VM (user ubi, passwordless sudo)
   sync NAME [SRC] [DEST] stream a checkout (tracked + untracked-unignored + .git)
-  pack [SRC]             write that checkout tarball to stdout (with a slim .git: HEAD + origin/master)
+  pack [SRC]             write that checkout tarball to stdout (with a slim .git: HEAD + origin/main)
   unpack NAME DEST       extract a tarball from stdin into DEST on the VM
   pull NAME REMOTE_GLOB LOCAL_DIR
                          copy matching remote entries into LOCAL_DIR

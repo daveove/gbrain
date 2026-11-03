@@ -157,13 +157,13 @@ export function scanMigrations(dir: string): MigrationFile[] {
 }
 
 function onOriginMaster(file: string): boolean {
-  const r = spawnSync('git', ['cat-file', '-e', `origin/master:${rel(file)}`], { cwd: REPO, stdio: 'ignore' });
+  const r = spawnSync('git', ['cat-file', '-e', `origin/main:${rel(file)}`], { cwd: REPO, stdio: 'ignore' });
   return r.status === 0;
 }
 
 function duplicate(first: MigrationFile, second: MigrationFile, all: MigrationFile[]): never {
   const [keep, move] = onOriginMaster(second.file) && !onOriginMaster(first.file) ? [second, first] : [first, second];
-  const tag = (m: MigrationFile) => (onOriginMaster(m.file) ? '  (on origin/master)' : '  (this branch)');
+  const tag = (m: MigrationFile) => (onOriginMaster(m.file) ? '  (on origin/main)' : '  (this branch)');
   const next = Math.max(...all.map((m) => m.version)) + 1;
   const moved = join(move.file, '..', `v${pad(next)}-${basename(move.file).replace(FILE_RE, '$2')}.ts`);
   throw new RegistryError([

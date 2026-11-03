@@ -6,7 +6,7 @@
  * current rules add. The CI-enforced thresholds on the synthetic fixture live
  * in test/secret-scan-fp-budget.test.ts, which imports the builder below.
  *
- *   bun scripts/secret-scan-fp-budget.ts [--base origin/master] [--json]
+ *   bun scripts/secret-scan-fp-budget.ts [--base origin/main] [--json]
  *   bun scripts/secret-scan-fp-budget.ts --dir <brain-dir> [--base <ref>]
  *
  * Corpora: every tracked text file under src/, docs/ and skills/ (the repo
@@ -300,7 +300,7 @@ async function main(): Promise<void> {
     const i = args.indexOf(name);
     return i >= 0 ? args[i + 1] : undefined;
   };
-  const base = await loadBaseScanner(opt('--base') ?? 'origin/master');
+  const base = await loadBaseScanner(opt('--base') ?? 'origin/main');
   const head: Scanner = current;
   const dir = opt('--dir');
   const corpora: Record<string, Array<{ id: string; text: string }>> = dir

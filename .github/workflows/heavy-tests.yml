@@ -2,7 +2,7 @@ name: Heavy Tests
 
 # Heavy ops-shape tests under tests/heavy/. Cost minutes per run; NOT part
 # of default PR CI. Three triggers:
-#   - Nightly schedule (catches regressions within 24h of merge to master).
+#   - Nightly schedule (catches regressions within 24h of merge to main).
 #   - On-demand opt-in via PR label `heavy-tests` (slow loop kept off by default).
 #   - Manual workflow_dispatch for triage.
 #
@@ -49,7 +49,7 @@ jobs:
     if: |
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
-    runs-on: ubicloud-standard-30-ubuntu-2404
+    runs-on: ubuntu-24.04
     # 75: tests/heavy/graduation_10k.sh builds the 10k-page history fixture
     # on a cold cache (~18 min) before graduating it.
     timeout-minutes: 75
@@ -150,7 +150,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'real-agent-e2e') ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Open the hermes/grok opt-in doors here so binary/auth absence — not
@@ -200,14 +200,14 @@ jobs:
           fi
           echo "keyed=false" >> "$GITHUB_OUTPUT"
           setcmds=$(printf 'gh secret set %s; ' "${missing[@]}")
-          echo "::warning::Real-agent door e2e executed 0 live claude/codex tests — empty secret(s): ${missing[*]}. Why: only the repo owner can set secrets. Fix (owner-only): ${setcmds%; } then re-check with: gh workflow run heavy-tests.yml --ref master (or label a PR real-agent-e2e)." >&2
+          echo "::warning::Real-agent door e2e executed 0 live claude/codex tests — empty secret(s): ${missing[*]}. Why: only the repo owner can set secrets. Fix (owner-only): ${setcmds%; } then re-check with: gh workflow run heavy-tests.yml --ref main (or label a PR real-agent-e2e)." >&2
           {
             echo "## Real-agent door e2e: 0 live tests executed"
             echo "Empty secret(s): ${missing[*]}. bootstrap-real-claude and bootstrap-real-codex run in no other job, so this run is not real-agent coverage."
             echo ""
             echo "- Why: only the repo owner can set secrets."
             echo "- Fix (owner-only): \`${setcmds%; }\`"
-            echo "- Re-check: \`gh workflow run heavy-tests.yml --ref master\`, or add the \`real-agent-e2e\` label to a PR."
+            echo "- Re-check: \`gh workflow run heavy-tests.yml --ref main\`, or add the \`real-agent-e2e\` label to a PR."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Install codex + claude (pinned npm versions, refuse on drift)
@@ -264,7 +264,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'real-agent-e2e') ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Four serial door tests at 600s each plus the installer budget cannot
     # fit the sibling job's 20 minutes.
     timeout-minutes: 40
@@ -515,7 +515,7 @@ jobs:
         contains(github.event.pull_request.labels.*.name, 'real-agent-e2e')) ||
       (github.event_name == 'workflow_dispatch' &&
         inputs.run_grok_door == true)
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Measured local door wall-time: keyless tier ~29s + one-time compiled
     # gbrain build (~2-4 min) + npm install (~10s); paid SMOKE turn budget
     # 2 x 240s. 20 min = measured + >50% headroom (GROK-CLI-PIN.md).
@@ -755,7 +755,7 @@ jobs:
     if: |
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CODEX_NPM_VERSION: "0.147.0"
@@ -836,7 +836,7 @@ jobs:
       github.event_name != 'pull_request' ||
       contains(github.event.pull_request.labels.*.name, 'real-agent-e2e') ||
       contains(github.event.pull_request.labels.*.name, 'heavy-tests')
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -1065,7 +1065,7 @@ jobs:
     # Named exception (docs/TESTING.md#event-parity): a schedule-only, non-gating
     # canary of the latest opencode; the pinned door lane above is the gate.
     if: github.event_name == 'schedule'
-    runs-on: ubicloud-standard-16-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     continue-on-error: true
     env:

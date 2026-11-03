@@ -93,7 +93,7 @@ describe('selected-e2e job wiring', () => {
       };
       git(['init', '-q']);
       git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture', '--allow-empty']);
-      git(['update-ref', 'refs/remotes/origin/master', 'HEAD']);
+      git(['update-ref', 'refs/remotes/origin/main', 'HEAD']);
       mkdirSync(join(dir, 'test/e2e'), { recursive: true });
       const files = ['test/e2e/mechanical.test.ts', 'test/e2e/route-a.test.ts', 'test/e2e/route-b.test.ts'];
       for (const file of files) writeFileSync(join(dir, file), '// fixture\n');

@@ -440,8 +440,8 @@ to a sibling module. Every row also adds a behavior test of its own; the
 | CLI-only command | The implementation in `src/commands/<name>.ts`; the dispatch module `src/cli/commands/<name>.ts`; a help line in `printHelp` (`src/cli.ts`, so raise its `module-size-limits.tsv` ceiling by one) | A record in `CLI_COMMANDS` (`src/cli/command-table.ts`): `phase: 'pre-connect'` when the command never touches the database, `'post-connect'` when its `run(engine, args, ctx)` needs an engine; `thinClient: 'none'` unless remote brains must refuse it (`'refuse'`, or `'route-then-refuse'` for subcommand routing); `selfHelp: true` when the command has flags or subcommands (its `run` then prints its own `--help`); optional `skipStartupHooks`; `load: () => import('<literal>')` | `bun run build:flag-registry`; dispatch goldens: `GBRAIN_TEST_UPDATE_GOLDENS=1 bun test test/cli-dispatch-phase.test.ts test/cli-dispatch-thin-client.test.ts`. CLI wording and tool-catalog bytes are not snapshot contracts. | `test/<name>.test.ts` spawning `bun src/cli.ts <name>` and asserting behavior and exit code, plus `bun test test/cli-dispatch-lifecycle.serial.test.ts test/cli-command-table.test.ts test/cli-flag-validation.test.ts` |
 | HTTP route (`gbrain serve --http`) | The route inside `mount<Area>(app, ctx)` in `src/commands/serve-http-<area>.ts` (`/admin/api/*` goes in `serve-http-admin-api.ts`, `/mcp` in `serve-http-mcp.ts`, OAuth in `serve-http-oauth.ts`); a new area is a new module plus one mount call in `buildServeHttpApp` (`src/commands/serve-http.ts`). An `/admin` route takes `ctx.requireAdmin` before its handler | None for a route in an existing area; a new area adds its mount call in `buildServeHttpApp` (order matters) | The route goldens, deliberately: `GBRAIN_TEST_UPDATE_GOLDENS=1 bun test test/serve-http-route-golden.test.ts test/serve-http-route-runtime-golden.test.ts` | A behavior test (`test/serve-http-<area>-<route>.test.ts`: mount the area on a bare `express()` app with a stub ctx; `mountAdminApi` reads `requireAdmin`, `sseClients` and `mcpResourceUrl` at mount time) plus `bun test test/serve-http-admin-route-guard.test.ts`, which finds the new route by itself |
 | Sync phase | A module under `src/commands/sync/` taking `(run, Pick<SyncPlan, ...>, ...)` and returning `SyncResult \| undefined`; state it shares across awaits becomes a field on `SyncRun` (`src/commands/sync/sync-run.ts`). A value for the final summary flows `SyncRun` field -> `finalizeIncrementalSync` (`sync/finalize.ts`) -> `SyncResult` (`src/commands/sync.ts`, raise its ceiling) -> `printSyncResult` (`sync/report.ts`) when it should print | The phase call order in `performSyncInner` (`src/commands/sync/incremental.ts`) | Nothing | A case in `test/sync-run-ordering.serial.test.ts` (it has the git-repo + PGLite harness: `commitPages`, `performSync`), plus `bun test test/sync.test.ts test/sync-run-ordering.serial.test.ts` |
-| Release version and migration numbers | Nothing by hand: when your PR is next to merge, `bun run release:restamp` (preview with `--dry-run`) merges `origin/master`, sets the PATCH version, renumbers your own migrations and commits once | None: it rewrites every required row of the CLAUDE.md "Version locations" table | It runs the generators itself and prints the golden-regeneration reason for the PR body | `bun run verify`; `bun test test/scripts/release-restamp.test.ts` when you change restamp itself ([docs](docs/RELEASING.md#release-restamp)) |
-| Stress-test a touched test (flake hunt) | Nothing: `bun run test:stress [files…] [--iterations N] [--base <ref>] [--postgres]` (defaults: files changed versus `origin/master`, 10 iterations, a fresh database per iteration) | None | Nothing | The same command; a failing iteration prints its reproduce line |
+| Release version and migration numbers | Nothing by hand: when your PR is next to merge, `bun run release:restamp` (preview with `--dry-run`) merges `origin/main`, sets the PATCH version, renumbers your own migrations and commits once | None: it rewrites every required row of the CLAUDE.md "Version locations" table | It runs the generators itself and prints the golden-regeneration reason for the PR body | `bun run verify`; `bun test test/scripts/release-restamp.test.ts` when you change restamp itself ([docs](docs/RELEASING.md#release-restamp)) |
+| Stress-test a touched test (flake hunt) | Nothing: `bun run test:stress [files…] [--iterations N] [--base <ref>] [--postgres]` (defaults: files changed versus `origin/main`, 10 iterations, a fresh database per iteration) | None | Nothing | The same command; a failing iteration prints its reproduce line |
 
 The PR stress gate (`stress-changed-tests`) runs every test file the PR adds or
 changes 10 times with that same `bun run test:stress` command; a touched file
@@ -707,7 +707,7 @@ accepted contribution is credited in `CHANGELOG.md`.
 ### gstack repo config (`.gstack/`)
 
 Two committed files tell gstack (1.91.98.0 or later) about gbrain's own gates;
-gstack reads both from master, so a branch's edits take effect after it merges.
+gstack reads both from the default branch, so edits take effect after they merge.
 
 - `.gstack/pregate.json`: `gstack-pregate run --allow-repo-commands` runs a
   guard when the branch touches its files: the serial-lane manifest test, the
@@ -722,6 +722,9 @@ gstack reads both from master, so a branch's edits take effect after it merges.
   that passed the gate.
 
 ### How a contributor PR lands
+
+This subsection describes upstream `garrytan/gbrain` policy on its `master`
+branch. The upstream-only Fix-wave gate does not run in `daveove/gbrain`.
 
 Contributor PRs are never merged into master as-is. A maintainer folds the
 change into a fix-wave PR, revises it there (tests, agent-facing errors,

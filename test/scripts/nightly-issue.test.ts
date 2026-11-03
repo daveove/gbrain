@@ -81,7 +81,7 @@ describe('nightly-watch incidents', () => {
     const record = recordOf(body);
     expect(record.failing.map(f => f.job).sort()).toEqual(['Heavy tests', 'Hermes door e2e (credentialed, real binary, loud-fail)', 'Plugin doors (codex + claude, install tier)']);
     expect(record.first_red).toEqual({ run_id: 37195155240, sha: record.head_sha });
-    expect(record.dispatch_argv).toEqual(['gh', 'workflow', 'run', 'heavy-tests.yml', '--ref', 'master']);
+    expect(record.dispatch_argv).toEqual(['gh', 'workflow', 'run', 'heavy-tests.yml', '--ref', 'main']);
     expect(record.next_step).toBe('code_fix');
     expect(calls.filter(c => c.path === 'repos/{repo}/labels').map(c => c.body!.name)).toEqual(['nightly-red']);
   });
@@ -143,7 +143,7 @@ describe('nightly-watch incidents', () => {
     expect(known.assessment.state).toBe('known-red');
     expect(known.plan.labels).toEqual(['nightly-red', 'known-red']);
     expect(known.plan.record!.next_step).toBe('known_red_wait');
-    expect(known.plan.record!.dispatch_argv).toEqual(['gh', 'workflow', 'run', 'scale-tier.yml', '--ref', 'master', '-f', 'pages=20000']);
+    expect(known.plan.record!.dispatch_argv).toEqual(['gh', 'workflow', 'run', 'scale-tier.yml', '--ref', 'main', '-f', 'pages=20000']);
 
     const unchanged = fakeClient({ ...scaleRun(watchdog), issues: [{ ...issueWith('open', known.plan.record!, ['nightly-red', 'known-red']), title: 'Nightly red: Scale tier' }] });
     await watchRun({ client: unchanged.client, repo: REPO, runId: 1, rows: scaleRows, today: TODAY, dryRun: false });
@@ -344,7 +344,7 @@ class World {
           return { artifacts: world.manifests.has(`${run.id}/${run.run_attempt}`) ? [{ id: run.id * 10 + run.run_attempt, name: 'ci-manifest', expired: false }] : [] } as R;
         }
         if ((m = /^repos\/\{repo\}\/actions\/workflows\/(\d+)\/runs\?event=(\w+)/.exec(path))) {
-          const runs = [...world.runs.values()].filter(r => r.workflow_id === Number(m![1]) && r.event === m![2] && (m![2] !== 'push' || r.head_branch === 'master'))
+          const runs = [...world.runs.values()].filter(r => r.workflow_id === Number(m![1]) && r.event === m![2] && (m![2] !== 'push' || r.head_branch === 'main'))
             .filter(r => !path.includes('status=success') || r.conclusion === 'success').sort((x, y) => y.run_number - x.run_number);
           return { workflow_runs: runs } as R;
         }
@@ -517,7 +517,7 @@ describe('master-red: push-to-master runs', () => {
       { id: 7002, name: 'coverage-full-e2e (1)', conclusion: 'cancelled', steps: [] },
       { id: 7003, name: 'test-status', conclusion: 'failure', steps: [] },
     ] });
-    w.annotations.set(7001, cancelNote(7001, 'Canceling since a higher priority waiting request for Test-refs/heads/master exists'));
+    w.annotations.set(7001, cancelNote(7001, 'Canceling since a higher priority waiting request for Test-refs/heads/main exists'));
     w.annotations.set(7002, cancelNote(7002, 'The run was canceled by @someone.'));
     w.manifests.set(`${onlyCancelled.id}/1`, completeManifest(onlyCancelled));
     const before = mrState(masterIssue(w)!);
@@ -554,7 +554,7 @@ describe('master-red: push-to-master runs', () => {
   test('nightly-red: a cancelled job is not a failure, and a previously failing job that was cancelled keeps the incident open', async () => {
     const h = heavy();
     const cancelledAll = h.jobs.jobs.map(j => (j.conclusion === 'failure' ? { ...j, conclusion: 'cancelled' } : j));
-    const notes = Object.fromEntries(cancelledAll.filter(j => j.conclusion === 'cancelled').map(j => [j.id, [{ annotation_level: 'failure', message: 'Canceling since a higher priority waiting request for Heavy Tests-refs/heads/master exists' }]]));
+    const notes = Object.fromEntries(cancelledAll.filter(j => j.conclusion === 'cancelled').map(j => [j.id, [{ annotation_level: 'failure', message: 'Canceling since a higher priority waiting request for Heavy Tests-refs/heads/main exists' }]]));
     const quiet = fakeClient({ ...h, jobs: { ...h.jobs, jobs: cancelledAll }, annotations: notes });
     const r = await watchRun({ client: quiet.client, repo: REPO, runId: 1, rows: realRows, today: TODAY, dryRun: false });
     expect(r.assessment.failures).toEqual([]);
@@ -763,7 +763,7 @@ describe('nightly-watch routing and guard', () => {
     await expect(watch({ client: w.client(), repo: REPO, runId: run.id, rows: realRows, today: TODAY, dryRun: false, replayIssue })).rejects.toThrow(msg);
     expect(w.calls.filter(c => c.method !== 'GET')).toEqual([]);
   };
-  test('schedule accepted; push-to-master of Test and E2E Tests accepted, including by dispatch with a push-to-master run id', () => {
+  test('schedule accepted; push-to-master of Test and E2E Tests accepted, including by dispatch with a push-to-main run id', () => {
     expect(routeRun(load<RunInfo>('run-heavy.json'), REPO)).toEqual({ track: 'schedule' });
     expect(routeRun(T.r8320, REPO)).toEqual({ track: 'push' });
     expect(routeRun(E.r8486, REPO)).toEqual({ track: 'push' });
@@ -777,11 +777,11 @@ describe('nightly-watch routing and guard', () => {
   const yaml = (f: string) => loadYaml(readFileSync(join(ROOT, '.github/workflows', f), 'utf8')) as Record<string, any>;
   test('nightly-watch.yml: master-only workflow_run, guard for schedule + allowlisted push-to-master from this repo, one queue per repo + workflow + track', () => {
     const w = yaml('nightly-watch.yml');
-    expect(w.on.workflow_run.branches).toEqual(['master']);
-    expect(w.on.workflow_dispatch.inputs.run_id.description).toBe('Scheduled or push-to-master run id to evaluate');
+    expect(w.on.workflow_run.branches).toEqual(['main']);
+    expect(w.on.workflow_dispatch.inputs.run_id.description).toBe('Scheduled or push-to-main run id to evaluate');
     expect(w.on.workflow_dispatch.inputs.replay_issue).toBeDefined();
     const guard: string = w.jobs.resolve.if;
-    for (const part of ["github.event_name == 'workflow_dispatch'", 'head_repository.full_name == github.repository', "workflow_run.event == 'schedule'", "workflow_run.event == 'push'", "head_branch == 'master'", '["Test","E2E Tests"]']) expect(guard).toContain(part);
+    for (const part of ["github.event_name == 'workflow_dispatch'", 'head_repository.full_name == github.repository', "workflow_run.event == 'schedule'", "workflow_run.event == 'push'", "head_branch == 'main'", '["Test","E2E Tests"]']) expect(guard).toContain(part);
     expect(Object.keys(PUSH_ALLOWLIST).sort()).toEqual(['E2E Tests', 'Test']);
     expect(w.concurrency).toBeUndefined();
     expect(w.jobs.watch.needs).toBe('resolve');

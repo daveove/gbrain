@@ -9,7 +9,7 @@
  *                       [--work <json>] [--out <dir>] [--dry-run]
  *
  * Files default to the test files changed versus the merge base with
- * origin/master (plus direct importers of changed test/helpers/ files, by the
+ * origin/main (plus direct importers of changed test/helpers/ files, by the
  * fan-in rule). Each file runs in its own execution profile (unit, serial,
  * slow with the workflow's pull-request values, both arms of a
  * DATABASE_URL-gated suite, or E2E through scripts/run-e2e.sh). With
@@ -49,7 +49,7 @@ export interface Args {
 }
 
 export function parseArgs(argv: string[]): Args | string {
-  const a: Args = { files: [], iterations: DEFAULT_ITERATIONS, firstIteration: 1, base: 'origin/master', postgres: false, randomize: false, out: '.context/test-stress', dryRun: false };
+  const a: Args = { files: [], iterations: DEFAULT_ITERATIONS, firstIteration: 1, base: 'origin/main', postgres: false, randomize: false, out: '.context/test-stress', dryRun: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     const value = () => { const v = argv[++i]; if (v === undefined) throw new Error(`${arg} needs a value`); return v; };

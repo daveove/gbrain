@@ -41,7 +41,7 @@
  * <root>/scripts/function-size-baseline.base.tsv if present),
  * GBRAIN_FUNCTION_SIZE_LIMIT, GBRAIN_FUNCTION_SIZE_SLACK,
  * GBRAIN_FUNCTION_SIZE_BASE_REF (git ref whose merge-base supplies the base
- * baseline; default origin/master).
+ * baseline; default origin/main).
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -244,7 +244,7 @@ function baseBaselineText(): { text: string | null; source: string } {
     const p = join(ROOT, 'scripts/function-size-baseline.base.tsv');
     return existsSync(p) ? { text: readFileSync(p, 'utf8'), source: 'fixture base' } : { text: null, source: 'none' };
   }
-  const ref = process.env.GBRAIN_FUNCTION_SIZE_BASE_REF ?? 'origin/master';
+  const ref = process.env.GBRAIN_FUNCTION_SIZE_BASE_REF ?? 'origin/main';
   const mergeBase = gitOut(['merge-base', 'HEAD', ref], ROOT)?.trim();
   const at = mergeBase ?? (gitOut(['rev-parse', '--verify', 'HEAD'], ROOT) ? 'HEAD' : null);
   if (!at) return { text: null, source: 'none (no git history)' };

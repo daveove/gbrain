@@ -16,7 +16,7 @@ race hunt (`race-hunt`, outside `test-status`). Both CI lanes live in
 ## Running it locally
 
 ```bash
-bun run test:stress                                   # files changed versus origin/master, 10 iterations
+bun run test:stress                                   # files changed versus origin/main, 10 iterations
 bun run test:stress test/a.test.ts --iterations 20    # explicit files
 bun run test:stress --postgres                        # include PostgreSQL arms and E2E files
 bun run test:stress --base <ref> --head <ref>         # the files a commit range touched
@@ -24,7 +24,7 @@ bun run test:stress --dry-run                         # print the plan only
 ```
 
 Without files the runner takes every `test/**/*.test.ts` added or modified
-versus the merge base with `origin/master` (renames at the new path,
+versus the merge base with `origin/main` (renames at the new path,
 deletions skipped, working tree and untracked files included), plus direct
 importers of changed `test/helpers/` files by the fan-in rule below.
 `--postgres` uses the server in `GBRAIN_STRESS_ADMIN_URL`, else a
@@ -136,7 +136,7 @@ shards.
 
 The scheduled Test run (and `gh workflow run test.yml -f race_hunt=true`, a
 diagnostic) runs every file in `test/postgres-unit-arms.txt` 10 times against
-Postgres, plus the Postgres-arm and E2E importers of helpers changed on master
+Postgres, plus the Postgres-arm and E2E importers of helpers changed on main
 since the previous night that the gate sampled out. Budget: at most 55-minute
 shards, 6 by default, growing to 12; past that every file runs at least 3
 iterations nightly and the spare capacity rotates by day, so each file still

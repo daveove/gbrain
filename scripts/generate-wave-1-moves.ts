@@ -3,7 +3,7 @@
  * Refactor wave 1 porting kit (plan W6 / W7, E2 + O11): the moved-symbol map.
  *
  * Diffs the TypeScript under `src/` between a base (default: the merge-base of
- * `origin/master` and HEAD) and HEAD, and records where every top-level symbol
+ * `origin/main` and HEAD) and HEAD, and records where every top-level symbol
  * of a changed base file went: `old path:name -> one or more new path:name`,
  * plus the façade (the old module path that still exports the name, if any).
  *
@@ -644,7 +644,7 @@ function main(argv: string[]): void {
     return i >= 0 ? argv[i + 1] : undefined;
   };
   const headRef = arg('--head') ?? 'HEAD';
-  const baseRef = arg('--base') ?? git(['merge-base', 'origin/master', headRef], root).trim();
+  const baseRef = arg('--base') ?? git(['merge-base', 'origin/main', headRef], root).trim();
   const baseSha = git(['rev-parse', '--short=12', baseRef], root).trim();
   const headSha = git(['rev-parse', '--short=12', headRef], root).trim();
   const { moves, unmapped, removedModules } = computeMoves(diffInputFromGit(root, baseRef, headRef));

@@ -53,7 +53,7 @@ describe('native-only CI remains separate from full validation', () => {
   test('a diagnostic dispatch (race_hunt or stress inputs) runs only its lane and never emits test-status', () => {
     for (const input of ['race_hunt', 'stress_files', 'stress_base'] as const) {
       expect(workflow.on.workflow_dispatch.inputs[input]).toBeDefined();
-      const diagnostic: Diagnostic = input === 'race_hunt' ? { race_hunt: true } : { [input]: input === 'stress_files' ? 'test/a.test.ts' : 'origin/master' };
+      const diagnostic: Diagnostic = input === 'race_hunt' ? { race_hunt: true } : { [input]: input === 'stress_files' ? 'test/a.test.ts' : 'origin/main' };
       for (const [name, job] of Object.entries(workflow.jobs)) {
         if (name === 'changes') continue;
         const runs = Boolean(evaluate(job.if!, 'workflow_dispatch', false, diagnostic));

@@ -11,7 +11,7 @@ name: Semgrep
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   schedule:
     - cron: '30 7 * * 1'  # weekly, Monday 07:30 UTC
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
     # Named exception (docs/TESTING.md#event-parity): pull requests gate on findings
     # new since the merge base; the weekly full-tree scan below covers the rest.
     if: github.event_name == 'pull_request'
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     container:
       image: semgrep/semgrep:1.170.0@sha256:c98f8829eea377274ee4b10656458b078b88232469b2ff913f091c2317347c9d
@@ -50,8 +50,8 @@ jobs:
           # workspace so our merge-base lookup works before Semgrep starts.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           # Diff against the MERGE BASE, not the base-branch head captured at
-          # event time: the checkout is the merge ref against current master,
-          # so a finding master landed after the event would otherwise be
+          # event time: the checkout is the merge ref against current main,
+          # so a finding main landed after the event would otherwise be
           # attributed to this PR. merge-base is the true common ancestor.
           BASELINE="$(git merge-base "$BASE_SHA" HEAD || echo "$BASE_SHA")"
           echo "PR scan — failing only on findings new since $BASELINE"
@@ -60,7 +60,7 @@ jobs:
   semgrep-full:
     # Named exception (docs/TESTING.md#event-parity): the weekly schedule and dispatch.
     if: github.event_name != 'pull_request'
-    runs-on: ubicloud-standard-4-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read

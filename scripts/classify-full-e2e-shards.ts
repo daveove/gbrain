@@ -55,7 +55,7 @@ export function classifyShards(result: string, shards: ShardJob[] | Error, run: 
     return {
       state: 'cancelled',
       title: 'Full E2E shards cancelled',
-      message: `Full E2E shards cancelled: ${url} was cancelled by a newer run in its concurrency group or by a user before ${notOk.map(s => s.name).join(', ')} finished, so no full-corpus coverage report exists for it. This is not a test failure. Next: gh workflow run e2e.yml --ref master -f full_corpus=true (or wait for the next schedule). Docs: ${DOCS}`,
+      message: `Full E2E shards cancelled: ${url} was cancelled by a newer run in its concurrency group or by a user before ${notOk.map(s => s.name).join(', ')} finished, so no full-corpus coverage report exists for it. This is not a test failure. Next: gh workflow run e2e.yml --ref main -f full_corpus=true (or wait for the next schedule). Docs: ${DOCS}`,
     };
   }
   const detail = shards.length === 0
