@@ -148,7 +148,7 @@ describe('fix-wave-closeout workflow', () => {
 
   test('runs only from the default branch on a merged same-repo PR into master', () => {
     expect(Object.keys(wf.on)).toEqual(['pull_request_target']);
-    expect(wf.on.pull_request_target!.branches).toEqual(['master']);
+    expect(wf.on.pull_request_target!.branches).toEqual(['main']);
     expect(wf.on.pull_request_target!.types).toEqual(['closed']);
     const job = wf.jobs['close-superseded']!;
     expect(job.if).toContain('github.event.pull_request.merged == true');

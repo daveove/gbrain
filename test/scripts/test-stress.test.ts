@@ -133,7 +133,7 @@ describe('arguments, reports and signatures', () => {
     expect(parseArgs(['--work', '[{"file":"test/a.test.ts","first":0,"count":1}]'])).toContain('--work must be');
     expect(parseArgs(['--work', '[{"file":"test/../x.test.ts","first":1,"count":1}]'])).toContain('--work must be');
     expect(parseArgs(['--bogus'])).toBe('unknown flag --bogus');
-    expect(parseArgs(['test/a.test.ts', '--postgres', '--seed', '9'])).toMatchObject({ files: ['test/a.test.ts'], postgres: true, seed: 9, iterations: 10, base: 'origin/master' });
+    expect(parseArgs(['test/a.test.ts', '--postgres', '--seed', '9'])).toMatchObject({ files: ['test/a.test.ts'], postgres: true, seed: 9, iterations: 10, base: 'origin/main' });
   });
 
   test('failure messages come out of the JUnit report in order', () => {

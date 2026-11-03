@@ -54,7 +54,7 @@ describe("selector CLI", () => {
       const git = (...a: string[]) => expect(spawnSync("git", a, { cwd: dir, encoding: "utf8" }).status).toBe(0);
       git("init", "-q");
       git("-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "base");
-      git("update-ref", "refs/remotes/origin/master", "HEAD");
+      git("update-ref", "refs/remotes/origin/main", "HEAD");
       mkdirSync(join(dir, "test/e2e"), { recursive: true });
       for (const file of ["test/e2e/a.test.ts", "test/e2e/b.test.ts"]) writeFileSync(join(dir, file), "// fixture\n");
       for (const [path, body] of Object.entries(files)) writeFileSync(join(dir, path), body);

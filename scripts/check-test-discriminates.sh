@@ -13,7 +13,7 @@
 #   2. Reverts each source file to its pre-fix state:
 #        - dirty file (uncommitted fix)  → content from HEAD
 #        - clean file (committed fix)    → content from $DISCRIMINATE_BASE
-#          (default: merge-base with origin/master, falling back to HEAD~1)
+#          (default: merge-base with origin/main, falling back to HEAD~1)
 #      A file that does not exist in the base ref is removed (its pre-fix
 #      state is nonexistence).
 #   3. Runs `bun test <test-file>` and parses the pass/fail counts.
@@ -37,7 +37,7 @@ set -uo pipefail
 
 usage() {
   echo "usage: bash scripts/check-test-discriminates.sh <test-file> <source-file> [<source-file>...]" >&2
-  echo "env:   DISCRIMINATE_BASE=<ref>   pre-fix ref for committed fixes (default: merge-base with origin/master)" >&2
+  echo "env:   DISCRIMINATE_BASE=<ref>   pre-fix ref for committed fixes (default: merge-base with origin/main)" >&2
   exit 2
 }
 
@@ -57,7 +57,7 @@ done
 
 BASE_REF="${DISCRIMINATE_BASE:-}"
 if [ -z "$BASE_REF" ]; then
-  BASE_REF="$(git merge-base HEAD origin/master 2>/dev/null || true)"
+  BASE_REF="$(git merge-base HEAD origin/main 2>/dev/null || true)"
   [ -n "$BASE_REF" ] || BASE_REF="HEAD~1"
 fi
 

@@ -28,7 +28,7 @@ const TEST_FILE = process.env.GBRAIN_GUARD_ROOT ? /\.test(\.fixture)?\.ts$/ : /\
 const DOCS = 'docs/TESTING.md#keeping-ci-partitions-balanced';
 const SCHEDULED = process.env.GITHUB_EVENT_NAME === 'schedule';
 const latestRun = (workflow: string, event: string) =>
-  `$(gh run list --workflow ${workflow} --branch master --event ${event} --status success --limit 1 --json databaseId --jq '.[0].databaseId')`;
+  `$(gh run list --workflow ${workflow} --branch main --event ${event} --status success --limit 1 --json databaseId --jq '.[0].databaseId')`;
 
 function walk(dir: string): string[] {
   const abs = join(ROOT, dir);

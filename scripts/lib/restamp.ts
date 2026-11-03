@@ -62,7 +62,7 @@ export function branchEntrySections(branchText: string, baseText: string): Chang
   if (idx < 0) {
     fail(`CHANGELOG.md on this branch no longer contains the merge base's top entry "${baseTop}"`,
       'restamp finds the branch\'s own entry as the sections above the newest entry the branch shares with master; a rewritten or reordered master entry hides it.',
-      ['restore master\'s entries (git checkout origin/master -- CHANGELOG.md, then re-add only your entry on top), commit,',
+      ['restore master\'s entries (git checkout origin/main -- CHANGELOG.md, then re-add only your entry on top), commit,',
         'then rerun: bun run release:restamp']);
   }
   return branch.slice(0, idx);
