@@ -1715,14 +1715,15 @@ export function makeResolver(
       basenameIndex = await opts.basenameIndex().catch(() => idx);
       return basenameIndex;
     }
-    if (!opts.sourceId && typeof engine.getAllSlugs !== 'function') {
+    const sourceCache = !!opts.sourceId && typeof engine.executeRaw === 'function';
+    if (!sourceCache && typeof engine.getAllSlugs !== 'function') {
       basenameIndex = idx;
       return idx;
     }
     try {
-      basenameIndex = opts.sourceId
-        ? (await sourceSlugIndex(engine, opts.sourceId)).index
-        : buildBasenameIndex(await engine.getAllSlugs());
+      basenameIndex = sourceCache
+        ? (await sourceSlugIndex(engine, opts.sourceId!)).index
+        : buildBasenameIndex(await engine.getAllSlugs(opts.sourceId ? { sourceId: opts.sourceId } : undefined));
       return basenameIndex;
     } catch {
       // Index build failed — empty map → resolveBasenameMatches finds
