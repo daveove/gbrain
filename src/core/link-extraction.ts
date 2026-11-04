@@ -12,6 +12,7 @@
  */
 
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
+import { sourceSlugIndex } from './source-slug-index.ts';
 import type { PageType, EffectiveDateSource } from './types.ts';
 import { ensureWellFormed } from './text-safe.ts';
 import { stripCodeBlocks } from './markdown-code.ts';
@@ -1704,13 +1705,8 @@ export function makeResolver(
   const attendanceCache = new Map<string, string | null>();
   const attendanceCacheLimit = 256;
 
-  // Issue #972: lazy-built basename → slug[] index for global-basename
-  // resolution. Built on first call to `resolveBasenameMatches`; reused
-  // for the rest of the resolver instance's lifetime. Cost is bounded
-  // (one `engine.getAllSlugs()` call per extract run / put_page). The
-  // index keys BOTH the raw tail and the slugified-tail so a wikilink
-  // `[[Fast-Weigh]]` matches a page slugged `companies/fast-weigh` as
-  // well as `notes/Fast-Weigh`.
+  // Keep one index per resolver; source-scoped callers share the fingerprinted
+  // source cache across runs. Unscoped callers retain their full slug read.
   let basenameIndex: Map<string, string[]> | null = null;
   async function ensureBasenameIndex(): Promise<Map<string, string[]>> {
     if (basenameIndex !== null) return basenameIndex;
@@ -1719,19 +1715,15 @@ export function makeResolver(
       basenameIndex = await opts.basenameIndex().catch(() => idx);
       return basenameIndex;
     }
-    if (typeof engine.getAllSlugs !== 'function') {
+    const sourceCache = !!opts.sourceId && typeof engine.executeRaw === 'function';
+    if (!sourceCache && typeof engine.getAllSlugs !== 'function') {
       basenameIndex = idx;
       return idx;
     }
     try {
-      // Issue #972 (codex [P1]): scope the basename index to the resolver's
-      // source. getAllSlugs({sourceId}) keeps wikilink resolution from
-      // spanning unrelated sources — a bare [[name]] must NOT resolve to a
-      // same-tail page in a DIFFERENT source and create a cross-source edge.
-      // #972 is "global basename across folders," not "cross-source federation."
-      const all = await engine.getAllSlugs(opts.sourceId ? { sourceId: opts.sourceId } : undefined);
-      // Issue #972 (codex [P2] DRY): one shared index builder for all surfaces.
-      basenameIndex = buildBasenameIndex(all);
+      basenameIndex = sourceCache
+        ? (await sourceSlugIndex(engine, opts.sourceId!)).index
+        : buildBasenameIndex(await engine.getAllSlugs(opts.sourceId ? { sourceId: opts.sourceId } : undefined));
       return basenameIndex;
     } catch {
       // Index build failed — empty map → resolveBasenameMatches finds

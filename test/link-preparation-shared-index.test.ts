@@ -23,6 +23,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import * as reconciliation from '../src/core/link-reconciliation.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { prepareAutomaticLinks } from '../src/core/persistence/links-preparation.ts';
+import { buildManifestContext } from '../src/core/cycle/link-manifest.ts';
 import { isolatedSharedSkillsEngine } from './helpers/shared-skills-engine.ts';
 import { requirePostgresTestDatabase, testBackends } from './helpers/test-backends.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -157,6 +158,20 @@ for (const backend of testBackends()) {
         .toEqual({ targets: ['ideas/renamed-insert'], fullReads: 1 });
       await engine.executeRaw(`DELETE FROM pages WHERE source_id='default' AND slug='ideas/renamed-insert'`);
       expect(await basenameTargets(engine, 'notes/third', 'See [[renamed-insert]] and [[known]].')).toEqual({ targets: ['topics/known'], fullReads: 1 });
+    }), 60_000);
+
+    test('manifest and automatic preparation reuse the same source read after an insert', () => withEnv(ENV, async () => {
+      const context = await buildManifestContext(engine, 'default');
+      await page(engine, 'default', 'topics/manifest-insert');
+      expect(await basenameTargets(engine, 'notes/first', 'See [[manifest-insert]] and [[known]].'))
+        .toEqual({ targets: ['topics/known', 'topics/manifest-insert'], fullReads: 0 });
+      const reads = spyOn(engine, 'executeRaw');
+      try {
+        const next = await buildManifestContext(engine, 'default');
+        expect(next.slugs.has('topics/manifest-insert')).toBe(true);
+        expect(context.slugs.has('topics/manifest-insert')).toBe(false);
+        expect(reads.mock.calls.filter(([sql]) => String(sql).includes('AS slugs FROM pages'))).toHaveLength(0);
+      } finally { reads.mockRestore(); }
     }), 60_000);
   });
 }

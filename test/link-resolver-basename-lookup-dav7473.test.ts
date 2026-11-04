@@ -35,13 +35,14 @@ afterAll(async () => {
   if (engine) await engine.disconnect();
 }, 60_000);
 
-/** Counts the full slug reads (getAllSlugs) and the per-source slug reads a resolver issues. */
+/** Counts full source slug reads and targeted resolver reads. */
 function countReads() {
   const counts = { fullScans: 0, slugReads: 0 };
   const getAllSlugs = engine.getAllSlugs.bind(engine);
   const executeRaw = engine.executeRaw.bind(engine);
   engine.getAllSlugs = (async (opts?: { sourceId?: string }) => { counts.fullScans++; return getAllSlugs(opts); }) as typeof engine.getAllSlugs;
   engine.executeRaw = (async (sql: string, params?: unknown[]) => {
+    if (/AS slugs FROM pages/.test(sql)) counts.fullScans++;
     if (/SELECT slug FROM pages WHERE source_id=\$1 AND/.test(sql)) counts.slugReads++;
     return executeRaw(sql, params);
   }) as typeof engine.executeRaw;
