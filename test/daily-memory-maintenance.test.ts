@@ -1987,26 +1987,122 @@ describe('daily memory from sources the brain already holds', () => {
       effective_date_source='date', updated_at='2026-10-01T00:00:00Z'::timestamptz
       WHERE slug LIKE 'notes/aaa-instant-%'`, []);
     const executeRaw = engine.executeRaw;
-    let batches = 0;
     engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
       const selected = await executeRaw.call(this, sql, params);
       if (sql.includes('AS utc_day')) {
-        batches++;
-        expect(selected.length).toBeLessThanOrEqual(40);
         for (const row of selected as { frontmatter: Record<string, unknown> }[]) {
           expect(row.frontmatter).not.toHaveProperty('unrelated_blob');
+          const candidate = row as typeof row & { utc_day: string; local_day: string; effective_date: unknown };
+          if (candidate.utc_day === candidate.local_day) {
+            expect(candidate.effective_date).toBeNull();
+            expect(candidate.frontmatter).toEqual({});
+          }
         }
       }
       return selected;
     }) as typeof engine.executeRaw;
     let result;
     try { result = await writeSeptember30(); } finally { engine.executeRaw = executeRaw; }
-    expect(batches).toBeGreaterThan(3);
     expect(result.pages).toBe(40);
     const page = await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID });
     expect(page!.compiled_truth).toContain('40 of 42 pages are linked.');
     expect(page!.compiled_truth).not.toContain('previous-day');
     expect(page!.compiled_truth.match(/\[\[default:notes\/page-/g)).toHaveLength(40);
+  });
+
+  // These fixtures cover many unsafe links, multiple sources, and ambiguous dates beyond the link cap.
+  // The count and labels catch truncated scans; query results catch unnecessary wire payloads.
+  // Existing small-day coverage cannot exercise the count-only tail. No production test seam is needed.
+  test('paged daily scans retain exact zoned counts and valid links after a revision rescan', async () => {
+    await engine.executeRaw("INSERT INTO sources (id,name) VALUES ('a-invalid','Invalid targets')");
+    for (const [source, count, prefix] of [
+      ['a-invalid', 510, 'notes/unsafe|'],
+      ['default', 533, 'notes/page-'],
+    ] as const) {
+      await engine.executeRaw(
+        `INSERT INTO pages (source_id,slug,type,title,compiled_truth,frontmatter,effective_date,effective_date_source)
+         SELECT $1,$2 || lpad(n::text,4,'0'),'note','Label ' || n,'Synthetic fixture',
+           '{"date":"2026-09-30"}'::jsonb,'2026-09-30T12:00:00Z'::timestamptz,'date'
+         FROM generate_series(0,$3::int - 1) n`, [source, prefix, count]);
+    }
+    const iso = '2026-09-30T00:00:00.000Z';
+    const detailRows = [
+      ['zz/calendar', 'date', iso, { date: '2026-09-30' }],
+      ['zz/legacy', 'date', iso, { date: iso }],
+      ['zz/filename', 'filename', iso, {}],
+      ['zz/created-calendar', 'created', iso, { created: 'invalid', 'date created': 'September 30, 2026' }],
+      ['zz/instant', 'date', iso, { date: iso, [DATE_INSTANT_PROVENANCE]: { date: iso } }],
+      ['zz/created-instant', 'created', iso, { created_at: iso, [DATE_INSTANT_PROVENANCE]: { created_at: iso } }],
+      ['zz/fallback', 'fallback', iso, {}],
+      ['zz/next-calendar', 'date', '2026-10-01T00:00:00.000Z', { date: '2026-10-01' }],
+    ] as const;
+    for (const [slug, source, date, frontmatter] of detailRows) {
+      const metadata: Record<string, unknown> = frontmatter;
+      await engine.executeRaw(
+        `INSERT INTO pages (source_id,slug,type,title,compiled_truth,frontmatter,effective_date,effective_date_source)
+         VALUES ('default',$1,'note','Unlinked label','Synthetic fixture',$2::jsonb,$3::timestamptz,$4)`,
+        [slug, { ...frontmatter, unrelated_blob: 'x'.repeat(32768),
+          [DATE_INSTANT_PROVENANCE]: { ...(metadata[DATE_INSTANT_PROVENANCE] as Record<string, unknown> | undefined),
+            unrelated_blob: 'x'.repeat(32768) } }, date, source]);
+    }
+    const executeRaw = engine.executeRaw;
+    let conflicts = 0;
+    let inserted = false;
+    engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
+      if (sql.includes('AS utc_day') && conflicts === 1 && !inserted) {
+        // Commit the peer's page outside the failed publication transaction.
+        await executeRaw.call(this,
+          `INSERT INTO pages (source_id,slug,type,title,compiled_truth,frontmatter,effective_date,effective_date_source)
+           VALUES ('default','notes/page--earlier','note','New label','Synthetic fixture',
+             '{"date":"2026-09-30"}'::jsonb,'2026-09-30T12:00:00Z'::timestamptz,'date')`);
+        inserted = true;
+      }
+      const selected = await executeRaw.call(this, sql, params);
+      if (sql.includes('AS utc_day')) {
+        const candidates = selected as { title: string; frontmatter: Record<string, unknown>; effective_date: unknown;
+          utc_day: string; local_day: string }[];
+        if (params?.[7] === false) {
+          for (const row of candidates) expect(row.title).toBe('');
+        }
+        for (const row of candidates) {
+          expect(row.frontmatter).not.toHaveProperty('unrelated_blob');
+          expect(row.frontmatter[DATE_INSTANT_PROVENANCE] ?? {}).not.toHaveProperty('unrelated_blob');
+          if (row.utc_day === row.local_day) {
+            expect(row.effective_date).toBeNull();
+            expect(row.frontmatter).toEqual({});
+          } else {
+            expect(row.effective_date).not.toBeNull();
+          }
+        }
+      }
+      return selected;
+    }) as typeof engine.executeRaw;
+    const putPage = engine.putPage;
+    const putSpy = spyOn(engine, 'putPage').mockImplementation(async function(this: PGLiteEngine, slug, page, opts) {
+      if (opts?.sourceId === DAILY_MEMORY_SOURCE_ID && conflicts === 0) {
+        conflicts++;
+        throw new PageRevisionConflictError(
+          '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222');
+      }
+      return putPage.call(this, slug, page, opts);
+    });
+    let result;
+    try {
+      result = await writeDailyMemoryFromSources(engine, { date: '2026-09-30', timezone: 'America/Los_Angeles' });
+    } finally {
+      putSpy.mockRestore();
+      engine.executeRaw = executeRaw;
+    }
+    expect(result).toMatchObject({ written: true, pages: 40 });
+    expect(conflicts).toBe(1);
+    const page = (await engine.getPage(result.slug, { sourceId: DAILY_MEMORY_SOURCE_ID }))!;
+    expect(page.compiled_truth).toContain('40 of 1048 pages are linked.');
+    expect(page.compiled_truth.match(/\[\[default:notes\/page-/g)).toHaveLength(40);
+    expect(page.compiled_truth).toContain('[[default:notes/page--earlier]] — New label');
+    expect(page.compiled_truth).toContain('[[default:notes/page-0038]] — Label 38');
+    expect(page.compiled_truth).not.toContain('page-0039');
+    expect(page.compiled_truth).not.toContain('unsafe|');
+    expect(page.compiled_truth).not.toContain('Unlinked label');
   });
 
   test('existing ratio_session pages are linked without creating or changing sessions', async () => {
@@ -2042,6 +2138,71 @@ describe('daily memory from sources the brain already holds', () => {
     expect(page!.compiled_truth).toContain('gmail: 1 record changed');
     expect(page!.compiled_truth).not.toContain('old index');
     expect(page!.deleted_at ?? null).toBeNull();
+  });
+
+  // Imported date discovery must keep created aliases and midnight provenance across 100-slug batches.
+  // A full provenance map or dropped marker fails the payload or zoned-day assertions.
+  // Existing version tests use small maps and slug sets. This uses only the existing engine boundary.
+  test('imported date batches retain zoned live and historical days with narrow provenance', async () => {
+    const seeded = await engine.executeRaw<{ slug: string }>(
+      `INSERT INTO pages (source_id,slug,type,title,compiled_truth,frontmatter,effective_date,effective_date_source)
+       SELECT 'default','notes/batch-' || lpad(n::text,3,'0'),'note','Unused label','Synthetic fixture',
+         '{"date":"2026-09-30"}'::jsonb,'2026-09-30T00:00:00Z'::timestamptz,'date'
+       FROM generate_series(0,100) n RETURNING slug`);
+    const slugs = seeded.map(row => row.slug).sort();
+    const iso = '2026-09-30T00:00:00.000Z';
+    for (const [slug, frontmatter] of [
+      ['notes/created-instant', { created: 'invalid', created_at: iso,
+        [DATE_INSTANT_PROVENANCE]: { created_at: iso, unrelated_blob: 'x'.repeat(32768) } }],
+      ['notes/created-calendar', { created: 'invalid', 'date created': 'September 30, 2026',
+        [DATE_INSTANT_PROVENANCE]: { unrelated_blob: 'x'.repeat(32768) } }],
+    ] as const) {
+      await engine.executeRaw(
+        `INSERT INTO pages (source_id,slug,type,title,compiled_truth,frontmatter,effective_date,effective_date_source)
+         VALUES ('default',$1,'note','Unused label','Synthetic fixture',$2::jsonb,$3::timestamptz,'created')`,
+        [slug, { ...frontmatter, unrelated_blob: 'x'.repeat(32768) }, iso]);
+      slugs.push(slug);
+    }
+    const historical = '2026-09-29T00:00:00.000Z';
+    const versionedSlug = 'notes/versioned-provenance';
+    await engine.putPage(versionedSlug, {
+      type: 'note', title: 'Unused version label', compiled_truth: 'Historical fixture',
+      frontmatter: { published: historical,
+        [DATE_INSTANT_PROVENANCE]: { published: historical, unrelated_blob: 'x'.repeat(32768) } },
+      effective_date: new Date(historical), effective_date_source: 'published',
+    });
+    await engine.createVersion(versionedSlug, { sourceId: 'default' });
+    await engine.putPage(versionedSlug, {
+      type: 'note', title: 'Unused current label', compiled_truth: 'Current fixture',
+      frontmatter: { date: '2026-09-30' },
+      effective_date: new Date(iso), effective_date_source: 'date',
+    });
+    slugs.push(versionedSlug);
+    const executeRaw = engine.executeRaw;
+    engine.executeRaw = (async function(this: PGLiteEngine, sql: string, params?: unknown[]) {
+      const selected = await executeRaw.call(this, sql, params);
+      if (sql.includes('AS utc_day') || sql.includes('FROM page_versions pv')) {
+        if (sql.includes('AS utc_day')) {
+          for (const row of selected) {
+            expect(row).not.toHaveProperty('title');
+            expect(row).not.toHaveProperty('source_id');
+            expect(row).not.toHaveProperty('slug');
+          }
+        }
+        for (const row of selected as { frontmatter: Record<string, unknown> }[]) {
+          expect(row.frontmatter).not.toHaveProperty('unrelated_blob');
+          expect(row.frontmatter[DATE_INSTANT_PROVENANCE]).not.toHaveProperty('unrelated_blob');
+        }
+      }
+      return selected;
+    }) as typeof engine.executeRaw;
+    let days;
+    try {
+      days = await dailyMemoryDaysForSlugs(engine, 'default', slugs, { timezone: 'America/Los_Angeles' });
+    } finally {
+      engine.executeRaw = executeRaw;
+    }
+    expect(days).toEqual(['2026-09-28', '2026-09-29', '2026-09-30']);
   });
 
   test('dailyMemoryDaysForSlugs includes soft-deleted pages so prior indexes can drop them', async () => {
