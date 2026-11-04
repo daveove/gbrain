@@ -170,7 +170,7 @@ export interface SourcePageRow {
   frontmatter: Record<string, unknown>;
 }
 
-export function isCalendarEffectiveDate(row: SourcePageRow): boolean {
+export function isCalendarEffectiveDate<T extends Pick<SourcePageRow, 'effective_date' | 'effective_date_source' | 'frontmatter'>>(row: T): boolean {
   if (row.effective_date_source === 'filename') return true;
   if (row.effective_date_source === 'fallback') return false;
   const date = new Date(row.effective_date!);
@@ -342,8 +342,12 @@ const DAY_MEMBER_SQL = `CASE
     THEN (effective_date AT TIME ZONE 'UTC')::date = $2::date
   END`;
 
-const DAY_ROW_COLUMNS = `source_id, slug, title, effective_date, effective_date_source,
-  jsonb_build_object(
+const DAY_ROW_COLUMNS = `source_id, slug, title,
+  CASE WHEN (effective_date AT TIME ZONE 'UTC')::date
+    IS DISTINCT FROM (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date
+    THEN effective_date END AS effective_date, effective_date_source,
+  CASE WHEN (effective_date AT TIME ZONE 'UTC')::date
+    IS DISTINCT FROM (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date THEN jsonb_build_object(
     COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
     'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
     'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
@@ -352,7 +356,8 @@ const DAY_ROW_COLUMNS = `source_id, slug, title, effective_date, effective_date_
       'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
       'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
       'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
-      'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
+      'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created'))
+    ELSE '{}'::jsonb END AS frontmatter,
   to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
   to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day`;
 
