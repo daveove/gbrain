@@ -160,3 +160,55 @@ describe('one-liner privacy strip (untrusted-reader boundary)', () => {
     expect(block).toContain('[[people/bob-example]]');
   });
 });
+
+describe('DAV-7473: scoped manifest reads only the slugs it names', () => {
+  /** Counts full slug reads and the slug rows the manifest reads from pages. */
+  function countReads() {
+    const counts = { fullScans: 0, slugRows: 0 };
+    const getAllSlugs = engine.getAllSlugs.bind(engine);
+    const executeRaw = engine.executeRaw.bind(engine);
+    engine.getAllSlugs = (async (opts?: { sourceId?: string }) => {
+      counts.fullScans++;
+      const all = await getAllSlugs(opts);
+      counts.slugRows += all.size;
+      return all;
+    }) as typeof engine.getAllSlugs;
+    engine.executeRaw = (async (sql: string, params?: unknown[]) => {
+      const rows = await executeRaw(sql, params);
+      if (/^SELECT slug FROM pages WHERE/.test(sql)) counts.slugRows += rows.length;
+      return rows;
+    }) as typeof engine.executeRaw;
+    // Delete the own-property wrappers so transactions reach the engine's methods again.
+    const wrapped = engine as unknown as Record<string, unknown>;
+    return { counts, restore() { delete wrapped.getAllSlugs; delete wrapped.executeRaw; } };
+  }
+
+  test('same candidates as the full-index build, with no full slug read', async () => {
+    await seedPage('people/alice-example', 'Alice Example is a founder. She works on widgets.');
+    await seedPage('projects/widget-launch', 'The widget launch project. Shipping Q3.');
+    for (let i = 0; i < 60; i++) await seedPage(`notes/filler-${i}`, `Filler note ${i}. Nothing to see.`);
+    const verdict = VERDICT(['Alice Example', 'nobody-known-here'], ['widget launch']);
+    const full = await buildLinkManifest(engine, await buildManifestContext(engine), verdict, '2026-08-16-widget-launch.txt', { outputRoot: 'wiki' });
+    const reads = countReads();
+    try {
+      const ctx = await buildManifestContext(engine, 'default');
+      const scoped = await buildLinkManifest(engine, ctx, verdict, '2026-08-16-widget-launch.txt', { outputRoot: 'wiki', sourceId: 'default' });
+      expect(scoped).toEqual(full);
+      expect(scoped.slugs).toContain('people/alice-example');
+      expect(reads.counts.fullScans).toBe(0);
+      // Before DAV-7473 the scoped build read all 62 slugs of the source.
+      expect(reads.counts.slugRows).toBeLessThan(20);
+    } finally {
+      reads.restore();
+    }
+  }, 60_000);
+
+  test('keyword hits outside the source never enter the manifest', async () => {
+    await engine.executeRaw(`INSERT INTO sources (id, name, config) VALUES ('other-src', 'other-src', '{}'::jsonb) ON CONFLICT DO NOTHING`);
+    await importFromContent(engine, 'people/zed-example', 'Zed Example builds gizmos.', { noEmbed: true, sourceId: 'other-src' });
+    const ctx = await buildManifestContext(engine, 'default');
+    expect(await ctx.existing(['people/zed-example'])).toEqual(new Set());
+    const { slugs } = await buildLinkManifest(engine, ctx, VERDICT(['Zed Example']), 'chat.txt', { outputRoot: 'wiki', sourceId: 'default' });
+    expect(slugs).not.toContain('people/zed-example');
+  });
+});

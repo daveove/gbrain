@@ -22,7 +22,7 @@
  */
 
 import type { BrainEngine, DreamVerdict } from '../engine.ts';
-import { buildBasenameIndex, queryBasenameIndex } from '../link-extraction.ts';
+import { makeResolver } from '../link-extraction.ts';
 import { extractFirstTwoSentences } from '../embedding-context.ts';
 import { stripTakesFence } from '../takes-fence.ts';
 import { stripFactsFence } from '../facts-fence.ts';
@@ -40,19 +40,36 @@ const ONE_LINER_MAX_CHARS = 160;
 const KEYWORD_LIMIT_PER_QUERY = 3;
 
 export interface ManifestContext {
-  /** Canonical slug set for the cycle's source (also the validation universe). */
-  slugs: Set<string>;
-  /** Basename → slugs index over the same set. */
-  basenameIndex: Map<string, string[]>;
+  /** Slugs of the cycle's source whose basename matches `name` (the basename index answer). */
+  basenameMatches(name: string): Promise<string[]>;
+  /** The subset of `slugs` that the cycle's source holds (also the validation universe). */
+  existing(slugs: string[]): Promise<Set<string>>;
 }
 
-/** Build once per phase; reused across every transcript's manifest. */
+/**
+ * Build once per phase; reused across every transcript's manifest.
+ *
+ * DAV-7473: this used to read every slug of the source (getAllSlugs) once per
+ * synthesis phase. It now asks the database only for the names and slugs a
+ * manifest needs. Basename lookups go through the link resolver, which gives
+ * the same answer as the full basename index and memoizes it per phase.
+ */
 export async function buildManifestContext(
   engine: BrainEngine,
   sourceId?: string,
 ): Promise<ManifestContext> {
-  const slugs = await engine.getAllSlugs(sourceId ? { sourceId } : undefined);
-  return { slugs, basenameIndex: buildBasenameIndex(slugs) };
+  const resolver = makeResolver(engine, { mode: 'batch', ...(sourceId ? { sourceId } : {}) });
+  return {
+    basenameMatches: async name => (await resolver.resolveBasenameMatches?.(name)) ?? [],
+    async existing(slugs) {
+      const wanted = [...new Set(slugs)];
+      if (!wanted.length) return new Set();
+      const rows = sourceId
+        ? await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])', [sourceId, wanted])
+        : await engine.executeRaw<{ slug: string }>('SELECT slug FROM pages WHERE slug=ANY($1::text[])', [wanted]);
+      return new Set(rows.map(row => row.slug));
+    },
+  };
 }
 
 export interface LinkManifestResult {
@@ -103,10 +120,12 @@ export async function buildLinkManifest(
 
     const candidates: string[] = [];
     const seen = new Set<string>();
-    const add = (slug: string): void => {
+    // `known` holds only slugs the source holds: basename matches come from
+    // the source, and keyword hits pass ctx.existing first.
+    const add = (slug: string, known: Set<string> | null): void => {
       if (seen.has(slug)) return;
       if (isDreamOutputSlug(slug, opts.outputRoot)) return;
-      if (!ctx.slugs.has(slug)) return;
+      if (known && !known.has(slug)) return;
       seen.add(slug);
       candidates.push(slug);
     };
@@ -114,7 +133,7 @@ export async function buildLinkManifest(
     // Arm 1 — basename-index exact/slugified matches for entities (the
     // dominant wikilink targets: people/company pages named after the entity).
     for (const q of queries) {
-      for (const slug of queryBasenameIndex(ctx.basenameIndex, q)) add(slug);
+      for (const slug of await ctx.basenameMatches(q)) add(slug, null);
       if (candidates.length >= MANIFEST_MAX_PAGES) break;
     }
 
@@ -131,7 +150,8 @@ export async function buildLinkManifest(
         } catch {
           continue; // per-query degradation; other arms still contribute
         }
-        for (const r of results) add(r.slug);
+        const known = await ctx.existing(results.map(r => r.slug));
+        for (const r of results) add(r.slug, known);
       }
     }
 
