@@ -71,6 +71,19 @@ describe('ompAdapter', () => {
     ]);
   });
 
+  test('an unknown role still counts as a skipped line', async () => {
+    const d = tdir();
+    const p = join(d, 'role.jsonl');
+    const header = { type: 'session', version: 3, id: 'omp-role', timestamp: '2026-09-30T00:00:00.000Z', cwd: '/tmp' };
+    const row = (role: string) => ({ type: 'message', timestamp: '2026-09-30T00:01:00.000Z', message: { role, content: null } });
+    const skippedOf = async (rows: unknown[]) => {
+      writeFileSync(p, [header, ...rows].map((r) => JSON.stringify(r)).join('\n') + '\n');
+      return (await drain(ompAdapter.parse(p))).diag.skippedLines;
+    };
+    expect(await skippedOf([row('fileMention')])).toBe(0);
+    expect(await skippedOf([row('futureRole')])).toBe(1);
+  });
+
   test('renders a distilled page under the omp session slug', async () => {
     const { sessions } = await drain(ompAdapter.parse(OMP_FIXTURE));
     const { slug, content } = renderBody(sessions[0]);

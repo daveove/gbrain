@@ -12,6 +12,7 @@
  */
 
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
+import { sourceSlugIndex } from './source-slug-index.ts';
 import type { PageType, EffectiveDateSource } from './types.ts';
 import { ensureWellFormed } from './text-safe.ts';
 import { stripCodeBlocks } from './markdown-code.ts';
@@ -1643,6 +1644,16 @@ function basenameSort(a: string, b: string): number {
   return (a.length - b.length) || a.localeCompare(b);
 }
 
+/** SQL twin of the tail `buildBasenameIndex` keys on: the text after the last `/`. */
+const SLUG_TAIL_SQL = `regexp_replace(slug, '^.*/', '')`;
+/**
+ * A tail of [a-z0-9] words joined by single hyphens. `normalizeBasename` and `toLowerCase` leave it
+ * unchanged, so a slug with such a tail is indexed under its raw tail only.
+ */
+const REGULAR_SLUG_TAIL_RE = '^[a-z0-9]+(-[a-z0-9]+)*$';
+/** Distinct names one resolver looks up in the database before it reads the whole source instead. */
+const BASENAME_FULL_INDEX_AFTER = 256;
+
 /** Build a `key → slug[]` index over a slug collection, or add the slugs to `idx`. Keys: raw/lower/slugified tail. */
 export function buildBasenameIndex(slugs: Iterable<string>, idx = new Map<string, string[]>()): Map<string, string[]> {
   const addKey = (key: string, slug: string) => {
@@ -1694,13 +1705,8 @@ export function makeResolver(
   const attendanceCache = new Map<string, string | null>();
   const attendanceCacheLimit = 256;
 
-  // Issue #972: lazy-built basename → slug[] index for global-basename
-  // resolution. Built on first call to `resolveBasenameMatches`; reused
-  // for the rest of the resolver instance's lifetime. Cost is bounded
-  // (one `engine.getAllSlugs()` call per extract run / put_page). The
-  // index keys BOTH the raw tail and the slugified-tail so a wikilink
-  // `[[Fast-Weigh]]` matches a page slugged `companies/fast-weigh` as
-  // well as `notes/Fast-Weigh`.
+  // Keep one index per resolver; source-scoped callers share the fingerprinted
+  // source cache across runs. Unscoped callers retain their full slug read.
   let basenameIndex: Map<string, string[]> | null = null;
   async function ensureBasenameIndex(): Promise<Map<string, string[]>> {
     if (basenameIndex !== null) return basenameIndex;
@@ -1709,19 +1715,15 @@ export function makeResolver(
       basenameIndex = await opts.basenameIndex().catch(() => idx);
       return basenameIndex;
     }
-    if (typeof engine.getAllSlugs !== 'function') {
+    const sourceCache = !!opts.sourceId && typeof engine.executeRaw === 'function';
+    if (!sourceCache && typeof engine.getAllSlugs !== 'function') {
       basenameIndex = idx;
       return idx;
     }
     try {
-      // Issue #972 (codex [P1]): scope the basename index to the resolver's
-      // source. getAllSlugs({sourceId}) keeps wikilink resolution from
-      // spanning unrelated sources — a bare [[name]] must NOT resolve to a
-      // same-tail page in a DIFFERENT source and create a cross-source edge.
-      // #972 is "global basename across folders," not "cross-source federation."
-      const all = await engine.getAllSlugs(opts.sourceId ? { sourceId: opts.sourceId } : undefined);
-      // Issue #972 (codex [P2] DRY): one shared index builder for all surfaces.
-      basenameIndex = buildBasenameIndex(all);
+      basenameIndex = sourceCache
+        ? (await sourceSlugIndex(engine, opts.sourceId!)).index
+        : buildBasenameIndex(await engine.getAllSlugs(opts.sourceId ? { sourceId: opts.sourceId } : undefined));
       return basenameIndex;
     } catch {
       // Index build failed — empty map → resolveBasenameMatches finds
@@ -1729,6 +1731,50 @@ export function makeResolver(
     }
     basenameIndex = idx;
     return idx;
+  }
+
+  // DAV-7473: a bare-name lookup asks the database for the few slugs it names instead of reading
+  // every slug of the source (about 100k rows per run for a large source). The answer is the one the
+  // full index gives: key k holds every slug whose tail, lowercased tail or normalized tail is k.
+  // A tail made only of [a-z0-9] words joined by single hyphens is its own lowercase and normalized
+  // form, so such a slug can match only by raw tail; the indexed read below finds those. Every other
+  // slug (the irregular set) is read once per resolver and indexed in memory. After
+  // BASENAME_FULL_INDEX_AFTER distinct names the full index is cheaper, so the resolver builds it.
+  let irregularIndex: Promise<Map<string, string[]>> | null = null;
+  const targetedMatches = new Map<string, string[]>();
+  async function targetedBasenameMatches(sourceId: string, trimmed: string): Promise<string[]> {
+    const forms = [...new Set([trimmed, trimmed.toLowerCase(), normalizeBasename(trimmed)].filter(Boolean))];
+    irregularIndex ??= engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE source_id=$1 AND ${SLUG_TAIL_SQL} !~ '${REGULAR_SLUG_TAIL_RE}'`, [sourceId],
+    ).then(rows => buildBasenameIndex(rows.map(row => row.slug)));
+    const [irregular, rows] = await Promise.all([irregularIndex, engine.executeRaw<{ slug: string }>(
+      `SELECT slug FROM pages WHERE source_id=$1 AND ${SLUG_TAIL_SQL}=ANY($2::text[])`, [sourceId, forms],
+    )]);
+    const named = buildBasenameIndex(rows.map(row => row.slug));
+    for (const key of forms) {
+      const hit = new Set([...(irregular.get(key) ?? []), ...(named.get(key) ?? [])]);
+      if (hit.size) return [...hit].sort(basenameSort);
+    }
+    return [];
+  }
+  async function lookupBasename(name: string): Promise<string[]> {
+    const trimmed = typeof name === 'string' ? name.trim() : '';
+    if (!trimmed) return [];
+    if (!opts.sourceId || opts.basenameIndex || typeof engine.executeRaw !== 'function' || basenameIndex !== null) {
+      return queryBasenameIndex(await ensureBasenameIndex(), name);
+    }
+    const known = targetedMatches.get(trimmed);
+    if (known) return [...known];
+    if (targetedMatches.size < BASENAME_FULL_INDEX_AFTER) {
+      try {
+        const found = await targetedBasenameMatches(opts.sourceId, trimmed);
+        targetedMatches.set(trimmed, found);
+        return [...found];
+      } catch {
+        irregularIndex = null; // fall through to the full index, which never throws
+      }
+    }
+    return queryBasenameIndex(await ensureBasenameIndex(), name);
   }
 
   return {
@@ -1759,7 +1805,7 @@ export function makeResolver(
       // Issue #972 (codex [P2] DRY): shared query so resolver + FS + doctor
       // return the same matches in the same stable order. Memoized per
       // resolver: a shared opts.basenameIndex may grow while a page extracts.
-      if (!basenameMatches.has(name)) basenameMatches.set(name, queryBasenameIndex(await ensureBasenameIndex(), name));
+      if (!basenameMatches.has(name)) basenameMatches.set(name, await lookupBasename(name));
       return [...basenameMatches.get(name)!];
     },
 
@@ -1827,7 +1873,7 @@ export function makeResolver(
       // resolveEntitySlug (#5769). Without it the live keyword step let a
       // transcript that repeats the term take over a correct frontmatter edge.
       if (resolveOpts?.globalBasename) {
-        const matches = queryBasenameIndex(await ensureBasenameIndex(), trimmed)
+        const matches = (await lookupBasename(trimmed))
           .filter(s => s !== resolveOpts.selfSlug);
         if (matches.length === 1) {
           cache.set(cacheKey, matches[0]);
