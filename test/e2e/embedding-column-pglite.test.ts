@@ -55,6 +55,12 @@ beforeAll(async () => {
   await (engine as any).db.exec(
     `ALTER TABLE content_chunks ADD COLUMN IF NOT EXISTS embedding_fixture halfvec(2560)`,
   );
+  // getEmbeddingsByChunkIds resolves a named column through the persisted
+  // embedding_columns registry (DAV-6928), so the ALTERed column must be
+  // declared there. An ALTER alone leaves the name unregistered.
+  await engine.setConfig('embedding_columns', JSON.stringify({
+    embedding_voyage: { provider: 'voyage:voyage-3-large', dimensions: 1024, type: 'vector' },
+  }));
 
   // Two pages with one chunk each.
   await engine.putPage('docs/page-a', {
