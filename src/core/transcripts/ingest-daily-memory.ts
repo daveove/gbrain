@@ -6,7 +6,34 @@ import { DAILY_MEMORY_SOURCE_ID } from '../cycle/daily-memory.ts';
 import { resolveCycleTimeZone } from '../cycle/cycle-date.ts';
 import { dailyMemoryDaysForSlugs, queueStandaloneSyncDailyMemory } from '../cycle/daily-memory-followup.ts';
 
-type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[] };
+type Prior = { targets: Array<{ slug: string; revision: string | null }>; days: string[]; group?: string; part?: number; parts?: number };
+type Chunk = Pick<Prior, 'targets' | 'days'>;
+
+/** Stay far below the 2704-byte btree row limit on op_checkpoint_paths_pkey. */
+const BEFORE_PATH_LIMIT = 2000;
+
+/** Encode one before: record as banked values, split by encoded path size; all chunks share one group. */
+function beforeValues(origin: string, record: Prior, group: string): string[] {
+  const encode = (value: Prior) => `before:${JSON.stringify(value)}`;
+  const size = (value: Prior) => Buffer.byteLength(JSON.stringify({ origin, value: encode(value) }));
+  const whole: Prior = { targets: record.targets, days: record.days, group };
+  if (size(whole) < BEFORE_PATH_LIMIT) return [encode(whole)];
+  const chunks: Chunk[] = [];
+  let current: Chunk = { targets: [], days: [] };
+  const place = (kind: 'targets' | 'days', item: Prior['targets'][number] | string) => {
+    (current[kind] as unknown[]).push(item);
+    if (size({ ...current, group, part: 99999, parts: 99999 }) < BEFORE_PATH_LIMIT
+      || current.targets.length + current.days.length === 1) return;
+    (current[kind] as unknown[]).pop();
+    chunks.push(current);
+    current = { targets: [], days: [] };
+    (current[kind] as unknown[]).push(item);
+  };
+  for (const target of record.targets) place('targets', target);
+  for (const day of record.days) place('days', day);
+  chunks.push(current);
+  return chunks.map((chunk, part) => encode({ ...chunk, group, part, parts: chunks.length }));
+}
 
 /** Bank prior/current days around session writes, then accept refresh work before a clean scan. */
 export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opts: {
@@ -86,7 +113,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
     // A peer may already have snapshotted the original before: path for retirement.
     // Give this committed mutation a fresh path so that older DELETE cannot erase it.
     opts.signal?.throwIfAborted();
-    const entries = [...prior.map(record => `before:${JSON.stringify({ ...record, bankId: randomUUID() })}`), ...changed.map(slug => `slug:${slug}`)];
+    const entries = [...prior.flatMap(record => beforeValues(origin, record, randomUUID())), ...changed.map(slug => `slug:${slug}`)];
     await appendCompletedInTransaction(tx, key, entries.map(value => JSON.stringify({ origin, value })));
   };
   return {
@@ -146,20 +173,21 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
       for (const row of existing) names.add(row.slug);
       const unique = [...names];
       const prior: Prior = {
+        group: randomUUID(),
         targets: unique.map(slug => ({
           slug,
           revision: existing.find(row => row.slug === slug)?.revision ?? null,
         })),
         days: await dailyMemoryDaysForSlugs(engine, opts.sourceId, unique, { signal: opts.signal, timezone }),
       };
-      await bank([`before:${JSON.stringify(prior)}`]);
+      await bank(beforeValues(origin, prior, prior.group!));
       for (const slug of unique) priorBySlug.set(slug, prior);
     },
     async touched(slugs: string[]) {
       const unique = [...new Set(slugs.filter(Boolean))];
       if (unique.length) {
         const prior = [...new Set(unique.map(slug => priorBySlug.get(slug)).filter((record): record is Prior => !!record))];
-        await bank([...prior.map(record => `before:${JSON.stringify(record)}`), ...unique.map(slug => `slug:${slug}`)]);
+        await bank([...prior.flatMap(record => beforeValues(origin, record, record.group ?? randomUUID())), ...unique.map(slug => `slug:${slug}`)]);
         for (const slug of unique) priorBySlug.delete(slug);
       }
     },
@@ -193,7 +221,7 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
           }
         }
         const slugs = new Set<string>(), days = new Set<string>();
-        type PriorDebt = Prior & { foreignAbandoned: boolean };
+        type PriorDebt = Prior & { foreignAbandoned: boolean; origin: string | null };
         const prior: PriorDebt[] = [];
         // Preserve still-running foreign origins (fresh lease). Adopt abandoned
         // origins (expired/missing lease) so crashed or rejected runs recover.
@@ -218,13 +246,38 @@ export async function createTranscriptIngestDailyMemory(engine: BrainEngine, opt
             if (!parsed || !Array.isArray(parsed.targets) || !Array.isArray(parsed.days)
               || !parsed.targets.every(target => target && typeof target.slug === 'string' && target.slug.length > 0
                 && (target.revision === null || typeof target.revision === 'string'))
-              || !parsed.days.every(day => typeof day === 'string')) {
+              || !parsed.days.every(day => typeof day === 'string')
+              || (parsed.group !== undefined && (typeof parsed.group !== 'string' || !parsed.group))
+              || (parsed.part !== undefined && !Number.isInteger(parsed.part))
+              || (parsed.parts !== undefined && !Number.isInteger(parsed.parts))) {
               throw new Error('Invalid daily-memory transcript ingest checkpoint');
             }
-            prior.push({ ...parsed, foreignAbandoned });
+            prior.push({ ...parsed, foreignAbandoned, origin: rowOrigin });
           } else throw new Error('Invalid daily-memory transcript checkpoint entry');
         }
-        for (const record of prior) {
+        // Chunks of one banked record share an origin and group; rejoin them so a
+        // drift in any chunk hands off every target and day. A missing chunk
+        // means the bank never completed, so hand off what survived.
+        const joined = new Map<string, { record: PriorDebt; seen: Set<number> }>();
+        const records: PriorDebt[] = [];
+        for (const chunk of prior) {
+          if (chunk.group === undefined) { records.push(chunk); continue; }
+          const id = `${chunk.origin}\0${chunk.group}`;
+          const entry = joined.get(id);
+          if (!entry) {
+            joined.set(id, { record: { ...chunk, targets: [...chunk.targets], days: [...chunk.days] }, seen: new Set([chunk.part ?? 0]) });
+            continue;
+          }
+          entry.record.targets.push(...chunk.targets);
+          entry.record.days.push(...chunk.days);
+          entry.record.parts = Math.max(entry.record.parts ?? 1, chunk.parts ?? 1);
+          entry.seen.add(chunk.part ?? 0);
+        }
+        for (const { record, seen } of joined.values()) {
+          if (seen.size < (record.parts ?? 1)) record.foreignAbandoned = true;
+          records.push(record);
+        }
+        for (const record of records) {
           opts.signal?.throwIfAborted();
           const current = await engine.executeRaw<{ slug: string; revision: string }>(
             'SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id=$1 AND slug=ANY($2::text[])',

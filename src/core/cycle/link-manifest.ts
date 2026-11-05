@@ -23,6 +23,7 @@
 
 import type { BrainEngine, DreamVerdict } from '../engine.ts';
 import { buildBasenameIndex, queryBasenameIndex } from '../link-extraction.ts';
+import { sourceSlugIndex } from '../source-slug-index.ts';
 import { extractFirstTwoSentences } from '../embedding-context.ts';
 import { stripTakesFence } from '../takes-fence.ts';
 import { stripFactsFence } from '../facts-fence.ts';
@@ -51,7 +52,11 @@ export async function buildManifestContext(
   engine: BrainEngine,
   sourceId?: string,
 ): Promise<ManifestContext> {
-  const slugs = await engine.getAllSlugs(sourceId ? { sourceId } : undefined);
+  if (sourceId) {
+    const { slugs, index } = await sourceSlugIndex(engine, sourceId);
+    return { slugs: new Set(slugs), basenameIndex: index };
+  }
+  const slugs = await engine.getAllSlugs();
   return { slugs, basenameIndex: buildBasenameIndex(slugs) };
 }
 

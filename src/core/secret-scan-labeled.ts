@@ -27,6 +27,9 @@
  * documented stoplist of prose and code words never redact. A pair's password
  * must also carry a letter plus a digit or a symbol, so prose such as
  * `login: Google/GitHub SSO` or `credentials: docs/auth.md` stays intact.
+ * A redaction marker (`<REDACTED:user-pattern>`) is never a user name or a
+ * password (DAV-6349): as a pair's user half it is one whole token, and a
+ * value that starts inside a marker is rejected.
  * Wave 12 W4.1 adds: a CLI flag value (`--password X`, `--pass "a b"`;
  * `--password-file` and other suffixed flags are not labels), an env name
  * with a suffix after the label (`PASSWORD_DB=`, `FOO_PASSWORD_BAR=`; a
@@ -60,7 +63,9 @@ const BARE_END = '(?=[.,;:!?)\\]}]{0,8}(?:\\s|$))';
 const QUOTED_VALUE = '[^"\'`\\n]{1,256}';
 const BOLD = '(?:\\*{1,2}|_{2})?';
 const PAIR_HEAD = `${LEFT}${PAIR_LABEL}${LABEL_END}${BOLD}${QUOTE}?\\s{0,4}(?:${DELIM}|-(?=\\s))?${BOLD}\\s{0,4}`;
-const PAIR_USER = `(?:${QUOTE}[^"'\`\\n/]{1,128}${QUOTE}|[^\\s/:"'\`]{1,128})`;
+/** A redaction marker (`<REDACTED:user-pattern>`) is one opaque user name, so its `:` is never read as the `user:pass` split. */
+const MARKER_USER = '<REDACTED(?::[A-Za-z0-9_-]{1,64})?>';
+const PAIR_USER = `(?:${MARKER_USER}|${QUOTE}[^"'\`\\n/]{1,128}${QUOTE}|[^\\s/:"'\`]{1,128})`;
 const PAIR_SEP = '(?:\\s{0,4}/\\s{0,4}|:(?![/\\s]))';
 const LABEL_SUFFIX = '(?:_[A-Za-z0-9]{1,16}){0,2}';
 const SINGLE_HEAD = `${LEFT}[A-Za-z0-9_]{0,32}${SINGLE_LABEL}${LABEL_SUFFIX}${LABEL_END}${BOLD}${QUOTE}?\\s{0,4}${DELIM}${BOLD}\\s{0,4}`;
@@ -192,6 +197,12 @@ function closesCodeSpan(head: string): boolean {
 
 const PAIR_USER_TAIL_RE = /([^\s/:"'`*]+)["'`]?\s*[/:]\s*["'`]?$/;
 
+/** True when `head` ends inside a redaction marker (`login <REDACTED:`), so the value is the marker's own label. */
+function insideRedactionMarker(head: string): boolean {
+  const open = head.lastIndexOf('<REDACTED');
+  return open >= 0 && head.indexOf('>', open) < 0;
+}
+
 /**
  * Validate a labeled match's value (`head` is the match text before it):
  * reject placeholders, masks, templating, URLs, paths, code references, code
@@ -207,6 +218,7 @@ export function labeledValueIsCredential(value: string, form: 'single' | 'pair' 
   // Only a single env-style label carries a setting suffix (`PASSWORD_FILE=`); a pair's user half may look like one (W12 S2).
   if (form === 'single' && settingSuffix(head)) return false;
   if (head.endsWith('`') && closesCodeSpan(head)) return false;
+  if (insideRedactionMarker(head)) return false;
   if (QUERY_PWD_RE.test(head)) return false;
   if (PLACEHOLDER_PREFIX_RE.test(value) || MASK_RE.test(value) || URL_RE.test(value) || PATH_RE.test(value)) return false;
   if (value.includes('(') || DOTTED_IDENTIFIER_RE.test(value)) return false;
