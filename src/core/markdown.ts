@@ -86,6 +86,8 @@ export interface ParsedMarkdown {
    * explicit frontmatter type is an override; absence means "don't change it".
    */
   typeExplicit?: boolean;
+  /** True when `slug` came from an explicit frontmatter `slug:` field (absent otherwise). */
+  slugExplicit?: boolean;
   /** Pack rule matched for this path and type; not yet stored in frontmatter. */
   inferredSubtype?: { type: string; name: string };
   title: string;
@@ -417,7 +419,8 @@ export function parseMarkdown(
     inferTitleFromEmbeddedFrontmatter(body) ||
     inferTitle(filePath);
   const tags = extractTags(frontmatter);
-  const slug = coerceFrontmatterString(frontmatter.slug) || inferSlug(filePath);
+  const declaredSlug = coerceFrontmatterString(frontmatter.slug);
+  const slug = declaredSlug || inferSlug(filePath);
 
   const cleanFrontmatter = comparableFrontmatter(withDateInstantProvenance(frontmatter, true));
 
@@ -426,6 +429,7 @@ export function parseMarkdown(
     compiled_truth: compiled_truth.trim(),
     timeline: timeline.trim(),
     slug,
+    ...(declaredSlug ? { slugExplicit: true } : {}),
     type,
     typeExplicit: explicitType !== '',
     ...(inferred?.subtype && type === inferred.type ? { inferredSubtype: { type, name: inferred.subtype } } : {}),
