@@ -73,8 +73,8 @@ describe('transcripts audit-secrets', () => {
 
   test('DAV-6349: the importer redaction marker after a login label is not a hit; a real-shaped credential is', async () => {
     const fake = ['Zq7', '!kp92x'].join('');
-    await conversation('conversations/sessions/2026-11-05-omp-aaaaaaaaaaaa', 'Notes for **Qualtrics, login <REDACTED:user-pattern>** then the survey link.\nQualtrics login <REDACTED:user-pattern>');
-    await conversation('conversations/sessions/2026-11-05-omp-bbbbbbbbbbbb', `ok\nQualtrics login jdoe-example / ${fake}`);
+    await conversation('conversations/sessions/2026-11-05-omp-aaaaaaaaaaaa', 'Notes for **Acme, login <REDACTED:user-pattern>** then the survey link.\nAcme login <REDACTED:user-pattern>');
+    await conversation('conversations/sessions/2026-11-05-omp-bbbbbbbbbbbb', `ok\nAcme login jdoe-example / ${fake}`);
     const result = await auditTranscriptSecrets(engine);
     expect(result.pages_scanned).toBe(2);
     expect(result.hits_total).toBe(1);
