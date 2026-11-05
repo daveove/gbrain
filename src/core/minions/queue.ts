@@ -55,6 +55,7 @@ export interface TrustedSubmitOpts {
 }
 
 const MIGRATION_VERSION = 7;
+const QUEUE_REQUIRED_COLUMNS = ['id', 'name', 'queue', 'status', 'data', 'lock_token', 'tokens_input', 'depth', 'max_children', 'timeout_ms', 'remove_on_complete'];
 
 const DEFAULT_MAX_SPAWN_DEPTH = 5;
 export const DREAM_INLINE_PRIVATE_QUEUE_PREFIX = 'dream-inline-';
@@ -194,11 +195,24 @@ export class MinionQueue {
   async ensureSchema(): Promise<void> {
     const ver = await this.engine.getConfig('version');
     const current = parseInt(ver || '1', 10);
-    if (current < MIGRATION_VERSION) {
-      throw new Error(
-        `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
-      );
-    }
+    if (current >= MIGRATION_VERSION) return;
+    if (await this.hasQueueSchema()) return;
+    throw new Error(
+      `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
+    );
+  }
+
+  /** The config version row can be missing or stale; the table and its migration v5-v7 columns are the source of truth. */
+  private async hasQueueSchema(): Promise<boolean> {
+    const rows = await this.engine.executeRaw<{ found: number | string }>(
+      `SELECT count(*) AS found
+         FROM pg_attribute
+        WHERE attrelid = to_regclass('minion_jobs')
+          AND NOT attisdropped
+          AND attname = ANY($1::text[])`,
+      [QUEUE_REQUIRED_COLUMNS],
+    );
+    return Number(rows[0]?.found ?? 0) === QUEUE_REQUIRED_COLUMNS.length;
   }
 
   /**
