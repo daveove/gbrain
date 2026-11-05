@@ -41,6 +41,8 @@ export const DAILY_MEMORY_PAGE_CAP = 40;
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
 
 const DAILY_MEMORY_SOURCE_NAME = 'Dream cycle indexes';
+/** Scan size is independent of the rendered link cap. */
+const DAILY_MEMORY_SCAN_BATCH = 500;
 
 function parseSourceConfig(raw: unknown): Record<string, unknown> | null {
   if (raw == null) return null;
@@ -170,7 +172,7 @@ export interface SourcePageRow {
   frontmatter: Record<string, unknown>;
 }
 
-export function isCalendarEffectiveDate(row: SourcePageRow): boolean {
+export function isCalendarEffectiveDate<T extends Pick<SourcePageRow, 'effective_date' | 'effective_date_source' | 'frontmatter'>>(row: T): boolean {
   if (row.effective_date_source === 'filename') return true;
   if (row.effective_date_source === 'fallback') return false;
   const date = new Date(row.effective_date!);
@@ -381,19 +383,11 @@ export async function writeDailyMemoryFromSources(
       for (;;) {
         throwIfAborted(opts.signal, '[dream] daily memory');
         const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
-          `SELECT source_id, slug, title, effective_date, effective_date_source,
-             jsonb_build_object(
-               COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
-               'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
-               'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
-               '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
-                 COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
-                 'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
-                 'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
-                 'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
-                 'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
-             to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
-             to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
+          `WITH candidates AS (
+             SELECT source_id, slug, CASE WHEN $8::boolean THEN title ELSE '' END AS title,
+               effective_date, effective_date_source, frontmatter,
+               to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+               to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
            FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
            WHERE deleted_at IS NULL
              AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
@@ -405,16 +399,34 @@ export async function writeDailyMemoryFromSources(
              AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
                OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
              AND (source_id, slug) > ($5, $6)
-           ORDER BY source_id, slug LIMIT $7`,
-          [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
+           ORDER BY source_id, slug LIMIT $7
+           )
+           SELECT source_id, slug, title,
+             CASE WHEN utc_day IS DISTINCT FROM local_day THEN effective_date END AS effective_date,
+             effective_date_source,
+             CASE WHEN utc_day IS DISTINCT FROM local_day THEN jsonb_build_object(
+               COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
+               'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
+               'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
+               '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
+                 COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
+                 'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+                 'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+                 'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+                 'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created'))
+               ELSE '{}'::jsonb END AS frontmatter,
+             utc_day, local_day
+           FROM candidates ORDER BY source_id, slug`,
+          [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_SCAN_BATCH, rows.length < DAILY_MEMORY_PAGE_CAP],
         );
         // Count every matching calendar/instant day without retaining a whole-day snapshot.
+        // Equal UTC/local days need no calendar/instant classification or date pack.
         for (const row of candidates) {
           if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
           pageTotal++;
           if (rows.length < DAILY_MEMORY_PAGE_CAP && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
         }
-        if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
+        if (candidates.length < DAILY_MEMORY_SCAN_BATCH) break;
         const last = candidates[candidates.length - 1];
         afterSource = last.source_id;
         afterSlug = last.slug;
