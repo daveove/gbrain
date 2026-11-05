@@ -44,9 +44,9 @@ import { ATTENDANCE_REPAIR_HELP, isAttendanceRepairRequest } from './extract-att
 import { join, relative, dirname } from 'path';
 import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from '../core/engine.ts';
 import { isUndefinedTableError } from '../core/utils.ts';
-import type { PageType } from '../core/types.ts';
+import type { PageType, StalePageRow } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
-import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetadata, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, replacePageFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
+import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetadata, lookupRefsForSlugs, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, replacePageFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
 import { collectWantedLinks, isWantedPagesEnabled } from '../core/wanted-links.ts';
 import { readLineGrammarSettings, statedRelationTypes } from '../core/line-grammar.ts';
 import { effectiveLinkExtractorWatermark, linkExtractorWatermarkFor } from '../core/link-extraction-watermark.ts';
@@ -62,7 +62,7 @@ import {
   WIKILINK_BASENAME_LINK_TYPE,
   buildBasenameIndex, queryBasenameIndex, stripCodeBlocks, normalizeBasename,
   parseInlineCitationTimelineEntries,
-  type UnresolvedFrontmatterRef, type LinkCandidate, type LinkExtractionPack,
+  type UnresolvedFrontmatterRef, type LinkCandidate, type LinkExtractionPack, type PageLinksResult, type SlugResolver,
 } from '../core/link-extraction.ts';
 // #3190: pack-aware link typing on every extract surface (db/stale/fs).
 import { loadActivePackForLocalEngine } from '../core/schema-pack/best-effort.ts';
@@ -2161,22 +2161,30 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   // #4611: mirrors extractLinksFromDB — configured default, resolved once.
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
-  // Nothing link-stale: skip the whole-brain resolver reads; the mention pass still runs.
-  const allRefs = totalStale ? await engine.listAllPageRefs() : [];
+  // DAV-7022: endpoint refs and type metadata for ONLY the slugs this run's stale pages
+  // ask about (origins, candidate targets, targetType lookups), loaded per batch with
+  // lookupRefsForSlugs — NOT listAllPageRefs() + loadLinkPageMetadata(), two reads of
+  // every live page (265k rows each on 29 Oct 2026) on every run. Each slug's row set
+  // is complete (every source), so resolveCandidateSources and the endpoint capture see
+  // exactly the rows the whole-brain maps would give them for that slug.
+  const lookedUp = new Set<string>();
   const allSlugs = new Set<string>();
   const slugToSources = new Map<string, string[]>();
-  for (const ref of allRefs) {
-    allSlugs.add(ref.slug);
-    const list = slugToSources.get(ref.slug) ?? [];
-    list.push(ref.source_id);
-    slugToSources.set(ref.slug, list);
-  }
+  const targetMetadata = new Map<string, { slug: string; source_id: string; type: string; knowledge_revision: string }>();
+  const loadRefs = async (slugs: Iterable<string>) => {
+    const missing = [...new Set(slugs)].filter(slug => !lookedUp.has(slug));
+    if (!missing.length) return;
+    const found = await lookupRefsForSlugs(engine, missing);
+    for (const slug of missing) lookedUp.add(slug);
+    for (const slug of found.allSlugs) allSlugs.add(slug);
+    for (const [slug, sources] of found.slugToSources) slugToSources.set(slug, sources);
+    for (const row of found.metadata) targetMetadata.set(`${row.source_id}\0${row.slug}`, row);
+  };
   // #3478: mirrors extractLinksFromDB — only federated sources keep the
   // cross-source 'default' fallback; absent/archived rows fail closed.
   const federatedSourceIds = new Set(
     (await loadAllSources(engine)).filter(source => sourceAllowsOutboundCrossSourceLinks(source.config)).map(source => source.id),
   );
-  const targetMetadata = new Map((totalStale ? await loadLinkPageMetadata(engine) : []).map(p => [`${p.source_id}\0${p.slug}`, p]));
 
   const progress = createProgress(cliOptsToProgressOptions(getCliOptions()));
   progress.start('extract.stale', totalStale);
@@ -2223,6 +2231,8 @@ export async function extractStaleFromDB(
     };
 
     try {
+      // Phase 1: snapshot every page of the batch.
+      const work: Array<{ page: StalePageRow; pack: LinkExtractionPack; snapshot: PageSnapshot; fullContent: string; resolver: SlugResolver }> = [];
       for (const page of rows) {
         const pack = packs.get(page.source_id);
         if (!pack) {
@@ -2234,18 +2244,44 @@ export async function extractStaleFromDB(
         if (!snapshot) { skippedConcurrentWrite++; continue; } // deleted since the stale scan: nothing to stamp
         opts.signal?.throwIfAborted();
         if (opts.originGuard && !await opts.originGuard(snapshot, engine)) continue;
-        const fullContent = snapshot.page.compiled_truth + '\n' + snapshot.page.timeline;
-        const linkRows: LinkBatchInput[] = [];
         if (!resolvers.has(page.source_id)) resolvers.set(page.source_id, makeResolver(engine, { mode: 'batch', sourceId: page.source_id }));
-        const resolver = resolvers.get(page.source_id)!;
-        const extracted = await extractPageLinks(
-          page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver,
-          { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
-            const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
-              page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
-            return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
-          } },
-        );
+        work.push({ page, pack, snapshot, fullContent: snapshot.page.compiled_truth + '\n' + snapshot.page.timeline, resolver: resolvers.get(page.source_id)! });
+      }
+      // Phase 2 (DAV-7022): extract the batch, load the refs of every slug it asked about,
+      // and extract again until no pass asks about an unloaded slug. That pass saw complete
+      // refs for each slug it used, so its results are the ones the whole-brain maps give.
+      // The resolvers cache their lookups, so a repeat pass reads nothing new for names.
+      const extractBatch = async () => {
+        const asked = new Set<string>();
+        const results: PageLinksResult[] = [];
+        for (const { page, pack, snapshot, fullContent, resolver } of work) {
+          opts.signal?.throwIfAborted();
+          asked.add(page.slug);
+          const extracted = await extractPageLinks(
+            page.slug, fullContent, snapshot.page.frontmatter, snapshot.page.type, resolver,
+            { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
+              asked.add(targetSlug);
+              const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
+                page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+              return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
+            } },
+          );
+          for (const c of extracted.candidates) {
+            asked.add(c.targetSlug);
+            if (c.fromSlug) asked.add(c.fromSlug);
+          }
+          results.push(extracted);
+        }
+        return { asked, results };
+      };
+      let pass = await extractBatch();
+      while ([...pass.asked].some(slug => !lookedUp.has(slug))) {
+        await loadRefs(pass.asked);
+        pass = await extractBatch();
+      }
+      for (const [index, { page, snapshot, fullContent }] of work.entries()) {
+        const extracted = pass.results[index]!;
+        const linkRows: LinkBatchInput[] = [];
         if (!extracted.attendanceComplete) {
           skippedAttendanceIncomplete++;
           attendanceBlocked.push({ slug: page.slug, source_id: page.source_id, revision: snapshot.revision });

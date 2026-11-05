@@ -121,6 +121,33 @@ describe('gbrain extract --stale', () => {
     expect(await engine.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS })).toBe(0);
   });
 
+  test('DAV-7022: reads refs only for the slugs the stale pages name, never every live page', async () => {
+    await engine.putPage('people/alice', personPage('Alice'));
+    await engine.putPage('people/unrelated', personPage('Unrelated'));
+    await engine.putPage('companies/acme', companyPage('Acme', '[Alice](people/alice) is the CEO of [Acme](companies/acme).'));
+    await engine.markPagesExtractedBatch([{ slug: 'people/unrelated', source_id: 'default' }, { slug: 'people/alice', source_id: 'default' }], new Date().toISOString());
+    const sql: string[] = [];
+    // Unbound spies: a transaction engine inherits from `engine`, so each call must run on its own `this`.
+    const listAllPageRefs = engine.listAllPageRefs;
+    const executeRaw = engine.executeRaw;
+    let fullRefReads = 0;
+    engine.listAllPageRefs = function (this: PGLiteEngine) { fullRefReads++; return listAllPageRefs.apply(this); } as PGLiteEngine['listAllPageRefs'];
+    engine.executeRaw = function (this: PGLiteEngine, ...args: Parameters<PGLiteEngine['executeRaw']>) { sql.push(String(args[0])); return executeRaw.apply(this, args); } as PGLiteEngine['executeRaw'];
+    try {
+      await extractStaleFromDB(engine, { quiet: true, dryRun: false, jsonMode: false, catchUp: true });
+    } finally {
+      Reflect.deleteProperty(engine, 'listAllPageRefs');
+      Reflect.deleteProperty(engine, 'executeRaw');
+    }
+    expect(fullRefReads).toBe(0);
+    expect(sql.some(query => query.includes("frontmatter->'aliases'"))).toBe(false);
+    const refReads = sql.filter(query => query.includes('SELECT slug, source_id, type, knowledge_revision FROM pages'));
+    expect(refReads.length).toBeGreaterThan(0);
+    const links = await engine.getLinks('companies/acme');
+    expect(links.some(l => l.to_slug === 'people/alice')).toBe(true);
+    expect(await stampOf('companies/acme')).not.toBeNull();
+  });
+
   test('idempotent: second run finds 0 stale and creates no new links', async () => {
     await engine.putPage('people/alice', personPage('Alice'));
     await engine.putPage('companies/acme', companyPage('Acme', '[Alice](people/alice) advises [Acme](companies/acme).'));

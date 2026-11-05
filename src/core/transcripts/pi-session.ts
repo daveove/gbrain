@@ -33,7 +33,7 @@ const LINE_GRAMMAR =
   "Turns {type:'message', timestamp ISO, message:{role, content:[{type:'text'|'thinking'|'toolCall', ...}], " +
   "timestamp epoch-ms}}; roles user/assistant/toolResult/developer. Only user/assistant text blocks " +
   'are kept; the line ISO timestamp is the message time. model_change, thinking_level_change, ' +
-  'custom, custom_message, credential_pin, compaction: skipped. Oversized files degrade to a ' +
+  "custom, custom_message, credential_pin, compaction, fileMention (role, content null): skipped. Oversized files degrade to a " +
   'head+tail read. Unknown fields tolerated.';
 
 export const OMP_SPEC_TARGET: HostSpecTarget = {
@@ -85,6 +85,7 @@ function firstLineType(sample: Buffer): unknown {
 }
 
 const PI_ROLES = ['user', 'assistant', 'toolResult', 'developer'];
+const PI_NON_TURN_ROLES = ['fileMention'];
 const PI_BLOCK_TYPES = ['text', 'thinking', 'toolCall', 'image'];
 
 async function* parsePiSession(
@@ -133,6 +134,7 @@ async function* parsePiSession(
     const e = entry as Record<string, unknown>;
     if (e.type !== 'message') continue;
     const m = typeof e.message === 'object' && e.message !== null ? (e.message as Record<string, unknown>) : null;
+    if (m !== null && typeof m.role === 'string' && PI_NON_TURN_ROLES.includes(m.role)) continue;
     // A message is understood when it has a known role and string or
     // known-block content. Anything else may hold text the shared mapper
     // dropped, so it counts as drift and the file can never pass as clean.

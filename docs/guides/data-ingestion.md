@@ -126,7 +126,10 @@ forms are recognized, with bare, quoted or backticked values:
 To keep prose and code intact, a value is never redacted when it is a
 placeholder (`<…>`, `${…}`, `$VAR`), a mask (`****`), a URL, a path, a
 function call, a dotted reference (`req.body.password`), a code identifier
-(`hashedPassword`), or one of the stoplisted words (`n/a`, `none`, `string`,
+(`hashedPassword`), part of a redaction marker (`login <REDACTED:user-pattern>`
+is not read as user `<REDACTED` and password `user-pattern>`; a marker user
+name is one token, so `login <REDACTED:user-pattern> / …` still redacts the
+password), or one of the stoplisted words (`n/a`, `none`, `string`,
 `required`, `changed`, `reset`, `flow`, `email`, `await` and similar; the
 list is `LABELED_STOPLIST` in `src/core/secret-scan-labeled.ts`). A pair's
 password must also be 4+ characters with a letter and a digit or symbol, so
@@ -149,6 +152,16 @@ edited.md` to remove the credential, or `gbrain delete <slug> --purge` after
 asking the user. Rotate any real credential that reached a page (see
 ["If a secret reached the brain"](../../SECURITY.md#if-a-secret-reached-the-brain)),
 then re-run the audit.
+
+`gbrain transcripts audit-secrets --scope conversations --json` scans every
+conversation page in every source, imported or not, including frontmatter
+keys and string values. It stores a result record in the config row
+`conversations.secret_audit`: scan start and end times, pages scanned, hit
+counts per pattern and the affected page ids. The record holds no slug and no
+matched text. A read-only monitor reads that row instead of reading
+conversation pages, and reports a missing or old record as unknown, so
+schedule the command at least once a day. It exits 1 if the record is not
+saved.
 
 **Say to your agent:** *"Check my imported transcripts for passwords"* (your agent runs the audit, lists the pages by slug and asks before changing any).
 
