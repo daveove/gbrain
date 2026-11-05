@@ -25,7 +25,7 @@ import type { BrainEngine } from '../engine.ts';
 import { scanText } from '../secret-scan.ts';
 
 /** Bump when the transcript-lane detectors change, so doctor asks for a fresh audit. */
-export const TRANSCRIPT_SECRET_AUDIT_VERSION = 1;
+export const TRANSCRIPT_SECRET_AUDIT_VERSION = 2;
 export const TRANSCRIPT_SECRET_AUDIT_KEY = 'transcripts.secret_audit';
 /** Config row the conversations-scope audit writes for the read-only monitor (DAV-7162). */
 export const CONVERSATION_SECRET_AUDIT_KEY = 'conversations.secret_audit';

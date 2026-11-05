@@ -36,7 +36,7 @@ import { effectiveWriteTrust, type TaintInput, type TrustTier, type WriteTrust }
 import { operationsByName } from '../src/core/operations.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import type { WriteAttribution } from '../src/core/persistence/attribution.ts';
-import { runMigrations } from '../src/core/migrate.ts';
+import { LATEST_VERSION, runMigrations } from '../src/core/migrate.ts';
 
 describe('TRUST_CONTENT_COLUMNS (ENG-2)', () => {
   test('facts, takes and timeline content is attribution content; the rest of attribution content is lifecycle or placement', () => {
@@ -321,7 +321,7 @@ test('v243 forward upgrade preserves trust for calendar provenance but still res
     const target = await newPage(engine, trust('operator_curated'), { date: '2026-09-24T00:00:00.000Z' });
     const before = await page(engine, target.slug);
     expect(before.trust_tier).toBe('operator_curated');
-    expect(await runMigrations(engine)).toEqual({ applied: 1, current: 243 });
+    expect(await runMigrations(engine)).toEqual({ applied: LATEST_VERSION - 242, current: LATEST_VERSION });
     const currentFunction = await engine.executeRaw<{ definition: string }>(
       "SELECT pg_get_functiondef('gbrain_stamp_trust_tier()'::regprocedure) AS definition");
     expect(currentFunction[0].definition).toContain('_gbrain_date_instants');

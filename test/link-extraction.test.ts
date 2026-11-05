@@ -1540,6 +1540,36 @@ describe('makeResolver — fallback chain', () => {
     expect(await r.resolveBasenameMatches!('struktura')).toEqual([]);
   });
 
+  test('resolveBasenameMatches: sourceId without getAllSlugs or executeRaw degrades to []', async () => {
+    const engine = {
+      async getPage() { return null; },
+      async findByTitleFuzzy() { return null; },
+      async searchKeyword() { return []; },
+    } as unknown as BrainEngine;
+    const r = makeResolver(engine, { mode: 'batch', sourceId: 'src-a' });
+    expect(await r.resolveBasenameMatches!('struktura')).toEqual([]);
+  });
+
+  test('resolveBasenameMatches: sourceId with executeRaw reads only that source, never getAllSlugs', async () => {
+    const calls: { sql: string; params?: unknown[] }[] = [];
+    let getAllCalls = 0;
+    const engine = {
+      async getPage() { return null; },
+      async findByTitleFuzzy() { return null; },
+      async searchKeyword() { return []; },
+      async getAllSlugs() { getAllCalls++; return new Set(['archive/struktura']); },
+      async executeRaw(sql: string, params?: unknown[]) {
+        calls.push({ sql, params });
+        return [{ n: 1, h: '0', m: 1, slugs: ['projects/struktura'] }];
+      },
+    } as unknown as BrainEngine;
+    const r = makeResolver(engine, { mode: 'batch', sourceId: 'src-a' });
+    expect(await r.resolveBasenameMatches!('struktura')).toEqual(['projects/struktura']);
+    expect(getAllCalls).toBe(0);
+    expect(calls.length).toBeGreaterThan(0);
+    for (const c of calls) expect(c.params?.[0]).toBe('src-a');
+  });
+
   test('resolveBasenameMatches: handles top-level slugs (no `/`)', async () => {
     const engine = makeFakeEngineWithSlugs(['struktura', 'notes/struktura']);
     const r = makeResolver(engine);
