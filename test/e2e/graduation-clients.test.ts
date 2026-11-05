@@ -11,8 +11,11 @@
  * - In the rename-to-tombstone window an older release can create a stray
  *   brain; the next `--resume` refuses with `graduation_split_brain` and the
  *   target stays non-authoritative.
- * - A write by an older release in a lock gap before the tombstone reaches
- *   the target on resume (source digests re-checked).
+ * - An older release writing to the source in a lock gap before the tombstone
+ *   is refused by the database coordinator guard (`writer_coordinator_required`);
+ *   nothing reaches the target and `--resume` still completes. A source write
+ *   that did land in the gap reaching the target is covered by
+ *   test/graduation-state.test.ts.
  * - An older release configured with the target URL cannot write while the
  *   target is fenced (copying, and between verify and cutover).
  * - A respawned stdio or HTTP serve exits with `graduation_in_progress`,
@@ -119,7 +122,7 @@ describe.skipIf(!DATABASE_URL)('graduation: older released binaries', () => {
   }, 900_000);
 
   for (const boundary of ['verified', 'source_closed'] as const) {
-    graduationTest(`an older-release write to the source in the lock gap after ${boundary} reaches the target on resume`, async () => {
+    graduationTest(`an older-release write in the lock gap after ${boundary} is refused by the coordinator guard; resume completes`, async () => {
       const c = await fresh(`older-gap-${boundary}`);
       const { argv, env } = await planAndRun(c);
       const child = startGbrain(argv, { home: c.fx.home, env, hooks: { events: c.events, pause: [boundary] } });
@@ -131,12 +134,13 @@ describe.skipIf(!DATABASE_URL)('graduation: older released binaries', () => {
         expect({ code: aware.code, error: codeOf(aware.json) }).toEqual({ code: 1, error: 'graduation_interrupted' });
       }
       const write = await olderRun(older[0].binary, c.fx.home, ['put', 'notes/lock-gap-write', '--source', 'default'], 'written by an older release in the lock gap\n');
-      expect({ code: write.code, stderr: write.code === 0 ? '' : write.stderr.slice(-1500) }).toEqual({ code: 0, stderr: '' });
+      expect(write.code).not.toBe(0);
+      expect(write.stderr).toContain('writer_coordinator_required');
       const resumed = await gbrain(['migrate', '--resume', '--json'], { home: c.fx.home, timeoutMs: 900_000 });
       expect({ code: resumed.code, stderr: resumed.code === 0 ? '' : resumed.stderr.slice(-3000) }).toEqual({ code: 0, stderr: '' });
       await withTarget(c.target.url, async t => {
         const [row] = await t.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM pages WHERE source_id='default' AND slug='notes/lock-gap-write'`);
-        expect(Number(row.n)).toBe(1);
+        expect(Number(row.n)).toBe(0);
       });
       expect(configuredEngine(c.fx).engine).toBe('postgres');
     }, 900_000);
