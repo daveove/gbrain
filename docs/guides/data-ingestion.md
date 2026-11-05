@@ -126,7 +126,10 @@ forms are recognized, with bare, quoted or backticked values:
 To keep prose and code intact, a value is never redacted when it is a
 placeholder (`<…>`, `${…}`, `$VAR`), a mask (`****`), a URL, a path, a
 function call, a dotted reference (`req.body.password`), a code identifier
-(`hashedPassword`), or one of the stoplisted words (`n/a`, `none`, `string`,
+(`hashedPassword`), part of a redaction marker (`login <REDACTED:user-pattern>`
+is not read as user `<REDACTED` and password `user-pattern>`; a marker user
+name is one token, so `login <REDACTED:user-pattern> / …` still redacts the
+password), or one of the stoplisted words (`n/a`, `none`, `string`,
 `required`, `changed`, `reset`, `flow`, `email`, `await` and similar; the
 list is `LABELED_STOPLIST` in `src/core/secret-scan-labeled.ts`). A pair's
 password must also be 4+ characters with a letter and a digit or symbol, so

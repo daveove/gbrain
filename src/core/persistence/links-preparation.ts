@@ -1,7 +1,8 @@
 import type { BrainEngine } from '../engine.ts';
 import { isUndefinedTableError } from '../utils.ts';
 import type { ParsedPage } from '../import-file.ts';
-import { buildBasenameIndex, extractPageLinks, isGlobalBasenameEnabled, makeResolver } from '../link-extraction.ts';
+import { extractPageLinks, isGlobalBasenameEnabled, makeResolver } from '../link-extraction.ts';
+import { sourceSlugIndex } from '../source-slug-index.ts';
 import { loadActivePackForLocalEngine } from '../schema-pack/best-effort.ts';
 import { DerivedLinkEndpointChangedError } from '../derived-links.ts';
 import { capturedLinkEndpoints, indexLinkSources, loadLinkSourcePolicy, makeLinkSourceResolver } from '../link-reconciliation.ts';
@@ -22,41 +23,6 @@ async function liveSlugAliases(engine: BrainEngine, sourceId: string, targets: s
     if (isUndefinedTableError(error)) return new Map();
     throw error;
   }
-}
-
-interface SourceSlugIndex { count: number; hash: bigint; maxId: number; index: Map<string, string[]> }
-const sourceSlugIndexes = new WeakMap<BrainEngine, Map<string, Promise<SourceSlugIndex | null>>>();
-const SLUG_FINGERPRINT = 'count(*)::int AS n, coalesce(sum(hashtextextended(slug, 0)), 0)::text AS h, coalesce(max(id), 0)::int AS m';
-
-async function refreshSourceSlugIndex(engine: BrainEngine, sourceId: string, state: SourceSlugIndex | null): Promise<SourceSlugIndex> {
-  if (state) {
-    const [probe] = await engine.executeRaw<{ n: number; h: string; m: number; added: string[]; added_h: string }>(`SELECT ${SLUG_FINGERPRINT},
-      coalesce(array_agg(slug) FILTER (WHERE id > $2), '{}') AS added, coalesce(sum(hashtextextended(slug, 0)) FILTER (WHERE id > $2), 0)::text AS added_h
-      FROM pages WHERE source_id=$1`, [sourceId, state.maxId]);
-    const hash = BigInt(probe!.h);
-    if (!probe!.added.length && probe!.n === state.count && hash === state.hash) return state;
-    if (probe!.n === state.count + probe!.added.length && hash === state.hash + BigInt(probe!.added_h)) {
-      return { count: probe!.n, hash, maxId: probe!.m, index: buildBasenameIndex(probe!.added, state.index) };
-    }
-  }
-  const [all] = await engine.executeRaw<{ n: number; h: string; m: number; slugs: string[] }>(
-    `SELECT ${SLUG_FINGERPRINT}, coalesce(array_agg(slug), '{}') AS slugs FROM pages WHERE source_id=$1`, [sourceId]);
-  return { count: all!.n, hash: BigInt(all!.h), maxId: all!.m, index: buildBasenameIndex(all!.slugs) };
-}
-
-/**
- * The basename index of every slug in a source (getAllSlugs' set), kept per
- * engine and source across link preparations. Each call fingerprints the
- * source's slugs (count, hash sum, max id) and reuses the index when nothing
- * changed, adds the new rows when only inserts happened, else rebuilds; so a
- * write from any process is seen exactly as the per-page slug read saw it.
- */
-async function sourceBasenameIndex(engine: BrainEngine, sourceId: string): Promise<Map<string, string[]>> {
-  const bySource = sourceSlugIndexes.get(engine) ?? new Map<string, Promise<SourceSlugIndex | null>>();
-  sourceSlugIndexes.set(engine, bySource);
-  const next = (bySource.get(sourceId) ?? Promise.resolve(null)).then(state => refreshSourceSlugIndex(engine, sourceId, state));
-  bySource.set(sourceId, next.catch(() => null));
-  return (await next).index;
 }
 
 /**
@@ -80,7 +46,7 @@ export const LINK_ENDPOINTS_SQL = `WITH own AS (
 export async function prepareAutomaticLinks(engine: BrainEngine, slug: string,
   page: Pick<ParsedPage, 'type' | 'compiled_truth' | 'timeline' | 'frontmatter'>, sourceId: string, primeSemantics = false) {
   if (primeSemantics) await primeRelationSemantics(engine);
-  const resolver = makeResolver(engine, { mode: 'live', sourceId, basenameIndex: () => sourceBasenameIndex(engine, sourceId) });
+  const resolver = makeResolver(engine, { mode: 'live', sourceId, basenameIndex: async () => (await sourceSlugIndex(engine, sourceId)).index });
   // One settings snapshot for the whole extraction; publication validates it (derived-links.ts). An unreadable
   // setting leaves the page's links unpublished (stale) rather than extracted under defaults.
   const settings: LineGrammarSettings | null = await readLineGrammarSettings(engine).catch(() => null);
