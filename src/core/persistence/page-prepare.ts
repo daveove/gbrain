@@ -604,13 +604,17 @@ export async function preparePageMutation(unbounded: BrainEngine, row: WriteRequ
       // Mandatory metadata shares publication rollback; exact no-ops never heal it. These, and the
       // projections (facts, takes, timeline rows of the page the import just wrote live), are independent and sent together.
       const [, pinned] = await pipelined(tx, [
-        async () => { if (sourcePath && !snapshot?.page.source_path) await tx.executeRaw(`UPDATE pages SET source_path = $1
-          WHERE source_id=$2 AND slug=$3 AND source_path IS NULL`, [sourcePath, row.source_id, row.slug]); },
+        // One statement stamps the minted origin and the first-write provenance (#6007 statement budget); a null leaves a column as it is.
+        async () => {
+          const mintedPath = sourcePath && !snapshot?.page.source_path ? sourcePath : null;
+          if (mintedPath === null && !provenance) return;
+          await tx.executeRaw(`UPDATE pages SET source_path=COALESCE(source_path,$3::text), source_kind=COALESCE($4::text,source_kind),
+            ingested_via=COALESCE($5::text,ingested_via), ingested_at=COALESCE($6::timestamptz,ingested_at)
+            WHERE source_id=$1 AND slug=$2`, [row.source_id, row.slug, mintedPath, provenance?.source_kind ?? null, provenance?.ingested_via ?? null, provenance?.ingested_at ?? null]);
+        },
         async () => pinMode ? (await tx.executeRaw<{ mode: string | null }>(`UPDATE sources SET config=CASE WHEN config->>'slug_root_mode' IS NULL
           THEN jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb($2::text)) ELSE config END WHERE id=$1 RETURNING config->>'slug_root_mode' AS mode`,
         [row.source_id, pinMode]))[0] : undefined,
-        async () => { if (provenance) await tx.executeRaw(`UPDATE pages SET source_kind=$3,ingested_via=$4,ingested_at=$5::timestamptz
-          WHERE source_id=$1 AND slug=$2`, [row.source_id, row.slug, provenance.source_kind, provenance.ingested_via, provenance.ingested_at]); },
         async () => { if (lean) ({ removedTimeline, contested } = projectedRows(await project?.(tx, applied?.pageId))); },
       ]) as [unknown, { mode: string | null } | undefined, unknown, unknown];
       if (pinMode && pinned?.mode !== pinMode) throw pageRefusal('revision_conflict', 'The source slug-root mode changed during preparation.', row,
