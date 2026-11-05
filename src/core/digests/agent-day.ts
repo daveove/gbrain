@@ -52,7 +52,7 @@ const MAX_ITEM_CHARS = 260;
 const TURN_RE = /^\*\*(User|Assistant)\*\* \((\d{4}-\d{2}-\d{2}) (\d{1,2}):(\d{2}) (AM|PM)\): ?/gm;
 const PR_URL_RE = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g;
 const ISSUE_URL_RE = /https:\/\/linear\.app\/[\w-]+\/issue\/DAV-\d+/g;
-/** Dave's personal meetings (Circleback, Pocket) never enter a digest page. */
+/** Personal meeting content (Circleback, Pocket) never enters a digest page. */
 const MEETING_RE = /circleback|\bpocket\b|personal meeting/i;
 const DONE_RE = /\b(merged|opened|created|posted|deployed|shipped|filed|fixed|pushed|landed|closed|resolved|result:|installed|published|wrote|updated)\b/i;
 const WAIT_RE = /(dave must(?! do:? ?nothing)|waiting on dave|needs dave|parked on dave|passkey|(?:for|from) dave'?s? (?:approval|decision|go\b|sign-?in|tap))/i;
