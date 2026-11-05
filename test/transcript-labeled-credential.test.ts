@@ -83,6 +83,9 @@ const MUST_REDACT: Array<[string, string]> = [
   ['table with |-|-| separators', `|user|password|\n|-|-|\n|alice-example|${PW}|`],
   ['pw column header', `| user | pw |\n|---|---|\n| alice-example | ${PW} |`],
   ['qualified column header', `| user | Password (prod) |\n|---|---|\n| alice-example | ${PW} |`],
+  // DAV-6349: a redaction marker as the user name is one opaque token; the password after it is still a credential
+  ['pair whose user is a redaction marker', `login <REDACTED:user-pattern> / ${PW}`],
+  ['colon pair whose user is a redaction marker', `creds: <REDACTED:user-pattern>:${PW}x9`],
 ];
 
 const MUST_KEEP: Array<[string, string]> = [
@@ -127,6 +130,11 @@ const MUST_KEEP: Array<[string, string]> = [
   ['flag followed by another flag', 'tool --password --interactive --verbose'],
   ['no-password boolean flag', 'ssh-keygen --no-password build-key'],
   ['skip-password flag', 'tool --skip-password-check release2'],
+  // DAV-6349: the importer's own redaction marker is never a user name or a password
+  ['bold login marker (DAV-6349 audit hit)', 'Notes for **Qualtrics, login <REDACTED:user-pattern>** then the survey link.'],
+  ['login marker then a digit', 'Qualtrics login <REDACTED:user-pattern>1'],
+  ['login marker then a symbol', 'Qualtrics login <REDACTED:user-pattern>&'],
+  ['login marker pair of markers', 'login <REDACTED:user-pattern>:<REDACTED:labeled_credential>'],
 ];
 
 describe('labeled_credential on the transcript page lane', () => {
@@ -185,5 +193,27 @@ describe('labeled_credential is opt-in', () => {
     for (const doc of buildSyntheticBrainCorpus().filter((d) => d.kind === 'clean')) {
       expect(scanText(doc.text, { highEntropy: true, labeledCredentials: true }).filter((f) => f.pattern === 'labeled_credential')).toEqual([]);
     }
+  });
+});
+
+describe('labeled_credential skips redaction markers (DAV-6349)', () => {
+  const scan = (text: string) => scanText(text, { highEntropy: true, labeledCredentials: true });
+  const FAKE = ['Zq7', '!kp92x'].join('');
+
+  test('a login line that holds only the importer marker gives 0 hits', () => {
+    expect(scan('Qualtrics login <REDACTED:user-pattern>')).toEqual([]);
+    expect(scan('Notes for **Qualtrics, login <REDACTED:user-pattern>** then the survey link.')).toEqual([]);
+  });
+
+  test('a real-shaped login user / pass credential still gives 1 hit', () => {
+    const hits = scan(`Qualtrics login jdoe-example / ${FAKE}`);
+    expect(hits.map((h) => h.pattern)).toEqual(['labeled_credential']);
+    expect(hits[0]!.redactedPreview).toBe('Qualtrics login jdoe-example / <REDACTED:labeled_credential>');
+  });
+
+  test('a password after a marker user name still gives 1 hit; the marker stays whole', () => {
+    const hits = scan(`Qualtrics login <REDACTED:user-pattern> / ${FAKE}`);
+    expect(hits.map((h) => h.pattern)).toEqual(['labeled_credential']);
+    expect(hits[0]!.redactedPreview).toBe('Qualtrics login <REDACTED:user-pattern> / <REDACTED:labeled_credential>');
   });
 });

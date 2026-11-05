@@ -70,6 +70,18 @@ describe('transcripts audit-secrets', () => {
     expect(raw).not.toContain('conversations/');
     expect((await loadTranscriptSecretAudit(engine))?.hits_total).toBe(1);
   });
+
+  test('DAV-6349: the importer redaction marker after a login label is not a hit; a real-shaped credential is', async () => {
+    const fake = ['Zq7', '!kp92x'].join('');
+    await conversation('conversations/sessions/2026-11-05-omp-aaaaaaaaaaaa', 'Notes for **Qualtrics, login <REDACTED:user-pattern>** then the survey link.\nQualtrics login <REDACTED:user-pattern>');
+    await conversation('conversations/sessions/2026-11-05-omp-bbbbbbbbbbbb', `ok\nQualtrics login jdoe-example / ${fake}`);
+    const result = await auditTranscriptSecrets(engine);
+    expect(result.pages_scanned).toBe(2);
+    expect(result.hits_total).toBe(1);
+    expect(result.pages).toEqual([
+      { id: expect.any(Number), slug: 'conversations/sessions/2026-11-05-omp-bbbbbbbbbbbb', source_id: 'default', content_hash: expect.any(String), hits: { labeled_credential: 1 }, lines: [2] },
+    ]);
+  });
 });
 
 describe('transcripts audit-secrets --scope conversations (DAV-7162 monitor record)', () => {
@@ -100,7 +112,7 @@ describe('transcripts audit-secrets --scope conversations (DAV-7162 monitor reco
     expect(raw).not.toContain('conversations/');
     const record = JSON.parse(raw);
     expect(record).toMatchObject({
-      schema_version: 1, scope: 'conversations', complete: true, source_id: null, detector_version: 1,
+      schema_version: 1, scope: 'conversations', complete: true, source_id: null, detector_version: 2,
       started_at: '2026-10-23T01:00:00.000Z', scanned_at: '2026-10-23T01:00:05.000Z',
       pages_scanned: 2, pages_affected: 2, hits_total: 2, by_pattern: { labeled_credential: 2 }, affected_pages_capped: false,
     });
