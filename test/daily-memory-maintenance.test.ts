@@ -456,6 +456,44 @@ describe('daily memory from sources the brain already holds', () => {
     expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
   });
 
+  test('a session with 80 parts banks before paths under 2000 bytes and restores the same prior map', async () => {
+    const slugs = Array.from({ length: 80 }, (_, index) => `sessions/omp/synthetic-session-0123456789abcdef/part-${String(index).padStart(3, '0')}`);
+    for (const [index, slug] of slugs.entries()) {
+      await engine.putPage(slug, { type: 'note', title: `Part ${index}`, compiled_truth: 'Synthetic fixture', frontmatter: { date: index === 79 ? '2026-01-22' : '2026-01-23' } });
+    }
+    await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug LIKE 'sessions/omp/synthetic-session-%'");
+    const crashed = (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'eighty-parts' }))!;
+    await crashed.before(slugs);
+    const banked = await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'before:%'");
+    expect(banked.length).toBeGreaterThan(1);
+    for (const row of banked) expect(Buffer.byteLength(row.path)).toBeLessThan(2000);
+    const records = banked.map(row => JSON.parse(JSON.parse(row.path).value.slice(7)) as { targets: Array<{ slug: string; revision: string | null }>; days: string[] });
+    const revisions = await engine.executeRaw<{ slug: string; revision: string }>(
+      "SELECT slug,knowledge_revision AS revision FROM pages WHERE source_id='default' AND slug=ANY($1::text[])", [slugs]);
+    const restored = new Map(records.flatMap(record => record.targets).map(target => [target.slug, target.revision]));
+    expect(restored).toEqual(new Map(revisions.map(row => [row.slug, row.revision])));
+    expect(restored.size).toBe(80);
+    expect([...new Set(records.flatMap(record => record.days))].sort()).toEqual(['2026-01-22', '2026-01-23']);
+    // Drift in the first chunk must hand off the days held by the last chunk, and the
+    // current pages now sit on a third day so only the banked record can supply 22 and 23.
+    await engine.putPage(slugs[0]!, { type: 'note', title: 'Part 0', compiled_truth: 'Synthetic fixture changed', frontmatter: { date: '2026-01-25' } });
+    await engine.executeRaw("UPDATE pages SET effective_date='2026-01-25T00:00:00Z'::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug LIKE 'sessions/omp/synthetic-session-%'");
+    for (const row of await engine.executeRaw<{ path: string }>(
+      "SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory' AND path::jsonb->>'value' LIKE 'running%'")) {
+      const wrapped = JSON.parse(row.path) as { origin: string };
+      const expired = JSON.stringify({ origin: wrapped.origin, value: `running:${new Date(Date.now() - 31 * 60_000).toISOString()}` });
+      await engine.executeRawDirect('UPDATE op_checkpoint_paths SET path=$1 WHERE path=$2', [expired, row.path]);
+      await engine.executeRawDirect(
+        "UPDATE op_checkpoints SET completed_keys=(completed_keys-$1::text[])||$2::jsonb WHERE op='transcript-ingest-daily-memory'",
+        [[row.path], JSON.stringify([expired])]);
+    }
+    await (await createTranscriptIngestDailyMemory(engine, { sourceId: 'default', runKey: 'eighty-parts-peer' }))!.finish();
+    const jobs = await engine.executeRaw<{ data: { daily_memory_dates?: string[] } }>("SELECT data FROM minion_jobs WHERE name='autopilot-daily-memory'");
+    for (const day of ['2026-01-22', '2026-01-23', '2026-01-25']) expect(jobs.some(row => row.data.daily_memory_dates?.includes(day))).toBe(true);
+    expect(await engine.executeRaw("SELECT path FROM op_checkpoint_paths WHERE op='transcript-ingest-daily-memory'")).toHaveLength(0);
+  }, 60_000);
+
   test('future-dated running lease lets a peer adopt abandoned before: debt', async () => {
     await engine.putPage('notes/future-lease-transcript', { type: 'note', title: 'Future lease', compiled_truth: 'Synthetic fixture', frontmatter: { date: '2026-01-26' } });
     await engine.executeRaw("UPDATE pages SET effective_date=(frontmatter->>'date')::date::timestamptz,effective_date_source='date' WHERE source_id='default' AND slug='notes/future-lease-transcript'");
