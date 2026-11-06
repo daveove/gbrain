@@ -1992,7 +1992,9 @@ describe('daily memory from sources the brain already holds', () => {
       const selected = await executeRaw.call(this, sql, params);
       if (sql.includes('AS utc_day')) {
         batches++;
-        expect(selected.length).toBeLessThanOrEqual(40);
+        // Each batch honours its requested page size; the row projection, not the size, bounds memory.
+        expect(Number(params![6])).toBeLessThanOrEqual(1000);
+        expect(selected.length).toBeLessThanOrEqual(Number(params![6]));
         for (const row of selected as { frontmatter: Record<string, unknown> }[]) {
           expect(row.frontmatter).not.toHaveProperty('unrelated_blob');
         }

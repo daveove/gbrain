@@ -319,6 +319,119 @@ export async function dailyMemoryExtractTargets(engine: BrainEngine, onlySlugs?:
   }
 }
 
+// Pages that can belong to one calendar day. The range uses pages_coalesce_date_idx
+// and is wide enough for any zone; the membership test below decides the day.
+// Params: $1 zone, $2 day, $3 daily-memory slug, $4 daily-memory source id.
+const DAY_PAGE_SCOPE = `FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
+  WHERE deleted_at IS NULL
+    AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
+    AND NOT (source_id = $4 AND slug = $3)
+    AND COALESCE(effective_date, updated_at) >= $2::date - 2
+    AND COALESCE(effective_date, updated_at) < $2::date + 3
+    AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
+      OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)`;
+
+// SQL form of `(calendar ? utc_day : local_day) === day`. A row whose UTC and
+// zone days agree needs no frontmatter. NULL means the row needs
+// isCalendarEffectiveDate(), which reads frontmatter in JS.
+const DAY_MEMBER_SQL = `CASE
+  WHEN effective_date IS NULL THEN (updated_at AT TIME ZONE $1)::date = $2::date
+  WHEN effective_date_source = 'filename' THEN (effective_date AT TIME ZONE 'UTC')::date = $2::date
+  WHEN effective_date_source = 'fallback' THEN (effective_date AT TIME ZONE $1)::date = $2::date
+  WHEN (effective_date AT TIME ZONE 'UTC')::date = (effective_date AT TIME ZONE $1)::date
+    THEN (effective_date AT TIME ZONE 'UTC')::date = $2::date
+  END`;
+
+const DAY_ROW_COLUMNS = `source_id, slug, title, effective_date, effective_date_source,
+  jsonb_build_object(
+    COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
+    'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
+    'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
+    '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
+      COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
+      'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+      'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+      'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+      'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
+  to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
+  to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day`;
+
+type DayPageRow = SourcePageRow & { utc_day: string; local_day: string };
+
+/** A page's membership in `day`, from the JS rule that reads frontmatter. */
+function isDayMember(row: DayPageRow, day: string): boolean {
+  return (row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) === day;
+}
+
+/** Rows for undecided-membership counting; one round trip per page, not per row. */
+const DAY_UNDECIDED_PAGE = 1000;
+
+/**
+ * The first DAILY_MEMORY_PAGE_CAP linkable pages of the day, in source/slug order.
+ * The scan stops once the list is full, so a day with 80 000 pages costs the
+ * same few round trips as a day with 40. SQL drops rows already known not to
+ * belong to the day, so a page of candidates is mostly members.
+ */
+async function collectDayPageRows(
+  engine: BrainEngine, zone: string, day: string, slug: string, signal?: AbortSignal,
+): Promise<SourcePageRow[]> {
+  const rows: SourcePageRow[] = [];
+  let afterSource = '';
+  let afterSlug = '';
+  while (rows.length < DAILY_MEMORY_PAGE_CAP) {
+    throwIfAborted(signal, '[dream] daily memory');
+    const candidates = await engine.executeRaw<DayPageRow>(
+      `SELECT ${DAY_ROW_COLUMNS} ${DAY_PAGE_SCOPE}
+         AND (${DAY_MEMBER_SQL}) IS NOT FALSE AND (source_id, slug) > ($5, $6) ORDER BY source_id, slug LIMIT $7`,
+      [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
+    );
+    for (const row of candidates) {
+      if (rows.length < DAILY_MEMORY_PAGE_CAP && isDayMember(row, day) && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
+    }
+    if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
+    const last = candidates[candidates.length - 1]!;
+    afterSource = last.source_id;
+    afterSlug = last.slug;
+  }
+  return rows;
+}
+
+/**
+ * Every page that belongs to the day, counted without reading the pages.
+ * One aggregate query decides almost every row in SQL. Only rows whose UTC day
+ * and zone day differ and whose date has no filename/fallback source come back
+ * for the frontmatter test, in pages of DAY_UNDECIDED_PAGE.
+ */
+async function countDayPages(
+  engine: BrainEngine, zone: string, day: string, slug: string, signal?: AbortSignal,
+): Promise<number> {
+  throwIfAborted(signal, '[dream] daily memory');
+  const [decided] = await engine.executeRaw<{ members: number; undecided: number }>(
+    `SELECT count(*) FILTER (WHERE m IS TRUE)::int AS members, count(*) FILTER (WHERE m IS NULL)::int AS undecided
+     FROM (SELECT ${DAY_MEMBER_SQL} AS m ${DAY_PAGE_SCOPE}) day_pages`,
+    [zone, day, slug, DAILY_MEMORY_SOURCE_ID],
+  );
+  let total = Number(decided?.members ?? 0);
+  let remaining = Number(decided?.undecided ?? 0);
+  let afterSource = '';
+  let afterSlug = '';
+  while (remaining > 0) {
+    throwIfAborted(signal, '[dream] daily memory');
+    const page = await engine.executeRaw<DayPageRow>(
+      `SELECT ${DAY_ROW_COLUMNS} ${DAY_PAGE_SCOPE}
+         AND (${DAY_MEMBER_SQL}) IS NULL AND (source_id, slug) > ($5, $6) ORDER BY source_id, slug LIMIT $7`,
+      [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAY_UNDECIDED_PAGE],
+    );
+    for (const row of page) if (isDayMember(row, day)) total++;
+    if (page.length < DAY_UNDECIDED_PAGE) break;
+    const last = page[page.length - 1]!;
+    afterSource = last.source_id;
+    afterSlug = last.slug;
+    remaining -= page.length;
+  }
+  return total;
+}
+
 /**
  * Write `daily-memory/YYYY-MM-DD` when any source already has a page for the
  * cycle day. A human-owned page at that slug is left in place, including one
@@ -374,51 +487,8 @@ export async function writeDailyMemoryFromSources(
           needs_extract: await dreamIndexesNeedExtract(engine) };
       }
 
-      const rows: SourcePageRow[] = [];
-      let pageTotal = 0;
-      let afterSource = '';
-      let afterSlug = '';
-      for (;;) {
-        throwIfAborted(opts.signal, '[dream] daily memory');
-        const candidates = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
-          `SELECT source_id, slug, title, effective_date, effective_date_source,
-             jsonb_build_object(
-               COALESCE(effective_date_source, 'date'), frontmatter->COALESCE(effective_date_source, 'date'),
-               'created', frontmatter->'created', 'created_at', frontmatter->'created_at',
-               'date_created', frontmatter->'date_created', 'date created', frontmatter->'date created',
-               '${DATE_INSTANT_PROVENANCE}', jsonb_build_object(
-                 COALESCE(effective_date_source, 'date'), frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source, 'date'),
-                 'created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
-                 'created_at', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
-                 'date_created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
-                 'date created', frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
-             to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
-             to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
-           FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
-           WHERE deleted_at IS NULL
-             AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
-             AND NOT (source_id = $4 AND slug = $3)
-             -- Index range (pages_coalesce_date_idx) wide enough for any zone;
-             -- the exact day test below still decides membership.
-             AND COALESCE(effective_date, updated_at) >= $2::date - 2
-             AND COALESCE(effective_date, updated_at) < $2::date + 3
-             AND ((effective_date AT TIME ZONE 'UTC')::date = $2::date
-               OR (COALESCE(effective_date, updated_at) AT TIME ZONE $1)::date = $2::date)
-             AND (source_id, slug) > ($5, $6)
-           ORDER BY source_id, slug LIMIT $7`,
-          [zone, day, slug, DAILY_MEMORY_SOURCE_ID, afterSource, afterSlug, DAILY_MEMORY_PAGE_CAP],
-        );
-        // Count every matching calendar/instant day without retaining a whole-day snapshot.
-        for (const row of candidates) {
-          if ((row.effective_date && isCalendarEffectiveDate(row) ? row.utc_day : row.local_day) !== day) continue;
-          pageTotal++;
-          if (rows.length < DAILY_MEMORY_PAGE_CAP && wikiLinkTarget(row.source_id, row.slug) !== null) rows.push(row);
-        }
-        if (candidates.length < DAILY_MEMORY_PAGE_CAP) break;
-        const last = candidates[candidates.length - 1];
-        afterSource = last.source_id;
-        afterSlug = last.slug;
-      }
+      const rows = await collectDayPageRows(engine, zone, day, slug, opts.signal);
+      const pageTotal = await countDayPages(engine, zone, day, slug, opts.signal);
       const records = await loadSourceRecordGroups(engine, zone, day);
 
       if (pageTotal === 0 && records.length === 0 && (!existing || existing.deleted_at)) {
