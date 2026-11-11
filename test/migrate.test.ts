@@ -731,17 +731,22 @@ describe('migrate — DROP INDEX CONCURRENTLY invalid-remnant cleanup (#1178, fi
     }
   });
 
-  test('dropInvalidConcurrentIndex helper itself probes pg_index.indisvalid and issues a standalone DROP (no DO block)', async () => {
+  test('invalid-remnant cleanup delegates the VALID/READY probe and issues a standalone DROP', () => {
     const src = surfaceFileSource('migrate', 'src/core/schema-migrations/helpers.ts');
     const helperStart = src.indexOf('async function dropInvalidConcurrentIndex');
     expect(helperStart).toBeGreaterThan(-1);
-    const helperBlock = src.slice(helperStart, helperStart + 1200);
-    expect(helperBlock).toContain('pg_index');
-    expect(helperBlock).toContain('indisvalid');
-    expect(helperBlock).toContain('executeRaw');
+    const helperBlock = src.slice(helperStart, src.indexOf('export type OnlineIndexOutcome', helperStart));
+    expect(helperBlock).toContain('readOnlineIndexState(engine, indexName)');
+    expect(helperBlock).toContain('state.valid && state.ready');
+    expect(helperBlock).toContain('state.building');
     expect(helperBlock).toContain('DROP INDEX CONCURRENTLY IF EXISTS');
     expect(helperBlock).not.toContain('DO $$');
     expect(helperBlock).not.toContain('EXECUTE ');
+    const reader = src.slice(src.indexOf('async function readOnlineIndexState'), src.indexOf('export async function buildIndexOnline'));
+    expect(reader).toContain('pg_index');
+    expect(reader).toContain('indisvalid');
+    expect(reader).toContain('indisready');
+    expect(reader).toContain('pg_stat_progress_create_index');
   });
 });
 
@@ -861,19 +866,6 @@ describe('migrate v66 — embed_stale_partial_index (D6)', () => {
     expect(dropIdx).toBeLessThan(createIdx);
     // Branches on engine.kind (handler-pattern from v14).
     expect(v66Block).toContain('engine.kind');
-  });
-
-  test('dropInvalidConcurrentIndex helper itself probes pg_index.indisvalid and issues a standalone DROP (no DO block)', async () => {
-    const src = surfaceFileSource('migrate', 'src/core/schema-migrations/helpers.ts');
-    const helperStart = src.indexOf('async function dropInvalidConcurrentIndex');
-    expect(helperStart).toBeGreaterThan(-1);
-    const helperBlock = src.slice(helperStart, helperStart + 1200);
-    expect(helperBlock).toContain('pg_index');
-    expect(helperBlock).toContain('indisvalid');
-    expect(helperBlock).toContain('executeRaw');
-    expect(helperBlock).toContain('DROP INDEX CONCURRENTLY IF EXISTS');
-    expect(helperBlock).not.toContain('DO $$');
-    expect(helperBlock).not.toContain('EXECUTE ');
   });
 
   test('v66 idempotent flag is true (re-run safety)', () => {
@@ -1418,10 +1410,9 @@ describe('PR #356 + #363 — session timeouts applied via startup parameters', (
     expect(dbSrc).toContain('export function resolveSessionTimeouts');
     expect(dbSrc).toContain('idle_in_transaction_session_timeout');
 
-    // Both connect paths call resolveSessionTimeouts() and feed it through
-    // postgres.js's connection option (startup parameters)
+    // Both connect paths resolve startup parameters; the engine forwards its per-connection config.
     expect(dbSrc).toContain('resolveSessionTimeouts()');
-    expect(pgSrc).toContain('resolveSessionTimeouts()');
+    expect(pgSrc).toContain('db.resolveSessionTimeouts(config)');
 
     // setSessionDefaults still callable (no-op) so existing call sites
     // don't break, but the SET command itself is gone — the work has
@@ -1454,7 +1445,7 @@ describe('PR #356 — non-transactional DDL runs via reserved connection', () =>
     expect(runFnIdx).toBeGreaterThan(-1);
     const fnBody = source.slice(runFnIdx, runFnIdx + 2500);
     expect(fnBody).toContain('withReservedConnection');
-    expect(fnBody).toContain("SET statement_timeout = '600000'");
+    expect(fnBody).toContain("SET statement_timeout = '${engine.migrationStatementTimeoutMs ?? 600000}'");
   });
 });
 
