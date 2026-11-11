@@ -56,6 +56,9 @@ describe('CI runner routing', () => {
         expect(job.if, name).toContain("contains(github.event.pull_request.labels.*.name, 'real-agent-e2e')");
         expect(job.if, name).toContain('inputs.run_grok_door == true');
         expect(job.if, name).not.toContain("'heavy-tests'");
+        expect(job.if?.replace(/\s+/g, ' ').trim(), name).toBe(
+          "(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'real-agent-e2e')) || (github.event_name == 'workflow_dispatch' && inputs.run_grok_door == true)",
+        );
       } else {
         expect(job.if, name).toContain("contains(github.event.pull_request.labels.*.name, 'heavy-tests')");
         expect(job.if, name).toContain("github.event_name");
