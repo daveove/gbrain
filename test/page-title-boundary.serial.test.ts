@@ -96,7 +96,8 @@ for (const backend of testBackends()) describe(`page title boundaries (${backend
       for (const index of PAGE_ONLINE_INDEXES) await engine.executeRaw(`DROP INDEX ${index.name}`);
       await insertPage(engine, 'default', 'long/before-upgrade', `${title}前`);
       await engine.setConfig('version', '239');
-      await engine.initSchema();
+      // initSchema is single-flight per connection; this checkpoint explicitly exercises the forward runner.
+      await runMigrations(engine);
       expect(await engine.getConfig('version')).toBe(String(LATEST_VERSION));
       expect((await engine.getPage('long/before-upgrade', { sourceId: 'default' }))?.title).toBe(`${title}前`);
       expect((await readPageIndexStates(engine)).map(index => index.state)).toEqual(['valid', 'valid', 'valid']);
@@ -111,7 +112,8 @@ for (const backend of testBackends()) describe(`page title boundaries (${backend
       await engine.executeRaw(`CREATE INDEX ${LEGACY_PAGE_TITLE_INDEX} ON pages (source_id, lower(title))`);
       await engine.setConfig('version', '243');
       expect((await pageIndexesCheck(engine)).status).toBe('warn');
-      expect(await runMigrations(engine)).toEqual({ applied: 1, current: LATEST_VERSION });
+      // Later migrations (244 and up) also run from this checkpoint; count them from LATEST_VERSION.
+      expect(await runMigrations(engine)).toEqual({ applied: LATEST_VERSION - 243, current: LATEST_VERSION });
       expect((await readPageIndexStates(engine)).map(index => index.state)).toEqual(['valid', 'valid', 'valid']);
       await assertConsumers(engine);
       expect(await runMigrations(engine)).toEqual({ applied: 0, current: LATEST_VERSION });
