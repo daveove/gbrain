@@ -10,19 +10,30 @@ type Job = {
 };
 const root = join(import.meta.dir, '../..');
 const load = (name: string) => loadYaml(readFileSync(join(root, '.github/workflows', name), 'utf8')) as { jobs: Record<string, Job> };
+// DAV-7475 (#71, #75): this fork has no Ubicloud installation for Test, E2E,
+// Scale tier, persistence, native-lock and stress jobs. They run on GitHub-hosted
+// runners. The label-gated heavy suite, actionlint and Semgrep keep Ubicloud labels.
+const hosted = 'ubuntu-latest';
 const normal = 'ubicloud-standard-16-ubuntu-2404';
 const heavy = 'ubicloud-standard-30-ubuntu-2404';
 const small = 'ubicloud-standard-2-ubuntu-2404';
 const report = 'ubicloud-standard-4-ubuntu-2404';
-const single = report;
 const pooled = 'ubicloud-standard-8-ubuntu-2404';
 const arm = 'ubicloud-standard-4-arm-ubuntu-2404';
+const hostedArm = 'ubuntu-24.04-arm';
 const targetRunners = (job: Job) =>
   JSON.parse(/fromJSON\('([^']+)'\)\[matrix\.target\]/.exec(job['runs-on']!)![1]!) as Record<string, string>;
 
 describe('CI runner routing', () => {
-  test('owned Linux validation jobs use Ubicloud without moving release publishing', () => {
-    for (const file of ['test.yml', 'e2e.yml', 'heavy-tests.yml', 'persistence-validation.yml', 'native-locks.yml', 'actionlint.yml', 'semgrep.yml']) {
+  test('fork Test, E2E, persistence, native-lock and stress jobs use GitHub-hosted runners; release never uses Ubicloud', () => {
+    for (const file of ['test.yml', 'e2e.yml', 'persistence-validation.yml', 'native-locks.yml', 'stress.yml', 'scale-tier.yml']) {
+      for (const job of Object.values(load(file).jobs)) {
+        const runner = job['runs-on'];
+        if (!runner || runner.startsWith('${{')) continue;
+        expect(runner, file).toBe(hosted);
+      }
+    }
+    for (const file of ['heavy-tests.yml', 'actionlint.yml', 'semgrep.yml']) {
       for (const job of Object.values(load(file).jobs)) {
         const runner = job['runs-on'];
         if (!runner || runner.startsWith('${{')) continue;
@@ -34,35 +45,15 @@ describe('CI runner routing', () => {
     expect(load('osv-scanner.yml').jobs['osv-scan']['runs-on']).toBeUndefined();
   });
 
-  test('single-process lanes and soaks use 4 vCPUs, pooled lanes 8, and the label-gated heavy suite keeps 30', () => {
-    // Measured: a unit shard is one bun process (1.1-1.5 busy cores on average)
-    // and took the same time on 4, 8 and 16 vCPUs; verify matches 16 vCPUs at 8.
-    for (const name of ['slow-brainbench-e2e', 'brainbench', 'slow-entity-resolve-perf', 'admin-browser', 'shared-skills-compatibility']) {
-      expect(load('test.yml').jobs[name]['runs-on'], name).toBe(single);
-    }
-    expect(load('test.yml').jobs.verify['runs-on']).toBe(pooled);
-    // E2E files run one bun process at a time against the job's Postgres:
-    // full-corpus shard 1 took 668s on 4 vCPUs, 704s on 8 and 741s on 16.
-    for (const name of ['jsonb-parity', 'tier2', 'tier1-backend-matrix', 'coverage-full-unit', 'coverage-full-slow', 'coverage-full-e2e']) {
-      expect(load('e2e.yml').jobs[name]['runs-on'], name).toBe(single);
-    }
-    expect(load('e2e.yml').jobs.tier1['runs-on']).toBe(normal);
-    expect(load('e2e.yml').jobs['coverage-full-serial']['runs-on']).toBe(pooled);
-    expect(load('persistence-validation.yml').jobs['read-performance']['runs-on']).toBe(single);
-    expect(load('persistence-validation.yml').jobs.invariants['runs-on']).toBe(single);
-    expect(load('persistence-validation.yml').jobs.reconciliation['runs-on']).toBe(single);
-    expect(load('persistence-validation.yml').jobs['deployment-matrix']['runs-on']).toBe(pooled);
+  test('the label-gated heavy suite keeps 30 vCPUs', () => {
     expect(load('heavy-tests.yml').jobs.heavy['runs-on']).toBe(heavy);
   });
 
-  test('Selected E2E shards run on 2 vCPUs; unit shards and the serial pool on 4 (C1, C8; C4 reverted)', () => {
-    // A 25-file E2E sample took 442s on 2 cores vs 455s on 4. Unit shards stay on
-    // 4: on PR #6013 the 2-vCPU cell raised the unit shard mean from 542s to 608s
-    // and made Test the critical path (V-2 revert). The serial shards finish far
-    // off the critical path on 4.
-    expect(load('test.yml').jobs.test['runs-on']).toBe(single);
-    expect(load('e2e.yml').jobs['selected-e2e']['runs-on']).toBe(small);
-    expect(load('test.yml').jobs['serial-tests']['runs-on']).toBe(single);
+  test('unit shards, the serial pool, verify and Selected E2E shards run on GitHub-hosted runners', () => {
+    expect(load('test.yml').jobs.test['runs-on']).toBe(hosted);
+    expect(load('test.yml').jobs['serial-tests']['runs-on']).toBe(hosted);
+    expect(load('test.yml').jobs.verify['runs-on']).toBe(hosted);
+    expect(load('e2e.yml').jobs['selected-e2e']['runs-on']).toBe(hosted);
   });
 
   test('security matrix labels and native platform coverage retain their identities', () => {
@@ -70,19 +61,19 @@ describe('CI runner routing', () => {
     expect(security.strategy!.matrix.os).toEqual(['ubuntu-latest', 'macos-26', 'windows-latest']);
     for (const os of security.strategy!.matrix.os!) {
       const expression = security['runs-on']!.replace(/^\$\{\{\s*|\s*\}\}$/g, '');
-      expect(runInNewContext(expression, { matrix: { os } }, { timeout: 100 })).toBe(os === 'ubuntu-latest' ? small : os);
+      expect(runInNewContext(expression, { matrix: { os } }, { timeout: 100 })).toBe(os);
     }
     const native = load('native-locks.yml');
     expect(targetRunners(native.jobs.native)).toEqual({
-      'linux-x64-glibc': single,
-      'linux-arm64-glibc': arm,
+      'linux-x64-glibc': hosted,
+      'linux-arm64-glibc': hostedArm,
       'darwin-arm64': 'macos-26',
       'darwin-x64': 'macos-26-intel',
       'win32-x64': 'windows-2022',
       'win32-arm64': 'windows-11-arm',
     });
     expect(native.jobs.native.strategy!.matrix.target).toEqual(Object.keys(targetRunners(native.jobs.native)));
-    expect(targetRunners(native.jobs.musl)).toEqual({ 'linux-x64-musl': single, 'linux-arm64-musl': arm });
+    expect(targetRunners(native.jobs.musl)).toEqual({ 'linux-x64-musl': hosted, 'linux-arm64-musl': hostedArm });
     expect(native.jobs.musl.strategy!.matrix.target).toEqual(['linux-x64-musl', 'linux-arm64-musl']);
   });
 
@@ -97,13 +88,13 @@ describe('CI runner routing', () => {
     expect(text).not.toMatch(/\$\{\{[^}]*secrets\./);
   });
 
-  test('status and planning jobs stay small while coverage reports retain memory headroom', () => {
+  test('status, planning and coverage report jobs use GitHub-hosted runners; actionlint and Semgrep keep their sizes', () => {
     for (const name of ['changes', 'gitleaks', 'dependency-audit', 'test-status', 'native-only-status']) {
-      expect(load('test.yml').jobs[name]['runs-on'], name).toBe(small);
+      expect(load('test.yml').jobs[name]['runs-on'], name).toBe(hosted);
     }
-    for (const name of ['prepare-e2e', 'e2e-status']) expect(load('e2e.yml').jobs[name]['runs-on'], name).toBe(small);
-    expect(load('test.yml').jobs['coverage-report']['runs-on']).toBe(report);
-    expect(load('e2e.yml').jobs['coverage-full-report']['runs-on']).toBe(report);
+    for (const name of ['prepare-e2e', 'e2e-status']) expect(load('e2e.yml').jobs[name]['runs-on'], name).toBe(hosted);
+    expect(load('test.yml').jobs['coverage-report']['runs-on']).toBe(hosted);
+    expect(load('e2e.yml').jobs['coverage-full-report']['runs-on']).toBe(hosted);
     expect(load('actionlint.yml').jobs.actionlint['runs-on']).toBe(small);
     expect(load('semgrep.yml').jobs.semgrep['runs-on']).toBe(report);
   });
