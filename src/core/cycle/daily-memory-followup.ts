@@ -470,6 +470,14 @@ export async function queueStandaloneSyncDailyMemory(
   return queueDailyDateBatch(queue, days, firstChild, 1, [firstChild], 0, 0, 0, '', timezone);
 }
 
+/** A backfill batch found its day children dead after the last replay round. Replay cannot recover them. */
+export class DailyMemoryReplayExhaustedError extends Error {
+  constructor(readonly replayRound: number, readonly failedJobIds: number[], readonly days: string[]) {
+    super(`Daily memory child replay exhausted after ${replayRound} rounds; jobs=${failedJobIds.join(',')}; days=${days.join(',')}`);
+    this.name = 'DailyMemoryReplayExhaustedError';
+  }
+}
+
 async function settleDailyDateChildren(
   engine: BrainEngine,
   job: DailyJob,
@@ -492,7 +500,7 @@ async function settleDailyDateChildren(
   }
   const failed = rows.filter(row => row.status === 'dead' || row.status === 'failed' || row.status === 'cancelled');
   if (failed.length && replayRound >= 2) {
-    throw new Error(`Daily memory child replay exhausted after ${replayRound} rounds; jobs=${failed.map(row => row.id).join(',')}; days=${days.join(',')}`);
+    throw new DailyMemoryReplayExhaustedError(replayRound, failed.map(row => row.id), days);
   }
   const replayed: number[] = [];
   for (const row of failed) {

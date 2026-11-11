@@ -3,14 +3,17 @@ import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../engine.ts';
 import { MinionQueue } from '../minions/queue.ts';
 import { calculateBackoff } from '../minions/backoff.ts';
-import { runDailyMemoryJob, type DailyMemoryAfterWrite } from './daily-memory-followup.ts';
+import { DailyMemoryReplayExhaustedError, runDailyMemoryJob, type DailyMemoryAfterWrite } from './daily-memory-followup.ts';
 
 export type DailyMemoryJobTimeout = { id: number; day: unknown; terminal: boolean };
+export type DailyMemoryReplayExhausted = { id: number; failedJobIds: number[]; days: string[] };
 
 export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
   signal?: AbortSignal; afterWrite: DailyMemoryAfterWrite; maxJobs?: number; timeBudgetMs?: number;
   /** Called after a job that outlived its own timeout is recorded as failed. */
   onJobTimeout?: (timeout: DailyMemoryJobTimeout) => void;
+  /** Called after a backfill batch whose day children all died is dead-lettered. */
+  onReplayExhausted?: (exhausted: DailyMemoryReplayExhausted) => void;
 }): Promise<number> {
   const queue = new MinionQueue(engine), names = ['autopilot-daily-memory'];
   const deadline = Date.now() + (opts.timeBudgetMs ?? 60_000);
@@ -91,12 +94,21 @@ export async function drainInlineDailyMemory(engine: BrainEngine, opts: {
       // drain's, so the drain records it and moves on to the next job.
       const jobTimedOut = message === 'Inline daily memory job timed out'
         || abortReason === 'Inline daily memory job timed out';
-      const terminal = job.attempts_made + 1 >= job.max_attempts;
+      // A backfill batch whose day children died through every replay round
+      // cannot recover by retrying. It dead-letters at once as a recorded job
+      // outcome; an old dead day must not fail tonight's capture or hold the
+      // seat watermarks.
+      const exhausted = error instanceof DailyMemoryReplayExhaustedError ? error : null;
+      const terminal = exhausted !== null || job.attempts_made + 1 >= job.max_attempts;
       const failed = await queue.failJob(job.id, token, message,
         terminal ? 'dead' : 'delayed', terminal ? 0 : calculateBackoff({ ...job, attempts_made: job.attempts_made + 1 }));
       if (!failed) throw new Error('Inline daily memory failure fence lost', { cause: error });
-      if (!jobTimedOut) throw error;
-      opts.onJobTimeout?.({ id: job.id, day: job.data.daily_memory_date, terminal });
+      if (exhausted) {
+        opts.onReplayExhausted?.({ id: job.id, failedJobIds: exhausted.failedJobIds, days: exhausted.days });
+      } else {
+        if (!jobTimedOut) throw error;
+        opts.onJobTimeout?.({ id: job.id, day: job.data.daily_memory_date, terminal });
+      }
     } finally {
       stopped = true;
       clearInterval(timer); clearTimeout(timeout);
