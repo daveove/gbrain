@@ -11,7 +11,7 @@ name: Semgrep
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main, master]
   schedule:
     - cron: '30 7 * * 1'  # weekly, Monday 07:30 UTC
   workflow_dispatch:
