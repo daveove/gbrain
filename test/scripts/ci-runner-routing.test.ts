@@ -52,6 +52,10 @@ describe('CI runner routing', () => {
       expect(job['runs-on'], name).toBe(hosted);
       if (name === 'opencode-door-canary') {
         expect(job.if).toBe("github.event_name == 'schedule'");
+      } else if (name === 'grok-door') {
+        expect(job.if, name).toContain("contains(github.event.pull_request.labels.*.name, 'real-agent-e2e')");
+        expect(job.if, name).toContain('inputs.run_grok_door == true');
+        expect(job.if, name).not.toContain("'heavy-tests'");
       } else {
         expect(job.if, name).toContain("contains(github.event.pull_request.labels.*.name, 'heavy-tests')");
         expect(job.if, name).toContain("github.event_name");
