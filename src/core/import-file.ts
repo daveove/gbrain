@@ -3,7 +3,7 @@ import { suffixedFrontmatterSlugHold } from './persistence/suffixed-slug.ts';
 import { maintenanceTransaction, ownerSourceGateInput, suppliedTrustMarkerView, trustMarkerChanged, writeTrustOfGate } from './persistence/attribution.ts';
 import { assertImportBase, sameCanonicalImport, sameContentAnyKeyOrder } from './page-state/import-guard.ts';
 import { stabilizeSafetyAssessments } from './persistence/reconcile-safety.ts';
-import { decideImportIdentity, collidingSlugOwner, fileOriginUri } from './import-identity.ts';
+import { decideImportIdentity, collidingSlugOwner, fileOriginUri, storedSlugForPath } from './import-identity.ts';
 import { readSourceFileSync } from './minions/source-filesystem.ts';
 import { readFileSync, statSync, lstatSync } from 'fs';
 import { basename, extname, resolve } from 'path';
@@ -1139,6 +1139,21 @@ export async function importFromFile(
         refusal: { code: 'frontmatter_slug_conflict', key: 'slug', message: slugConflictHoldMessage(relativePath, expectedSlug) }, skip_reason: 'frontmatter_slug_conflict',
       };
     }
+  }
+
+  // A file with no explicit frontmatter slug whose name is a stored page's
+  // slug (`a--b.md` for page `a--b`) updates that page. slugifyPath collapses
+  // the hyphen run, so the path-derived slug alone would create a twin.
+  if (expectedSlug !== '' && !parsed.slugExplicit) {
+    const stored = await storedSlugForPath(engine, opts.sourceId, relativePath, expectedSlug);
+    if (stored.kind === 'ambiguous') {
+      return {
+        slug: expectedSlug, status: 'skipped', chunks: 0, skip_reason: 'slug_collision',
+        error: `Path "${relativePath}" maps to more than one stored page in source ${opts.sourceId ?? 'default'} (${stored.slugs.join(', ')}); ` +
+          `rename the file to the exact stored slug to update one of them.`,
+      };
+    }
+    if (stored.kind === 'stored') resolvedSlug = stored.slug;
   }
 
   const suffixHold = usedFrontmatterFallback ? await suffixedFrontmatterSlugHold(engine, opts.sourceId, relativePath, resolvedSlug) : null;
