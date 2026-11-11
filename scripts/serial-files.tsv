@@ -146,6 +146,7 @@ test/embed-backfill-cli-admission.serial.test.ts	global-state	global-state: R3: 
 test/embed-exit-code-3037.serial.test.ts	global-state	global-state: binds local servers/ports
 test/embed-independent-column.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway; learned embedding input caps use process-wide test seams
 test/embed-input-type-wire.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway
+test/embed-lock-acquisition.serial.test.ts	R1	R1: mutates GBRAIN_HOME and configures the process-wide AI gateway and embedding transport during lease-failure tests
 test/embed-lock-skipped.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/embed-max-usd-metered.serial.test.ts	global-state	global-state: configureGateway and __setEmbedTransportForTests change the process-wide AI gateway; replaces globalThis.fetch for the Voyage multimodal stub
 test/embed-overlength-drain.serial.test.ts	R2	R2: mock.module(src/core/embedding.ts) fake embedder; R1: mutates process.env (GBRAIN_MAX_CHUNK_TOKENS)
@@ -265,6 +266,7 @@ test/migrate-engine-pagination.serial.test.ts	R1	R1: mutates process.env (GBRAIN
 test/migrate-full-row-projections.serial.test.ts	global-state	global-state: runMigrateEngine sets the process-wide CLI exit verdict (reset in afterEach) and the run swaps GBRAIN_HOME through withEnv and writes config.json (saveConfig)
 test/migrate-graduation-cli.serial.test.ts	global-state	global-state: withEnv holds GBRAIN_HOME at a temp dir (withEnv) across awaited runMigrateGraduation calls that read the file-plane opt-out
 test/migrate-quiet-replay.serial.test.ts	R1	R1: mutates process.env (GBRAIN_MIGRATE_VERBOSE, GBRAIN_PGLITE_SNAPSHOT)
+test/migration-acceptance.postgres.serial.test.ts	global-state	global-state: withEnv swaps migration deadline settings while native concurrent-index builds and cancellation use real PostgreSQL timers; explicitly opted into a disposable loopback database
 test/migration-in-process.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll; R4: PGLiteEngine without an afterAll disconnect
 test/migration-v0-29-1.serial.test.ts	R1	R1: mutates process.env (GBRAIN_HOME)
 test/migrations-fresh-install-audit.serial.test.ts	global-state	global-state: R3: constructs PGLiteEngine outside beforeAll
@@ -286,6 +288,7 @@ test/openclaw-compact-transcript-runtime.serial.test.ts	global-state	global-stat
 test/openclaw-context-engine-native.serial.test.ts	global-state	global-state: binds local servers/ports
 test/ops-run-onboard-scope-gate.serial.test.ts	R2	R2: mock.module(../src/core/onboard/checks.ts, ../src/core/remediation/index.ts, ../src/core/onboard/render.ts) replaces modules for every file in the process
 test/page-summary-length.serial.test.ts	R1	R1: mutates process.env (GBRAIN_AUDIT_DIR)
+test/page-title-boundary.serial.test.ts	global-state	global-state: R3/R4: fresh PGLite engines per disposable full-schema/migration fixture outside suite hooks; each closes in finally; catalog and lookup regressions run in their own process
 test/pending-write-exit.serial.test.ts	global-state	global-state: binds local servers/ports
 test/persistence-drain-latency.serial.test.ts	global-state	global-state: configureGateway changes the process-wide AI gateway; patches process stdout/stderr/console; times event-loop gaps against a bound, so a parallel neighbour would distort the measurement
 test/persistence-image-import.serial.test.ts	R2	R2: mock.module(../src/core/embedding.ts) replaces modules for every file in the process

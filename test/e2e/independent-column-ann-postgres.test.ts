@@ -102,7 +102,7 @@ function indexes(plan: unknown): string[] {
   }, 60_000);
 
   const opts = () => ({ embeddingColumn: column, sourceId: 'default', excludePrivate: true, limit: 10 });
-  function assertSafe(rows: Array<{ slug: string; source_id: string }>) {
+  function assertSafe(rows: Array<{ slug: string; source_id?: string }>) {
     expect(rows).toHaveLength(10);
     expect(rows[0].slug).toBe('fixture/current');
     expect(rows.every(row => row.source_id === 'default' && !forbidden.some(name => row.slug === `fixture/${name}`))).toBe(true);
