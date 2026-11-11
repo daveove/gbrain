@@ -44,39 +44,24 @@ and prints it. In CI, each red job's step summary lists the failing tests with a
 
 ## CI runner capacity
 
-Repository-owned Linux validation jobs use ephemeral Ubicloud runners pinned to
-Ubuntu 24.04. The Ubicloud Managed Runners GitHub App must have access to this
-repository and active billing in its connected project; runner labels alone do
-not grant access. No Ubicloud API token is passed to workflow jobs.
+This public fork uses standard GitHub-hosted runners. Linux jobs use
+`ubuntu-latest`; native ARM64 jobs use `ubuntu-24.04-arm`. macOS and Windows
+matrices retain their platform-specific runners. Release building and publishing
+stay unchanged. The pinned upstream OSV workflow owns its runner selection.
 
-| Workload | Runner | Capacity |
-| --- | --- | --- |
-| Unit shards, slow and eval jobs, BrainBench, admin browser, shared-skills compatibility, persistence soak, reconciliation crashes and read latency, native Linux cells, OpenClaw startup, JSONB parity, PR serial pool, E2E backend matrix, Tier 2, coverage reports and Semgrep | `ubicloud-standard-4-ubuntu-2404` | 4 vCPU, 16 GB RAM |
-| Nightly coverage serial pool, `verify`, PgBouncer/RLS deployment matrix | `ubicloud-standard-8-ubuntu-2404` | 8 vCPU, 32 GB RAM |
-| E2E Tier 1 (its CLI `init` spawns exceed their timeouts on 4 vCPUs), label-gated and nightly heavy-tests jobs | `ubicloud-standard-16-ubuntu-2404` | 16 vCPU, 64 GB RAM |
-| Label-gated heavy test suite | `ubicloud-standard-30-ubuntu-2404` | 30 vCPU, 120 GB RAM |
-| Native ARM64 glibc and musl tests | `ubicloud-standard-4-arm-ubuntu-2404` | 4 vCPU |
-| Selected E2E (one Bun process each), planning, status aggregation, dependency audit, gitleaks, security regressions and actionlint | `ubicloud-standard-2-ubuntu-2404` | 2 vCPU, 8 GB RAM |
+Standard GitHub-hosted runners in public repositories do not consume included
+Actions minutes. This policy does not cover larger runners or paid model calls.
+See [GitHub Actions billing](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions).
 
-macOS and Windows matrices stay on GitHub-hosted runners. Release building and
-publishing also stay unchanged. The pinned upstream OSV reusable workflow does
-not expose a runner override, so its runner remains upstream-owned.
+Heavy Tests runs nightly, on manual dispatch, or for pull requests with the
+`heavy-tests` label. Scale tier selects relevant paths or the `scale-tier` label,
+plus nightly and manual runs. The race hunt runs nightly or on manual dispatch.
+The changed-test stress lane remains part of `test-status`. None of these
+selection rules changes the required test commands or weakens `test-status`.
 
-Sizes come from measured CPU use, not guesses. Each Ubicloud project shares one
-vCPU quota between pull-request CI and agent `ci:ubicloud` VMs, so an oversized
-runner makes every other job wait, and an undersized one lengthens the PR
-critical path. A unit shard is one Bun process that averages 1.1-1.5 busy
-cores, yet on 2 vCPUs the unit shard mean rose from 542s to 608s on a full PR
-run and made Test the critical path, so unit shards stay on 4 vCPUs. On matched
-VMs a unit shard takes the same time on 4, 8 and 16 vCPUs; the serial pool and
-`verify` take the same time on 8 and 16 vCPUs (serial shard 2: 222s and 224s;
-277s on 4); the 2,500-write PGLite soak averages 1.3-1.8 busy cores and takes
-523s on 4 vCPUs and 500s on 16. Selected E2E workers run one file at a time and
-fit on 2 vCPUs. Re-measure with `scripts/ubicloud/ubi-runner.sh run -s standard-N`
-before resizing a runner: more CPU does not shorten a single-process job, and
-the decision rule is critical path first, vCPU-minutes second.
-`test/scripts/ci-runner-routing.test.ts` pins capacity and platform routing;
-`.github/actionlint.yaml` declares the exact custom runner labels.
+`test/scripts/ci-runner-routing.test.ts` checks all workflow files for unavailable
+Ubicloud labels and preserves the native platform matrix. The separate
+`ci:ubicloud` command still supports operator-provided ephemeral VMs.
 
 ### Event parity
 
