@@ -6,6 +6,7 @@ import { load as loadYaml } from 'js-yaml';
 
 type Job = {
   'runs-on'?: string;
+  steps?: Array<{ run?: string; env?: Record<string, string | number> }>;
   strategy?: { matrix: { os?: string[]; target?: string[] } };
 };
 const root = join(import.meta.dir, '../..');
@@ -54,6 +55,9 @@ describe('CI runner routing', () => {
     expect(load('test.yml').jobs['serial-tests']['runs-on']).toBe(hosted);
     expect(load('test.yml').jobs.verify['runs-on']).toBe(hosted);
     expect(load('e2e.yml').jobs['selected-e2e']['runs-on']).toBe(hosted);
+    // DAV-7731: cold typecheck beside other checks reached its 120s deadline on the hosted runner.
+    const verifyStep = load('test.yml').jobs.verify.steps!.find(step => step.run === 'bun run verify')!;
+    expect(verifyStep.env?.GBRAIN_VERIFY_MAX_PARALLEL).toBe(1);
   });
 
   test('security matrix labels and native platform coverage retain their identities', () => {
