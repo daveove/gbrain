@@ -37,7 +37,7 @@ import { join, resolve } from 'node:path';
 import {
   COLLISION_DOCS, MIGRATION_FILE_RE, MIGRATIONS_DIR, RESTAMP_DOCS, RestampError, STAMPS,
   branchEntrySections, fail, findLeftoverRefs, isGenerated, migrationPayloadKey, nextPatchVersion, parseAddedLines,
-  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampTodoLines, versionOfHeader,
+  isVersionToken, planRenumber, rebuildChangelog, renumberMigrationText, resolveVersionOnlyHunks, restampTodoLines, splitChangelog, versionOfHeader,
   type BranchMigration, type ChangelogSection, type LeftoverRef, type Renumber,
 } from './lib/restamp.ts';
 import { offlineEnv } from './regen-all.ts';
@@ -347,6 +347,18 @@ function restampTree(ctx: Ctx, state: State, opts: { acceptRefs: boolean; date: 
   if (state.entry) {
     const old = versionOfHeader(state.entry.header) ?? state.branchVersion;
     ctx.write('CHANGELOG.md', rebuildChangelog(ctx.read('CHANGELOG.md'), state.entry, old, version, opts.date));
+  }
+  if (existsSync(join(ctx.root, 'changelog.d'))) {
+    const collected = ctx.run(['node', resolve(import.meta.dir, 'collect-changelog.mjs')], { GBRAIN_RESTAMP_DATE: opts.date });
+    if (collected.code !== 0) {
+      stop(state, ctx, collected.out.trim(), 'changelog fragments must be valid before release.',
+        ['fix the named fragment, then resume']);
+    }
+    // Retain collected text if a later generator stops and --continue rebuilds the entry.
+    const entry = splitChangelog(ctx.read('CHANGELOG.md')).sections[0];
+    if (entry && versionOfHeader(entry.header) === version) state.entry = entry;
+    ctx.saveState(state);
+    ctx.log(collected.out.trim());
   }
   if (existsSync(join(ctx.root, 'TODOS.md'))) {
     const lines = new Set(addedLines(ctx, state.masterRef, ['--', 'TODOS.md']).map((l) => l.line));
