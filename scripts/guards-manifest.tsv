@@ -61,7 +61,7 @@ check-wasm-embedded.sh	buildfresh	exempt	binary embed check
 check-bootstrap-tag.sh	repostate	exempt	VERSION stamp drift check
 check-cli-executable.sh	repostate	exempt	file-mode check
 check-no-tracked-symlinks.sh	repostate	exempt	git index state check
-check-changelog-pr.mjs	repostate	exempt	PR diff policy: direct changelog edits require a release branch and version files; isolated git fixtures in test/scripts/changelog-fragments.test.ts
+check-changelog-pr.mjs	repostate	exempt	PR diff policy runs in .github/workflows/changelog.yml with PR base/head refs, not local verify; isolated git fixtures in test/scripts/changelog-fragments.test.ts
 check-grok-pin.sh	repostate	exempt	pin-stamp drift check (GROK-CLI-PIN.md stamps vs heavy-tests grok-door env); own bun guard tests in test/check-bootstrap-guards.test.ts
 check-module-size.sh	scanner	yes	committed per-file line ceilings (module-size-limits.tsv); growth + stale-ceiling + missing-row + new-file cap
 check-function-size.ts	scanner	yes	W5 per-function line ratchet (TS compiler API): new >300-line function, growth, shrink-below-limit, stale slack, missing row, raise without issue/TODO id; baseline scripts/function-size-baseline.tsv keyed by path + name path; --transfer for verified move-only commits
