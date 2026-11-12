@@ -11,7 +11,7 @@ permissions:
 jobs:
   changelog-policy:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -28,4 +28,7 @@ jobs:
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.3
+      - name: Install dependencies for the test preloads
+        timeout-minutes: 8
+        run: bun --no-env-file scripts/ci-bun-install.ts --frozen-lockfile --ignore-scripts
       - run: bun --no-env-file test test/scripts/changelog-fragments.test.ts
