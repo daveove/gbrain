@@ -704,6 +704,26 @@ Community PRs are batched into release waves rather than merged one-by-one;
 contributor attribution stays attached via `Co-Authored-By:` trailers and every
 accepted contribution is credited in `CHANGELOG.md`.
 
+### Changelog fragments
+
+For each pull request, add one Markdown file at
+`changelog.d/<branch-or-issue>.md`. Replace branch-name slashes with hyphens.
+Write user-facing release notes with optional `### Added`, `### Changed`, or
+`### Fixed` headings. Keep attribution in the fragment when applicable.
+Do not edit `CHANGELOG.md` in a feature or fix pull request.
+
+The `changelog-policy` check rejects direct edits, deletions, and renames of
+`CHANGELOG.md`. A release pull request uses a `release/` branch and changes
+both `VERSION` and `package.json`; only those pull requests may edit it.
+
+At release time, run the existing `bun run release:restamp --base main`
+command from the release branch (`--base master` for the upstream repository).
+After the version stamps, restamp collects fragments in filename order,
+writes them to `CHANGELOG.md`, and removes the consumed files in its commit.
+It preserves existing entries. Preview with `--dry-run`; the preview writes nothing.
+To collect without the restamp process, after stamping `VERSION`, run
+`node scripts/collect-changelog.mjs`. Collection with no fragments changes nothing.
+
 ### gstack repo config (`.gstack/`)
 
 Two committed files tell gstack (1.91.98.0 or later) about gbrain's own gates;

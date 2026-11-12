@@ -175,6 +175,40 @@ const status = (r: string) => git(r, 'status', '--porcelain').trim();
 const stateFile = (r: string) => join(r, '.git', 'gbrain-restamp.json');
 
 describe('release:restamp end to end', () => {
+  test('collects fragments without a branch changelog entry and preserves them through --continue', () => {
+    const fx = fixture();
+    const before = read(fx.work, 'CHANGELOG.md');
+    put(fx.work, { 'changelog.d/issue.md': '### Fixed\n\n- Widgets retain their state.\n' });
+    commit(fx.work, 'fix: widgets');
+    const failed = restamp(fx.work, [], {
+      GBRAIN_RESTAMP_STEPS: JSON.stringify([{ name: 'fixture failure', argv: ['bun', '-e', 'process.exit(1)'] }]),
+    });
+    expect(failed.code).toBe(1);
+    expect(read(fx.work, 'CHANGELOG.md')).toContain('- Widgets retain their state.');
+    expect(existsSync(join(fx.work, 'changelog.d/issue.md'))).toBe(false);
+    const resumed = restamp(fx.work, ['--continue']);
+    expect(resumed.code, resumed.out).toBe(0);
+    expect(read(fx.work, 'CHANGELOG.md')).toContain('- Widgets retain their state.');
+    expect(read(fx.work, 'CHANGELOG.md')).toContain(before.slice(before.indexOf('## [')));
+    expect(status(fx.work)).toBe('');
+    expect(git(fx.work, 'show', '--format=', '--name-status', 'HEAD')).toContain('D\tchangelog.d/issue.md');
+  }, 120_000);
+
+  test('keeps a legacy release entry and collected fragments through --continue', () => {
+    const fx = fixture();
+    branchWork(fx, '0.1.1.0', { 'changelog.d/issue.md': '### Fixed\n\n- Widgets retain their state.\n' });
+    const failed = restamp(fx.work, [], {
+      GBRAIN_RESTAMP_STEPS: JSON.stringify([{ name: 'fixture failure', argv: ['bun', '-e', 'process.exit(1)'] }]),
+    });
+    expect(failed.code).toBe(1);
+    const resumed = restamp(fx.work, ['--continue']);
+    expect(resumed.code, resumed.out).toBe(0);
+    const text = read(fx.work, 'CHANGELOG.md');
+    expect(text).toContain('Widgets now sync twice as fast.');
+    expect(text.match(/Widgets retain their state/g)).toHaveLength(1);
+    expect(text.match(/## \[0\.1\.1\.0\]/g)).toHaveLength(1);
+  }, 120_000);
+
   test('collision-heavy branch: concurrent CHANGELOG entry, colliding version and migration, finishes within 5 minutes', () => {
     const started = performance.now();
     const fx = fixture();

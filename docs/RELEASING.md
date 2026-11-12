@@ -135,30 +135,26 @@ queued commit against `master`.
   actually merged (`gh pr view <n> --json state,mergedAt`) before tagging,
   announcing or starting dependent work.
 
-## CHANGELOG + VERSION are branch-scoped
+## Changelog fragments and release versions
 
-**VERSION and CHANGELOG describe what THIS branch adds vs master, not how we got
-here.** Every feature branch that ships gets its own version bump and CHANGELOG
-entry. The entry is product release notes for users; it is not a log of internal
-decisions, review rounds, or codex findings.
+Feature and fix pull requests add one `changelog.d/<branch-or-issue>.md`
+fragment instead of editing `CHANGELOG.md`. Use Markdown headings at level
+three or below and user-facing notes. See [CONTRIBUTING.md](../CONTRIBUTING.md#changelog-fragments).
 
-**Write the CHANGELOG entry at /ship time, not during development.** Mid-branch
-iterations, review rounds (CEO/Eng/Codex/DX), and implementation detours belong
-in the plan file at `~/.claude/plans/`, not in the CHANGELOG. One unified entry
-per branch, covering what the branch added vs the base branch.
+Release pull requests use `release/` branches and change both `VERSION` and
+`package.json`. The `changelog-policy` check allows only those pull requests
+to edit `CHANGELOG.md` directly. Keep previously published entries unchanged.
 
-**Never edit a CHANGELOG entry that already landed on master.** If master has
-v0.18.2.0 and your branch adds features, bump to the next PATCH version
-(v0.18.3.0, never MINOR) instead of editing master's v0.18.2.0. When merging master into your branch, master may
-bring new CHANGELOG entries above yours — push your entry above master's
-latest and verify:
+Run `bun run release:restamp --base main` on the release branch
+(`--base master` upstream). After the version stamps, restamp runs
+`scripts/collect-changelog.mjs`. The collector sorts fragments by filename,
+adds their text to the target version, and removes the consumed files.
+Restamp commits the changelog and fragment removals together.
+If a later generator fails, `--continue` keeps the collected text.
+The collector preserves existing changelog content and does nothing without fragments.
 
-- Does CHANGELOG have your branch's own entry separate from master's entries?
-- Is VERSION higher than master's VERSION?
-- Is your entry the topmost `## [X.Y.Z]` entry?
-- `grep "^## \[" CHANGELOG.md` shows a contiguous version sequence?
-
-If any answer is no, fix it before continuing.
+Legacy branch entries remain supported during restamp. A new release entry
+must describe the release contents, rather than internal reviews or intermediate decisions.
 
 **CHANGELOG is for users, not contributors.** Write like product release notes:
 
