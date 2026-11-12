@@ -71,7 +71,7 @@ test('post-import discovery failure banks slugs and withholds bookmark through a
   });
   const execute = engine.executeRaw;
   const failure = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
-    if (committed && sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic day discovery outage');
+    if (committed && sql.includes('SELECT effective_date, effective_date_source,')) throw new Error('Synthetic day discovery outage');
     return execute.call(this, sql, params) as Promise<T[]>;
   });
   try {
@@ -312,7 +312,7 @@ test('pre-write date discovery failure leaves the canonical page and bookmark un
   await engine.setConfig('sync.last_commit', 'before');
   const execute = engine.executeRaw;
   const failure = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
-    if (sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic prior-date discovery outage');
+    if (sql.includes('SELECT effective_date, effective_date_source,')) throw new Error('Synthetic prior-date discovery outage');
     return execute.call(this, sql, params) as Promise<T[]>;
   });
   try { await withEnv({ GBRAIN_HOME: home }, async () => {
