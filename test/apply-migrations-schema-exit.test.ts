@@ -129,7 +129,7 @@ describe('apply-migrations with Postgres unreachable stays non-fatal and says so
     expect(parseDocument(r.stdout).apply_migrations).toEqual({ exit_code: 0 });
   }, 180_000);
 
-  test('package postinstall runs apply-migrations, which exits 0, so no recovery hint is printed', async () => {
+  test('package postinstall with the opt-in runs apply-migrations, which exits 0, so no recovery hint is printed', async () => {
     const home = postgresHome();
     const driver = writeSchemaDriver(home, { migrations: ['noop'], args: [], entry: 'argv' });
     const bin = join(home, 'bin');
@@ -137,7 +137,7 @@ describe('apply-migrations with Postgres unreachable stays non-fatal and says so
     writeFileSync(join(bin, 'gbrain'), `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} --no-env-file ${JSON.stringify(driver)} "$@"\n`, { mode: 0o755 });
     const r = spawnSync(process.execPath, ['--no-env-file', join(REPO, 'scripts/postinstall.ts')], {
       cwd: home,
-      env: { HOME: home, GBRAIN_HOME: home, PATH: `${bin}:/usr/bin:/bin`, GBRAIN_SKIP_REFERENCE_SWEEP: '1' },
+      env: { HOME: home, GBRAIN_HOME: home, PATH: `${bin}:/usr/bin:/bin`, GBRAIN_SKIP_REFERENCE_SWEEP: '1', GBRAIN_POSTINSTALL_APPLY_MIGRATIONS: '1' },
       encoding: 'utf8', timeout: 120_000,
     });
     const out = r.stdout + r.stderr;
