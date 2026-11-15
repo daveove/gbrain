@@ -4,8 +4,8 @@ import type { BrainEngine } from '../engine.ts';
 const QUEUE_REQUIRED_COLUMNS = ['id', 'name', 'queue', 'status', 'data', 'lock_token', 'tokens_input', 'depth', 'max_children', 'timeout_ms', 'remove_on_complete'];
 
 /**
- * The config version row can be missing or stale. The table and its migration
- * v5 to v7 columns are the source of truth.
+ * Fallback for a missing config version row: the table and its migration v5 to
+ * v7 columns are then the source of truth.
  */
 export async function hasQueueSchema(engine: BrainEngine): Promise<boolean> {
   const rows = await engine.executeRaw<{ found: number | string }>(

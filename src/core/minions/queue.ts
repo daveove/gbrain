@@ -194,10 +194,20 @@ export class MinionQueue {
   /** Verify minion_jobs table exists (migration v5+). Call before first operation. */
   async ensureSchema(): Promise<void> {
     const ver = await this.engine.getConfig('version');
-    const current = parseInt(ver || '1', 10);
-    if (current >= MIGRATION_VERSION || await hasQueueSchema(this.engine)) return;
+    // A recorded version is authoritative: a stale row must still refuse even
+    // when the table happens to carry the required columns.
+    if (ver !== null && ver !== '') {
+      const current = parseInt(ver, 10);
+      if (current >= MIGRATION_VERSION) return;
+      throw new Error(
+        `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
+      );
+    }
+    // No version row (for example after a config reset): the real table and its
+    // migration v5 to v7 columns are the source of truth.
+    if (await hasQueueSchema(this.engine)) return;
     throw new Error(
-      `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
+      `minion_jobs table not found (schema version 1, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
     );
   }
 
