@@ -71,6 +71,7 @@ export const DOMAIN_OF: Record<string, string> = {
   'runUnsafe': OOS.helper,
   'executeRaw': OOS.lifecycle,
   'executeRawDirect': OOS.lifecycle,
+  'executeRawInSource': OOS.lifecycle,
   'runMigration': OOS.lifecycle,
   'getBulkRetryOpts': OOS.helper,
   'batchRetry': OOS.helper,
