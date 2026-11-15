@@ -68,6 +68,8 @@ jobs:
           bun-version: 1.4.3
       - id: plan
         env:
+          # The nightly trend planner (scripts/scale/trend.ts) calls gh run list and gh run download.
+          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           ADDED_LABEL: ${{ github.event.label.name }}
