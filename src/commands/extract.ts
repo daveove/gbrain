@@ -2190,7 +2190,6 @@ export async function extractStaleFromDB(
   progress.start('extract.stale', totalStale);
 
   const startMs = Date.now();
-  // A slug-bound run skips the mention pass below, so it keeps the whole budget, as the managed path does.
   const linkDeadline = await linkPhaseDeadline(engine, sourceIdFilter, startMs, catchUp ? undefined : timeBudgetMs, opts.slugs === undefined);
   let afterPageId = 0;
   let linksCreated = 0, timelineCreated = 0, pagesProcessed = 0;
