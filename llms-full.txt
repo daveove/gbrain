@@ -2013,7 +2013,8 @@ before you push more. One push starts about 75 checks, and the account has one
 shared job limit, so a burst of pushes queues every other repository's CI. Pull
 requests run the Scale tier only with the `scale-tier` label. Push workflow files
 through `~/clawd/bin/gh-as <app> --repo daveove/gbrain --permissions contents:write,workflows:write`;
-the `daveove` token has no `workflow` scope.
+the `daveove` token has no `workflow` scope. gbrain PRs merge as fleet-cockpit through
+`~/clawd/bin/gh-as` (the merge holder covers only den and cockpit); never the `daveove` login.
 
 ## Privacy
 
