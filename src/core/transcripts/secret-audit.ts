@@ -87,13 +87,15 @@ export interface ConversationSecretAuditRecord extends TranscriptSecretAuditSumm
  * ancestor of the value (`{ password: { prod: 'hunter2' } }`), and the
  * labeled detector needs the delimiter right after that ancestor label, not
  * after the dotted path (`password: hunter2` as well as `password.prod:
- * hunter2`).
+ * hunter2`). Each key is also its own string, so a credential used as a key
+ * is found when its value is null, `{}` or `[]` and emits no scalar.
  */
 function frontmatterStrings(value: unknown, path: string[] = [], out: string[] = []): string[] {
   if (Array.isArray(value)) {
     for (const child of value) frontmatterStrings(child, path, out);
   } else if (value && typeof value === 'object') {
     for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out.push(key);
       frontmatterStrings(child, [...path, key], out);
     }
   } else if (value !== null && value !== undefined) {
