@@ -2632,6 +2632,16 @@ export interface BrainEngine {
   ): Promise<T[]>;
 
   /**
+   * A read of one source's rows: `executeRaw` run inside that source's RLS
+   * scope. On Postgres with `GBRAIN_RLS_SCOPE_BINDING` on, the statement runs
+   * in a transaction that binds `app.scopes` to `sourceId`, as `getAllSlugs`
+   * and the other scoped reads do, so a non-owner role sees the source's rows
+   * and no others. With the flag off it is `executeRaw`. PGLite has no RLS
+   * layer and runs it directly. Read statements only. (DAV-7512)
+   */
+  executeRawInSource<T = Record<string, unknown>>(sourceId: string, sql: string, params?: unknown[]): Promise<T[]>;
+
+  /**
    * Like `executeRaw`, but routes through the DIRECT (session-mode) pool when
    * dual-pool is active (Supabase: port 5432), falling back to the read pool
    * otherwise. Use this for the Minion lock hot-path (`claim`/`renewLock`):

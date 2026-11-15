@@ -2872,6 +2872,11 @@ export class PGLiteEngine implements BrainEngine {
     return Promise.race([queryPromise, abortPromise]);
   }
 
+  /** PGLite has no RLS layer, so a source-scoped read is a plain read (see BrainEngine.executeRawInSource). */
+  async executeRawInSource<T = Record<string, unknown>>(_sourceId: string, sql: string, params?: unknown[]): Promise<T[]> {
+    return this.executeRaw<T>(sql, params);
+  }
+
   /**
    * PGLite is in-process WASM with no connection pooler, so the direct-pool
    * routing that `executeRawDirect` provides on Postgres is a no-op here:

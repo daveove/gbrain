@@ -110,12 +110,12 @@ const POLICIES = [
 /** Basename-resolved targets of a page whose body is `body`, and how many full slug reads the preparation issued. */
 async function basenameTargets(engine: BrainEngine, slug: string, body: string) {
   await engine.executeRaw(`UPDATE pages SET compiled_truth=$2 WHERE source_id='default' AND slug=$1`, [slug, body]);
-  const reads = spyOn(engine, 'executeRaw');
+  const reads = spyOn(engine, 'executeRawInSource');
   try {
     const snapshot = (await engine.readPageSnapshot(slug, { sourceId: 'default' }))!;
     const prepared = await prepareAutomaticLinks(engine, slug, { ...snapshot.page, frontmatter: snapshot.page.frontmatter ?? {} }, 'default');
     return { targets: prepared.pageKeys.map(key => key.slug).filter(key => key !== slug).sort(),
-      fullReads: reads.mock.calls.filter(([sql]) => String(sql).includes('AS slugs FROM pages')).length };
+      fullReads: reads.mock.calls.filter(([, sql]) => String(sql).includes('AS slugs FROM pages')).length };
   } finally { reads.mockRestore(); }
 }
 
@@ -165,12 +165,12 @@ for (const backend of testBackends()) {
       await page(engine, 'default', 'topics/manifest-insert');
       expect(await basenameTargets(engine, 'notes/first', 'See [[manifest-insert]] and [[known]].'))
         .toEqual({ targets: ['topics/known', 'topics/manifest-insert'], fullReads: 0 });
-      const reads = spyOn(engine, 'executeRaw');
+      const reads = spyOn(engine, 'executeRawInSource');
       try {
         const next = await buildManifestContext(engine, 'default');
         expect(next.slugs.has('topics/manifest-insert')).toBe(true);
         expect(context.slugs.has('topics/manifest-insert')).toBe(false);
-        expect(reads.mock.calls.filter(([sql]) => String(sql).includes('AS slugs FROM pages'))).toHaveLength(0);
+        expect(reads.mock.calls.filter(([, sql]) => String(sql).includes('AS slugs FROM pages'))).toHaveLength(0);
       } finally { reads.mockRestore(); }
     }), 60_000);
   });
