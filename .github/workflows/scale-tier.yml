@@ -4,7 +4,7 @@ name: Scale tier
 # O-ENG-16 / O-CEO-9). Runs scripts/scale/run.ts --enforce on PGLite and Postgres.
 #
 # When it runs (one rule):
-# - pull requests that touch the paths below, or carry the `scale-tier` label: 10k;
+# - pull requests that carry the `scale-tier` label: 10k (no path trigger);
 # - nightly: 10k + 20k until the import-rate gate has passed at 20k on both
 #   engines on five consecutive nights, then 50k (scripts/scale/trend.ts
 #   decides from the last five nightly reports);
@@ -68,25 +68,18 @@ jobs:
           bun-version: 1.4.3
       - id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           ADDED_LABEL: ${{ github.event.label.name }}
           PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
-          PR: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
           PAGES_INPUT: ${{ inputs.pages }}
         run: |
           set -euo pipefail
-          # Spec 5.4 paths: engine SQL, search, import, sync, doctor, both engines,
-          # schema and migrations, the harness itself (and this workflow).
-          paths='^(src/core/engine-sql/|src/core/search/|src/core/import-file\.ts$|src/commands/import\.ts$|src/commands/sync/|src/core/sync[^/]*\.ts$|src/core/persistence/sync-[^/]*\.ts$|src/commands/doctor/|src/core/pglite-engine\.ts$|src/core/postgres-engine\.ts$|src/schema\.sql$|src/core/schema-migrations/|scripts/scale/|\.github/workflows/scale-tier\.yml$)'
           run=false
           pages='[10000]'
           # Named exception (docs/TESTING.md#event-parity): pull requests run 10k pages
-          # only when they touch the paths above or carry the label; the nightly
-          # Scale tier schedule covers 10k-50k on both engines.
+          # only while the scale-tier label is on, so an unlabelled pull request never starts
+          # the tier; the nightly Scale tier schedule covers 10k-50k on both engines.
           case "$EVENT" in
             workflow_dispatch)
               if ! [[ "$PAGES_INPUT" =~ ^[0-9]+$ ]] || [ "$PAGES_INPUT" -lt 20 ]; then
@@ -107,13 +100,6 @@ jobs:
                 # Only the scale-tier label itself starts a run; other labels never do.
                 [ "$ADDED_LABEL" = scale-tier ] && run=true
               elif printf '%s' "$PR_LABELS" | jq -e 'index("scale-tier") != null' >/dev/null; then
-                run=true
-              elif ! [[ "$CHANGED_FILES" =~ ^[0-9]{1,4}$ ]] || [ "$CHANGED_FILES" -ge 3000 ]; then
-                # The PR files API returns at most 3000 files; an unknown diff runs the tier.
-                run=true
-              elif files=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename'); then
-                if printf '%s\n' "$files" | grep -Eq "$paths"; then run=true; fi
-              else
                 run=true
               fi
               ;;
