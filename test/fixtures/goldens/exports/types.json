@@ -5456,6 +5456,7 @@
           "inferredSubtype?: { type: string; name: string; } | undefined",
           "recovery?: FrontmatterRecovery | undefined",
           "slug: string",
+          "slugExplicit?: boolean | undefined",
           "tags: string[]",
           "timeline: string",
           "title: string",
