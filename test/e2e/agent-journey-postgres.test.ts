@@ -201,6 +201,8 @@ describeE2E('H4: keyless agent journey on Postgres', () => {
     const latest = await brainQuery(db.url, sql => sql`SELECT value FROM config WHERE key = 'version'`);
     const pending = String(Number(latest[0].value) - 3);
     await brainQuery(db.url, sql => sql`UPDATE config SET value = ${pending} WHERE key = 'version'`);
+    // Import now completes its structural sweep; create real extraction debt for the consent boundary.
+    await brainQuery(db.url, sql => sql`UPDATE pages SET links_extracted_at = NULL`);
     const snapshot = () => brainQuery(db.url, async sql => JSON.stringify({
       pages: await sql`SELECT slug, content_hash, updated_at::text AS u FROM pages ORDER BY slug`,
       links: await sql`SELECT count(*)::int AS n FROM links`,

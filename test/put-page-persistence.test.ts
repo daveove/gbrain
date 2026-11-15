@@ -94,23 +94,19 @@ async function embedding(result: Awaited<ReturnType<typeof put>>, expectFailure 
 async function expectOnlyDailyHandoffs(writes: Array<{ params: Record<string, unknown> }>): Promise<void> {
   const jobs = await engine.executeRaw<{ id: number; name: string; data: Record<string, unknown>; idempotency_key: string; submission_authority: { kind: string } }>(
     'SELECT id,name,data,idempotency_key,submission_authority FROM minion_jobs ORDER BY id');
-  // Embeddings belong to persistence_effects, never ordinary minion jobs.
-  expect(jobs).toHaveLength(writes.length * 2);
-  expect(jobs.every(job => job.name === 'autopilot-daily-memory' && job.submission_authority.kind === 'application')).toBe(true);
+  // Embeddings belong to persistence_effects. Unclaimed publications coalesce by day/timezone.
+  expect(jobs).toHaveLength(1);
+  expect(jobs[0]).toMatchObject({
+    name: 'autopilot-daily-memory',
+    idempotency_key: 'autopilot-daily:2026-01-15:UTC:pending',
+    submission_authority: { kind: 'application' },
+    data: { daily_memory_only: true, daily_memory_date: '2026-01-15',
+      source_cycle_job_ids: [], daily_memory_timezone: 'UTC' },
+  });
   for (const write of writes) {
-    const [request] = await engine.executeRaw<{ id: string }>(
-      'SELECT id FROM persistence_requests WHERE request_id=$1::uuid', [write.params.request_id]);
-    const children = jobs.filter(job => job.idempotency_key.startsWith(
-      `autopilot-daily:2026-01-15:sync:default:page:put_page:${write.params.slug}:${request.id}:`));
-    expect(children).toHaveLength(1);
-    const child = children[0];
-    expect(child.data).toEqual({ daily_memory_only: true, daily_memory_date: '2026-01-15',
-      source_cycle_job_ids: [], daily_memory_timezone: 'UTC' });
-    const batches = jobs.filter(job => job.data.daily_memory_source_job_id === child.id);
-    expect(batches).toHaveLength(1);
-    expect(batches[0].data).toEqual({ daily_memory_date: '2026-01-15', daily_memory_dates: ['2026-01-15'],
-      daily_memory_source_job_id: child.id, daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id],
-      daily_memory_replay_round: 0, daily_memory_timezone: 'UTC' });
+    const [request] = await engine.executeRaw<{ state: string }>(
+      'SELECT state FROM persistence_requests WHERE request_id=$1::uuid', [write.params.request_id]);
+    expect(request.state).toBe('committed');
   }
 }
 async function holdRoot() {

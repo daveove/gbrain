@@ -151,12 +151,17 @@ export async function dailyMemoryDaysForSlugs(
   const days = new Set<string>();
   for (let offset = 0; offset < slugs.length; offset += 100) {
     opts.signal?.throwIfAborted();
-    const rows = await engine.executeRaw<SourcePageRow & { utc_day: string; local_day: string }>(
-      `SELECT source_id, slug, title, effective_date, effective_date_source,
+    const rows = await engine.executeRaw<Pick<SourcePageRow, 'effective_date' | 'effective_date_source' | 'frontmatter'> & { utc_day: string; local_day: string }>(
+      `SELECT effective_date, effective_date_source,
          jsonb_build_object(COALESCE(effective_date_source,'date'),frontmatter->COALESCE(effective_date_source,'date'),
            'created',frontmatter->'created','created_at',frontmatter->'created_at',
            'date_created',frontmatter->'date_created','date created',frontmatter->'date created',
-           '${DATE_INSTANT_PROVENANCE}',frontmatter->'${DATE_INSTANT_PROVENANCE}') AS frontmatter,
+           '${DATE_INSTANT_PROVENANCE}',jsonb_build_object(
+             COALESCE(effective_date_source,'date'),frontmatter->'${DATE_INSTANT_PROVENANCE}'->COALESCE(effective_date_source,'date'),
+             'created',frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+             'created_at',frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+             'date_created',frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+             'date created',frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
          to_char(effective_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS utc_day,
          to_char(COALESCE(effective_date, updated_at) AT TIME ZONE $1, 'YYYY-MM-DD') AS local_day
        FROM pages
@@ -213,7 +218,14 @@ export async function dailyMemoryDaysForSlugs(
              'published',pv.frontmatter->'published','created',pv.frontmatter->'created',
              'created_at',pv.frontmatter->'created_at','date_created',pv.frontmatter->'date_created',
              'date created',pv.frontmatter->'date created',
-             '${DATE_INSTANT_PROVENANCE}',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}') AS frontmatter,
+             '${DATE_INSTANT_PROVENANCE}',jsonb_build_object(
+               'event_date',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'event_date',
+               'date',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date',
+               'published',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'published',
+               'created',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created',
+               'created_at',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'created_at',
+               'date_created',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date_created',
+               'date created',pv.frontmatter->'${DATE_INSTANT_PROVENANCE}'->'date created')) AS frontmatter,
            p.created_at, p.updated_at, p.import_filename, pv.snapshot_at
          FROM page_versions pv
          JOIN pages p ON p.id = pv.page_id

@@ -58,6 +58,8 @@ export const DOMAIN_OF: Record<string, string> = {
   'disconnect': OOS.lifecycle,
   'disconnectInternal': OOS.helper,
   'initSchema': OOS.lifecycle,
+  'migrationStatementTimeoutMs': OOS.lifecycle,
+  'cancelSchemaInitialization': OOS.lifecycle,
   'applyForwardReferenceBootstrap': OOS.helper,
   'transaction': OOS.lifecycle,
   'transactionDirect': OOS.lifecycle,

@@ -687,7 +687,7 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     expect(claimed.id).toBe(source.id);
     const execute = engine.executeRaw;
     const discovery = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
-      if (sql.includes('SELECT source_id, slug, title, effective_date')) throw new Error('Synthetic affected-day discovery failure');
+      if (sql.includes('SELECT effective_date, effective_date_source,')) throw new Error('Synthetic affected-day discovery failure');
       return execute.call(this, sql, params) as Promise<T[]>;
     });
     try { await expect(refreshDailyMemoryAfterSourceSync(engine, claimed, 'affected-source', { status: 'ok', phases: [{ phase: 'sync', pagesAffected: slugs }] })).rejects.toThrow('Synthetic affected-day discovery failure'); }
@@ -790,7 +790,7 @@ describe('autopilot-global-maintenance handler stamps last_global_at (PGLite)', 
     let injected = false;
     const execute = engine.executeRaw;
     const spy = spyOn(engine, 'executeRaw').mockImplementation(async function<T>(this: PGLiteEngine, sql: string, params?: unknown[]): Promise<T[]> {
-      if (!injected && sql.includes('SELECT source_id, slug, title, effective_date')) {
+      if (!injected && sql.includes('SELECT effective_date, effective_date_source,')) {
         injected = true; await appendCompleted(this, key, [concurrent]);
       }
       return execute.call(this, sql, params) as Promise<T[]>;

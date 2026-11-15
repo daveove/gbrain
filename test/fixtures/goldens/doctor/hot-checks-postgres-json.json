@@ -724,7 +724,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -736,7 +736,7 @@
           },
           {
             "category": "brain",
-            "message": "No by-mention links in this brain.",
+            "message": "Re-derived 2 by-mention link(s) across 2 page(s); all still follow from the current gazetteer.",
             "name": "stale_mentions",
             "status": "ok"
           },
@@ -1560,9 +1560,9 @@
           {
             "category": "ops",
             "details": {
-              "depth": 0,
-              "oldest_age_seconds": null,
-              "worker_alive": true
+              "depth": 1,
+              "oldest_age_seconds": "<recent>",
+              "worker_alive": false
             },
             "message": "No stalled-forever jobs; no queue over depth 10; no old embed-backfill jobs without a worker.",
             "name": "queue_health",
@@ -1771,7 +1771,7 @@
           },
           {
             "category": "brain",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "message": "Extraction lag not applicable (20 pages — too few to assess)",
             "name": "links_extraction_lag",
             "status": "ok"
           },
@@ -2943,7 +2943,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -3861,7 +3861,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "message": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "message": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn"
           },
@@ -3873,7 +3873,7 @@
           },
           {
             "category": "brain",
-            "message": "No by-mention links in this brain.",
+            "message": "Re-derived 2 by-mention link(s) across 2 page(s); all still follow from the current gazetteer.",
             "name": "stale_mentions",
             "status": "ok"
           },
@@ -4697,9 +4697,9 @@
           {
             "category": "ops",
             "details": {
-              "depth": 0,
-              "oldest_age_seconds": null,
-              "worker_alive": true
+              "depth": 1,
+              "oldest_age_seconds": "<recent>",
+              "worker_alive": false
             },
             "message": "No stalled-forever jobs; no queue over depth 10; no old embed-backfill jobs without a worker.",
             "name": "queue_health",
@@ -4908,7 +4908,7 @@
           },
           {
             "category": "brain",
-            "message": "Extraction lag not applicable (20 pages — too few to assess); 1 page(s) pending link extraction (gbrain extract --stale finishes them)",
+            "message": "Extraction lag not applicable (20 pages — too few to assess)",
             "name": "links_extraction_lag",
             "status": "ok"
           },
@@ -6080,7 +6080,7 @@
               },
               "why": "The plan lists which steps raise each score component, what they cost and the reachable maximum; it changes nothing."
             },
-            "fix": "Brain score 20/100 (embed 0/35, links 0/25, timeline density (entity and event pages) 10/15, orphans 0/15, dead-links 10/10)",
+            "fix": "Brain score 25/100 (embed 0/35, links 3/25, timeline density (entity and event pages) 10/15, orphans 2/15, dead-links 10/10)",
             "name": "brain_score",
             "status": "warn",
             "tier": "symptom"
@@ -6273,5 +6273,5 @@
       "stdout": "<json>"
     }
   },
-  "normalizer": "doctor-json-pg-v1"
+  "normalizer": "doctor-hot-json-pg-v2"
 }

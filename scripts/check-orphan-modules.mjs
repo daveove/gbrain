@@ -54,6 +54,7 @@ const ALLOWLIST = new Map([
 // reason 'script-reachable', which the guard verifies.
 const PERMITTED_TEST_ONLY = [
   { path: 'src/core/bootstrap/template-repo.ts', reason: 'script-reachable' },
+  { path: 'src/core/evidence-context-reader.ts', reason: 'held: DAV-6842 optional host-injected adapter for external source_records stores; stock BrainEngine owns no such table and deliberately exposes no runtime operation for it' },
   { path: 'src/eval/longmemeval/diagnostics.ts', reason: 'script-reachable' },
   { path: 'src/eval/longmemeval/evidence-brief.ts', reason: 'held: eval-only wave 1 brief builder (10x memory advantage plan A3), loaded by path from gbrain-evals eval/runner/pilot; product wiring is plan item A8, conditional on the A5 pilot' },
   { path: 'src/eval/longmemeval/evidence-packet.ts', reason: 'script-reachable' },

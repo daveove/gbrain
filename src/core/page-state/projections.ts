@@ -471,23 +471,53 @@ export async function projectionBacklog(engine: Pick<BrainEngine, 'executeRaw'>)
 export async function rebuildPendingPageProjections(engine: BrainEngine, limit = 20, opts: ProjectionRebuildOptions = {}): Promise<{ rebuilt: number; superseded: number }> {
   const now = opts.now ?? Date.now;
   const startedAt = now();
-  const params: unknown[] = [Math.max(1, Math.min(limit, 100))];
+  const pageLimit = Math.max(1, Math.min(limit, 100));
+  // Deadline calls fetch lazily: at most three candidates can outlive the
+  // budget. Unbudgeted drains still read their full batch in one statement.
+  const fetchLimit = opts.deadlineMs === undefined ? pageLimit : Math.min(pageLimit, 4);
+  const params: unknown[] = [fetchLimit];
   const filters: string[] = [];
   if (opts.retryCooldown) filters.push(PROJECTION_RETRY_READY_SQL);
   if (opts.notAfter !== undefined) { params.push(opts.notAfter); filters.push(`j.updated_at<=$${params.length}::text::timestamptz`); }
   if (opts.reasons) { params.push(opts.reasons); filters.push(`j.reason=ANY($${params.length}::text[])`); }
   if (opts.pages) { params.push(opts.pages.slugs); filters.push(`j.slug=ANY($${params.length}::text[])`); }
+  const attemptedIncarnations: string[] = [];
+  const attemptedSlugs: string[] = [];
+  if (opts.deadlineMs !== undefined) {
+    params.push(attemptedIncarnations, attemptedSlugs);
+    // A failed or concurrently replaced job can remain queued. Try each page
+    // only once per invocation, even when the next window lists it again.
+    filters.push(`NOT EXISTS (SELECT 1 FROM unnest($${params.length - 1}::uuid[],$${params.length}::text[]) attempted(source_incarnation,slug)
+      WHERE attempted.source_incarnation=j.source_incarnation AND attempted.slug=j.slug)`);
+  }
   const sourceFilter = opts.pages ? `WHERE s.id=$${params.push(opts.pages.sourceId)}` : '';
-  const jobs = await engine.executeRaw<{ source_id: string; source_incarnation: string; slug: string; revision: string; page_kind: string }>(`SELECT s.id AS source_id,j.source_incarnation,j.slug,j.revision,p.page_kind
+  const selectJobs = `SELECT s.id AS source_id,j.source_incarnation,j.slug,j.revision
     FROM (SELECT source_incarnation,slug,revision,updated_at FROM page_projection_jobs j
       ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''}
       ORDER BY updated_at,source_incarnation,slug OFFSET 0) j
     ${PROJECTION_JOB_PROBES} ${sourceFilter}
-    ORDER BY j.updated_at,j.source_incarnation,j.slug LIMIT $1`, params);
+    ORDER BY j.updated_at,j.source_incarnation,j.slug LIMIT $1`;
+  type Job = { source_id: string; source_incarnation: string; slug: string; revision: string };
+  let jobs: Job[] = [];
+  let nextJob = 0;
+  let exhausted = false;
   let rebuilt = 0;
   let superseded = 0;
-  for (const [index, job] of jobs.entries()) {
+  for (let index = 0; index < pageLimit; index++) {
     if (opts.deadlineMs !== undefined && index > 0 && now() - startedAt >= opts.deadlineMs) break;
+    if (nextJob === jobs.length) {
+      if (exhausted) break;
+      const fetchSize = Math.min(fetchLimit, pageLimit - index);
+      params[0] = fetchSize;
+      jobs = await engine.executeRaw<Job>(selectJobs, params);
+      nextJob = 0;
+      exhausted = jobs.length < fetchSize;
+      if (!jobs.length) break;
+      if (opts.deadlineMs !== undefined && index > 0 && now() - startedAt >= opts.deadlineMs) break;
+    }
+    const job = jobs[nextJob++]!;
+    attemptedIncarnations.push(job.source_incarnation);
+    attemptedSlugs.push(job.slug);
     const observed = [job.source_incarnation, job.slug, job.revision];
     try {
       const prepared = await engine.transaction(async tx => {

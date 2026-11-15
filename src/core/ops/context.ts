@@ -1059,7 +1059,8 @@ export async function requireWritablePage(
     includeDeleted: true,
   });
   if (writable) {
-    if (ctx.remote !== false && isOwnerAggregate(writable)) throw new OperationError('page_not_found', 'Page not found.');
+    if (ctx.remote !== false && isOwnerAggregate(writable)) throw opError('page_not_found', 'Page not found.',
+      'Use a page slug returned by search within this connection\'s accessible source.');
     if (ctx.viaSubagent === true && ctx.auth && isPageHidden(writable, await resolveExcludePrivatePages(ctx.engine, ctx.remote))) {
       throw opError('permission_denied', `${operation}: this page is outside your write visibility.`,
         'The page is private and this delegated write cannot see it; choose a different slug, or report the refusal to the user.');
@@ -1068,7 +1069,8 @@ export async function requireWritablePage(
   }
   if (allowCreate) {
     if (ctx.remote !== false && isReservedOwnerAggregateIdentity(writeSource, slug)) {
-      throw new OperationError('page_not_found', 'Page not found.');
+      throw opError('page_not_found', 'Page not found.',
+        'Use a page slug returned by search within this connection\'s accessible source.');
     }
     return;
   }

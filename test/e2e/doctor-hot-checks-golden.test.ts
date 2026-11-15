@@ -4,7 +4,8 @@
  * (test/helpers/doctor-hot-checks-fixture.ts), first run and a second run
  * after edits, on a scratch database per capture
  * (`gbrain_test_doctor_hot_<uuid>`). Captured on 3f960312a before the doctor
- * speedups, which must reproduce it after the doctor-json-pg-v1 normalizer.
+ * speedups. The doctor-hot-json-pg-v2 normalizer also bounds and replaces
+ * the real-server age of the fixture's freshly queued daily-memory job.
  *
  * Tier 1 (no API keys). Skips without DATABASE_URL.
  * Run: DATABASE_URL=... bun test test/e2e/doctor-hot-checks-golden.test.ts
@@ -37,10 +38,25 @@ function pgNormalizer(base: URL) {
     [name, '<database>'],
     [`${base.hostname}:${base.port || '5432'}`, '<pg_host>:<pg_port>'],
     [/\bgbrain_test_doctor_hot_[0-9a-f]{32}\b/g, '<database>'],
-  ], 'doctor-json-pg-v1');
-  return defineNormalizer<PgCaptures>('doctor-json-pg-v1', (c) => {
+  ], 'doctor-hot-json-pg-v2');
+  return defineNormalizer<PgCaptures>('doctor-hot-json-pg-v2', (c) => {
     const n = inner(c.url, c.name);
-    return { first: n.apply(c.first), second: n.apply(c.second) };
+    const normalize = (run: GbrainRun) => {
+      const json = structuredClone(run.json) as {
+        checks?: Array<{ name: string; details?: { depth?: number; oldest_age_seconds?: number | string | null } }>;
+      } | null;
+      const queue = json?.checks?.find((check) => check.name === 'queue_health')?.details;
+      if (queue && Number(queue.depth) > 0) {
+        // Postgres uses its real clock. Preserve queue depth and worker state,
+        // and prove this is fresh fixture work before removing elapsed seconds.
+        expect(typeof queue.oldest_age_seconds).toBe('number');
+        expect(queue.oldest_age_seconds as number).toBeGreaterThanOrEqual(0);
+        expect(queue.oldest_age_seconds as number).toBeLessThan(120);
+        queue.oldest_age_seconds = '<recent>';
+      }
+      return n.apply({ ...run, json });
+    };
+    return { first: normalize(c.first), second: normalize(c.second) };
   });
 }
 

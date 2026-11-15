@@ -193,7 +193,9 @@ for (const backend of backends) {
         try {
           await engine.executeRaw(`SELECT set_config('TimeZone', 'America/New_York', false)`);
           // 01:20-04, 01:40-04, then 01:10-05 and 01:30-05: their text sorts differently from their instants.
-          for (const [i, at] of ['2026-11-01T05:20:00Z', '2026-11-01T05:40:00Z', '2026-11-01T06:10:00Z', '2026-11-01T06:30:00Z'].entries()) {
+          // The fallback must lie after the first pass's watermark (now), so it uses a future fallback day:
+          // 1 Nov 2099 is a Sunday, the first in November. A past day (2026-11-01) leaves every page below the watermark.
+          for (const [i, at] of ['2099-11-01T05:20:00Z', '2099-11-01T05:40:00Z', '2099-11-01T06:10:00Z', '2099-11-01T06:30:00Z'].entries()) {
             await engine.executeRaw('UPDATE pages SET compiled_truth=$1, updated_at=$2::timestamptz WHERE source_id=$3 AND slug=$4', [DETERMINISTIC, at, s.id, slugs[i]]);
           }
           await s.census({ batchSize: 1 });

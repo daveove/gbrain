@@ -76,6 +76,8 @@ describe("guard registration ⇒ execution coverage", () => {
       "duplicates check:admin-build's vite+tsc build; embed freshness covered there",
     "check-bash32.sh":
       "needs Docker or a native bash 3.2: runs as a test.yml verify-job step (bash:3.2 image) and in macos-validation.yml (/bin/bash), never in verify",
+    "check-changelog-pr.mjs":
+      "runs in .github/workflows/changelog.yml with PR base/head refs; local verify has no PR context; isolated Git fixtures in test/scripts/changelog-fragments.test.ts",
     "check-test-discriminates.sh":
       "manual per-PR discrimination helper (#3665): reverts named source files and re-runs bun test to prove the test fails without the fix — cannot know which hunk is 'the fix' on an arbitrary diff, so deliberately not in verify/CI (manifest row says the same)",
   };
@@ -400,7 +402,8 @@ exit 0
     const verifyStart = testYml.indexOf("\n  verify:\n");
     const verifyJob = testYml.slice(verifyStart, testYml.indexOf("\n  serial-tests:\n", verifyStart));
     expect(verifyJob).toContain("- run: bun run verify");
-    expect(verifyJob).toMatch(/runs-on: ubicloud-standard-\d+-ubuntu/);
+    // DAV-7475 (#71) moved the fork's Test workflow to GitHub-hosted runners.
+    expect(verifyJob).toMatch(/runs-on: ubuntu-latest/);
     const dry = spawnSync("bash", [SCRIPT, "--dry-list"], { encoding: "utf8" }).stdout.split("\n");
     expect(dry).toContain("typecheck");
     const pkgScripts = (JSON.parse(readFileSync("package.json", "utf8")) as { scripts: Record<string, string> }).scripts;

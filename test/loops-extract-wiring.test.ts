@@ -41,6 +41,7 @@ describe('relational edge vocabulary', () => {
   });
 
   test('gbrain-base-v2.yaml declares both verbs as link_types', () => {
+    // test-reads-source-ok[structural]: the base schema pack is a YAML data file shipped under src/; the test parses it and asserts its declared link types.
     const raw = fs.readFileSync(
       path.join(REPO, 'src', 'core', 'schema-pack', 'base', 'gbrain-base-v2.yaml'),
       'utf8',
