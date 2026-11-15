@@ -71,8 +71,7 @@ export async function extractManagedStaleLinks(engine: BrainEngine,
   const result: ManagedLinkExtraction = { pages: 0, created: 0, removed: 0, timeline: 0, skipped: 0, remaining: 0 };
   const startMs = Date.now();
   const withMentions = opts.mentions !== false;
-  const deadline = withMentions ? await linkPhaseDeadline(engine, opts.sourceId, startMs, opts.timeBudgetMs)
-    : opts.timeBudgetMs === undefined ? Infinity : startMs + opts.timeBudgetMs;
+  const deadline = await linkPhaseDeadline(engine, opts.sourceId, startMs, opts.timeBudgetMs, withMentions);
   const maxPages = opts.maxPages ?? Infinity;
   const done = new Set<string>();
   const attribution = await maintenanceAttribution(engine);

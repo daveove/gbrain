@@ -35,10 +35,14 @@ export async function previewMentionPass(engine: BrainEngine, sourceId?: string)
 /**
  * Deadline for the link phase of a budgeted sweep: half the budget while
  * mention-due pages exist, so a link backlog cannot starve the mention pass
- * across cycles. Unbudgeted (catch-up) sweeps get no deadline.
+ * across cycles. A sweep that runs no mention pass (`mentionPass: false`, a
+ * slug-bound run) keeps the whole budget: stopping at half of it would leave a
+ * backlog that the caller cannot tell from a spent budget (DAV-7405).
+ * Unbudgeted (catch-up) sweeps get no deadline.
  */
-export async function linkPhaseDeadline(engine: BrainEngine, sourceId: string | undefined, startMs: number, budgetMs: number | undefined): Promise<number> {
+export async function linkPhaseDeadline(engine: BrainEngine, sourceId: string | undefined, startMs: number, budgetMs: number | undefined, mentionPass = true): Promise<number> {
   if (budgetMs === undefined) return Infinity;
+  if (!mentionPass) return startMs + budgetMs;
   const policy = await readMentionPolicy(engine);
   const due = policy.enabled ? await countMentionDuePages(engine, sourceId) : 0;
   return startMs + (due > 0 ? budgetMs / 2 : budgetMs);
