@@ -1,0 +1,3 @@
+### Fixed
+
+- DAV-7110: standalone `gbrain import` no longer slows down as it runs. The daily-memory live lease is renewed twice per imported file, and each renewal scanned and JSON-parsed every checkpoint row the import had banked so far, so per-file cost grew with the number of files already imported (scale tier `import_rate`: the last 10% of a 5,000-file source cost about 4x the first). Renewal now retires this import's previous lease marker by primary key, and the per-renewal rewrite of the legacy `completed_keys` array is dropped because an import never writes its lease there. Lease semantics, peer adoption and `release()` are unchanged.

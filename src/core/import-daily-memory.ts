@@ -63,6 +63,12 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
   };
   // Workers share this origin; serialize renewals so two deletes cannot wipe both markers.
   let liveChain: Promise<void> = Promise.resolve();
+  // Live markers this origin banked and has not yet retired. Only this origin
+  // writes them, and only through appendCompleted (child rows, never the legacy
+  // completed_keys array), so a renewal retires them by primary key. Matching
+  // them by parsing every banked row cost O(banked rows) per renewal; renewals
+  // run twice per imported file, so a long import grew quadratically (DAV-7110).
+  let ownLive: string[] = [];
   const touchLive = (committed = false) => {
     const run = async () => {
       if (!committed) opts.signal?.throwIfAborted();
@@ -71,25 +77,15 @@ export async function createImportDailyMemory(engine: BrainEngine, opts: {
       if (!await appendCompleted(engine, key, [wrapped])) {
         throw new Error('Daily-memory import checkpoint unavailable');
       }
-      await engine.executeRawDirect(
-        `DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2
-           AND CASE WHEN pg_input_is_valid(path, 'jsonb') THEN
-             path::jsonb->>'origin'=$3 AND path::jsonb->>'value' LIKE 'live:%'
-             AND path<>$4
-           ELSE false END`,
-        [key.op, key.fingerprint, origin, wrapped]);
-      await engine.executeRawDirect(
-        `UPDATE op_checkpoints SET completed_keys=(
-           SELECT COALESCE(jsonb_agg(to_jsonb(elem)), '[]'::jsonb)
-           FROM jsonb_array_elements_text(COALESCE(completed_keys, '[]'::jsonb)) AS elem
-           WHERE NOT (
-             CASE WHEN pg_input_is_valid(elem, 'jsonb') THEN COALESCE(
-               elem::jsonb->>'origin'=$3 AND elem::jsonb->>'value' LIKE 'live:%' AND elem<>$4, false)
-             ELSE false END
-           )
-         ), updated_at=now()
-         WHERE op=$1 AND fingerprint=$2`,
-        [key.op, key.fingerprint, origin, wrapped]);
+      // A failed retirement keeps its markers here for the next renewal or release.
+      const stale = ownLive.filter(value => value !== wrapped);
+      ownLive = [...stale, wrapped];
+      if (stale.length) {
+        await engine.executeRawDirect(
+          'DELETE FROM op_checkpoint_paths WHERE op=$1 AND fingerprint=$2 AND path=ANY($3::text[])',
+          [key.op, key.fingerprint, stale]);
+      }
+      ownLive = [wrapped];
     };
     const next = liveChain.then(run, run);
     liveChain = next.then(() => undefined, () => undefined);
