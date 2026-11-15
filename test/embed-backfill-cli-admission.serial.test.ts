@@ -112,6 +112,8 @@ describe('jobs submit embed-backfill — PGLite worker surface', () => {
     await staleEngine.connect({});
     await staleEngine.initSchema();
     await staleEngine.setConfig('version', '0');
+    // The queue now reads the real schema, so a stale schema needs the table gone as well as an old version.
+    await staleEngine.executeRaw('ALTER TABLE minion_jobs RENAME TO minion_jobs_hold');
     const origExit = process.exit;
     const origError = console.error;
     const errors: string[] = [];

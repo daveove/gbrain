@@ -293,7 +293,7 @@ describe('put_page persistence boundary', () => {
     const executeRaw = engine.executeRaw;
     let rejected = false;
     engine.executeRaw = function<T>(sql: string, params?: unknown[]): Promise<T[]> {
-      if (sql.includes('SET source_path = $1')) {
+      if (sql.includes('source_path=COALESCE(source_path')) {
         rejected = true;
         throw new Error('fixture source-path write rejected');
       }
