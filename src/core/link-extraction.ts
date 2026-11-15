@@ -1715,7 +1715,7 @@ export function makeResolver(
       basenameIndex = await opts.basenameIndex().catch(() => idx);
       return basenameIndex;
     }
-    const sourceCache = !!opts.sourceId && typeof engine.executeRaw === 'function';
+    const sourceCache = !!opts.sourceId && typeof engine.executeRawInSource === 'function';
     if (!sourceCache && typeof engine.getAllSlugs !== 'function') {
       basenameIndex = idx;
       return idx;
@@ -1742,12 +1742,14 @@ export function makeResolver(
   // BASENAME_FULL_INDEX_AFTER distinct names the full index is cheaper, so the resolver builds it.
   let irregularIndex: Promise<Map<string, string[]>> | null = null;
   const targetedMatches = new Map<string, string[]>();
+  // The reads run in the source's RLS scope (executeRawInSource): with scope binding on, a non-owner role whose
+  // app.scopes excludes the source would read no rows here, and an empty answer is cached as a successful lookup.
   async function targetedBasenameMatches(sourceId: string, trimmed: string): Promise<string[]> {
     const forms = [...new Set([trimmed, trimmed.toLowerCase(), normalizeBasename(trimmed)].filter(Boolean))];
-    irregularIndex ??= engine.executeRaw<{ slug: string }>(
+    irregularIndex ??= engine.executeRawInSource<{ slug: string }>(sourceId,
       `SELECT slug FROM pages WHERE source_id=$1 AND ${SLUG_TAIL_SQL} !~ '${REGULAR_SLUG_TAIL_RE}'`, [sourceId],
     ).then(rows => buildBasenameIndex(rows.map(row => row.slug)));
-    const [irregular, rows] = await Promise.all([irregularIndex, engine.executeRaw<{ slug: string }>(
+    const [irregular, rows] = await Promise.all([irregularIndex, engine.executeRawInSource<{ slug: string }>(sourceId,
       `SELECT slug FROM pages WHERE source_id=$1 AND ${SLUG_TAIL_SQL}=ANY($2::text[])`, [sourceId, forms],
     )]);
     const named = buildBasenameIndex(rows.map(row => row.slug));
@@ -1760,7 +1762,7 @@ export function makeResolver(
   async function lookupBasename(name: string): Promise<string[]> {
     const trimmed = typeof name === 'string' ? name.trim() : '';
     if (!trimmed) return [];
-    if (!opts.sourceId || opts.basenameIndex || typeof engine.executeRaw !== 'function' || basenameIndex !== null) {
+    if (!opts.sourceId || opts.basenameIndex || typeof engine.executeRawInSource !== 'function' || basenameIndex !== null) {
       return queryBasenameIndex(await ensureBasenameIndex(), name);
     }
     const known = targetedMatches.get(trimmed);
@@ -1790,7 +1792,7 @@ export function makeResolver(
       if (attendanceCache.has(cacheKey)) return attendanceCache.get(cacheKey)!;
       const slugs = value.includes('/') ? [value] : [...new Set(hints.flatMap(hint =>
         [normalizeBasename(value), slugifySegment(value)].map(form => `${hint}/${form}`)))];
-      const matches = await engine.executeRaw<{ slug: string }>(`SELECT slug FROM pages
+      const matches = await engine.executeRawInSource<{ slug: string }>(opts.sourceId ?? 'default', `SELECT slug FROM pages
         WHERE source_id=$1 AND deleted_at IS NULL AND type='person'
           AND (slug=ANY($2::text[]) OR (hashtext(lower(title))=hashtext(lower($3)) AND lower(title)=lower($3))
             OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(CASE WHEN jsonb_typeof(frontmatter->'aliases')='array'

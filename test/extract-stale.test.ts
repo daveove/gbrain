@@ -16,6 +16,7 @@
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runExtract, extractStaleFromDB } from '../src/commands/extract.ts';
+import { linkPhaseDeadline } from '../src/core/mentions/stale.ts';
 import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
 import type { PageInput } from '../src/core/types.ts';
 
@@ -501,4 +502,11 @@ describe('gbrain extract --stale', () => {
     expect(r2.staleRemaining).toBe(0);
   });
 
+  test('DAV-7405: a sweep with no mention pass keeps the whole budget; one with a due mention pass gets half', async () => {
+    for (let i = 0; i < 3; i++) await engine.putPage(`people/deadline-${i}`, personPage(`Deadline ${i}`));
+    expect(await linkPhaseDeadline(engine, undefined, 1_000, 10_000)).toBe(1_000 + 5_000);
+    expect(await linkPhaseDeadline(engine, undefined, 1_000, 10_000, false)).toBe(1_000 + 10_000);
+    expect(await linkPhaseDeadline(engine, undefined, 1_000, undefined)).toBe(Infinity);
+    expect(await linkPhaseDeadline(engine, undefined, 1_000, undefined, false)).toBe(Infinity);
+  });
 });

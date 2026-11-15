@@ -14,7 +14,7 @@ const SLUG_FINGERPRINT = 'count(*)::int AS n, coalesce(sum(hashtextextended(slug
 
 async function refreshSourceSlugIndex(engine: BrainEngine, sourceId: string, state: SourceSlugIndex | null): Promise<SourceSlugIndex> {
   if (state) {
-    const [probe] = await engine.executeRaw<{ n: number; h: string; m: number; added: string[]; added_h: string }>(`SELECT ${SLUG_FINGERPRINT},
+    const [probe] = await engine.executeRawInSource<{ n: number; h: string; m: number; added: string[]; added_h: string }>(sourceId, `SELECT ${SLUG_FINGERPRINT},
       coalesce(array_agg(slug) FILTER (WHERE id > $2), '{}') AS added, coalesce(sum(hashtextextended(slug, 0)) FILTER (WHERE id > $2), 0)::text AS added_h
       FROM pages WHERE source_id=$1`, [sourceId, state.maxId]);
     const hash = BigInt(probe!.h);
@@ -24,7 +24,7 @@ async function refreshSourceSlugIndex(engine: BrainEngine, sourceId: string, sta
       return { count: probe!.n, hash, maxId: probe!.m, slugs: state.slugs, index: buildBasenameIndex(probe!.added, state.index) };
     }
   }
-  const [all] = await engine.executeRaw<{ n: number; h: string; m: number; slugs: string[] }>(
+  const [all] = await engine.executeRawInSource<{ n: number; h: string; m: number; slugs: string[] }>(sourceId,
     `SELECT ${SLUG_FINGERPRINT}, coalesce(array_agg(slug), '{}') AS slugs FROM pages WHERE source_id=$1`, [sourceId]);
   return { count: all!.n, hash: BigInt(all!.h), maxId: all!.m, slugs: all!.slugs, index: buildBasenameIndex(all!.slugs) };
 }

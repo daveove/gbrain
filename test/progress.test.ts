@@ -198,6 +198,8 @@ describe('progress reporter', () => {
     expect(worked.cpu_ms).toBeGreaterThanOrEqual(60);
     expect(waited.elapsed_ms - worked.elapsed_ms).toBeGreaterThanOrEqual(190);
     const waitedCpuMs = waited.cpu_ms - worked.cpu_ms;
+    // The wait is 200 ms. A reporter that counted waiting as CPU would bill at least 200 ms, so 180 ms still fails it.
+    // CI runners billed 106 ms and 139 ms of steal-inflated CPU inside the wait on main (DAV-7475), above the old 100 ms bound.
     expect(
       waitedCpuMs,
       `the second tick billed ${waitedCpuMs.toFixed(1)} ms of thread CPU (first tick, after the 60 ms spin: ${worked.cpu_ms.toFixed(1)} ms): ` +
@@ -208,7 +210,7 @@ describe('progress reporter', () => {
         `${((usageAfter.userCPUTime + usageAfter.systemCPUTime - usageBefore.userCPUTime - usageBefore.systemCPUTime) / 1000).toFixed(1)} ms CPU on all threads; ` +
         `hypervisor steal across the window: ${stealMs === null ? 'unknown (no /proc/stat)' : `${stealMs} ms`}` +
         `${attempts.length > 1 ? ` (attempt ${attempts.length} of 5; steal per attempt: ${attempts.map((a) => `${a.stealMs} ms`).join(', ')})` : ''}`,
-    ).toBeLessThan(100);
+    ).toBeLessThan(180);
   });
 
   test('quiet mode emits nothing', () => {

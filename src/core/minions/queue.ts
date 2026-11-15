@@ -21,6 +21,7 @@ import { validateAttachment } from './attachments.ts';
 import { isProtectedJobName } from './protected-names.ts';
 import { assertEmbedBackfillQueueAdmission } from './embed-backfill-admission.ts';
 import { lockDelegatedSubmission, checkDelegatedCapacity, prepareDelegatedReplay, admitDelegatedRetry } from './delegated-admission.ts';
+import { hasQueueSchema } from './queue-schema.ts';
 import {
   computeParamHash,
   resolveAdmissionPolicy,
@@ -194,11 +195,10 @@ export class MinionQueue {
   async ensureSchema(): Promise<void> {
     const ver = await this.engine.getConfig('version');
     const current = parseInt(ver || '1', 10);
-    if (current < MIGRATION_VERSION) {
-      throw new Error(
-        `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
-      );
-    }
+    if (current >= MIGRATION_VERSION || await hasQueueSchema(this.engine)) return;
+    throw new Error(
+      `minion_jobs table not found (schema version ${current}, need ${MIGRATION_VERSION}). Run 'gbrain init' to apply migrations.`
+    );
   }
 
   /**

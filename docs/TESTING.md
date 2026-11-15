@@ -54,7 +54,7 @@ Actions minutes. This policy does not cover larger runners or paid model calls.
 See [GitHub Actions billing](https://docs.github.com/en/billing/managing-billing-for-your-products/managing-billing-for-github-actions/about-billing-for-github-actions).
 
 Heavy Tests runs nightly, on manual dispatch, or for pull requests with the
-`heavy-tests` label. Scale tier selects relevant paths or the `scale-tier` label,
+`heavy-tests` label. Scale tier runs on pull requests only with the `scale-tier` label,
 plus nightly and manual runs. The race hunt runs nightly or on manual dispatch.
 The changed-test stress lane remains part of `test-status`. None of these
 selection rules changes the required test commands or weakens `test-status`.

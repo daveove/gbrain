@@ -2901,6 +2901,16 @@ export class PostgresEngine implements BrainEngine {
     // swap in a fresh pool. See db.ts setSessionDefaults / supervisor.ts.
   }
 
+  /** A raw read bound to `sourceId`'s RLS scope, like the scoped page reads (see BrainEngine.executeRawInSource). */
+  async executeRawInSource<T = Record<string, unknown>>(sourceId: string, sql: string, params?: unknown[]): Promise<T[]> {
+    this.checkoutGauge.acquire('raw');
+    try {
+      return await this.withScopedReadTransaction(undefined, sourceId, tx => this.runUnsafe<T>(tx, sql, params));
+    } finally {
+      this.checkoutGauge.release('raw');
+    }
+  }
+
   /**
    * Minion lock hot-path variant of executeRaw. Routes to the DIRECT
    * session-mode pool (port 5432) when dual-pool is active so lock

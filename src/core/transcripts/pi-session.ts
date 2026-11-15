@@ -85,7 +85,7 @@ function firstLineType(sample: Buffer): unknown {
 }
 
 const PI_ROLES = ['user', 'assistant', 'toolResult', 'developer'];
-const PI_NON_TURN_ROLES = ['fileMention'];
+const PI_NON_TURN_ROLES = ['fileMention', 'custom'];
 const PI_BLOCK_TYPES = ['text', 'thinking', 'toolCall', 'image'];
 
 async function* parsePiSession(
