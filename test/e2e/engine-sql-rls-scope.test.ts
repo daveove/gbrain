@@ -111,6 +111,20 @@ async function sourcesSeen(tx: BrainEngine, sourceId?: string): Promise<string[]
     }
   });
 
+  test('DAV-7512: executeRawInSource binds the source scope, where executeRaw with unbound scopes reads nothing', async () => {
+    const sql = 'SELECT DISTINCT source_id FROM pages ORDER BY source_id';
+    const ids = (rows: Array<{ source_id: string }>) => rows.map((row) => row.source_id);
+    expect(ids(await asRole(engine, (tx) => tx.executeRaw<{ source_id: string }>(sql), ''))).toEqual([]);
+    expect(ids(await asRole(engine, (tx) => tx.executeRawInSource<{ source_id: string }>('src-a', sql), ''))).toEqual(['src-a']);
+    expect(ids(await asRole(engine, (tx) => tx.executeRawInSource<{ source_id: string }>('src-b', sql), ''))).toEqual(['src-b']);
+    // The bound read leaves the outer scope as it was.
+    const after = await asRole(engine, async (tx) => {
+      await tx.executeRawInSource('src-a', sql);
+      return tx.executeRaw<{ source_id: string }>(sql);
+    }, '');
+    expect(ids(after)).toEqual([]);
+  });
+
   test('concurrent-request isolation: interleaved reads for two sources stay separate', async () => {
     const reads = Array.from({ length: 8 }, (_, i) => (i % 2 === 0 ? 'src-a' : 'src-b'));
     const seen = await Promise.all(reads.map((id) => asRole(engine, (tx) => sourcesSeen(tx, id))));
