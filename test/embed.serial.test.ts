@@ -971,10 +971,43 @@ describe('#3374 — transient network retry branch', () => {
 // Gap scan: CLI flag wiring + end-to-end budget firing (beyond plan)
 // ────────────────────────────────────────────────────────────────
 
+/**
+ * Emulated gbrain_cycle_locks table speaking the exact SQL shapes
+ * db-lock.ts's PGLite branch issues, so tryAcquireDbLock / release run the
+ * REAL lock code against an inspectable table.
+ */
+function lockTableEmulator() {
+  const table = new Map<string, { fence: string }>();
+  const db = {
+    query: async (sql: string, params?: unknown[]) => {
+      if (/^\s*INSERT INTO gbrain_cycle_locks/i.test(sql)) {
+        const id = String(params?.[0]);
+        if (table.has(id)) return { rows: [] }; // held; steal predicate not emulated
+        const fence = `${Date.now()}.${Math.random()}`;
+        table.set(id, { fence });
+        return { rows: [{ id, fence }] };
+      }
+      if (/^\s*UPDATE gbrain_cycle_locks/i.test(sql)) {
+        const id = String(params?.[1]);
+        return { rows: table.has(id) ? [{ id }] : [] };
+      }
+      if (/^\s*DELETE FROM gbrain_cycle_locks/i.test(sql)) {
+        table.delete(String(params?.[0]));
+        return { rows: [] };
+      }
+      return { rows: [] };
+    },
+  };
+  return { table, db };
+}
+
 describe('runEmbed CLI flag wiring (--stale --source)', () => {
   test('--source <id> on CLI threads sourceId into countStaleChunks', async () => {
     let receivedOpts: unknown;
+    const { table, db } = lockTableEmulator();
     const engine = mockEngine({
+      kind: 'pglite',
+      db,
       countStaleChunks: async (opts: unknown) => {
         receivedOpts = opts;
         return 0; // short-circuit so we don't hit listStaleChunks
@@ -982,6 +1015,7 @@ describe('runEmbed CLI flag wiring (--stale --source)', () => {
     });
     await runEmbed(engine, ['--stale', '--source', 'media-corpus']);
     expect(receivedOpts).toEqual({ sourceId: 'media-corpus' });
+    expect(table.size).toBe(0);
   });
 
   test('--stale without --source passes undefined opts (back-compat fast path)', async () => {
@@ -1420,36 +1454,6 @@ describe('#4599 stall watchdog (runEmbedCore --stale)', () => {
   const wedgedChunks = [
     { chunk_index: 0, chunk_text: 'hello', chunk_source: 'compiled_truth', embedded_at: null, token_count: 1 },
   ];
-
-  /**
-   * Emulated gbrain_cycle_locks table speaking the exact SQL shapes
-   * db-lock.ts's PGLite branch issues, so tryAcquireDbLock / release run the
-   * REAL lock code against an inspectable table.
-   */
-  function lockTableEmulator() {
-    const table = new Map<string, { fence: string }>();
-    const db = {
-      query: async (sql: string, params?: unknown[]) => {
-        if (/^\s*INSERT INTO gbrain_cycle_locks/i.test(sql)) {
-          const id = String(params?.[0]);
-          if (table.has(id)) return { rows: [] }; // held; steal predicate not emulated
-          const fence = `${Date.now()}.${Math.random()}`;
-          table.set(id, { fence });
-          return { rows: [{ id, fence }] };
-        }
-        if (/^\s*UPDATE gbrain_cycle_locks/i.test(sql)) {
-          const id = String(params?.[1]);
-          return { rows: table.has(id) ? [{ id }] : [] };
-        }
-        if (/^\s*DELETE FROM gbrain_cycle_locks/i.test(sql)) {
-          table.delete(String(params?.[0]));
-          return { rows: [] };
-        }
-        return { rows: [] };
-      },
-    };
-    return { table, db };
-  }
 
   test('stall fires: single-flight locks released via the lock table, summary flushed, reason surfaces', async () => {
     process.env.GBRAIN_EMBED_STALL_ABORT_SECONDS = '1';

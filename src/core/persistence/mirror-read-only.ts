@@ -10,11 +10,16 @@
  * after `mirror-writable`, as an unbound-source page does (#5254).
  */
 import type { SqlEngine } from './model.ts';
+import { sourceMembership } from './source-membership.ts';
 
-/** `lock`: inside a publication, hold the source row so a concurrent mode change waits for this write. */
+/**
+ * `lock`: inside a publication, hold the source row so a concurrent mode change waits for this write. The locked read is
+ * the transaction's shared source membership read (it carries the mirror flag), so a publication reads the row once.
+ */
 export async function sourceMirrorReadOnly(engine: SqlEngine, sourceId: string, lock = false): Promise<boolean> {
+  if (lock) return (await sourceMembership(engine, sourceId, true))[0]?.mirror_read_only === true;
   const [row] = await engine.executeRaw<{ read_only: boolean }>(
-    `SELECT COALESCE(config->>'mirror_read_only','false')='true' AS read_only FROM sources WHERE id=$1${lock ? ' FOR SHARE' : ''}`, [sourceId]);
+    `SELECT COALESCE(config->>'mirror_read_only','false')='true' AS read_only FROM sources WHERE id=$1`, [sourceId]);
   return row?.read_only === true;
 }
 

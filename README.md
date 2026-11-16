@@ -30,8 +30,6 @@ Alongside keyword and semantic retrieval, GBrain offers two optional ways to use
 
 The point of building a 150K-page brain is to use it as a strategic moat. To never lose context. To query what's in your own head without re-reading it. The brain layer is what makes the moat usable. The 24/7 dream cycle is what keeps it sharp. Both run on your hardware, your DB, your keys.
 
-It's easier to ship a daemon that runs 24/7 to ingest, enrich, and consolidate than it is to keep an agent in chat working hard. GBrain is that daemon, generalized. Install in 30 minutes. Your agent does the work. As my personal agent gets smarter, so does yours.
-
 > **Start keyless.** Your harness subscription and any separately configured model API usage are different costs. The optional personal-agent bootstrap takes about 15 minutes; always-on enrichment needs its own compute and API configuration.
 
 Durable preferences and facts can be shared across agents; transient task and
@@ -130,9 +128,9 @@ The following bootstrap paths are optional: use them when you want GBrain to hel
 
 ### For Codex — optional personal-agent bootstrap
 
-Turn Codex into your persistent personal agent. (Just want the brain + skills without the full agent? `codex plugin marketplace add garrytan/gbrain@codex-plugin` then `codex plugin add gbrain@gbrain` — see [docs/mcp/CODEX.md](docs/mcp/CODEX.md). The paste block below builds the whole agent.) Works in the **ChatGPT desktop app** (open Codex on a folder) and in the **Codex CLI** (`codex` in a terminal) — same install, same result. Open Codex in a **new, empty folder** (not an existing code project) — that folder becomes your agent's own **private GitHub repo**, which bootstrap creates and privacy-verifies for you. Then paste:
+For a new persistent personal agent, open Codex in a **new, empty folder** in the desktop app or CLI. Bootstrap creates and privacy-verifies the agent's private GitHub repo there. Paste:
 
-```
+```text
 Read and follow every step of:
 https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/BOOTSTRAP_FOR_AGENTS.md
 Goal: set yourself up as my persistent personal agent in this folder, with gbrain
@@ -141,29 +139,11 @@ answers. Ask before anything destructive. You are not done until
 `gbrain bootstrap verify` exits 0.
 ```
 
-Bootstrap creates identity files from your answers, a local keyless brain, MCP
-registration, and a private repository. Command approvals are normal. Verify a
-saved fact in a fresh conversation; identity-file recall alone is not that test.
-The repo is not a complete backup. For private-repo adoption, optional providers,
-cloud behavior, and uninstall, read the [bootstrap guide](docs/guides/bootstrap.md).
+Bootstrap creates identity files from your answers, a keyless brain and MCP registration. Command approvals are normal. Verify a saved fact in a fresh conversation with observed GBrain calls; identity-file recall alone is not that test. The repo is not a complete backup. See the [bootstrap guide](docs/guides/bootstrap.md) for providers, cloud behavior, hooks, adoption and uninstall.
 
 ### For Claude Code — optional personal-agent bootstrap
 
-Works in the **desktop app** and in the **CLI** (`claude` in a terminal) — identical harness, identical result. Open Claude Code in a **new, empty folder** (not an existing code project) — that folder becomes your agent's own **private GitHub repo**, created and privacy-verified for you. Then paste the same block:
-
-```
-Read and follow every step of:
-https://raw.githubusercontent.com/garrytan/gbrain/latest-stable/BOOTSTRAP_FOR_AGENTS.md
-Goal: set yourself up as my persistent personal agent in this folder, with gbrain
-as your memory. Interview me before writing any identity file — never invent
-answers. Ask before anything destructive. You are not done until
-`gbrain bootstrap verify` exits 0.
-```
-
-Claude Code also supports per-turn context and persistence hooks, with opt-outs.
-A fresh-conversation recall test must observe actual GBrain calls, not infer the
-source from the answer. See [bootstrap](docs/guides/bootstrap.md) for cloud setup,
-private-repo adoption, hooks, recovery, and removal.
+Open Claude Code in a **new, empty folder** in the desktop app or CLI and paste the same bootstrap block above. It creates and privacy-verifies the agent's private GitHub repo. Claude Code also supports per-turn context and persistence hooks with opt-outs; the [bootstrap guide](docs/guides/bootstrap.md) covers them.
 
 ### For OpenClaw or Hermes — GBrain as intended, always on
 
@@ -301,19 +281,9 @@ It does not enable embeddings, sharing, schedules, or curation automatically.
 
 ### Local agent sessions and nightly day indexes
 
-Session capture is explicit and local-only. `gbrain transcripts ingest` accepts
-Claude Code, Codex, OpenClaw, Hermes, Grok, OMP, Pi, OpenCode, Cursor, ChatGPT,
-and Claude export formats. `--date-zone <IANA-zone>` selects the frontmatter
-calendar day without changing stable session identities. Large sessions are
-split into complete continuation pages; a bounded or malformed read holds its
-watermark for retry.
+Session capture is explicit and local-only. `gbrain transcripts ingest` accepts local agent sessions and ChatGPT/Claude exports; `--date-zone <IANA-zone>` selects the calendar day without changing session identities. Malformed or bounded reads retain their watermark for retry.
 
-The repository launcher `scripts/gbrain-daily-memory.sh` captures Codex by default;
-set `GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"` to opt into
-additional local seats. Each seat has its own mtime watermark. Clean seats advance
-only after the index write succeeds; failed seats retain their cutoff while other
-seats finish. Explicit-date backfills rewrite the index without advancing capture
-watermarks. OpenCode's SQLite store is opened read-only.
+[`scripts/gbrain-daily-memory.sh`](scripts/gbrain-daily-memory.sh) captures Codex by default. Set `GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor"` to opt into more seats. Each seat advances its watermark only after a successful index write; dated backfills leave capture watermarks alone.
 
 ```bash
 GBRAIN_REPO_ROOT="$PWD" GBRAIN_DAILY_MEMORY_POOL_SIZE=1 bash scripts/gbrain-daily-memory.sh
@@ -321,19 +291,9 @@ bun scripts/write-daily-memory.ts 2026-10-01  # index-only backfill
 bun scripts/run-facts-absorb.ts --max-usd 0.50 --concurrency 1 --max-minutes 30
 ```
 
-The launcher pins one timezone and day, retries infrastructure connection failures
-within `GBRAIN_CONNECT_RETRY_BUDGET_MS` (20 minutes by default), and fails closed
-when the timezone lookup or zone validation fails. An explicit nightly pool setting
-outranks `env.sh`; the normalized default is two connections, and one is supported.
-It uses subscription-only model routing: paid embeddings remain queued. The separate
-facts runner honors configured billing policy and reserves each in-flight job's worst
-case against the supplied spend cap before claiming work.
+The launcher pins one timezone/day and uses subscription-only model routing; paid embeddings stay queued. The separate facts runner honors billing policy and the supplied spend cap. See the [launcher](scripts/gbrain-daily-memory.sh) for connection retries and pool settings.
 
-Daily indexes and source-record reference pages live in the non-federated `dream`
-system source. They contain labels and links, not copied message bodies, and remain
-owner-only even when ordinary private-page filtering is disabled. Current managed
-publication and wanted-link wakeups preserve affected-date debt across imports,
-syncs, edits, deletions, source lifecycle changes, and nightly job retries.
+Daily indexes and source-record references contain labels and links, not copied message bodies. They live in the non-federated, owner-only `dream` source, even when ordinary private-page filtering is disabled. Durable refresh debt survives mutations and retries.
 
 ## Your brain's shape (schema packs)
 

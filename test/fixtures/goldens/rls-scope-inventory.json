@@ -3447,7 +3447,7 @@
       }
     },
     "static": {
-      "callSites": 29,
+      "callSites": 30,
       "directMethods": {
         "_searchKeywordCJK": 1,
         "countChunklessPagesWithContent": 1,
@@ -3455,6 +3455,7 @@
         "countStaleChunks": 1,
         "countStaleFrontmatterKeyPages": 1,
         "countStalePagesForExtraction": 1,
+        "executeRawInSource": 1,
         "findDuplicatePage": 1,
         "findDuplicatePages": 1,
         "getAllSlugs": 1,
@@ -3495,6 +3496,7 @@
         "applyForwardReferenceBootstrap": "none",
         "batchLoadEmotionalInputs": "none",
         "batchRetry": "none",
+        "cancelSchemaInitialization": "none",
         "connRetry": "none",
         "connect": "none",
         "consolidateFact": "none",
@@ -3519,6 +3521,7 @@
         "engineSqlOn": "none",
         "executeRaw": "none",
         "executeRawDirect": "none",
+        "executeRawInSource": "direct",
         "expireFact": "none",
         "explainVectorSearch": "via:runVectorAttempt",
         "findAnomalies": "none",
@@ -3610,6 +3613,7 @@
         "markPagesExtractedBatch": "none",
         "mergeOntologyFact": "none",
         "migrateFactsToCanonical": "none",
+        "migrationStatementTimeoutMs": "none",
         "onCheckout": "none",
         "purgeDeletedPages": "none",
         "putContradictionCacheEntry": "none",

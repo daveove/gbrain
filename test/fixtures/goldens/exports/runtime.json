@@ -46,6 +46,7 @@
         "engineSql",
         "executeRaw",
         "executeRawDirect",
+        "executeRawInSource",
         "expireFact",
         "findAnomalies",
         "findByTitleFuzzy",
@@ -210,6 +211,7 @@
         "applyForwardReferenceBootstrap",
         "batchLoadEmotionalInputs",
         "batchRetry",
+        "cancelSchemaInitialization",
         "connRetry",
         "connect",
         "consolidateFact",
@@ -234,6 +236,7 @@
         "engineSqlOn",
         "executeRaw",
         "executeRawDirect",
+        "executeRawInSource",
         "expireFact",
         "explainVectorSearch",
         "findAnomalies",
@@ -325,6 +328,7 @@
         "markPagesExtractedBatch",
         "mergeOntologyFact",
         "migrateFactsToCanonical",
+        "migrationStatementTimeoutMs",
         "onCheckout",
         "purgeDeletedPages",
         "putContradictionCacheEntry",
@@ -537,7 +541,8 @@
         "loadConfigFileOnly",
         "loadConfigWithEngine",
         "saveConfig",
-        "toEngineConfig"
+        "toEngineConfig",
+        "userHomeDir"
       ],
       "./core/guardrails": [
         "GuardrailLoadError",

@@ -57,9 +57,10 @@ bun install -g github:garrytan/gbrain
 Verify: `gbrain --version` should print a version number. If `gbrain` is not found,
 restart the shell or add the PATH export to the shell profile.
 
-> **If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`** (Bun
-> occasionally blocks the top-level postinstall hook on global installs, so schema
-> migrations don't run automatically), the CLI prints a recovery hint pointing at
+> **If `bun install -g` aborts or `gbrain doctor` reports `schema_version: 0`** (the package
+> postinstall hook applies no migrations unless `GBRAIN_POSTINSTALL_APPLY_MIGRATIONS=1` is set on
+> the install command, and Bun occasionally blocks the hook on global installs), the CLI prints a
+> recovery hint pointing at
 > [#218](https://github.com/garrytan/gbrain/issues/218). Run `gbrain apply-migrations --yes --no-autopilot-install`
 > to recover. It exits 0 only when the schema is at head. Exit 1 with `migrations_pending` means the schema
 > is still behind: another `--yes` repeats the failure, so run `gbrain doctor --json`, tell the user what it

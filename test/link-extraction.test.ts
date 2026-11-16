@@ -1540,7 +1540,7 @@ describe('makeResolver — fallback chain', () => {
     expect(await r.resolveBasenameMatches!('struktura')).toEqual([]);
   });
 
-  test('resolveBasenameMatches: sourceId without getAllSlugs or executeRaw degrades to []', async () => {
+  test('resolveBasenameMatches: sourceId without getAllSlugs or executeRawInSource degrades to []', async () => {
     const engine = {
       async getPage() { return null; },
       async findByTitleFuzzy() { return null; },
@@ -1550,7 +1550,7 @@ describe('makeResolver — fallback chain', () => {
     expect(await r.resolveBasenameMatches!('struktura')).toEqual([]);
   });
 
-  test('resolveBasenameMatches: sourceId with executeRaw reads only that source, never getAllSlugs', async () => {
+  test('resolveBasenameMatches: sourceId with executeRawInSource reads only that source, never getAllSlugs', async () => {
     const calls: { sql: string; params?: unknown[] }[] = [];
     let getAllCalls = 0;
     const engine = {
@@ -1558,8 +1558,8 @@ describe('makeResolver — fallback chain', () => {
       async findByTitleFuzzy() { return null; },
       async searchKeyword() { return []; },
       async getAllSlugs() { getAllCalls++; return new Set(['archive/struktura']); },
-      async executeRaw(sql: string, params?: unknown[]) {
-        calls.push({ sql, params });
+      async executeRawInSource(sourceId: string, sql: string, params?: unknown[]) {
+        calls.push({ sql, params: [sourceId, ...(params ?? [])] });
         return [{ n: 1, h: '0', m: 1, slugs: ['projects/struktura'] }];
       },
     } as unknown as BrainEngine;

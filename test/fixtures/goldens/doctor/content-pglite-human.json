@@ -139,7 +139,7 @@
       "  [OK] facts_extraction_health: Automatic fact extraction not configured (keyless) — memory comes from agent-authored `## Facts` fences and the `remember` verb. One optional key enables automatic extraction (OpenAI or Anthropic).",
       "  [OK] effective_date_health: Sample of last 1000 pages clean (no fallback-with-parseable-fm-date, no future-dated, no pre-1990)",
       "  [OK] salience_health: Skipped (no pages have emotional_weight > 0; either fresh install or recompute hasn't run yet)",
-      "  [WARN] queue_health: no_worker: 10 job(s) are waiting (default=10; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
+      "  [WARN] queue_health: no_worker: 1 job(s) are waiting (default=1; oldest 0h) and PGLite has no background worker, so they run only when a `gbrain jobs work` drain does.",
       "    Fix: gbrain jobs work --brain host",
       "  [OK] subagent_capability: Subagent tier resolves to default (claude-sonnet-4-6) — full tool-loop capability",
       "  [OK] facts_health: facts_health(default): 0 active, 0 today, 0 this week, 0 consolidated, top entities —",

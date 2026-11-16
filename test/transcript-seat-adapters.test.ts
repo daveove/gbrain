@@ -81,6 +81,12 @@ describe('ompAdapter', () => {
       return (await drain(ompAdapter.parse(p))).diag.skippedLines;
     };
     expect(await skippedOf([row('fileMention')])).toBe(0);
+    // omp injects hidden harness context as {role:'custom', customType, content:string, display:false}.
+    expect(await skippedOf([{
+      type: 'message',
+      timestamp: '2026-09-30T00:01:00.000Z',
+      message: { role: 'custom', customType: 'eval-state-context', content: 'x', display: false, attribution: 'agent' },
+    }])).toBe(0);
     expect(await skippedOf([row('futureRole')])).toBe(1);
   });
 

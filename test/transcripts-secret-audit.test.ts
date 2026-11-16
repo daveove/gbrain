@@ -100,6 +100,18 @@ describe('transcripts audit-secrets --scope conversations (DAV-7162 monitor reco
     expect((await auditTranscriptSecrets(engine)).pages_affected).toBe(1);
   });
 
+  test('DAV-7405: a credential used as a frontmatter key is found when its value is null, an empty object or an empty list', async () => {
+    const token = ['ghp', '_', 'A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'].join('');
+    await engine.putPage('conversations/manual/key-null', { type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { [token]: null } });
+    await engine.putPage('conversations/manual/key-object', { type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { [token]: {} } });
+    await engine.putPage('conversations/manual/key-list', { type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { [token]: [] } });
+    await engine.putPage('conversations/manual/key-clean', { type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { harmless: null } });
+    const result = await auditTranscriptSecrets(engine, { scope: 'conversations' });
+    expect(result.pages_scanned).toBe(4);
+    expect(result.pages_affected).toBe(3);
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
   test('the stored record has counts, pattern names, page ids and the scan start; no slug and no matched text', async () => {
     await conversation('conversations/sessions/2026-01-02-codex-aaaaaaaaaaaa', `ok\npassword: ${PW}`);
     await engine.putPage('conversations/manual/frontmatter-hit', { type: 'conversation', title: 'notes', compiled_truth: 'clean', frontmatter: { setup: `password: ${PW}` } });

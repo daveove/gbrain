@@ -57,24 +57,140 @@ async function backlog(engine: BrainEngine, pages: number): Promise<string> {
 function costed(engine: BrainEngine, costMs: number) {
   const clock = { t: 0, now: () => clock.t };
   const transaction = engine.transaction.bind(engine);
+  const executeRaw = engine.executeRaw.bind(engine);
+  const fetched = { rows: 0, batches: [] as number[], columns: [] as string[] };
   const proxy = new Proxy(engine, { get(target, key) {
     if (key === 'transaction') return <T>(run: (tx: BrainEngine) => Promise<T>) => { clock.t += costMs / 2; return transaction(run); };
+    if (key === 'executeRaw') return async (...args: Parameters<BrainEngine['executeRaw']>) => {
+      const rows = await executeRaw(...args);
+      if (args[0].startsWith('SELECT s.id AS source_id,j.source_incarnation,j.slug,j.revision')) {
+        fetched.rows += rows.length;
+        fetched.batches.push(rows.length);
+        if (rows.length) fetched.columns = Object.keys(rows[0]).sort();
+      }
+      return rows;
+    };
     const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value;
   } });
-  return { engine: proxy, clock };
+  return { engine: proxy, clock, fetched };
 }
 
 const pending = async (engine: BrainEngine) => (await projectionBacklog(engine)).pending;
 
 test('a budgeted rebuild starts no page after the deadline, and the resident invocation uses the 250 ms budget', async () => {
   for (const engine of engines) {
-    await backlog(engine, 40);
+    const sourceId = await backlog(engine, 40);
+    const queue = () => engine.executeRaw(`SELECT j.slug,j.revision::text,j.reason,j.updated_at::text
+      FROM page_projection_jobs j JOIN sources s ON s.incarnation=j.source_incarnation WHERE s.id=$1 ORDER BY j.slug`, [sourceId]);
+    const pages = () => engine.executeRaw(`SELECT slug,knowledge_revision::text,text_projection_revision::text,compiled_truth,timeline
+      FROM pages WHERE source_id=$1 ORDER BY slug`, [sourceId]);
+    const beforeQueue = await queue();
+    const beforePages = await pages();
     const direct = costed(engine, 40);
     expect(await rebuildPendingPageProjections(direct.engine, 100, { deadlineMs: 250, now: direct.clock.now })).toEqual({ rebuilt: 7, superseded: 0 });
     expect(direct.clock.t - 40).toBeLessThan(250);
+    expect(direct.fetched.rows).toBe(8);
+    expect(direct.fetched.batches).toEqual([4, 4]);
+    expect(direct.fetched.columns).toEqual(['revision', 'slug', 'source_id', 'source_incarnation']);
+    expect(await queue()).toEqual(beforeQueue.slice(7));
+    expect((await pages()).slice(7)).toEqual(beforePages.slice(7));
     const resident = costed(engine, 40);
     expect(await runResidentProjectionInvocation(resident.engine, localHostId(), [], resident.clock.now)).toEqual({ rebuilt: 7, superseded: 0 });
+    expect(resident.fetched.rows).toBe(8);
+    expect(resident.fetched.batches).toEqual([4, 4]);
+    expect(await queue()).toEqual(beforeQueue.slice(14));
+    expect((await pages()).slice(14)).toEqual(beforePages.slice(14));
     expect(await pending(engine)).toBe(26);
+  }
+}, 120_000);
+
+test('deadline windows retain the first-page guarantee and the full 100-page cap for fast rebuilds', async () => {
+  for (const engine of engines) {
+    await backlog(engine, 110);
+    const first = costed(engine, 40);
+    expect(await rebuildPendingPageProjections(first.engine, 100, { deadlineMs: 0, now: first.clock.now })).toEqual({ rebuilt: 1, superseded: 0 });
+    expect(first.fetched.rows).toBe(4);
+    expect(await pending(engine)).toBe(109);
+    const fast = costed(engine, 0);
+    expect(await rebuildPendingPageProjections(fast.engine, 150, { deadlineMs: 250, now: fast.clock.now })).toEqual({ rebuilt: 100, superseded: 0 });
+    expect(fast.fetched.rows).toBe(100);
+    expect(fast.fetched.batches).toEqual(Array(25).fill(4));
+    const drain = costed(engine, 0);
+    expect(await rebuildPendingPageProjections(drain.engine, 100)).toEqual({ rebuilt: 9, superseded: 0 });
+    expect(drain.fetched.batches).toEqual([9]);
+    expect(await pending(engine)).toBe(0);
+  }
+}, 120_000);
+
+test('a later candidate fetch that crosses the deadline starts no additional page', async () => {
+  for (const engine of engines) {
+    await backlog(engine, 10);
+    const timed = costed(engine, 10);
+    const delayed = new Proxy(timed.engine, { get(target, key) {
+      if (key === 'executeRaw') return async (...args: Parameters<BrainEngine['executeRaw']>) => {
+        const rows = await target.executeRaw(...args);
+        if (timed.fetched.batches.length === 2) timed.clock.t += 250;
+        return rows;
+      };
+      const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    expect(await rebuildPendingPageProjections(delayed, 100, { deadlineMs: 250, now: timed.clock.now })).toEqual({ rebuilt: 4, superseded: 0 });
+    expect(timed.fetched.batches).toEqual([4, 4]);
+    expect(await pending(engine)).toBe(6);
+  }
+}, 120_000);
+
+test('deadline windows do not retry a failed page and still heal stale rows before later candidates', async () => {
+  for (const engine of engines) {
+    const sourceId = await backlog(engine, 10);
+    await engine.executeRaw("UPDATE page_projection_jobs SET revision=gen_random_uuid() WHERE slug='notes/n-0001'");
+    const timed = costed(engine, 0);
+    const transaction = timed.engine.transaction.bind(timed.engine);
+    let attempts = 0;
+    const broken = new Proxy(timed.engine, { get(target, key) {
+      if (key === 'transaction') return <T>(run: (tx: BrainEngine) => Promise<T>) => {
+        if (attempts++ === 0) return Promise.reject(new Error('simulated preparation failure'));
+        return transaction(run);
+      };
+      const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const failures: Array<{ slug: string; reason: string }> = [];
+    expect(await rebuildPendingPageProjections(broken, 100, {
+      deadlineMs: 250, now: timed.clock.now, onFailure: failure => failures.push(failure),
+    })).toEqual({ rebuilt: 9, superseded: 0 });
+    expect(timed.fetched.batches).toEqual([4, 4, 2]);
+    expect(failures).toEqual([expect.objectContaining({ slug: 'notes/n-0000', reason: 'simulated preparation failure' })]);
+    expect(await engine.executeRaw('SELECT slug,reason FROM page_projection_jobs')).toEqual([{ slug: 'notes/n-0000', reason: 'rebuild_failed' }]);
+    const repaired = (await engine.readPageSnapshot('notes/n-0001', { sourceId }))!;
+    expect(repaired.page.text_projection_revision).toBe(repaired.revision);
+  }
+}, 120_000);
+
+test('each deadline window preserves source, page, reason, and microsecond run-start filters', async () => {
+  for (const engine of engines) {
+    const sourceId = await backlog(engine, 12);
+    const otherSource = `drain-${++sourceSeq}`;
+    await engine.executeRaw('INSERT INTO sources(id,name) VALUES($1,$1)', [otherSource]);
+    await engine.putPage('notes/n-0000', { type: 'note', title: 'Other source', compiled_truth: 'Keep this queued.' }, { sourceId: otherSource });
+    await engine.executeRaw("UPDATE page_projection_jobs SET updated_at='2026-01-01 00:00:00.000400+00'");
+    await engine.executeRaw("UPDATE page_projection_jobs SET reason='other_reason' WHERE slug='notes/n-0007'");
+    await engine.executeRaw("UPDATE page_projection_jobs SET updated_at='2026-01-01 00:00:00.000500+00' WHERE slug='notes/n-0008'");
+    const before = await engine.executeRaw('SELECT source_incarnation,slug,revision,reason,updated_at::text FROM page_projection_jobs ORDER BY source_incarnation,slug');
+    const timed = costed(engine, 0);
+    const slugs = Array.from({ length: 9 }, (_, i) => `notes/n-${String(i).padStart(4, '0')}`);
+    expect(await rebuildPendingPageProjections(timed.engine, 5, {
+      deadlineMs: 250, now: timed.clock.now, notAfter: '2026-01-01 00:00:00.000400+00',
+      reasons: ['test_backlog'], pages: { sourceId, slugs },
+    })).toEqual({ rebuilt: 5, superseded: 0 });
+    expect(timed.fetched.batches).toEqual([4, 1]);
+    const rest = costed(engine, 0);
+    expect(await rebuildPendingPageProjections(rest.engine, 100, {
+      deadlineMs: 250, now: rest.clock.now, notAfter: '2026-01-01 00:00:00.000400+00',
+      reasons: ['test_backlog'], pages: { sourceId, slugs },
+    })).toEqual({ rebuilt: 2, superseded: 0 });
+    const [source] = await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [sourceId]);
+    expect(await engine.executeRaw('SELECT source_incarnation,slug,revision,reason,updated_at::text FROM page_projection_jobs ORDER BY source_incarnation,slug'))
+      .toEqual(before.filter(row => row.source_incarnation !== source.incarnation || !slugs.slice(0, 7).includes(String(row.slug))));
   }
 }, 120_000);
 
@@ -85,7 +201,9 @@ test('a claimable write drops the resident invocation to two pages; a blocked or
     const head = await f.admit('head');
     const invoke = (excluded: string[]) => { const timed = costed(engine, 20); return runResidentProjectionInvocation(timed.engine, localHostId(), excluded, timed.clock.now); };
     expect(await hasClaimableWrite(engine, localHostId())).toBe(true);
-    expect((await invoke([])).rebuilt).toBe(2);
+    const waiting = costed(engine, 20);
+    expect((await runResidentProjectionInvocation(waiting.engine, localHostId(), [], waiting.clock.now)).rebuilt).toBe(2);
+    expect(waiting.fetched.batches).toEqual([2]);
     const root = `db:${head.source_incarnation}`;
     expect(await hasClaimableWrite(engine, localHostId(), [root])).toBe(false);
     expect((await invoke([root])).rebuilt).toBe(13);
@@ -100,15 +218,17 @@ test('a claimable write drops the resident invocation to two pages; a blocked or
 test('a 1,000-page backlog drains in the invocation count the injected per-page cost predicts', async () => {
   for (const engine of engines) {
     await backlog(engine, 1000);
-    const { engine: timed, clock } = costed(engine, 10);
+    const { engine: timed, clock, fetched } = costed(engine, 10);
     let invocations = 0;
     for (;;) {
       const startedAt = clock.t;
+      const rowsBefore = fetched.rows;
       const result = await runResidentProjectionInvocation(timed, localHostId(), [], clock.now);
       if (result.rebuilt + result.superseded === 0) break;
       invocations++;
       expect(result.rebuilt).toBe(25);
       expect(clock.t - 10 - startedAt).toBeLessThan(250);
+      expect(fetched.rows - rowsBefore).toBeLessThanOrEqual(result.rebuilt + 3);
     }
     expect(invocations).toBe(40);
     expect(await pending(engine)).toBe(0);
