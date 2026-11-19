@@ -1,0 +1,3 @@
+### Added
+
+- DAV-6364: the day index `daily-memory/YYYY-MM-DD` has a `## Work` section after `## Comms`. It lists the Linear issues (`DAV-123`) and GitHub pull requests (`github.com/o/r/pull/9`, `o/r#9`) that the day's agent session pages (`conversations/sessions/`) mention. Each reference shows once, in first-seen order, with up to 3 session links and a count of the other sessions. The section lists at most 40 references and ends with an "N more" line on a busy day. An id inside a URL counts only when the URL is a Linear issue or pull request URL. A day whose sessions mention nothing gets no section.
