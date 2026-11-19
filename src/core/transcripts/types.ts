@@ -148,17 +148,20 @@ export const TRANSCRIPT_EXPORT_JSON_HARD_CAP = 200 * 1024 * 1024;
 
 // ── Slug construction (ONE helper — no per-adapter templates) ───────────────
 
+/** Page directory for every harness session (Claude Code, Codex, omp, ...). */
+export const HARNESS_SESSION_SLUG_DIR = 'conversations/sessions';
+
 /** Per-provider page directories, matching skills/conversation-archive layout. */
 const SLUG_DIRS: Record<TranscriptFormat, string> = {
-  'claude-code': 'conversations/sessions',
-  codex: 'conversations/sessions',
-  openclaw: 'conversations/sessions',
-  hermes: 'conversations/sessions',
-  grok: 'conversations/sessions',
-  omp: 'conversations/sessions',
-  pi: 'conversations/sessions',
-  opencode: 'conversations/sessions',
-  cursor: 'conversations/sessions',
+  'claude-code': HARNESS_SESSION_SLUG_DIR,
+  codex: HARNESS_SESSION_SLUG_DIR,
+  openclaw: HARNESS_SESSION_SLUG_DIR,
+  hermes: HARNESS_SESSION_SLUG_DIR,
+  grok: HARNESS_SESSION_SLUG_DIR,
+  omp: HARNESS_SESSION_SLUG_DIR,
+  pi: HARNESS_SESSION_SLUG_DIR,
+  opencode: HARNESS_SESSION_SLUG_DIR,
+  cursor: HARNESS_SESSION_SLUG_DIR,
   chatgpt: 'conversations/chatgpt',
   'claude-export': 'conversations/claude',
 };

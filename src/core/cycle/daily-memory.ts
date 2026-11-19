@@ -6,7 +6,9 @@
  * that already hold a page whose content date falls on the cycle's calendar
  * day contribute a short label and a wikilink. source_records updated that
  * same day add one summary line per source and a capped set of stable record
- * links. Message bodies stay off the note. No new connector.
+ * links. Harness session pages of the day add a Work section: the Linear
+ * issues and GitHub pull requests they mention, each with session links.
+ * Message bodies stay off the note. No new connector.
  *
  * The scan is brain-wide on purpose: this runs only from the single
  * maintenance job, which is the lane that already walks every source.
@@ -32,6 +34,7 @@ import { PageRevisionConflictError } from '../page-state/types.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { calendarDateInTimeZone, isValidTimeZone, resolveCycleTimeZone } from './cycle-date.ts';
 import { DATE_INSTANT_PROVENANCE, isCalendarDateSpelling, parseDateLoose } from '../effective-date.ts';
+import { HARNESS_SESSION_SLUG_DIR } from '../transcripts/types.ts';
 
 export const DAILY_MEMORY_SOURCE_ID = 'dream';
 export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
@@ -39,6 +42,14 @@ export const DAILY_MEMORY_SLUG_PREFIX = 'daily-memory';
 export const DAILY_MEMORY_PAGE_CAP = 40;
 /** Per-source link cap so a chat firehose cannot fill the note. */
 export const DAILY_MEMORY_RECORD_LINK_CAP = 8;
+/**
+ * Work references (Linear issues, GitHub pull requests) listed per day. Same
+ * size as the page list. A sample of 30 days had a median of 44 references
+ * and a peak of 1 287; the rest stay on the session pages.
+ */
+export const DAILY_MEMORY_WORK_LINK_CAP = 40;
+/** Session pages linked beside one work reference; the line counts the rest. */
+export const DAILY_MEMORY_WORK_SESSION_CAP = 3;
 
 const DAILY_MEMORY_SOURCE_NAME = 'Dream cycle indexes';
 
@@ -221,6 +232,31 @@ function wikiLinkTarget(sourceId: string, slug: string): string | null {
   return `${sourceId}:${slug}`;
 }
 
+// One token per URL, Linear issue id or short pull request form, in text
+// order. A URL is one token, so an id inside a URL is judged by its URL.
+const WORK_TOKEN_RE = /(?:https?:\/\/|\bgithub\.com\/|\blinear\.app\/)[^\s<>()[\]{}`'"]*|\bDAV-\d+\b|(?<![\w./@-])[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+#\d+\b/g;
+const GITHUB_PULL_URL_RE = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)\/pull\/(\d+)/i;
+const LINEAR_ISSUE_URL_RE = /^(?:https?:\/\/)?linear\.app\/[^/]+\/issue\/(DAV-\d+)(?![\w-])/;
+const SHORT_PULL_RE = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#(\d+)$/;
+
+/**
+ * Linear issue ids (`DAV-123`) and GitHub pull requests (`github.com/o/r/pull/9`,
+ * `o/r#9`) in text order, one entry per mention. A Linear issue URL or pull
+ * request URL counts once. Any other URL counts as nothing, so an id that only
+ * names a branch, file or page inside a link is not a reference.
+ */
+export function extractWorkReferences(text: string): string[] {
+  const keys: string[] = [];
+  for (const [token] of text.matchAll(WORK_TOKEN_RE)) {
+    if (token.startsWith('DAV-')) { keys.push(token); continue; }
+    const pull = SHORT_PULL_RE.exec(token) ?? GITHUB_PULL_URL_RE.exec(token);
+    if (pull) { keys.push(`${pull[1]!.toLowerCase()}/${pull[2]!.toLowerCase()}#${Number(pull[3])}`); continue; }
+    const issue = LINEAR_ISSUE_URL_RE.exec(token);
+    if (issue) keys.push(issue[1]!);
+  }
+  return keys;
+}
+
 interface SourceRecordGroup {
   source_type: string;
   total: number | string;
@@ -235,10 +271,18 @@ interface SourceRecordLink {
   slug: string;
 }
 
+/** One issue or pull request with the first session pages that mention it. */
+interface WorkReference {
+  key: string;
+  sessions: string[];
+  sessionTotal: number;
+}
+
 interface RenderInput {
   rows: SourcePageRow[];
   pageTotal: number;
   records: Array<SourceRecordGroup & { links: SourceRecordLink[] }>;
+  work: WorkReference[];
 }
 
 function renderNote(day: string, input: RenderInput): string {
@@ -279,6 +323,18 @@ function renderNote(day: string, input: RenderInput): string {
         lines.push(`${group.links.length} of ${total} records are linked.`, '');
       }
     }
+  }
+
+  if (input.work.length) {
+    lines.push('## Work', '');
+    for (const ref of input.work.slice(0, DAILY_MEMORY_WORK_LINK_CAP)) {
+      const more = ref.sessionTotal - ref.sessions.length;
+      const tail = more > 0 ? ` and ${more} more session ${more === 1 ? 'page' : 'pages'}` : '';
+      lines.push(`- ${escapeMdMeta(ref.key)} — ${ref.sessions.map(target => `[[${target}]]`).join(', ')}${tail}`);
+    }
+    lines.push('');
+    const hidden = input.work.length - DAILY_MEMORY_WORK_LINK_CAP;
+    if (hidden > 0) lines.push(`${hidden} more work ${hidden === 1 ? 'reference stays' : 'references stay'} on the session pages.`, '');
   }
 
   // Match canonical Markdown ingestion so a managed rerun is a true no-op.
@@ -437,6 +493,46 @@ async function countDayPages(
   return total;
 }
 
+/** Session pages read per round trip. A part page holds at most about 45 KB. */
+const WORK_SESSION_BATCH = 20;
+
+/**
+ * Every issue and pull request the day's harness session pages mention, once
+ * each, in first-seen order (source/slug order, then text order). Each keeps
+ * the first DAILY_MEMORY_WORK_SESSION_CAP session links and a session count.
+ */
+async function collectWorkReferences(
+  engine: BrainEngine, zone: string, day: string, slug: string, signal?: AbortSignal,
+): Promise<WorkReference[]> {
+  const refs = new Map<string, WorkReference>();
+  let afterSource = '';
+  let afterSlug = '';
+  for (;;) {
+    throwIfAborted(signal, '[dream] daily memory');
+    const page = await engine.executeRaw<DayPageRow & { compiled_truth: string | null }>(
+      `SELECT ${DAY_ROW_COLUMNS}, compiled_truth ${DAY_PAGE_SCOPE}
+         AND slug LIKE $5 AND (${DAY_MEMBER_SQL}) IS NOT FALSE AND (source_id, slug) > ($6, $7)
+       ORDER BY source_id, slug LIMIT $8`,
+      [zone, day, slug, DAILY_MEMORY_SOURCE_ID, `${HARNESS_SESSION_SLUG_DIR}/%`, afterSource, afterSlug, WORK_SESSION_BATCH],
+    );
+    for (const row of page) {
+      const target = wikiLinkTarget(row.source_id, row.slug);
+      if (target === null || !isDayMember(row, day)) continue;
+      for (const key of new Set(extractWorkReferences(row.compiled_truth ?? ''))) {
+        let ref = refs.get(key);
+        if (!ref) refs.set(key, ref = { key, sessions: [], sessionTotal: 0 });
+        ref.sessionTotal++;
+        if (ref.sessions.length < DAILY_MEMORY_WORK_SESSION_CAP) ref.sessions.push(target);
+      }
+    }
+    if (page.length < WORK_SESSION_BATCH) break;
+    const last = page[page.length - 1]!;
+    afterSource = last.source_id;
+    afterSlug = last.slug;
+  }
+  return [...refs.values()];
+}
+
 /**
  * Write `daily-memory/YYYY-MM-DD` when any source already has a page for the
  * cycle day. A human-owned page at that slug is left in place, including one
@@ -500,6 +596,8 @@ export async function writeDailyMemoryFromSources(
         return { written: false, day, slug, source_id: DAILY_MEMORY_SOURCE_ID,
           needs_extract: await dreamIndexesNeedExtract(engine), pages: 0, reason: 'no_source_activity' };
       }
+      // Session pages are day pages, so an empty day needs no session scan.
+      const work = pageTotal > 0 ? await collectWorkReferences(engine, zone, day, slug, opts.signal) : [];
 
       let recordsWrote = false;
       for (const group of records) {
@@ -514,7 +612,7 @@ export async function writeDailyMemoryFromSources(
       }
 
       const title = `Daily memory ${day}`;
-      const compiled_truth = renderNote(day, { rows, pageTotal, records });
+      const compiled_truth = renderNote(day, { rows, pageTotal, records, work });
       const dailyUnchanged = Boolean(
         existing
         && !existing.deleted_at
