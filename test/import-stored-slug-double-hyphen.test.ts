@@ -158,6 +158,33 @@ describe('import updates the stored page for a double-hyphen slug', () => {
     expect(result.slug).toBe('notes/i-j');
   });
 
+  test('a soft-deleted stem page does not take the file from the live page that holds the path-derived slug', async () => {
+    // DAV-7121: the raw-JSON twin `m--n` was soft-deleted; the readable page `m-n` stayed live and owns the file.
+    await seed('m--n', SOURCE, 'Raw JSON body.');
+    await seed('m-n', SOURCE, 'Readable body.');
+    const rel = 'm--n.md';
+    await engine.executeRaw(`UPDATE pages SET source_path = $1 WHERE source_id = $2 AND slug = 'm-n'`, [rel, SOURCE]);
+    await engine.executeRaw(`UPDATE pages SET deleted_at = NOW() WHERE source_id = $1 AND slug = 'm--n'`, [SOURCE]);
+
+    expect((await storedSlugForPath(engine, SOURCE, rel, slugifyPath(rel))).kind).toBe('none');
+    const result = await importFromFile(engine, write(rel, doc('Readable', 'Edited readable body.')), rel, { noEmbed: true, sourceId: SOURCE });
+    expect(result.slug).toBe('m-n');
+    expect(await liveSlugs(SOURCE)).toEqual(['m-n']);
+    const rows = await engine.executeRaw<{ slug: string; compiled_truth: string; deleted: boolean }>(
+      `SELECT slug, compiled_truth, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id = $1`, [SOURCE]);
+    const bySlug = new Map(rows.map(r => [r.slug, r]));
+    expect(bySlug.get('m--n')?.deleted).toBe(true);
+    expect(bySlug.get('m--n')?.compiled_truth).toContain('Raw JSON body.');
+    expect(bySlug.get('m-n')?.deleted).toBe(false);
+    expect(bySlug.get('m-n')?.compiled_truth).toContain('Edited readable body.');
+  });
+
+  test('a soft-deleted stem page is still found when no live page holds the path-derived slug', async () => {
+    await seed('o--p', SOURCE);
+    await engine.executeRaw(`UPDATE pages SET deleted_at = NOW() WHERE source_id = $1 AND slug = 'o--p'`, [SOURCE]);
+    expect(await storedSlugForPath(engine, SOURCE, 'o--p.md', slugifyPath('o--p.md'))).toEqual({ kind: 'stored', slug: 'o--p' });
+  });
+
   // A--B.md and a--b.md are two files only on a case-sensitive filesystem.
   const caseSensitive = (() => {
     const probe = mkdtempSync(join(tmpdir(), 'gbrain-case-probe-'));

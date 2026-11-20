@@ -183,18 +183,23 @@ export type StoredSlugDecision =
  * its slug normalizes (slugifyPath) to the path-derived slug, so a file can
  * only reach pages its own path already designates. The stem hit wins; a
  * live row beats a soft-deleted one; two different `source_path` owners are
- * ambiguous and the caller skips the file. No query runs when the stem is
- * already the path-derived slug, so ordinary imports pay nothing.
+ * ambiguous and the caller skips the file. A soft-deleted candidate never
+ * takes the file from a live page that already holds the path-derived slug
+ * (DAV-7121: the raw-JSON `a--b` twin was soft-deleted and the live `a-b`
+ * page kept the file, so a re-import must keep updating `a-b`). No query runs
+ * when the stem is already the path-derived slug, so ordinary imports pay
+ * nothing.
  */
 export async function storedSlugForPath(engine: BrainEngine, sourceId: string | undefined, sourcePath: string, expectedSlug: string): Promise<StoredSlugDecision> {
   const stem = sourcePath.replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\.mdx?$/i, '').toLowerCase();
   if (!expectedSlug || !stem || stem === expectedSlug) return { kind: 'none' };
   const rows = await engine.executeRaw<{ slug: string; deleted: boolean }>(
-    `SELECT slug, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id = $1 AND (slug = $2 OR source_path = $3)`,
-    [sourceId ?? 'default', stem, sourcePath],
+    `SELECT slug, deleted_at IS NOT NULL AS deleted FROM pages WHERE source_id = $1 AND (slug = $2 OR source_path = $3 OR slug = $4)`,
+    [sourceId ?? 'default', stem, sourcePath, expectedSlug],
   );
   const reachable = rows.filter(row => row.slug !== expectedSlug && slugifyPath(`${row.slug}.md`) === expectedSlug);
   const live = reachable.filter(row => !row.deleted);
+  if (live.length === 0 && rows.some(row => row.slug === expectedSlug && !row.deleted)) return { kind: 'none' };
   const pool = live.length > 0 ? live : reachable;
   if (pool.some(row => row.slug === stem)) return { kind: 'stored', slug: stem };
   const slugs = [...new Set(pool.map(row => row.slug))];
