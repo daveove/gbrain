@@ -20,6 +20,7 @@
 
 import { createHash } from 'node:crypto';
 import { effectiveLinkExtractorWatermark } from '../link-extraction-watermark.ts';
+import { quarantineFilterFragment } from '../quarantine.ts';
 import { maintenancePreflight, publishMaintenancePage } from '../persistence/prepared-maintenance.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 import { parseMarkdown, serializeMarkdown } from '../markdown.ts';
@@ -341,7 +342,7 @@ function renderNote(day: string, input: RenderInput): string {
   return lines.join('\n').trimEnd();
 }
 
-// Candidate ownership is checked before applying the shared stale/wanted-link predicate.
+// Apply ownership and the engine-sql/pages.ts stale predicate before returning any rows.
 const GENERATED_INDEXES = `FROM pages JOIN sources s ON s.id=pages.source_id
   WHERE source_id=$1 AND s.archived IS NOT TRUE AND deleted_at IS NULL
   AND (s.config @> '{"system_index":true}'::jsonb
@@ -358,19 +359,29 @@ async function dreamIndexesNeedExtract(engine: BrainEngine): Promise<boolean> {
 /** Owned origins only, including durable wanted-link target-arrival wakeups. */
 export async function dailyMemoryExtractTargets(engine: BrainEngine, onlySlugs?: string[]): Promise<string[]> {
   if (onlySlugs?.length === 0) return [];
-  const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT slug ${GENERATED_INDEXES}${onlySlugs ? ' AND slug=ANY($2::text[])' : ''} ORDER BY slug`,
-    onlySlugs ? [DAILY_MEMORY_SOURCE_ID, onlySlugs] : [DAILY_MEMORY_SOURCE_ID]);
-  if (!rows.length) return [];
-  const slugs = rows.map(row => row.slug);
-  const selected: string[] = [];
   const versionTs = await effectiveLinkExtractorWatermark(engine);
+  const selected: string[] = [];
+  // Keep the wanted-link arms equivalent to listStalePagesForExtraction.
   let afterPageId = 0;
   for (;;) {
-    const stale = await engine.listStalePagesForExtraction({ sourceId: DAILY_MEMORY_SOURCE_ID,
-      versionTs, slugs, batchSize: 100, afterPageId });
+    const stale = await engine.executeRaw<{ id: number; slug: string }>(
+      `SELECT pages.id, slug ${GENERATED_INDEXES}
+        AND ${quarantineFilterFragment('pages')}
+        AND (links_extracted_at IS NULL OR links_extracted_at < $2::timestamptz
+          OR pages.updated_at > links_extracted_at
+          OR pages.id IN (SELECT w.origin_page_id FROM wanted_links w
+            JOIN pages t ON t.source_id=w.target_source_id AND t.slug=w.target_ref AND t.deleted_at IS NULL
+            WHERE t.updated_at > w.checked_at
+          UNION SELECT w.origin_page_id FROM wanted_links w
+            JOIN pages t ON t.source_id=w.target_source_id
+              AND regexp_replace(t.slug, '^.*/', '')=w.target_ref AND t.deleted_at IS NULL
+            WHERE w.ref_kind='name' AND t.updated_at > w.checked_at))
+        AND pages.id > $3${onlySlugs ? ' AND slug=ANY($4::text[])' : ''}
+        ORDER BY pages.id LIMIT 100`,
+      onlySlugs ? [DAILY_MEMORY_SOURCE_ID, versionTs, afterPageId, onlySlugs]
+        : [DAILY_MEMORY_SOURCE_ID, versionTs, afterPageId]);
     if (!stale.length) return selected.sort();
-    selected.push(...stale.map(row => row.slug));
+    for (const row of stale) selected.push(row.slug);
     afterPageId = stale[stale.length - 1]!.id;
   }
 }
