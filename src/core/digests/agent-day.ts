@@ -58,7 +58,7 @@ const DONE_RE = /\b(merged|opened|created|posted|deployed|shipped|filed|fixed|pu
 const WAIT_RE = /(dave must(?! do:? ?nothing)|waiting on dave|needs dave|parked on dave|passkey|(?:for|from) dave'?s? (?:approval|decision|go\b|sign-?in|tap))/i;
 const NOTHING_RE = /dave must do:?\s*nothing|nothing blocked|not blocked|no blocker/i;
 const FAIL_RE = /\b(failed|failure|exit [1-9]\d?|timed out|time out|not verified|crashed|rejected|could not|cannot)\b/i;
-/** Outcome words that a negation turns around; a sentence with one has not shipped. */
+/** A negation before the completion word means the outcome has not shipped. */
 const NEGATED_RE = /\b(not|never|unable|cannot|failed|without)\b|n't\b/i;
 const SHIP_LINK_RE = /https:\/\/(?:github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+|linear\.app\/[\w-]+\/issue\/DAV-\d+)/;
 
@@ -168,9 +168,9 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
     let hasEligibleTurn = false;
     for (const t of allTurns) {
       if (t.role === 'user') {
-        const ask = askText(t.text);
         // The assistant turns that answer a meeting ask are skipped whole, also across midnight.
-        meetingThread = MEETING_RE.test(ask ?? t.text.slice(0, 4000));
+        meetingThread = MEETING_RE.test(t.text);
+        const ask = meetingThread ? null : askText(t.text);
         if (t.date === date && !meetingThread) {
           hasEligibleTurn = true;
           if (ask && ask.length >= 12) out.asked.push({ time: t.time, text: ask, session: tag });
@@ -187,13 +187,14 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
         if (line.length < 12 || line.startsWith('|')) continue;
         const bullet = line.replace(/^[-*•]\s*/, '');
         const item = { time: t.time, text: squash(bullet), session: tag };
-        // A done word counts only in a sentence that also holds the link and no negation:
-        // "I could not merge <PR>. It was not merged." ships nothing.
-        const shippedHere = bullet.split(/(?<=[.!?])\s+/).some((sentence) =>
-          SHIP_LINK_RE.test(sentence) && DONE_RE.test(sentence) && !NEGATED_RE.test(sentence));
+        // A done word counts only beside a link, with no negation before the completion.
+        const shippedHere = bullet.split(/(?<=[.!?])\s+/).some((sentence) => {
+          const done = DONE_RE.exec(sentence);
+          return done && SHIP_LINK_RE.test(sentence) && !NEGATED_RE.test(sentence.slice(0, done.index));
+        });
         if (shippedHere) out.shipped.push(item);
         if (WAIT_RE.test(bullet) && !NOTHING_RE.test(bullet)) out.waiting.push(item);
-        else if (FAIL_RE.test(bullet) && bullet.length < 400) out.failed.push(item);
+        else if (FAIL_RE.test(bullet.replace(/\b0+\s+fail(?:ed|ures?)\b/gi, '')) && bullet.length < 400) out.failed.push(item);
       }
     }
     if (hasEligibleTurn) {
