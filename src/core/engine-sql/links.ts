@@ -93,7 +93,7 @@ export async function addLink(
         endpoint_state.from_id, endpoint_state.to_id, endpoint_state.target_allowed
       FROM endpoint_state
     `)).rows as Array<{ from_exists: boolean; to_exists: boolean; from_id: number | null; to_id: number | null; target_allowed: boolean }>;
-    if (result && !result.target_allowed) throw new Error('Cross-source link target is isolated');
+    if (result && result.target_allowed === false) throw new Error('Cross-source link target is isolated');
     if (!result?.from_exists) throw new PageMissingError('addLink', 'from', from, fromSrc);
     if (!result.to_exists) throw new PageMissingError('addLink', 'to', to, toSrc);
     if (isTemporalLinkType(linkType)) {
