@@ -10,8 +10,8 @@
  * issues and GitHub pull requests they mention, each with session links.
  * Message bodies stay off the note. No new connector.
  *
- * The scan is brain-wide on purpose: this runs only from the single
- * maintenance job, which is the lane that already walks every source.
+ * The scan includes active sources unless they explicitly set federated=false.
+ * Isolated source labels, counts and work references stay on their source.
  * The note itself is one row in source `dream` (non-federated). Page
  * visibility alone is not enough: remote_private_pages can opt out of
  * private filtering, and mandatory owner-aggregate authorization protects both new dream indexes
@@ -391,6 +391,7 @@ export async function dailyMemoryExtractTargets(engine: BrainEngine, onlySlugs?:
 // Params: $1 zone, $2 day, $3 daily-memory slug, $4 daily-memory source id.
 const DAY_PAGE_SCOPE = `FROM pages JOIN sources s ON s.id=pages.source_id AND s.archived IS NOT TRUE
   WHERE deleted_at IS NULL
+    AND (s.config->>'federated') IS DISTINCT FROM 'false'
     AND COALESCE(frontmatter->>'dream_generated', '') IS DISTINCT FROM 'true'
     AND NOT (source_id = $4 AND slug = $3)
     AND COALESCE(effective_date, updated_at) >= $2::date - 2

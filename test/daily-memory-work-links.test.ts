@@ -97,6 +97,38 @@ describe('daily memory Work section', () => {
     expect(rerun.reason).toBe('unchanged');
   }, 60_000);
 
+  test('isolated sources contribute no labels, links or Work references', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config) VALUES
+        ('isolated', 'Isolated source', '{"federated":false}'::jsonb),
+        ('shared', 'Shared source', '{"federated":true}'::jsonb),
+        ('unset', 'Unset source', '{}'::jsonb)`,
+    );
+    await putPage(session('public'), 'User: work on DAV-101.');
+    for (const sourceId of ['isolated', 'shared', 'unset']) {
+      await engine.putPage('notes/fixture', {
+        type: 'note', title: `${sourceId} fixture`, compiled_truth: 'Synthetic source body.',
+        frontmatter: { date: DAY }, effective_date: new Date(`${DAY}T00:00:00Z`), effective_date_source: 'date',
+      }, { sourceId });
+    }
+    await engine.putPage(session('private'), {
+      type: 'conversation', title: 'Restricted session label',
+      compiled_truth: 'User: confidential DAV-909 and acme/private#91.',
+      frontmatter: { date: DAY }, effective_date: new Date(`${DAY}T00:00:00Z`), effective_date_source: 'date',
+    }, { sourceId: 'isolated' });
+
+    const result = await writeDailyMemoryFromSources(engine, { date: DAY, timezone: ZONE });
+    expect(result).toMatchObject({ written: true, pages: 3 });
+    const text = await note();
+    expect(text).toContain(link('public'));
+    expect(text).toContain('[[shared:notes/fixture]]');
+    expect(text).toContain('[[unset:notes/fixture]]');
+    expect(text).toContain('DAV-101');
+    for (const absent of ['isolated', 'Restricted session label', 'DAV-909', 'acme/private#91']) {
+      expect(text).not.toContain(absent);
+    }
+  }, 60_000);
+
   test('a busy day keeps the reference cap and the per-reference session cap', async () => {
     const ids = Array.from({ length: DAILY_MEMORY_WORK_LINK_CAP + 5 }, (_, i) => `DAV-${1000 + i}`);
     const shared = DAILY_MEMORY_WORK_SESSION_CAP + 2;

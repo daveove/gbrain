@@ -69,6 +69,27 @@ describe('daily memory on a day with many pages', () => {
     expect(note!.compiled_truth).not.toContain('instants/out-0');
   }, 60_000);
 
+  test('isolated sources do not fill the link cap or increase the page total', async () => {
+    await seedBigDay();
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, config)
+       VALUES ('aaa-isolated', 'Isolated source', '{"federated":false}'::jsonb)`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (source_id, slug, type, title, compiled_truth, effective_date, effective_date_source)
+       SELECT 'aaa-isolated', 'private/page-' || g, 'note', 'Restricted label ' || g, 'Restricted body.',
+         '${DAY}T00:00:00Z'::timestamptz, 'filename'
+       FROM generate_series(1, ${BULK_PAGES}) g`,
+    );
+    const result = await writeDailyMemoryFromSources(engine, { date: DAY, timezone: ZONE });
+    expect(result).toMatchObject({ written: true, pages: DAILY_MEMORY_PAGE_CAP });
+    const note = await engine.getPage(dailyMemorySlug(DAY), { sourceId: DAILY_MEMORY_SOURCE_ID });
+    expect(note!.compiled_truth).toContain(`${DAILY_MEMORY_PAGE_CAP} of ${BULK_PAGES + INSTANTS_IN_DAY.length} pages are linked.`);
+    expect(note!.compiled_truth).toContain('[[notion:export/page-00001]]');
+    expect(note!.compiled_truth).not.toContain('aaa-isolated');
+    expect(note!.compiled_truth).not.toContain('Restricted');
+  }, 60_000);
+
   test('a day under the cap lists every page with no overflow line', async () => {
     await engine.executeRaw(`INSERT INTO sources (id, name) VALUES ('notion', 'notion')`);
     for (const [i, iso] of INSTANTS_IN_DAY.entries()) {

@@ -27,6 +27,8 @@ identifiers and attribution are available in the pre-removal Git revision
 
 ### Fixed
 
+- DAV-8075: Daily-memory indexes exclude sources with `federated=false` from page labels, page counts, and Work references.
+
 - DAV-7731: This public fork runs the remaining Linux workflows on standard GitHub-hosted runners instead of unavailable Ubicloud labels. Heavy Tests keeps its nightly, manual, and label-based selection. Required test checks retain their existing runners and commands.
 - DAV-7111: the daily-memory writer no longer pages a whole day 40 rows at a time. It collects the first 40 linkable pages, then counts the day with one aggregate query. Only rows whose UTC day and zone day differ go through the frontmatter check, 1 000 rows per query. A day with 81 792 pages (2026-09-03) took about 2 000 queries and passed the 20-minute job timeout on every attempt. It now takes a constant few queries. The page list and the page total are unchanged.
 - DAV-6349: the `labeled_credential` detector (transcript import and `gbrain transcripts audit-secrets`) no longer reads the importer's own redaction marker as a credential. `**acme-example, login <REDACTED:user-pattern>**` was read as user `<REDACTED` and password `user-pattern>**`, so the audit reported a false hit. A value that starts inside a `<REDACTED…>` marker is rejected. A marker as the user half of a pair is one token, so `login <REDACTED:user-pattern> / <password>` still redacts the password.
