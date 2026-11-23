@@ -97,7 +97,7 @@ export async function reconcileSourceLinks(
         page.type, resolver, { pack: opts.pack, globalBasename: opts.globalBasename, lineGrammar,
           targetType: (slug, source) => {
             const resolved = sourcesOf.resolve({ targetSlug: slug, targetSourceId: source, linkType: '', context: '' });
-            return resolved.ok ? metadata.get(`${resolved.toSourceId}\0${slug}`)?.type : undefined;
+            return resolved.ok ? metadata.get(`${resolved.toSourceId}\0${slug}`)?.type : resolved.reason === 'isolated_target' ? null : undefined;
           } });
       for (const ref of extracted.unresolved) {
         if (isIsolatedLinkReference(ref.name, sourceId, policy.isolatedSourceIds)) continue;
@@ -159,7 +159,7 @@ export async function replaceFileLinks(engine: BrainEngine, slug: string, source
   const extracted = await extractPageLinks(slug, content, parsed.frontmatter, snapshot.page.type, resolver,
     { ...opts, skipFrontmatter: !includeFrontmatter, targetType: (targetSlug, targetSourceId) => {
       const result = resolve(slug, { targetSlug, targetSourceId, linkType: '', context: '' });
-      return result.ok ? metadata.get(`${result.toSourceId}\0${targetSlug}`)?.type : undefined;
+      return result.ok ? metadata.get(`${result.toSourceId}\0${targetSlug}`)?.type : result.reason === 'isolated_target' ? null : undefined;
     } });
   if (!extracted.attendanceComplete) return null;
   const attendance = extracted.candidates.filter(candidate => candidate.canonicalAttendance
@@ -250,12 +250,17 @@ export interface LinkSourcePolicy {
   isolatedSourceIds: ReadonlySet<string>;
 }
 
+export async function loadLinkFallbackPolicy(engine: BrainEngine) {
+  const [defaultSourceId, isolatedSourceIds] = await Promise.all([resolveLinkFallbackDefault(engine), loadIsolatedLinkSources(engine)]);
+  return { defaultSourceId, isolatedSourceIds };
+}
+
 export async function loadLinkSourcePolicy(engine: BrainEngine, sourceId: string): Promise<LinkSourcePolicy> {
-  const [source, crossSource, defaultSourceId, isolatedSourceIds] = await Promise.all([
-    fetchSource(engine, sourceId), isCrossSourceLinksEnabled(engine), resolveLinkFallbackDefault(engine), loadIsolatedLinkSources(engine),
+  const [source, crossSource, fallback] = await Promise.all([
+    fetchSource(engine, sourceId), isCrossSourceLinksEnabled(engine), loadLinkFallbackPolicy(engine),
   ]);
   return { allowCrossSource: source !== null && !source.archived && sourceAllowsOutboundCrossSourceLinks(source.config),
-    crossSource, defaultSourceId, isolatedSourceIds };
+    crossSource, ...fallback };
 }
 
 export type LinkCandidateAdmission = { ok: true; row: LinkBatchInput } | Exclude<CandidateSourceResolution, { ok: true }>;

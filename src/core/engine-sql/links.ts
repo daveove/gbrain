@@ -21,7 +21,7 @@ import { PageMissingError } from '../engine-errors.ts';
 import { QUARANTINE_FILTER_FRAGMENT } from '../quarantine.ts';
 import type { SqlExecutor } from './executor.ts';
 import type { LegacyUnscopedRead, ScopedRead } from './brands.ts';
-import { sqlFragment, trustedSql } from './fragment.ts';
+import { renderFragment, sqlFragment, trustedSql } from './fragment.ts';
 import { refreshRelationships, type RelationshipKey } from '../link-relationships.ts';
 import { isTemporalLinkType, relationshipFilterSql, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, annotateTemporalRow } from '../link-validity.ts';
 import type { LinkReadScope } from '../link-validity.ts';
@@ -107,17 +107,14 @@ export async function addLinksBatch(exec: SqlExecutor, links: LinkBatchInput[]):
     // of N parallel unnest(${arr}::text[]). The old text[] array-literal path
     // crashed Postgres ("malformed array literal") on free-text context strings
     // (calendar/Zoom lines with commas, quotes, braces, em-dashes); JSONB encodes
-    // arbitrary text safely and dodges the 65535-param cap. Binding goes through
-    // executeRawJsonb (the audited cross-engine JSONB contract) with an OBJECT
-    // wrapper { rows } — a bare top-level array through postgres.js would re-enter
-    // the same array serializer this fix exists to avoid. Row construction +
-    // NUL-stripping + exact defaulting live in buildLinkRows (shared with PGLite).
+    // arbitrary text safely and dodges the 65535-param cap. Bind the raw
+    // object wrapper { rows } through the fragment renderer, then retain
+    // the existing raw executor lane. Row construction and NUL-stripping
+    // live in buildLinkRows.
     const rows = buildLinkRows(links);
-    const insert = (target: SqlExecutor) => executeRawJsonb<RelationshipKey>(
-      target,
-      `INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, link_kind, origin_page_id, origin_field, resolution_type)
+    const statement = renderFragment(sqlFragment`INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, link_kind, origin_page_id, origin_field, resolution_type)
        SELECT f.id, t.id, v.link_type, v.context, v.link_source, v.link_kind, o.id, v.origin_field, v.resolution_type
-       FROM jsonb_to_recordset(($1::jsonb)->'rows') AS v(
+       FROM jsonb_to_recordset((${ { rows } }::jsonb)->'rows') AS v(
          from_slug text, to_slug text, link_type text, context text, link_source text,
          origin_slug text, origin_field text, from_source_id text, to_source_id text,
          origin_source_id text, link_kind text, resolution_type text
@@ -125,12 +122,10 @@ export async function addLinksBatch(exec: SqlExecutor, links: LinkBatchInput[]):
        JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
        JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
        LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
-       WHERE ${LINK_TARGET_SOURCE_FENCE_SQL}
+       WHERE ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
-       RETURNING from_page_id, to_page_id, link_type`,
-      [],
-      [{ rows }],
-    );
+       RETURNING from_page_id, to_page_id, link_type`);
+    const insert = (target: SqlExecutor) => target.executeRaw<RelationshipKey>(statement.text, statement.params);
     // Temporal relation types also refresh their relationship state in the
     // same transaction; batches of plain references skip it entirely.
     if (!rows.some(r => isTemporalLinkType(r.link_type))) return (await insert(exec)).length;

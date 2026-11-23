@@ -414,7 +414,7 @@ export const SQL_CASES: SqlCase[] = [
 
   // ── links ──
   ...variants('addLink', [
-    ['default', (e) => e.addLink(SLUG, SLUG2, 'works at', 'works_at'), [[/WITH endpoint_state/, [{ from_exists: true, to_exists: true }]]]],
+    ['default', (e) => e.addLink(SLUG, SLUG2, 'works at', 'works_at'), [[/WITH endpoint_state/, [{ from_exists: true, to_exists: true, target_allowed: true }]]]],
   ]),
   ...variants('addLinksBatch', [['default', (e) => e.addLinksBatch([{ from_slug: SLUG, to_slug: SLUG2, link_type: 'works_at' }])]]),
   ...variants('replaceDerivedLinks', [

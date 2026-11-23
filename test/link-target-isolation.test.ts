@@ -159,6 +159,41 @@ describe('DAV-8075 isolated link targets', () => {
     expect(await engine.executeRaw('SELECT target_ref, context FROM wanted_links')).toEqual([]);
   });
 
+  for (const lane of ['reconcile', 'prepare', 'db', 'stale'] as const) {
+    for (const reference of ['body', 'frontmatter'] as const) {
+      test(`${lane}: an isolated ${reference} attendee does not block the meeting's other links`, async () => {
+        await engine.setConfig('link_resolution.cross_source', 'true');
+        await engine.putPage('people/allowed-example', { type: 'person', title: 'Allowed Example', compiled_truth: 'Public attendee' });
+        const blocked = `${isolated}:${secretSlug}`;
+        await engine.putPage('meetings/mixed', {
+          type: 'meeting', title: 'Mixed meeting',
+          compiled_truth: reference === 'body' ? `Attendees: [[${blocked}]], [[people/allowed-example]]` : '',
+          frontmatter: reference === 'frontmatter' ? { attendees: [`[[${blocked}]]`, '[[people/allowed-example]]'] } : {},
+        });
+        if (lane === 'reconcile') {
+          const result = await reconcileSourceLinks(engine, 'default', { pack });
+          expect(result.ok).toBe(true);
+          expect(result.failures).toEqual([]);
+          await assertNoTargetText(result);
+        } else if (lane === 'prepare') {
+          const page = (await engine.getPage('meetings/mixed', { sourceId: 'default' }))!;
+          const prepared = await prepareAutomaticLinks(engine, page.slug, page, 'default');
+          expect(prepared.attendanceComplete).toBe(true);
+          expect((await prepared.apply(engine)).errors).toBe(0);
+        } else if (lane === 'db') {
+          await runExtract(engine, ['links', '--source', 'db', '--source-id', 'default', '--include-frontmatter']);
+        } else {
+          const result = await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true, catchUp: true,
+            includeFrontmatter: true, sourceIdFilter: 'default', slugs: ['meetings/mixed'] });
+          expect(result.skippedAttendanceIncomplete ?? 0).toBe(0);
+        }
+        expect(await storedEdges()).toMatchObject([{ from_slug: 'people/allowed-example', to_slug: 'meetings/mixed', target_source: 'default' }]);
+        await assertNoTargetText(await storedEdges());
+        expect(await engine.executeRaw('SELECT target_ref, context FROM wanted_links')).toEqual([]);
+      });
+    }
+  }
+
   test('shared SQL insertion fences every producer and emits a content-free single-link error', async () => {
     await seedOrigin();
     const row = { from_slug: 'notes/origin', from_source_id: 'default', to_slug: secretSlug,

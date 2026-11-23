@@ -1891,7 +1891,7 @@
       "addLink": {
         "default": [
           {
-            "paramCount": 10,
+            "paramCount": 13,
             "unsafeOptions": {
               "cancelFence": false,
               "prepare": true,
