@@ -78,12 +78,13 @@ export async function prepareAutomaticLinks(engine: BrainEngine, slug: string,
     { ...opts, targetType: (targetSlug, targetSourceId) => {
       const resolved = sources.resolve({ targetSlug, targetSourceId, linkType: '', context: '' });
       return resolved.ok ? (targetSlug === slug && resolved.toSourceId === sourceId ? page.type
-        : metadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type) : undefined;
+        : metadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type) : resolved.reason === 'isolated_target' ? null : undefined;
     } });
   // The rows the store keeps (#6228/#6225), so the receipt's wanted preview never names a target no page can have.
   const wanted = { producers: ['body', 'frontmatter'] as const, rows: await isWantedPagesEnabled(engine)
     ? await possibleWantedRows(engine, sourceId, collectWantedLinks({ candidates: candidates.map(retarget), frontmatterUnresolved: unresolved,
-      originSourceId: sourceId, crossSourceAllowed: sources.crossSourceAllowed, resolve: sources.resolve }))
+      originSourceId: sourceId, isolatedSourceIds: policy.isolatedSourceIds,
+      crossSourceAllowed: sources.crossSourceAllowed, resolve: sources.resolve }))
     : [] };
   let skippedCrossSource = 0;
   const rows = candidates.map(retarget).flatMap(candidate => {

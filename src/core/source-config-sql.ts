@@ -59,6 +59,14 @@ export const SOURCE_CONFIG_OBJECT_SQL = `(
     ) AS entry(key, value)
 )`;
 
+/** Callers supply fixed page aliases, never user input. */
+export function linkTargetSourceFenceSql(from: string, to: string): string {
+  return `(${from}.source_id = ${to}.source_id OR NOT EXISTS (
+    SELECT 1 FROM sources WHERE id = ${to}.source_id
+      AND (${SOURCE_CONFIG_OBJECT_SQL})->'federated' = 'false'::jsonb
+  ))`;
+}
+
 /** Paste-ready repair used by `gbrain doctor`. */
 export const REPAIR_SOURCE_CONFIG_SQL =
   `UPDATE sources SET config = ${SOURCE_CONFIG_OBJECT_SQL} ` +

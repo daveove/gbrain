@@ -44,6 +44,7 @@ import { createHash } from 'node:crypto';
 import type { BrainEngine, LinkBatchInput } from '../engine.ts';
 import { pipelined } from '../page-state/transactions.ts';
 import { isCrossSourceLinksEnabled } from '../link-extraction.ts';
+import { loadIsolatedLinkSources } from '../sources-load.ts';
 import {
   buildGazetteer, findMentionedEntities, gazetteerEntryKeys, tokenizeTitle,
   type Gazetteer, type GazetteerEntry, type GazetteerEntryKey,
@@ -56,7 +57,7 @@ import { maintenanceAttribution } from '../persistence/attribution.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
 
 /** Bump to rescan every page's mentions once (gazetteer or scanner behavior change). */
-export const MENTION_EXTRACTOR_VERSION = 5;
+export const MENTION_EXTRACTOR_VERSION = 6;
 /** Bump to re-derive every entity page's declared aliases and title subject once. */
 export const ALIAS_DERIVATION_VERSION = 4;
 
@@ -135,9 +136,9 @@ async function sourcesInScope(engine: BrainEngine, sourceId?: string): Promise<s
   return rows.map(r => r.id);
 }
 
-function policyFingerprint(types: string[], crossSource: boolean, policy: MentionPolicy): string {
+function policyFingerprint(types: string[], crossSource: boolean, policy: MentionPolicy, isolatedSourceIds: string[]): string {
   return createHash('sha256').update(JSON.stringify({
-    types, crossSource, ignore: [...policy.ignore].map(n => n.toLowerCase()).sort(),
+    types, crossSource, isolatedSourceIds, ignore: [...policy.ignore].map(n => n.toLowerCase()).sort(),
     aliasDeny: [...policy.aliasDeny].map(n => n.toLowerCase()).sort(), multiword: policy.multiwordAliases, siblings: policy.siblingMerge,
   })).digest('hex').slice(0, 16);
 }
@@ -518,7 +519,8 @@ export async function runMentionPass(engine: BrainEngine, opts: MentionPassOpts 
     return { ...result, state: 'failed', error: message, remaining: await countMentionDuePages(engine, opts.sourceId) };
   }
   const allSources = allowCrossSource ? (await sourcesInScope(engine)) : [];
-  const fingerprints = new Map<string, string>(sources.map(s => [s, policyFingerprint(types.get(s)!, allowCrossSource, policy)]));
+  const isolatedSourceIds = [...await loadIsolatedLinkSources(engine)].sort();
+  const fingerprints = new Map<string, string>(sources.map(s => [s, policyFingerprint(types.get(s)!, allowCrossSource, policy, isolatedSourceIds)]));
   const stored = new Map((await engine.executeRaw<{ source_id: string; policy_fingerprint: string | null }>(
     'SELECT source_id, policy_fingerprint FROM mention_index_status WHERE source_id = ANY($1::text[])', [sources]))
     .map(r => [r.source_id, r.policy_fingerprint]));

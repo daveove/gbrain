@@ -4288,7 +4288,7 @@
         "kind": "type",
         "name": "CandidateSourceResolution",
         "signature": [
-          "{ ok: true; fromSlug: string; fromSourceId: string; toSourceId: string; } | { ok: false; reason: \"missing_target\" | \"missing_from\" | \"cross_source\"; }"
+          "{ ok: true; fromSlug: string; fromSourceId: string; toSourceId: string; } | { ok: false; reason: \"missing_target\" | \"missing_from\" | \"cross_source\" | \"isolated_target\"; }"
         ]
       },
       {
@@ -4463,7 +4463,7 @@
         "kind": "function",
         "name": "resolveCandidateSources",
         "signature": [
-          "(c: LinkCandidate, pageSlug: string, pageSourceId: string, allSlugs: Set<string>, slugToSources: Map<string, string[]>, allowCrossSource: boolean, opts?: { crossSource?: boolean; defaultSourceId?: string; }) => CandidateSourceResolution"
+          "(c: LinkCandidate, pageSlug: string, pageSourceId: string, allSlugs: Set<string>, slugToSources: Map<string, string[]>, allowCrossSource: boolean, opts?: { crossSource?: boolean; defaultSourceId?: string; isolatedSourceIds?: ReadonlySet<string>; }) => CandidateSourceResolution"
         ]
       },
       {
@@ -4929,7 +4929,7 @@
           "onResolvedFrontmatterTarget?: ((slug: string) => void) | undefined",
           "pack?: LinkExtractionPack | null | undefined",
           "skipFrontmatter?: boolean | undefined",
-          "targetType?: ((slug: string, sourceId?: string) => string | undefined) | undefined"
+          "targetType?: ((slug: string, sourceId?: string) => string | null | undefined) | undefined"
         ],
         "name": "ExtractPageLinksOptions"
       },
@@ -5155,7 +5155,7 @@
         "kind": "function",
         "name": "extractFrontmatterLinks",
         "signature": [
-          "(slug: string, pageType: PageType, frontmatter: Record<string, unknown>, resolver: SlugResolver, globalBasename?: boolean, pack?: LinkExtractionPack | null, targetType?: (slug: string) => string | undefined, onResolvedTarget?: (slug: string) => void) => Promise<FrontmatterExtractResult>"
+          "(slug: string, pageType: PageType, frontmatter: Record<string, unknown>, resolver: SlugResolver, globalBasename?: boolean, pack?: LinkExtractionPack | null, targetType?: (slug: string, sourceId?: string) => string | null | undefined, onResolvedTarget?: (slug: string) => void) => Promise<FrontmatterExtractResult>"
         ]
       },
       {

@@ -20,6 +20,7 @@ import { targetTakesVerb } from './link-target-roles.ts';
 import { inSuppressedRange, rolePriorSuppressedRanges } from './machine-sections.ts';
 import { statedRelationTypes } from './line-grammar.ts';
 import { isValidSourceId } from './source-id.ts';
+import { maskExcludedLinkReferences } from './link-target-exclusion.ts';
 import { isDatedTimelineLine, parseInlineCitationTimelineEntries, TIMELINE_LINE_RE, TIMELINE_LINE_RE_CN } from './timeline-citations.ts';
 import { isMaterializedMarkerLine } from './timeline-marker.ts';
 import { slugifyPath, slugifySegment } from './sync.ts';
@@ -663,7 +664,8 @@ export interface ExtractPageLinksOptions {
   globalBasename?: boolean; skipFrontmatter?: boolean; pack?: LinkExtractionPack | null;
   /** Typed relation lines (core/line-grammar.ts); on unless `enabled: false`. */
   lineGrammar?: { enabled?: boolean; allowUndeclaredTypes?: boolean };
-  targetType?: (slug: string, sourceId?: string) => string | undefined;
+  /** Null excludes a policy-denied target without making meeting attendance incomplete. */
+  targetType?: (slug: string, sourceId?: string) => string | null | undefined;
   onResolvedFrontmatterTarget?: (slug: string) => void;
   /** Receives every body-link typing decision with its reasons (explainLinkType, development reports). */
   explain?: (e: LinkTypeExplanation) => void;
@@ -731,6 +733,7 @@ function makeTypeFor(content: string, pageType: PageType, opts: ExtractPageLinks
     const stated = bodyReference ? statedType(idx) : undefined; // a typed relation line wins (core/line-grammar.ts)
     if (stated && !(stated === 'attended' && pageType === 'meeting')) return decide(stated, { stated });
     const targetType = opts.targetType?.(targetSlug, sourceId);
+    if (targetType === null) return { linkType: 'mentions' };
     if (pack) {
       const packVerb = inferLinkTypeFromPack(pack, pageType as string, ctx, packBudget, targetType);
       if (packVerb && (packOwnsAttendance || packVerb !== 'attended' || pageType !== 'meeting')) {
@@ -800,6 +803,11 @@ export async function extractPageLinks(
   opts: ExtractPageLinksOptions = {},
 ): Promise<PageLinksResult> {
   const candidates: LinkCandidate[] = [];
+  const references = extractEntityRefs(content);
+  if (opts.targetType) content = maskExcludedLinkReferences(content, references, ref => {
+    const target = ref.sameDir ? resolveSameDirSlug(slug, ref) : resolveRelativeSlug(slug, ref);
+    return target != null && opts.targetType!(target.toLowerCase(), ref.sourceId ?? undefined) === null;
+  });
 
   const pack = opts.pack ?? null;
   const attendancePending = new Set<number>();
@@ -808,7 +816,7 @@ export async function extractPageLinks(
   const typeFor = makeTypeFor(content, pageType, opts, attendancePending, attendanceResolved);
 
   // 1. Markdown entity refs.
-  for (const ref of extractEntityRefs(content)) {
+  for (const ref of references) {
     // #3190: same-directory markdown link — resolve against THIS page's
     // directory (the FS path's resolveSlug does exactly this via
     // join(fileDir, target)). Slugified through the sync grammar so
@@ -913,7 +921,7 @@ export async function extractPageLinks(
         ? opts.targetType(target) === 'person' : target.startsWith('people/'));
       const uniquePerson = personTargets.length === 1;
       if (pageType === 'meeting' && opts.targetType && !uniquePerson
-        && targets.filter(target => opts.targetType!(target) !== undefined).length > 1) attendanceAmbiguous.add(idx);
+        && targets.filter(target => opts.targetType!(target) != null).length > 1) attendanceAmbiguous.add(idx);
       const authoredRef = wikilinkAuthoredRef(ref.slug, idx);
       for (const target of bareDirect) {
         const inferred = typeFor(context, target, idx);
@@ -1982,7 +1990,7 @@ export async function extractFrontmatterLinks(
   resolver: SlugResolver,
   globalBasename = false,
   pack?: LinkExtractionPack | null,
-  targetType?: (slug: string) => string | undefined,
+  targetType?: (slug: string, sourceId?: string) => string | null | undefined,
   onResolvedTarget?: (slug: string) => void,
 ): Promise<FrontmatterExtractResult> {
   const candidates: LinkCandidate[] = [];
@@ -2047,6 +2055,9 @@ export async function extractFrontmatterLinks(
         // through unchanged; the original `name` is preserved for the
         // unresolved report and edge context.
         const linkTarget = unwrapWikilink(name);
+        const colon = linkTarget.indexOf(':');
+        const sourceId = colon > 0 && isValidSourceId(linkTarget.slice(0, colon)) ? linkTarget.slice(0, colon) : undefined;
+        if ((sourceId || linkTarget.includes('/')) && targetType?.(sourceId ? linkTarget.slice(colon + 1) : linkTarget, sourceId) === null) continue;
         const canonicalAttendance = mapping.type === 'attended' && mapping.direction === 'incoming';
         let resolved = await (canonicalAttendance && resolver.resolveAttendance
           ? resolver.resolveAttendance(linkTarget, mapping.dirHint)
@@ -2072,12 +2083,14 @@ export async function extractFrontmatterLinks(
           unresolved.push({ field, name });
           continue;
         }
+        const resolvedType = targetType?.(resolved);
+        if (resolvedType === null) continue;
         onResolvedTarget?.(resolved);
         const packTargetType = packMappings.includes(mapping)
           ? pack?.link_types.find(lt => lt.name === mapping.type)?.inference?.target_type : undefined;
         const expectedType = canonicalAttendance ? 'person' : packTargetType;
-        if (expectedType && (targetType || packTargetType) && targetType?.(resolved) !== expectedType) {
-          if (targetType?.(resolved) === undefined && mapping.type === 'attended') attendanceComplete = false;
+        if (expectedType && (targetType || packTargetType) && resolvedType !== expectedType) {
+          if (resolvedType === undefined && mapping.type === 'attended') attendanceComplete = false;
           unresolved.push({ field, name, reason: 'target_type_mismatch' });
           continue;
         }
@@ -2387,41 +2400,4 @@ export async function isGlobalBasenameEnabled(engine: BrainEngine): Promise<bool
   return ['1', 'true', 'yes', 'on'].includes(normalized);
 }
 
-/**
- * Read the `link_resolution.cross_source` config flag. Defaults to FALSE
- * (opt-in only; the historical same-source-or-'default' edge gate is
- * preserved for existing brains).
- *
- * When TRUE: a wikilink whose target slug exists ONLY in other sources
- * (neither the origin page's source nor 'default') still produces an edge,
- * with `to_source_id` picked deterministically (lexicographically smallest
- * matching source). When FALSE, those candidates are dropped — but counted
- * and surfaced in the extract summary, never silent (issue #2589: the drop
- * was previously indistinguishable from an unresolved link).
- *
- * SCOPE: the DB extract paths (`extract links --source db`, `extract --stale`),
- * the mention scan (`findMentionedEntities` callers lift their guard under it),
- * and the serve-resident maintenance sweep (`sweep.ts`, #3757 — it threads the
- * same flag so its reconcile keeps the edges the CLI lanes created).
- * The FS-walk paths (dir-driven, incl. the autopilot cycle's extract phase)
- * build their slug set from the walked files of ONE source, so cross-source
- * targets aren't resolvable there; FS-walk parity is a filed follow-up.
- *
- * Resolution order (highest → lowest):
- *   1. Env var `GBRAIN_LINK_RESOLUTION_CROSS_SOURCE=1` (operator override)
- *   2. DB plane via `engine.getConfig('link_resolution.cross_source')`
- *   3. Default false
- *
- * Closes https://github.com/garrytan/gbrain/issues/2589.
- */
-export async function isCrossSourceLinksEnabled(engine: BrainEngine): Promise<boolean> {
-  const envVal = process.env.GBRAIN_LINK_RESOLUTION_CROSS_SOURCE;
-  if (envVal != null) {
-    const normalized = envVal.trim().toLowerCase();
-    return ['1', 'true', 'yes', 'on'].includes(normalized);
-  }
-  const val = await engine.getConfig('link_resolution.cross_source');
-  if (val == null) return false;
-  const normalized = val.trim().toLowerCase();
-  return ['1', 'true', 'yes', 'on'].includes(normalized);
-}
+export { isCrossSourceLinksEnabled } from './link-resolution-config.ts';

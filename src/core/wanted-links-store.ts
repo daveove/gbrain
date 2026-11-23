@@ -7,6 +7,7 @@ import type { BrainEngine } from './engine.ts';
 import { executeRawJsonb } from './sql-query.ts';
 import { sanitizeForJsonb } from './batch-rows.ts';
 import { validateSlug } from './utils.ts';
+import { SOURCE_CONFIG_OBJECT_SQL } from './source-config-sql.ts';
 
 export type WantedProducer = 'body' | 'frontmatter';
 
@@ -41,7 +42,8 @@ export async function possibleWantedRows<T extends Pick<WantedLinkInput, 'ref_ki
   const foreign = [...new Set(shaped.map(row => row.target_source_id).filter(id => id !== originSourceId))];
   if (!foreign.length) return shaped;
   const registered = new Set((await tx.executeRaw<{ id: string }>(
-    'SELECT id FROM sources WHERE id = ANY($1::text[]) ORDER BY id FOR SHARE', [foreign])).map(row => row.id));
+    `SELECT id FROM sources WHERE id = ANY($1::text[]) AND (${SOURCE_CONFIG_OBJECT_SQL})->'federated' IS DISTINCT FROM 'false'::jsonb
+      ORDER BY id FOR SHARE`, [foreign])).map(row => row.id));
   return shaped.filter(row => row.target_source_id === originSourceId || registered.has(row.target_source_id));
 }
 
@@ -128,6 +130,11 @@ export async function listWantedPages(engine: Pick<BrainEngine, 'executeRaw'>, o
         o.slug AS origin_slug, o.source_id AS origin_source_id
       FROM wanted_links w JOIN pages o ON o.id = w.origin_page_id AND o.deleted_at IS NULL
       WHERE NOT EXISTS (SELECT 1 FROM pages t WHERE t.source_id = w.target_source_id AND t.slug = w.target_ref AND t.deleted_at IS NULL)
+        AND (w.target_source_id = o.source_id OR NOT EXISTS (SELECT 1 FROM sources WHERE id = w.target_source_id
+          AND (${SOURCE_CONFIG_OBJECT_SQL})->'federated' = 'false'::jsonb))
+        AND NOT EXISTS (SELECT 1 FROM pages hidden JOIN sources ON sources.id = hidden.source_id
+          WHERE w.target_source_id = o.source_id AND hidden.slug = w.target_ref AND hidden.source_id <> o.source_id
+            AND hidden.deleted_at IS NULL AND (${SOURCE_CONFIG_OBJECT_SQL})->'federated' = 'false'::jsonb)
         ${scope}${originPrivacy}
     ), grouped AS (
       SELECT target_source_id, target_ref, min(ref_kind) AS ref_kind,

@@ -36,6 +36,7 @@ export function collectWantedLinks(input: {
   frontmatterUnresolved?: readonly UnresolvedFrontmatterRef[];
   originSourceId: string;
   crossSourceAllowed: boolean;
+  isolatedSourceIds?: ReadonlySet<string>;
   resolve: (candidate: LinkCandidate) => Resolution;
 }): WantedLinkInput[] {
   const groups = new Map<string, { first: LinkCandidate; resolved: boolean; missing: boolean }>();
@@ -58,6 +59,7 @@ export function collectWantedLinks(input: {
     const ref = first.authoredRef!;
     const targetSourceId = ref.targetSourceId ?? input.originSourceId;
     if (targetSourceId !== input.originSourceId && !input.crossSourceAllowed) continue;
+    if (targetSourceId !== input.originSourceId && input.isolatedSourceIds?.has(targetSourceId)) continue;
     add({ producer: 'body', ref_kind: ref.kind, target_source_id: targetSourceId, target_ref: ref.target,
       link_type: first.linkType, context: first.context.slice(0, 240) });
   }
@@ -70,6 +72,7 @@ export function collectWantedLinks(input: {
       targetSourceId = target.slice(0, colon);
       target = target.slice(colon + 1);
       if (targetSourceId !== input.originSourceId && !input.crossSourceAllowed) continue;
+      if (targetSourceId !== input.originSourceId && input.isolatedSourceIds?.has(targetSourceId)) continue;
     }
     const slugShaped = /^[a-z0-9][a-z0-9_-]*(\/[a-z0-9][a-z0-9._-]*)+$/.test(target);
     const ref = slugShaped ? target : normalizeBasename(target);

@@ -32,6 +32,9 @@ import { quarantineFilterFragment, isQuarantined } from '../quarantine.ts';
 import { activationSuppressedSql, pageEligibleSql } from '../eligibility/sql.ts';
 import { trustFields, type TrustFields } from '../eligibility/labels.ts';
 import type { ReadEligibility } from '../eligibility/policy.ts';
+import { linkTargetSourceFenceSql } from '../source-config-sql.ts';
+
+const LINK_TARGET_SOURCE_FENCE_SQL = linkTargetSourceFenceSql('f', 't');
 
 export const PREVIEW_CHARS = 160;
 export const GROUP_ROW_CAP = 10;
@@ -104,7 +107,8 @@ function referrersCte(scope: ReferrerScope): string {
        WHERE t.deleted_at IS NULL${targetPriv}
     ),
     refs AS MATERIALIZED (
-      SELECT DISTINCT l.from_page_id AS id FROM links l WHERE l.to_page_id IN (SELECT id FROM tgt)${linkPriv}
+      SELECT DISTINCT l.from_page_id AS id FROM links l JOIN pages f ON f.id = l.from_page_id JOIN pages t ON t.id = l.to_page_id
+       WHERE l.to_page_id IN (SELECT id FROM tgt) AND ${LINK_TARGET_SOURCE_FENCE_SQL}${linkPriv}
     ),
     typed AS MATERIALIZED (
       SELECT f.id, f.slug, f.source_id, f.type,
