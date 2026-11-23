@@ -48,7 +48,7 @@ describe('agent day-out digest', () => {
     ['cockpit-keeper', 'yoda'], ['agentworld-keeper', 'aslan'], ['svi-operator', 'aragorn'],
     ['intown-project', 'spock'], ['sales-marketing', 'scotty'], ['comms-keeper', 'mandalorian'],
     ['home-keeper', 'home-keeper'], ['delivery-keeper', 'delivery-keeper'], ['learning-keeper', 'learning-keeper'],
-  ])('attributes the current primary id %s', (id, role) => {
+  ] as const)('attributes the current primary id %s', (id, role) => {
     expect(attributeRole(`You are the persistent ${id} primary for Agentworld, the operator's first mate.`)).toBe(role);
     expect(attributeRole(`cwd: /home/operator/.local/state/agentworld-primary-worktrees/project/${id}`)).toBe(role);
     expect(attributeRole(`cwd: /home/operator/.local/state/agentworld-primary-worktrees/project/${id}/src`)).toBe(role);
