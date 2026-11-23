@@ -212,6 +212,12 @@ export function sourceAllowsOutboundCrossSourceLinks(config: unknown): boolean {
   return parsed.federated === true || parsed.system_index === true;
 }
 
+/** Explicit isolation blocks incoming links, even under the global cross-source opt-in. */
+export async function loadIsolatedLinkSources(engine: Pick<BrainEngine, 'executeRaw'>): Promise<ReadonlySet<string>> {
+  const rows = await engine.executeRaw<{ id: string; config: unknown }>('SELECT id, config FROM sources');
+  return new Set(rows.filter(row => parseSourceConfig(row.config).federated === false).map(row => row.id));
+}
+
 /**
  * Three-way federation state for display (CLI `sources list`, etc.).
  *

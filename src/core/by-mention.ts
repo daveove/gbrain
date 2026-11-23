@@ -41,6 +41,7 @@ import { isGenericEntityToken } from './entity-name-quality.ts';
 import { ALWAYS_LINKABLE_TYPES, linkableTypesFor, loadSourcePack, readMentionPolicy, type MentionPolicy, type PackTypes } from './mentions/policy.ts';
 import { siblingVerdict, type SiblingCandidate } from './mentions/siblings.ts';
 import { isShortCode } from './mentions/short-codes.ts';
+import { loadIsolatedLinkSources } from './sources-load.ts';
 
 /**
  * The four types that are always linkable, whatever the schema pack says. The
@@ -102,6 +103,7 @@ export interface GazetteerEntry {
    * binds to that canonical twin instead (see findMentionedEntities).
    */
   connector_stub?: true;
+  isolated?: true;
 }
 
 /**
@@ -122,7 +124,7 @@ export type Gazetteer = Map<string, GazetteerEntry[]>;
 export function hashGazetteer(gazetteer: Gazetteer): string {
   const entries: string[] = [];
   for (const bucket of gazetteer.values()) {
-    for (const e of bucket) entries.push(`${e.source_id}\0${e.slug}\0${e.title}\0${e.tokens.join(' ')}\0${e.matchText ?? ''}${e.caseTokens ? `\0${e.caseTokens.join(' ')}` : ''}`);
+    for (const e of bucket) entries.push(`${e.source_id}\0${e.slug}\0${e.title}\0${e.tokens.join(' ')}\0${e.matchText ?? ''}${e.caseTokens ? `\0${e.caseTokens.join(' ')}` : ''}${e.isolated ? '\0isolated' : ''}`);
   }
   // Matching semantics are part of the resume identity, not just DB contents.
   return createHash('sha256').update('shared-sibling-names-v3\n').update(entries.sort().join('\n')).digest('hex').slice(0, 8);
@@ -486,6 +488,7 @@ export async function buildGazetteer(
   const dropped = opts.dropped;
   const drop = (d: DroppedName) => { dropped?.push(d); };
   const sources = await engine.executeRaw<{ id: string }>('SELECT DISTINCT source_id AS id FROM pages WHERE deleted_at IS NULL', []);
+  const isolatedSourceIds = await loadIsolatedLinkSources(engine);
   const typesBySource = new Map<string, Set<string>>();
   const packBySource = new Map<string, PackTypes | null>();
   for (const { id } of sources) {
@@ -515,6 +518,7 @@ export async function buildGazetteer(
     const bucket = gazetteer.get(key);
     if (bucket) bucket.push(entry);
     else gazetteer.set(key, [entry]);
+    if (isolatedSourceIds.has(entry.source_id)) entry.isolated = true;
   };
   // Per source: the first token of every multi-word entity name (titles here,
   // aliases below), for the ambiguous-first-word guard on single-token aliases.
@@ -758,6 +762,7 @@ export function findMentionedEntities(
     const tok = tokens[at + k]!;
     return stripped.slice(tok.offset, tok.offset + tok.length).normalize('NFC') === t;
   });
+  const visible = (entry: GazetteerEntry) => entry.source_id === opts.fromSourceId || !entry.isolated;
 
   const out: Mention[] = [];
   const seenTargets = new Set<string>();
@@ -776,6 +781,7 @@ export function findMentionedEntities(
     let matched: GazetteerEntry | null = null;
     let matchedTokens = 0;
     for (const entry of bucket) {
+      if (!visible(entry)) continue;
       if (i + entry.tokens.length > tokens.length) continue;
       if (!hasHangulMatchBoundary(stripped, tokens, i, entry)) continue;
       if (!caseMatches(entry, i)) continue;
@@ -824,7 +830,7 @@ export function findMentionedEntities(
     // candidates and no slug match keep the stub (an honest tie).
     if (opts.allowCrossSource && matched.connector_stub) {
       const stub = matched;
-      const canonical = bucket.filter(e => !e.connector_stub && e.source_id !== stub.source_id && sameName(e, stub));
+      const canonical = bucket.filter(e => visible(e) && !e.connector_stub && e.source_id !== stub.source_id && sameName(e, stub));
       const pick = canonical.length === 1 ? canonical[0] : canonical.find(e => e.slug === stub.slug);
       if (pick && canonical.filter(e => e.slug === pick.slug).length === 1) matched = pick;
     }

@@ -11,6 +11,8 @@ import { guardEffectSource } from './effect-recovery.ts';
 import type { SqlEngine, WriteAuthority, WriteRequest } from './model.ts';
 import { excludesPrivateWrites } from './page-visibility.ts';
 import { isRemoteWantedPagesEnabled, replaceWantedLinks } from '../wanted-links.ts';
+import { lookupRefsForSlugs, resolveCandidateSources } from '../link-reconciliation.ts';
+import { loadIsolatedLinkSources } from '../sources-load.ts';
 
 /** `mcp.remote_auto_links`: unset is on; false/0/no/off (any case) turns the remote `links` effect off. */
 export async function isRemoteAutoLinksEnabled(engine: Pick<BrainEngine, 'getConfig'>): Promise<boolean> {
@@ -33,8 +35,15 @@ async function mentionTargets(engine: BrainEngine, snapshot: PageSnapshot, sourc
     makeResolver(engine, { mode: 'live', sourceId }), { skipFrontmatter: true, pack: null, globalBasename: await isGlobalBasenameEnabled(engine) });
   const targets = new Map<string, string>();
   const skipped: SkippedLinkTarget[] = [];
+  const isolatedSourceIds = await loadIsolatedLinkSources(engine);
+  const endpoints = isolatedSourceIds.size ? await lookupRefsForSlugs(engine, [page.slug, ...candidates.map(c => c.targetSlug)]) : null;
   for (const candidate of candidates) {
     if (candidate.fromSlug || candidate.targetSlug === page.slug) continue;
+    if (endpoints) {
+      const resolved = resolveCandidateSources(candidate, page.slug, sourceId, endpoints.allSlugs, endpoints.slugToSources,
+        false, { isolatedSourceIds });
+      if (!resolved.ok && resolved.reason === 'isolated_target') continue;
+    }
     if (candidate.targetSourceId && candidate.targetSourceId !== sourceId) skipped.push({ slug: candidate.targetSlug, reason: 'cross_source' });
     else if (!targets.has(candidate.targetSlug)) targets.set(candidate.targetSlug, candidate.context);
   }

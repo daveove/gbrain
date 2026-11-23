@@ -46,7 +46,7 @@ import type { BrainEngine, LinkBatchInput, TimelineBatchInput } from '../core/en
 import { isUndefinedTableError } from '../core/utils.ts';
 import type { PageType, StalePageRow } from '../core/types.ts';
 import { parseMarkdown } from '../core/markdown.ts';
-import { resolveCandidateSources, resolveLinkFallbackDefault, loadLinkPageMetadata, lookupRefsForSlugs, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, replacePageFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
+import { resolveCandidateSources, resolveLinkFallbackDefault, isIsolatedLinkReference, loadLinkPageMetadata, lookupRefsForSlugs, capturedLinkEndpoints, fileLinkOwnership, replaceFileLinks, replacePageFileLinks, type LinkPageMetadata } from '../core/link-reconciliation.ts';
 import { collectWantedLinks, isWantedPagesEnabled } from '../core/wanted-links.ts';
 import { readLineGrammarSettings, statedRelationTypes } from '../core/line-grammar.ts';
 import { effectiveLinkExtractorWatermark, linkExtractorWatermarkFor } from '../core/link-extraction-watermark.ts';
@@ -99,7 +99,7 @@ import { isQuarantined, quarantinedSlugs } from '../core/quarantine.ts';
 import { runSlidingPool } from '../core/worker-pool.ts';
 import { isAborted } from '../core/abort-check.ts';
 import { parseWorkers, resolveWorkersWithClamp } from '../core/sync-concurrency.ts';
-import { loadAllSources, sourceAllowsOutboundCrossSourceLinks } from '../core/sources-load.ts';
+import { loadAllSources, loadIsolatedLinkSources, sourceAllowsOutboundCrossSourceLinks } from '../core/sources-load.ts';
 import { plannerStatsForLinkDrain } from '../core/planner-stats.ts';
 
 // Batch size for addLinksBatch / addTimelineEntriesBatch.
@@ -1851,6 +1851,7 @@ async function extractLinksFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   // #4611: resolve the configured default source ONCE per run.
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
+  const isolatedSourceIds = await loadIsolatedLinkSources(engine);
   // v0.32.8: listAllPageRefs enumerates (slug, source_id) so we can thread
   // sourceId to getPage AND build a cross-source resolution map for link
   // disambiguation. Pre-fix used getAllSlugs() which collapsed
@@ -1968,11 +1969,11 @@ async function extractLinksFromDB(
       slug, fullContent, page.frontmatter, page.type, resolver,
       { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
         const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
-          source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+          source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds });
         return !resolved.ok ? undefined : targetSlug === slug && resolved.toSourceId === source_id ? page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
       } },
     );
-    unresolved.push(...extracted.unresolved);
+    unresolved.push(...extracted.unresolved.filter(ref => !isIsolatedLinkReference(ref.name, source_id, isolatedSourceIds)));
     if (!extracted.attendanceComplete) { skippedAttendanceIncomplete++; continue; }
 
     for (const c of extracted.candidates) {
@@ -1984,11 +1985,11 @@ async function extractLinksFromDB(
       // the #3908 crossSource flag resolves the edge instead of dropping it.
       const resolved = resolveCandidateSources(
         c, slug, source_id, allSlugs, slugToSources, federatedSourceIds.has(source_id),
-        { crossSource, defaultSourceId: linkDefaultSourceId },
+        { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds },
       );
       if (!resolved.ok) {
         if (resolved.reason === 'cross_source') skippedCrossSource++;
-        else skippedMissingTarget++;
+        else if (resolved.reason !== 'isolated_target') skippedMissingTarget++;
         continue;
       }
       const row = resolvedLinkCandidate(c, slug, source_id, resolved);
@@ -2015,9 +2016,9 @@ async function extractLinksFromDB(
     if (!dryRun) {
       try {
         const wanted = wantedPages ? collectWantedLinks({ candidates: extracted.candidates,
-          frontmatterUnresolved: includeFrontmatter ? extracted.unresolved : [], originSourceId: source_id,
+          frontmatterUnresolved: includeFrontmatter ? extracted.unresolved : [], originSourceId: source_id, isolatedSourceIds,
           crossSourceAllowed: federatedSourceIds.has(source_id) || crossSource, resolve: c => resolveCandidateSources(c, slug, source_id,
-            allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId }) }) : [];
+            allSlugs, slugToSources, federatedSourceIds.has(source_id), { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds }) }) : [];
         pendingWrites.push({ slug, source_id, item: { origin: { slug, sourceId: source_id, expectedRevision: snapshot.revision,
           sourceIncarnation: snapshot.sourceIncarnation }, links: batch, opts: { includeFrontmatter, lineGrammar: grammar,
           wanted: { producers: includeFrontmatter ? ['body', 'frontmatter'] : ['body'], rows: wanted },
@@ -2161,6 +2162,7 @@ export async function extractStaleFromDB(
   const crossSource = await isCrossSourceLinksEnabled(engine);
   // #4611: mirrors extractLinksFromDB — configured default, resolved once.
   const linkDefaultSourceId = await resolveLinkFallbackDefault(engine);
+  const isolatedSourceIds = await loadIsolatedLinkSources(engine);
   // DAV-7022: endpoint refs and type metadata for ONLY the slugs this run's stale pages
   // ask about (origins, candidate targets, targetType lookups), loaded per batch with
   // lookupRefsForSlugs — NOT listAllPageRefs() + loadLinkPageMetadata(), two reads of
@@ -2262,7 +2264,7 @@ export async function extractStaleFromDB(
             { skipFrontmatter: !includeFrontmatter, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
               asked.add(targetSlug);
               const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, page.slug,
-                page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId });
+                page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds });
               return !resolved.ok ? undefined : targetSlug === page.slug && resolved.toSourceId === page.source_id ? snapshot.page.type : targetMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type;
             } },
           );
@@ -2291,20 +2293,20 @@ export async function extractStaleFromDB(
           const r = resolveCandidateSources(
             c, page.slug, page.source_id, allSlugs, slugToSources,
             federatedSourceIds.has(page.source_id),
-            { crossSource, defaultSourceId: linkDefaultSourceId },
+            { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds },
           );
           if (!r.ok) {
             if (r.reason === 'cross_source') skippedCrossSource++;
-            else skippedMissingTarget++;
+            else if (r.reason !== 'isolated_target') skippedMissingTarget++;
             continue;
           }
           linkRows.push(resolvedLinkCandidate(c, page.slug, page.source_id, r));
         }
         const origin = { slug: page.slug, sourceId: page.source_id, expectedRevision: snapshot.revision, sourceIncarnation: snapshot.sourceIncarnation };
         const wanted = wantedEnabled ? collectWantedLinks({ candidates: extracted.candidates,
-          frontmatterUnresolved: includeFrontmatter ? extracted.unresolved : [], originSourceId: page.source_id,
+          frontmatterUnresolved: includeFrontmatter ? extracted.unresolved : [], originSourceId: page.source_id, isolatedSourceIds,
           crossSourceAllowed: federatedSourceIds.has(page.source_id) || crossSource, resolve: c => resolveCandidateSources(c, page.slug,
-            page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId }) }) : [];
+            page.source_id, allSlugs, slugToSources, federatedSourceIds.has(page.source_id), { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds }) }) : [];
         const linkOpts = { includeFrontmatter, lineGrammar: grammar, expectedEndpoints: capturedLinkEndpoints(linkRows, targetMetadata, origin),
           wanted: { producers: includeFrontmatter ? ['body', 'frontmatter'] as const : ['body'] as const, rows: wanted } };
         const stampIso = page.updated_at.getTime() >= Date.parse(versionTs) ? page.updated_at_iso : versionTs;

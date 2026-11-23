@@ -25,6 +25,9 @@ import { sqlFragment, trustedSql } from './fragment.ts';
 import { refreshRelationships, type RelationshipKey } from '../link-relationships.ts';
 import { isTemporalLinkType, relationshipFilterSql, temporalLinkJoinSql, TEMPORAL_LINK_SELECT_SQL, annotateTemporalRow } from '../link-validity.ts';
 import type { LinkReadScope } from '../link-validity.ts';
+import { linkTargetSourceFenceSql, SOURCE_CONFIG_OBJECT_SQL } from '../source-config-sql.ts';
+
+const LINK_TARGET_SOURCE_FENCE_SQL = linkTargetSourceFenceSql('f', 't');
 
 /** Bounded link reads annotate rows with relationship status (never filter) when a temporal read is requested. */
 function finishTemporal(rows: unknown[], opts?: LinkReadScope): Link[] {
@@ -69,12 +72,16 @@ export async function addLink(
         SELECT
           (SELECT id FROM pages WHERE slug = ${from} AND source_id = ${fromSrc} FOR KEY SHARE) AS from_id,
           (SELECT id FROM pages WHERE slug = ${to} AND source_id = ${toSrc} FOR KEY SHARE) AS to_id,
-          (SELECT id FROM pages WHERE slug = ${originSlug ?? null} AND source_id = ${originSrc} FOR KEY SHARE) AS origin_id
+          (SELECT id FROM pages WHERE slug = ${originSlug ?? null} AND source_id = ${originSrc} FOR KEY SHARE) AS origin_id,
+          (${fromSrc} = ${toSrc} OR NOT EXISTS (
+            SELECT 1 FROM sources WHERE id = ${toSrc}
+              AND (${trustedSql(SOURCE_CONFIG_OBJECT_SQL)})->'federated' = 'false'::jsonb
+          )) AS target_allowed
       ), upserted AS (
         INSERT INTO links (from_page_id, to_page_id, link_type, context, link_source, origin_page_id, origin_field)
         SELECT s.from_id, s.to_id, ${linkType || ''}, ${sanitizeForJsonb(context || '')}, ${src}, s.origin_id, ${originField ?? null}
         FROM endpoint_state s
-        WHERE s.from_id IS NOT NULL AND s.to_id IS NOT NULL
+        WHERE s.from_id IS NOT NULL AND s.to_id IS NOT NULL AND s.target_allowed
         ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO UPDATE SET
           context = EXCLUDED.context,
           origin_field = EXCLUDED.origin_field
@@ -83,9 +90,10 @@ export async function addLink(
       SELECT
         endpoint_state.from_id IS NOT NULL AS from_exists,
         endpoint_state.to_id IS NOT NULL AS to_exists,
-        endpoint_state.from_id, endpoint_state.to_id
+        endpoint_state.from_id, endpoint_state.to_id, endpoint_state.target_allowed
       FROM endpoint_state
-    `)).rows as Array<{ from_exists: boolean; to_exists: boolean; from_id: number | null; to_id: number | null }>;
+    `)).rows as Array<{ from_exists: boolean; to_exists: boolean; from_id: number | null; to_id: number | null; target_allowed: boolean }>;
+    if (result && !result.target_allowed) throw new Error('Cross-source link target is isolated');
     if (!result?.from_exists) throw new PageMissingError('addLink', 'from', from, fromSrc);
     if (!result.to_exists) throw new PageMissingError('addLink', 'to', to, toSrc);
     if (isTemporalLinkType(linkType)) {
@@ -117,6 +125,7 @@ export async function addLinksBatch(exec: SqlExecutor, links: LinkBatchInput[]):
        JOIN pages f ON f.slug = v.from_slug AND f.source_id = v.from_source_id
        JOIN pages t ON t.slug = v.to_slug AND t.source_id = v.to_source_id
        LEFT JOIN pages o ON o.slug = v.origin_slug AND o.source_id = v.origin_source_id
+       WHERE ${LINK_TARGET_SOURCE_FENCE_SQL}
        ON CONFLICT (from_page_id, to_page_id, link_type, link_source, origin_page_id) DO NOTHING
        RETURNING from_page_id, to_page_id, link_type`,
       [],
@@ -268,6 +277,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[]) ${trustedSql(tJoin)}
           WHERE f.slug = ${slug} AND f.source_id = ANY(${ids}::text[]) AND t.source_id = ANY(${ids}::text[])
             AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+            AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
           ORDER BY l.id
         `)).rows;
         return finish(rows);
@@ -292,6 +302,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
           LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
           WHERE f.slug = ${slug} AND f.source_id = ${opts.sourceId}
             AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+            AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
           ORDER BY l.id
         `)).rows;
         return finish(rows);
@@ -308,6 +319,7 @@ export async function getLinks(exec: ScopedRead, slug: string, opts?: LinkReadSc
         LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
         WHERE f.slug = ${slug}
           AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+          AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
         ORDER BY l.id
       `)).rows;
       return finish(rows);
@@ -336,6 +348,7 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
           LEFT JOIN pages o ON o.id = l.origin_page_id AND o.source_id = ANY(${ids}::text[]) ${trustedSql(tJoin)}
           WHERE t.slug = ${slug} AND t.source_id = ANY(${ids}::text[]) AND f.source_id = ANY(${ids}::text[])
             AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+            AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
           ORDER BY l.id
         `)).rows;
         return finish(rows);
@@ -355,6 +368,7 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
           LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
           WHERE t.slug = ${slug} AND t.source_id = ${opts.sourceId}
             AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+            AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
           ORDER BY l.id
         `)).rows;
         return finish(rows);
@@ -371,6 +385,7 @@ export async function getBacklinks(exec: ScopedRead, slug: string, opts?: LinkRe
         LEFT JOIN pages o ON o.id = l.origin_page_id ${trustedSql(tJoin)}
         WHERE t.slug = ${slug}
           AND f.deleted_at IS NULL AND t.deleted_at IS NULL ${trustedSql(privacy)}
+          AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
         ORDER BY l.id
       `)).rows;
       return finish(rows);
@@ -511,6 +526,7 @@ export async function traverseGraph(
              WHERE g.depth < ${depth}
                AND NOT (p2.id = ANY(g.visited))
                AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+               AND ${trustedSql(linkTargetSourceFenceSql('g', 'p2'))}
                ${stepScope} ${temporalWalkFilter('l', opts)}
              ORDER BY p2.slug ASC, p2.id ASC
              LIMIT ${cap})`
@@ -521,6 +537,7 @@ export async function traverseGraph(
             WHERE g.depth < ${depth}
               AND NOT (p2.id = ANY(g.visited))
               AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+              AND ${trustedSql(linkTargetSourceFenceSql('g', 'p2'))}
               ${stepScope} ${temporalWalkFilter('l', opts)}`;
     // Cycle prevention: visited array tracks page IDs already in the path.
     const rows = (await exec.run(sqlFragment`
@@ -544,7 +561,8 @@ export async function traverseGraph(
           (SELECT jsonb_agg(DISTINCT jsonb_build_object('to_slug', p3.slug, 'link_type', l2.link_type))
            FROM links l2
            JOIN pages p3 ON p3.id = l2.to_page_id
-           WHERE l2.from_page_id = g.id AND p3.deleted_at IS NULL ${privacy('p3', 'l2')} ${aggScope} ${temporalWalkFilter('l2', opts)}),
+           WHERE l2.from_page_id = g.id AND p3.deleted_at IS NULL ${privacy('p3', 'l2')} ${aggScope} ${temporalWalkFilter('l2', opts)}
+             AND ${trustedSql(linkTargetSourceFenceSql('g', 'p3'))}),
           '[]'::jsonb
         ) as links
       FROM (SELECT DISTINCT id, slug, source_id, title, type, depth
@@ -625,6 +643,7 @@ export async function traversePathsDetailed(
           WHERE w.depth + 1 < ${depth}
             AND NOT (p2.id = ANY(w.visited))
             AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+            AND ${trustedSql(linkTargetSourceFenceSql('w', 'p2'))}
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
             ${stepScope}
         ),
@@ -639,6 +658,7 @@ export async function traversePathsDetailed(
         JOIN pages p2 ON p2.id = l.to_page_id
         WHERE w.depth < ${depth}
           AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+          AND ${trustedSql(linkTargetSourceFenceSql('w', 'p2'))}
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
           ${stepScope}
         ORDER BY depth, from_slug, to_slug, from_source_id, to_source_id
@@ -657,6 +677,7 @@ export async function traversePathsDetailed(
           WHERE w.depth + 1 < ${depth}
             AND NOT (p2.id = ANY(w.visited))
             AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+            AND ${trustedSql(linkTargetSourceFenceSql('p2', 'w'))}
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
             ${stepScope}
         ),
@@ -671,6 +692,7 @@ export async function traversePathsDetailed(
         JOIN pages p2 ON p2.id = l.from_page_id
         WHERE w.depth < ${depth}
           AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+          AND ${trustedSql(linkTargetSourceFenceSql('p2', 'w'))}
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
           ${stepScope}
         ORDER BY depth, from_slug, to_slug, from_source_id, to_source_id
@@ -686,9 +708,12 @@ export async function traversePathsDetailed(
           FROM walk w
           JOIN links l ON (l.from_page_id = w.id OR l.to_page_id = w.id)
           JOIN pages p2 ON p2.id = CASE WHEN l.from_page_id = w.id THEN l.to_page_id ELSE l.from_page_id END
+          JOIN pages f ON f.id = l.from_page_id
+          JOIN pages t ON t.id = l.to_page_id
           WHERE w.depth + 1 < ${depth}
             AND NOT (p2.id = ANY(w.visited))
             AND p2.deleted_at IS NULL ${privacy('p2', 'l')}
+            AND ${trustedSql(LINK_TARGET_SOURCE_FENCE_SQL)}
             AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
             ${stepScope}
         ),
@@ -705,6 +730,7 @@ export async function traversePathsDetailed(
         WHERE w.depth < ${depth}
           AND pf.deleted_at IS NULL ${privacy('pf', 'l')}
           AND pt.deleted_at IS NULL ${privacy('pt')}
+          AND ${trustedSql(linkTargetSourceFenceSql('pf', 'pt'))}
           AND (${!linkTypeMatches} OR l.link_type = ${linkType ?? ''}) ${temporalWalkFilter('l', opts)}
           ${pfScope}
           ${ptScope}

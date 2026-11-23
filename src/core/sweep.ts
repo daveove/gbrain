@@ -55,6 +55,7 @@ import type { FactsBackstopCtx } from './facts/backstop.ts';
 import type { CapabilityReport } from './capability.ts';
 import { maintenanceTransaction } from './persistence/attribution.ts';
 import { managedPersistenceEnabled } from './persistence/ownership.ts';
+import { fetchSource, loadIsolatedLinkSources, sourceAllowsOutboundCrossSourceLinks } from './sources-load.ts';
 
 /** Delay before the serve-startup sweep fires (post-connect settle). */
 export const STARTUP_SWEEP_DELAY_MS = 3_000;
@@ -454,16 +455,16 @@ async function runLinksTimelinePass(
     // isolated source must not push cross-source edges. Single-row fetchSource
     // (not loadAllSources) keeps the sweep's bounded-cost discipline; a missing
     // sources row fails closed to isolated.
-    const { fetchSource, sourceAllowsOutboundCrossSourceLinks } = await import('./sources-load.ts');
     const sourceRow = await fetchSource(engine, sourceId);
     const allowCrossSource = sourceRow !== null && sourceAllowsOutboundCrossSourceLinks(sourceRow.config);
     // #3757: thread the same `link_resolution.cross_source` opt-in (#2589) and
     // configured default source (#4611) the CLI extract lanes pass. Without
     // them the sweep dropped every edge into a non-default source AND its
     // reconcile below deleted the ones `extract links --source db` created.
-    const [crossSource, linkDefaultSourceId] = await Promise.all([
+    const [crossSource, linkDefaultSourceId, isolatedSourceIds] = await Promise.all([
       isCrossSourceLinksEnabled(engine),
       resolveLinkFallbackDefault(engine),
+      loadIsolatedLinkSources(engine),
     ]);
     let crossSourceDrops = 0;
     for (const { slug } of pageCandidates) {
@@ -471,7 +472,7 @@ async function runLinksTimelinePass(
       const { candidates, attendanceComplete } = await extractPageLinks(slug, `${page.compiled_truth}\n${page.timeline}`, page.frontmatter,
         page.type, resolver, { skipFrontmatter: true, globalBasename, pack, lineGrammar, targetType: (targetSlug, targetSourceId) => {
           const resolved = resolveCandidateSources({ targetSlug, targetSourceId, linkType: '', context: '' }, slug,
-            sourceId, allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId });
+            sourceId, allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds });
           return resolved.ok ? endpointMetadata.get(`${resolved.toSourceId}\0${targetSlug}`)?.type : undefined;
         } });
       if (!attendanceComplete) {
@@ -480,9 +481,9 @@ async function runLinksTimelinePass(
         continue;
       }
       if (wantedEnabled) {
-        wantedBySlug.set(slug, collectWantedLinks({ candidates, originSourceId: sourceId,
+        wantedBySlug.set(slug, collectWantedLinks({ candidates, originSourceId: sourceId, isolatedSourceIds,
           crossSourceAllowed: allowCrossSource || crossSource, resolve: c => resolveCandidateSources(c, slug, sourceId,
-            allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId }) }));
+            allSlugs, slugToSources, allowCrossSource, { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds }) }));
       }
       for (const c of candidates) {
         // #2589: a cross_source drop here means the target exists only in
@@ -490,7 +491,7 @@ async function runLinksTimelinePass(
         // skip ledger exactly like the extract paths count it.
         const resolved = resolveCandidateSources(
           c, slug, sourceId, allSlugs, slugToSources, allowCrossSource,
-          { crossSource, defaultSourceId: linkDefaultSourceId },
+          { crossSource, defaultSourceId: linkDefaultSourceId, isolatedSourceIds },
         );
         if (!resolved.ok) {
           if (resolved.reason === 'cross_source') crossSourceDrops++;

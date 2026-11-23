@@ -1,7 +1,7 @@
 import type { BrainEngine, LinkBatchInput } from './engine.ts';
 import { extractPageLinks, unwrapWikilink, resolvedLinkCandidate,
   isCrossSourceLinksEnabled, type LinkCandidate, type LinkExtractionPack, type SlugResolver } from './link-extraction.ts';
-import { fetchSource, sourceAllowsOutboundCrossSourceLinks } from './sources-load.ts';
+import { fetchSource, loadIsolatedLinkSources, sourceAllowsOutboundCrossSourceLinks } from './sources-load.ts';
 import { parseMarkdown } from './markdown.ts';
 import { isValidSourceId } from './source-id.ts';
 import { buildSourceLocalReferenceIndex } from './source-local-reference-index.ts';
@@ -100,6 +100,7 @@ export async function reconcileSourceLinks(
             return resolved.ok ? metadata.get(`${resolved.toSourceId}\0${slug}`)?.type : undefined;
           } });
       for (const ref of extracted.unresolved) {
+        if (isIsolatedLinkReference(ref.name, sourceId, policy.isolatedSourceIds)) continue;
         const target = unwrapWikilink(ref.name);
         const qualifier = target.split(':')[0];
         const foreign = target.includes(':') && isValidSourceId(qualifier) && qualifier !== sourceId;
@@ -114,12 +115,14 @@ export async function reconcileSourceLinks(
       for (const candidate of extracted.candidates) {
         const admitted = sourcesOf.admit(candidate);
         if (admitted.ok) { rows.push(admitted.row); continue; }
+        if (admitted.reason === 'isolated_target') continue;
         const crossSource = admitted.reason === 'cross_source';
         result.unresolved.push({ originSlug, reason: crossSource ? 'cross_source' : 'missing_target',
           target: crossSource && candidate.targetSourceId ? `${candidate.targetSourceId}:${candidate.targetSlug}` : candidate.targetSlug });
       }
       const wanted = wantedEnabled ? collectWantedLinks({ candidates: extracted.candidates, frontmatterUnresolved: extracted.unresolved,
-        originSourceId: sourceId, crossSourceAllowed: sourcesOf.crossSourceAllowed, resolve: sourcesOf.resolve }) : [];
+        originSourceId: sourceId, isolatedSourceIds: policy.isolatedSourceIds,
+        crossSourceAllowed: sourcesOf.crossSourceAllowed, resolve: sourcesOf.resolve }) : [];
       let written: { created: number; removed: number };
       try {
         written = await engine.replaceDerivedLinks({ slug: page.slug, sourceId,
@@ -240,13 +243,19 @@ export function indexLinkSources(pages: ReadonlyArray<{ slug: string; source_id:
   return { allSlugs, slugToSources };
 }
 
-export interface LinkSourcePolicy { allowCrossSource: boolean; crossSource: boolean; defaultSourceId: string }
+export interface LinkSourcePolicy {
+  allowCrossSource: boolean;
+  crossSource: boolean;
+  defaultSourceId: string;
+  isolatedSourceIds: ReadonlySet<string>;
+}
 
 export async function loadLinkSourcePolicy(engine: BrainEngine, sourceId: string): Promise<LinkSourcePolicy> {
-  const [source, crossSource, defaultSourceId] = await Promise.all([
-    fetchSource(engine, sourceId), isCrossSourceLinksEnabled(engine), resolveLinkFallbackDefault(engine),
+  const [source, crossSource, defaultSourceId, isolatedSourceIds] = await Promise.all([
+    fetchSource(engine, sourceId), isCrossSourceLinksEnabled(engine), resolveLinkFallbackDefault(engine), loadIsolatedLinkSources(engine),
   ]);
-  return { allowCrossSource: source !== null && !source.archived && sourceAllowsOutboundCrossSourceLinks(source.config), crossSource, defaultSourceId };
+  return { allowCrossSource: source !== null && !source.archived && sourceAllowsOutboundCrossSourceLinks(source.config),
+    crossSource, defaultSourceId, isolatedSourceIds };
 }
 
 export type LinkCandidateAdmission = { ok: true; row: LinkBatchInput } | Exclude<CandidateSourceResolution, { ok: true }>;
@@ -338,7 +347,7 @@ export function capturedLinkEndpoints(links: LinkBatchInput[], metadata: Readonl
  */
 export type CandidateSourceResolution =
   | { ok: true; fromSlug: string; fromSourceId: string; toSourceId: string }
-  | { ok: false; reason: 'missing_target' | 'missing_from' | 'cross_source' };
+  | { ok: false; reason: 'missing_target' | 'missing_from' | 'cross_source' | 'isolated_target' };
 
 /**
  * #4611: resolve the source id the cross-source link fallback compares
@@ -359,6 +368,13 @@ export async function resolveLinkFallbackDefault(
   return 'default';
 }
 
+export function isIsolatedLinkReference(name: string, originSourceId: string, isolatedSourceIds: ReadonlySet<string>): boolean {
+  const target = unwrapWikilink(name);
+  const colon = target.indexOf(':');
+  const sourceId = target.slice(0, colon);
+  return colon > 0 && sourceId !== originSourceId && isolatedSourceIds.has(sourceId);
+}
+
 export function resolveCandidateSources(
   c: LinkCandidate,
   pageSlug: string,
@@ -366,13 +382,19 @@ export function resolveCandidateSources(
   allSlugs: Set<string>,
   slugToSources: Map<string, string[]>,
   allowCrossSource: boolean,
-  opts: { crossSource?: boolean; defaultSourceId?: string } = {},
+  opts: { crossSource?: boolean; defaultSourceId?: string; isolatedSourceIds?: ReadonlySet<string> } = {},
 ): CandidateSourceResolution {
   const fromSlug = c.fromSlug ?? pageSlug;
+  const isolated = (sourceId: string) => sourceId !== pageSourceId && opts.isolatedSourceIds?.has(sourceId);
+  if (c.targetSourceId && isolated(c.targetSourceId)) return { ok: false, reason: 'isolated_target' };
   if (!allSlugs.has(c.targetSlug)) return { ok: false, reason: 'missing_target' };
   if (!allSlugs.has(fromSlug)) return { ok: false, reason: 'missing_from' };
   const fromSources = slugToSources.get(fromSlug) ?? [];
-  const targetSources = slugToSources.get(c.targetSlug) ?? [];
+  let targetSources = slugToSources.get(c.targetSlug) ?? [];
+  if (targetSources.some(isolated)) {
+    targetSources = targetSources.filter(sourceId => !isolated(sourceId));
+    if (!targetSources.length) return { ok: false, reason: 'isolated_target' };
+  }
   if (c.targetSourceId) {
     if (!targetSources.includes(c.targetSourceId)) return { ok: false, reason: 'missing_target' };
     if (!fromSources.includes(pageSourceId)) return { ok: false, reason: 'missing_from' };
@@ -391,6 +413,7 @@ export function resolveCandidateSources(
   const defaultSourceId = opts.defaultSourceId ?? 'default';
   const fromSourceId = fromSources.includes(pageSourceId) ? pageSourceId
     : (fromSources.includes(defaultSourceId) ? defaultSourceId : fromSources[0]);
+  if (isolated(fromSourceId)) return { ok: false, reason: 'isolated_target' };
   let toSourceId: string;
   if (targetSources.includes(fromSourceId)) {
     toSourceId = fromSourceId;

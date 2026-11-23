@@ -83,7 +83,8 @@ export async function prepareAutomaticLinks(engine: BrainEngine, slug: string,
   // The rows the store keeps (#6228/#6225), so the receipt's wanted preview never names a target no page can have.
   const wanted = { producers: ['body', 'frontmatter'] as const, rows: await isWantedPagesEnabled(engine)
     ? await possibleWantedRows(engine, sourceId, collectWantedLinks({ candidates: candidates.map(retarget), frontmatterUnresolved: unresolved,
-      originSourceId: sourceId, crossSourceAllowed: sources.crossSourceAllowed, resolve: sources.resolve }))
+      originSourceId: sourceId, isolatedSourceIds: policy.isolatedSourceIds,
+      crossSourceAllowed: sources.crossSourceAllowed, resolve: sources.resolve }))
     : [] };
   let skippedCrossSource = 0;
   const rows = candidates.map(retarget).flatMap(candidate => {
