@@ -1,8 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import {
   AGENT_ROLES, agentDaySlug, attributeRole, askText, buildRoleDay, dayStartUtc, renderRoleDay, splitTurns,
 } from '../src/core/digests/agent-day.ts';
-import { buildAgentDayPages, groupSessions, partNumber } from '../scripts/write-agent-day-digests.ts';
+import { buildAgentDayPages, groupSessions, partNumber, putPage, readLocalAgentSessions } from '../scripts/write-agent-day-digests.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -39,6 +42,28 @@ describe('agent day-out digest', () => {
     expect(attributeRole('worktree /x/aw-spock-abc123 branch')).toBe('spock');
     expect(attributeRole('You are Gandalf, the Buzz agent for sales')).toBe('scotty');
     expect(attributeRole('You are the operator\'s OMP agent.')).toBeNull();
+  });
+
+  test.each([
+    ['cockpit-keeper', 'yoda'], ['agentworld-keeper', 'aslan'], ['svi-operator', 'aragorn'],
+    ['intown-project', 'spock'], ['sales-marketing', 'scotty'], ['comms-keeper', 'mandalorian'],
+    ['home-keeper', 'home-keeper'], ['delivery-keeper', 'delivery-keeper'], ['learning-keeper', 'learning-keeper'],
+  ])('attributes the current primary id %s', (id, role) => {
+    expect(attributeRole(`You are the persistent ${id} primary for Agentworld, the operator's first mate.`)).toBe(role);
+    expect(attributeRole(`cwd: /home/operator/.local/state/agentworld-primary-worktrees/project/${id}`)).toBe(role);
+    expect(attributeRole(`cwd: /home/operator/.local/state/agentworld-primary-worktrees/project/${id}/src`)).toBe(role);
+    expect(attributeRole(`cwd: /home/operator/.herdr/worktrees/project/aw-${id}-abc123`)).toBe(role);
+    expect(attributeRole(`cwd: /home/operator/.herdr/worktrees/project/aw-primary-${id}`)).toBe(role);
+  });
+
+  test('explicit identity wins over another primary worktree in the session', () => {
+    const path = '/home/operator/agentworld-primary-worktrees/cockpit/cockpit-keeper';
+    expect(attributeRole(`You are the persistent svi-operator primary for Agentworld.\n${path}`)).toBe('aragorn');
+    expect(attributeRole(`reporting to Aragorn\n${path}`)).toBe('aragorn');
+    expect(attributeRole(`You are Gandalf, the Buzz agent\n${path}`)).toBe('scotty');
+    expect(attributeRole('You are the persistent unknown-keeper primary for Agentworld.')).toBeNull();
+    expect(attributeRole('/agentworld-primary-worktrees/project/cockpit-keeper-extra')).toBeNull();
+    expect(attributeRole('We discussed cockpit-keeper and sales-marketing.')).toBeNull();
   });
 
   test('takes the Buzz event content, not the prompt boilerplate', () => {
@@ -239,6 +264,93 @@ describe('agent day-out digest day boundaries (DAV-7417)', () => {
   });
 });
 
+describe('agent day-out CLI writes (DAV-7417)', () => {
+  function fakeCli(firstCode: number, firstOutput = '', firstError = '', alwaysFail = false) {
+    const root = mkdtempSync(join(tmpdir(), 'agent-day-cli-'));
+    const statePath = join(root, 'state.json');
+    const cli = join(root, 'cli.ts');
+    const optionsUrl = new URL('../src/core/cli-options.ts', import.meta.url).href;
+    writeFileSync(cli, `
+import { parseGlobalFlags } from ${JSON.stringify(optionsUrl)};
+const args = process.argv.slice(2);
+const { cliOpts } = parseGlobalFlags(args);
+const path = ${JSON.stringify(statePath)};
+const state = await Bun.file(path).exists() ? await Bun.file(path).json() : { calls: [], writes: [] };
+const content = await Bun.stdin.text();
+const requestId = args[args.indexOf('--request-id') + 1];
+state.calls.push({ args, requestId, content, timeoutMs: cliOpts.timeoutMs });
+if ((cliOpts.timeoutMs ?? 180000) < 240000) {
+  await Bun.write(path, JSON.stringify(state));
+  console.error('context timed out at the old default');
+  process.exit(124);
+}
+if (!state.writes.some(write => write.requestId === requestId)) state.writes.push({ requestId, content });
+await Bun.write(path, JSON.stringify(state));
+if (state.calls.length === 1 || ${alwaysFail}) {
+  console.log(${JSON.stringify(firstOutput)});
+  console.error(${JSON.stringify(firstError)});
+  process.exit(${firstCode});
+}
+console.log('committed');
+`);
+    return {
+      cli,
+      state: () => JSON.parse(readFileSync(statePath, 'utf8')) as {
+        calls: { args: string[]; requestId: string; content: string; timeoutMs: number }[];
+        writes: { requestId: string; content: string }[];
+      },
+      cleanup: () => rmSync(root, { recursive: true, force: true }),
+    };
+  }
+
+  test('a simulated 240-second put exceeds the old default and succeeds', async () => {
+    const cli = fakeCli(0);
+    try {
+      await putPage('digests/agent-day/2026-11-23/yoda', 'synthetic private page', cli.cli);
+      const state = cli.state();
+      expect(state.calls).toHaveLength(1);
+      expect(state.calls[0].timeoutMs).toBe(360_000);
+      expect(state.calls[0].args).toContain('--force');
+      expect(state.calls[0].args[state.calls[0].args.indexOf('--wait') + 1]).toBe('300');
+      expect(state.writes).toHaveLength(1);
+    } finally { cli.cleanup(); }
+  });
+
+  test.each([
+    [124, '', 'context timed out'],
+    [10, 'write_pending', ''],
+    [0, '{"status":"write_pending"}', ''],
+    [1, '', 'Request timed out'],
+  ] as const)('replays one request after exit %i and writes once', async (code, out, err) => {
+    const cli = fakeCli(code, out, err);
+    try {
+      await putPage('digests/agent-day/2026-11-23/yoda', 'synthetic private page', cli.cli);
+      const state = cli.state();
+      expect(state.calls).toHaveLength(2);
+      expect(state.calls[0].requestId).toMatch(/^[0-9a-f-]{36}$/);
+      expect(state.calls[0]).toEqual(state.calls[1]);
+      expect(state.writes).toHaveLength(1);
+    } finally { cli.cleanup(); }
+  });
+
+  test('does not retry an unrelated CLI error', async () => {
+    const cli = fakeCli(1, '', 'invalid_params');
+    try {
+      await expect(putPage('digests/agent-day/2026-11-23/yoda', 'synthetic private page', cli.cli)).rejects.toThrow('invalid_params');
+      expect(cli.state().calls).toHaveLength(1);
+    } finally { cli.cleanup(); }
+  });
+
+  test.each([10, 124])('stops after one retry of exit %i', async code => {
+    const cli = fakeCli(code, '', 'still pending or timed out', true);
+    try {
+      await expect(putPage('digests/agent-day/2026-11-23/yoda', 'synthetic private page', cli.cli)).rejects.toThrow(`exited ${code}`);
+      expect(cli.state().calls).toHaveLength(2);
+      expect(cli.state().writes).toHaveLength(1);
+    } finally { cli.cleanup(); }
+  });
+});
+
 describe('agent day-out discovery (DAV-7417)', () => {
   let engine: PGLiteEngine, version: string | null;
   beforeAll(async () => {
@@ -259,6 +371,91 @@ describe('agent day-out discovery (DAV-7417)', () => {
     });
     await engine.executeRaw('UPDATE pages SET updated_at=$1::timestamptz WHERE source_id=$2 AND slug=$3', [updatedAt, 'default', slug]);
   };
+
+  test('builds private pages for current primaries and excludes their meeting threads', async () => {
+    const ids = ['cockpit-keeper', 'agentworld-keeper', 'svi-operator', 'intown-project', 'sales-marketing',
+      'comms-keeper', 'home-keeper', 'delivery-keeper', 'learning-keeper'];
+    for (const id of ids) {
+      await seed(`conversations/sessions/2026-11-23-omp-${id}`, [
+        `**User** (2026-11-23 1:00 AM): You are the persistent ${id} primary for Agentworld.`,
+        '**Assistant** (2026-11-23 1:05 AM): I merged https://github.com/acme-example/brain-example/pull/9 for the synthetic build.',
+        '**User** (2026-11-23 1:10 AM): Summarize the Circleback meeting from Pocket.',
+        '**Assistant** (2026-11-23 1:15 AM): I opened https://github.com/acme-example/brain-example/pull/10 from that private meeting.',
+      ].join('\n'), id, '2026-11-23T10:00:00Z');
+    }
+    const built = await buildAgentDayPages(engine, '2026-11-23', 'Asia/Manila');
+    expect(built.unattributed).toBe(0);
+    expect(built.pages.map(page => page.role)).toEqual([...AGENT_ROLES]);
+    for (const page of built.pages) {
+      expect(page.sessions).toBe(1);
+      expect(page.content).toContain('visibility: private');
+      expect(page.content).toContain('pull/9');
+      expect(page.content).not.toMatch(/Circleback|Pocket|pull\/10/);
+    }
+  });
+
+  test('reads local turns in memory, filters Manila days, redacts secrets and merges captured duplicates', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-day-local-'));
+    const secret = 'synthetic' + 'Ab3xY7qR9z'.repeat(3);
+    const makeSession = (file: string, id: string, turns: [string, string, string][]) => {
+      mkdirSync(dirname(file), { recursive: true });
+      const lines = [
+        { type: 'session', version: 3, id, timestamp: '2026-11-22T15:00:00Z', cwd: '/home/operator/project' },
+        ...turns.map(([role, timestamp, text]) => ({
+          type: 'message', timestamp, message: { role, content: [{ type: 'text', text }] },
+        })),
+      ];
+      writeFileSync(file, lines.map(line => JSON.stringify(line)).join('\n') + '\n');
+      utimesSync(file, new Date('2026-11-24T10:00:00Z'), new Date('2026-11-24T10:00:00Z'));
+    };
+    try {
+      const primary = join(root, 'agentworld/cockpit-keeper/primary.jsonl');
+      makeSession(primary, 'local-yoda', [
+        ['user', '2026-11-22T15:00:00Z', 'Fix the synthetic build, reporting to Spock.'],
+        ['assistant', '2026-11-22T15:59:00Z', 'I opened https://github.com/acme-example/brain-example/pull/1 before the Manila day.'],
+        ['assistant', '2026-11-22T16:01:00Z', `I merged https://github.com/acme-example/brain-example/pull/2 with Bearer ${secret}.`],
+        ['user', '2026-11-23T15:55:00Z', 'Summarize the Pocket meeting.'],
+        ['assistant', '2026-11-23T15:56:00Z', 'I opened https://github.com/acme-example/brain-example/pull/3 from that private thread.'],
+        ['assistant', '2026-11-23T16:01:00Z', 'I opened https://github.com/acme-example/brain-example/pull/4 after the Manila day.'],
+      ]);
+      makeSession(join(root, 'agentworld/agentworld-keeper/meeting.jsonl'), 'local-aslan', [
+        ['user', '2026-11-22T15:59:00Z', 'Summarize the Circleback meeting.'],
+        ['assistant', '2026-11-22T16:05:00Z', 'I opened https://github.com/acme-example/brain-example/pull/5 from the private meeting.'],
+        ['user', '2026-11-22T16:10:00Z', 'Fix the synthetic independent build.'],
+        ['assistant', '2026-11-22T16:11:00Z', 'I opened https://github.com/acme-example/brain-example/pull/6 for the independent build.'],
+      ]);
+      makeSession(join(root, '-project/worker.jsonl'), 'local-worker', [
+        ['user', '2026-11-22T16:10:00Z', 'You are a worker reporting to Aragorn. Fix the synthetic build.'],
+        ['assistant', '2026-11-22T16:11:00Z', 'I opened https://github.com/acme-example/brain-example/pull/7 for the worker build.'],
+      ]);
+      makeSession(join(root, '-project/worker/Child.jsonl'), 'excluded-child', [
+        ['user', '2026-11-22T16:10:00Z', 'You are a worker reporting to Aragorn. Exclude this delegated session.'],
+      ]);
+      const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { root, patterns: [] });
+      expect(local).toHaveLength(3);
+      expect(local.find(session => session.sessionId === 'local-yoda')?.role).toBe('yoda');
+      expect(local.map(session => session.text).join('\n')).not.toContain(secret);
+      const captured = 'conversations/sessions/2026-11-22-omp-synthetic';
+      await seed(captured, '**User** (2026-11-22 4:01 PM): You are Spock, the Buzz agent.', 'local-yoda', '2026-11-23T10:00:00Z');
+      const before = await engine.listPages({ slugPrefix: 'conversations/sessions/' });
+      const built = await buildAgentDayPages(engine, '2026-11-23', 'Asia/Manila', local);
+      expect(built.pages.map(page => [page.role, page.sessions])).toEqual([['yoda', 1], ['aslan', 1], ['aragorn', 1]]);
+      const yoda = built.pages.find(page => page.role === 'yoda')!.content;
+      expect(yoda).toContain('pull/2');
+      expect(yoda).toContain('<REDACTED:bearer>');
+      expect(yoda).toContain(captured);
+      expect(yoda).toContain('file://');
+      expect(yoda).not.toMatch(/pull\/[134]|Pocket/);
+      const aslan = built.pages.find(page => page.role === 'aslan')!.content;
+      expect(aslan).toContain('pull/6');
+      expect(aslan).not.toMatch(/pull\/5|Circleback|private meeting/);
+      expect(built.pages.every(page => page.content.includes('visibility: private'))).toBe(true);
+      expect(await engine.listPages({ slugPrefix: 'conversations/sessions/' })).toEqual(before);
+      const nextDay = await readLocalAgentSessions('2026-11-24', 'Asia/Manila', { root, patterns: [] });
+      const nextBuilt = await buildAgentDayPages(engine, '2026-11-24', 'Asia/Manila', nextDay);
+      expect(nextBuilt.pages).toHaveLength(0);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 
   test('finds a session that started the day before by its updated pages, and reads every part', async () => {
     // Slug date 28 Oct (UTC start); part 1 holds the prompt, part 2 holds 29 Oct turns.
