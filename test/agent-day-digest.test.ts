@@ -18,9 +18,9 @@ const BUZZ_PROMPT = [
 
 const session = [
   `**User** (2026-10-29 2:02 PM): <base>\n${BUZZ_PROMPT}`,
-  '**Assistant** (2026-10-29 2:30 PM): I opened draft PR https://github.com/daveove/gbrain/pull/56 for https://linear.app/daveove/issue/DAV-7404.',
-  '**Assistant** (2026-10-29 2:31 PM): Dave must do: approve the passkey tap.',
-  '**Assistant** (2026-10-29 2:32 PM): What Dave must do: nothing.',
+  '**Assistant** (2026-10-29 2:30 PM): I opened draft PR https://github.com/acme-example/brain-example/pull/56 for https://linear.app/acme-example/issue/DAV-1234.',
+  '**Assistant** (2026-10-29 2:31 PM): The operator must approve the passkey tap.',
+  '**Assistant** (2026-10-29 2:32 PM): No passkey is required; no blocker.',
   '**Assistant** (2026-10-29 2:33 PM): The nightly run failed with exit 1 on the codex seat.',
   '**Assistant** (2026-10-28 11:59 PM): An older day line that failed.',
 ].join('\n');
@@ -38,7 +38,7 @@ describe('agent day-out digest', () => {
     expect(attributeRole('native OMP task worker reporting to Aragorn (svi-operator)')).toBe('aragorn');
     expect(attributeRole('worktree /x/aw-spock-abc123 branch')).toBe('spock');
     expect(attributeRole('You are Gandalf, the Buzz agent for sales')).toBe('scotty');
-    expect(attributeRole('You are Dave\'s OMP agent.')).toBeNull();
+    expect(attributeRole('You are the operator\'s OMP agent.')).toBeNull();
   });
 
   test('takes the Buzz event content, not the prompt boilerplate', () => {
@@ -47,14 +47,25 @@ describe('agent day-out digest', () => {
       .toBe('host the report cards (DAV-7357)');
   });
 
-  test('builds the four sections, keeps only the day, skips "nothing" lines', () => {
+  test('extracts multiline goals before a wrapped file heading', () => {
+    const goal = '# Goal\n\nFix the synthetic build';
+    for (const text of [goal, `<file name="task.md">\n${goal}\n</file>`]) {
+      expect(askText(text)).toBe('Fix the synthetic build');
+      const day = buildRoleDay('yoda', '2026-10-29', [{
+        sessionId: 'goal', slugs: ['goal'], text: `**User** (2026-10-29 2:00 PM): ${text}`,
+      }]);
+      expect(day.asked.map((item) => item.text)).toEqual(['Fix the synthetic build']);
+    }
+  });
+
+  test('builds the four sections, keeps only the day, skips no-blocker lines', () => {
     const day = buildRoleDay('yoda', '2026-10-29', [{ sessionId: '01a18578-daf', slugs: ['conversations/sessions/2026-10-29-omp-x'], text: session }]);
     expect(day.asked.map((i) => i.text)).toEqual(['@Yoda check the Supabase egress and report back']);
     expect(day.shipped).toHaveLength(1);
     expect(day.shipped[0].text).toContain('pull/56');
-    expect(day.waiting.map((i) => i.text)).toEqual(['Dave must do: approve the passkey tap.']);
+    expect(day.waiting.map((i) => i.text)).toEqual(['The operator must approve the passkey tap.']);
     expect(day.failed.map((i) => i.text)).toEqual(['The nightly run failed with exit 1 on the codex seat.']);
-    expect(day.links).toEqual({ prs: ['https://github.com/daveove/gbrain/pull/56'], issues: ['https://linear.app/daveove/issue/DAV-7404'] });
+    expect(day.links).toEqual({ prs: ['https://github.com/acme-example/brain-example/pull/56'], issues: ['https://linear.app/acme-example/issue/DAV-1234'] });
   });
 
   test('drops a session about a personal meeting and any line that mentions one', () => {
@@ -143,6 +154,22 @@ describe('agent day-out digest day boundaries (DAV-7417)', () => {
     expect(day.shipped.map((i) => i.text)).toEqual(['I opened https://github.com/a/b/pull/2 on the day.']);
     expect(day.shipped[0].time).toBe('11:05');
     expect(renderRoleDay(day)).toContain('Times are Asia/Manila.');
+  });
+
+  test('keeps earlier work when the first same-day user turn starts a meeting thread', () => {
+    const text = [
+      '**User** (2026-10-29 11:59 PM): Fix the synthetic build',
+      '**Assistant** (2026-10-30 12:01 AM): I merged https://github.com/acme-example/brain-example/pull/31 for the build.',
+      '**User** (2026-10-30 12:05 AM): Summarize the Circleback meeting',
+      '**Assistant** (2026-10-30 12:06 AM): I opened https://github.com/acme-example/brain-example/pull/32 from those action items.',
+    ].join('\n');
+    const day = buildRoleDay('spock', '2026-10-30', [{ sessionId: 'build', slugs: ['b'], text }]);
+    expect(day.sessions).toEqual(['build']);
+    expect(day.sessionSlugs).toEqual(['b']);
+    expect(day.shipped.map((item) => item.text)).toEqual(['I merged https://github.com/acme-example/brain-example/pull/31 for the build.']);
+    expect(day.links.prs).toEqual(['https://github.com/acme-example/brain-example/pull/31']);
+    expect(day.asked).toEqual([]);
+    expect(JSON.stringify(day)).not.toMatch(/circleback|pull\/32/i);
   });
 
   test('a meeting ask before midnight keeps its reply out of the next day', () => {

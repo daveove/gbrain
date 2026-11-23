@@ -134,12 +134,13 @@ export function askText(turnText: string): string | null {
   if (/<base>|<context>|<buzz-events?>/.test(turnText)) return null;
   const heading = /^# (?:Task|Goal):? *(.+)$/m.exec(turnText);
   if (heading) return squash(heading[1]);
+  const goal = /^# Goal\s*\n+([\s\S]*?)(?:\n#|\n\n|$)/m.exec(turnText);
+  if (goal) return squash(goal[1]);
   if (turnText.startsWith('<file ')) {
     const first = /^# (.+)$/m.exec(turnText);
     return first ? squash(first[1]) : null;
   }
-  const goal = /^# Goal\s*\n+([\s\S]*?)(?:\n#|\n\n|$)/m.exec(turnText);
-  return squash(goal?.[1] ?? turnText.split('\n\n')[0] ?? '');
+  return squash(turnText.split('\n\n')[0] ?? '');
 }
 
 const cap = <T,>(xs: T[]): T[] => xs.slice(0, MAX_ITEMS_PER_SECTION);
@@ -162,26 +163,25 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
   const prs = new Set<string>(), issues = new Set<string>();
   for (const s of sessions) {
     const allTurns = splitTurns(s.text, zone);
-    const turns = allTurns.filter((t) => t.date === date);
-    if (!turns.length) continue;
-    const firstAsk = turns.find((t) => t.role === 'user');
-    if (firstAsk && MEETING_RE.test(firstAsk.text.slice(0, 4000))) continue;
-    out.sessions.push(s.sessionId);
-    out.sessionSlugs.push(...s.slugs);
     const tag = s.sessionId.slice(0, 8);
     let meetingThread = false;
+    let hasEligibleTurn = false;
     for (const t of allTurns) {
       if (t.role === 'user') {
         const ask = askText(t.text);
         // The assistant turns that answer a meeting ask are skipped whole, also across midnight.
-        meetingThread = Boolean(ask && MEETING_RE.test(ask));
-        if (t.date === date && ask && ask.length >= 12 && !meetingThread) out.asked.push({ time: t.time, text: ask, session: tag });
+        meetingThread = MEETING_RE.test(ask ?? t.text.slice(0, 4000));
+        if (t.date === date && !meetingThread) {
+          hasEligibleTurn = true;
+          if (ask && ask.length >= 12) out.asked.push({ time: t.time, text: ask, session: tag });
+        }
         continue;
       }
       if (meetingThread || t.date !== date) continue;
       // Meeting content never feeds a page: this check runs on every line before
       // a link or a fact is read from it, so a later meeting line adds nothing.
       for (const line of t.text.split('\n').map((l) => l.trim()).filter((l) => l && !MEETING_RE.test(l))) {
+        hasEligibleTurn = true;
         for (const url of line.match(PR_URL_RE) ?? []) prs.add(url);
         for (const url of line.match(ISSUE_URL_RE) ?? []) issues.add(url);
         if (line.length < 12 || line.startsWith('|')) continue;
@@ -195,6 +195,10 @@ export function buildRoleDay(role: AgentRole, date: string, sessions: SessionInp
         if (WAIT_RE.test(bullet) && !NOTHING_RE.test(bullet)) out.waiting.push(item);
         else if (FAIL_RE.test(bullet) && bullet.length < 400) out.failed.push(item);
       }
+    }
+    if (hasEligibleTurn) {
+      out.sessions.push(s.sessionId);
+      out.sessionSlugs.push(...s.slugs);
     }
   }
   out.asked = cap(dedupe(out.asked));
