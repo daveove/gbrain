@@ -26,9 +26,11 @@ import json, os, pathlib, sys, time
 args = sys.argv[1:]
 if args[0] == '-e':
     os.execv(os.environ['TEST_REAL_BUN'], [os.environ['TEST_REAL_BUN'], *args])
-kind = 'tz' if any('daily-memory-timezone' in a for a in args) else (
-  'facts' if any('run-facts-absorb' in a for a in args) else (
-  'ingest' if 'transcripts' in args else 'write'))
+kind = ('tz' if any('daily-memory-timezone' in a for a in args) else
+  'config' if args[1:3] == ['config', 'get'] else
+  'digest' if any('write-agent-day-digests' in a for a in args) else
+  'facts' if any('run-facts-absorb' in a for a in args) else
+  'ingest' if 'transcripts' in args else 'write')
 log = pathlib.Path(os.environ['TEST_CALLS'])
 previous = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 if kind == 'tz':
@@ -52,6 +54,8 @@ if kind == 'write' and os.environ.get('TEST_HOLD') == '1':
 if kind == 'ingest':
     # Launcher parses cleanScan from --json stdout before advancing watermark.
     print(json.dumps({'cleanScan': os.environ.get('TEST_CLEAN_SCAN', '1') != '0'}))
+elif kind == 'config':
+    print(os.environ.get('TEST_LOOKBACK_WATERMARK', ''))
 else:
     print('fixture success')
 `);
@@ -66,7 +70,8 @@ else:
     expect(result.error).toBeUndefined();
     expect(readFileSync(config, 'utf8')).toBe(original);
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory.lock'))).toBe(false);
-    return { code: result.status, calls: existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line) as Call) : [] };
+    const allCalls = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n').map(line => JSON.parse(line) as Call) : [];
+    return { code: result.status, allCalls, calls: allCalls.filter(call => !['config', 'digest'].includes(call.kind)) };
   }
   return { home, run };
 }
@@ -389,8 +394,54 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['write']);
     expect(result.calls[0].args).toEqual([join(repo, 'scripts/write-daily-memory.ts'), '2026-09-29']);
     expect(result.calls[0].lookback).toBeFalsy();
+    expect(result.allCalls.map(call => call.kind)).toEqual(['write']);
     // Backfill must not advance the Codex mtime watermark.
     expect(readFileSync(mark, 'utf8')).toBe(before);
+  });
+
+  it('writes agent digests after capture for the selected day and predecessor', () => {
+    const { home, run } = fixture();
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date());
+    const previous = new Date(Date.parse(`${day}T00:00:00Z`) - 86400_000).toISOString().slice(0, 10);
+    const result = run();
+    expect(result.code).toBe(0);
+    expect(result.allCalls.map(call => call.kind)).toEqual(['config', 'write', 'digest', 'digest']);
+    expect(result.allCalls[0].args.slice(1)).toEqual(['config', 'get', 'cycle.daily_memory_last_lookback_day']);
+    const digests = result.allCalls.filter(call => call.kind === 'digest');
+    expect(digests.map(call => call.args)).toEqual([previous, day].map(date => [join(repo, 'scripts/write-agent-day-digests.ts'), date]));
+    expect(digests.map(call => call.zone)).toEqual(['Asia/Manila', 'Asia/Manila']);
+    const log = readFileSync(join(home, 'Library/Logs/gbrain-daily-memory.log'), 'utf8');
+    for (const date of [previous, day]) expect(log).toContain(`agent-day ok ${date}`);
+  });
+
+  it('uses the pre-write watermark to refresh digest recovery days', () => {
+    const { run } = fixture();
+    const day = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Manila' }).format(new Date());
+    const days = [3, 2, 1, 0].map(offset => new Date(Date.parse(`${day}T00:00:00Z`) - offset * 86400_000).toISOString().slice(0, 10));
+    const result = run([], { TEST_LOOKBACK_WATERMARK: days[0] });
+    expect(result.code).toBe(0);
+    expect(result.allCalls.map(call => call.kind)).toEqual(['config', 'write', 'digest', 'digest', 'digest', 'digest']);
+    expect(result.allCalls.filter(call => call.kind === 'digest').map(call => call.args[1])).toEqual(days);
+  });
+
+  it('logs digest failures without failing the capture or skipping later digest days', () => {
+    const { home, run } = fixture();
+    const result = run([], { TEST_FAIL_KIND: 'digest', TEST_FAIL_ALWAYS: '1' });
+    expect(result.code).toBe(0);
+    expect(result.allCalls.filter(call => call.kind === 'digest')).toHaveLength(2);
+    const log = readFileSync(join(home, 'Library/Logs/gbrain-daily-memory.log'), 'utf8');
+    expect(log.match(/agent-day failed \(exit 7\)/g)).toHaveLength(2);
+    expect(log).not.toContain('agent-day ok');
+  });
+
+  it('skips agent digests after ingest, capture or facts failures', () => {
+    for (const kind of ['ingest', 'write', 'facts']) {
+      const { home, run } = fixture();
+      todayInputs(home);
+      const result = run([], { TEST_FAIL_KIND: kind, GBRAIN_DAILY_MEMORY_FACTS_MAX_USD: '1' });
+      expect(result.code).toBe(7);
+      expect(result.allCalls.filter(call => call.kind === 'digest')).toEqual([]);
+    }
   });
 
   it('runs the opt-in facts step after a scheduled write, never on an explicit date', () => {
