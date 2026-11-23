@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import {
-  agentDaySlug, attributeRole, askText, buildRoleDay, dayStartUtc, renderRoleDay, splitTurns,
+  AGENT_ROLES, agentDaySlug, attributeRole, askText, buildRoleDay, dayStartUtc, renderRoleDay, splitTurns,
 } from '../src/core/digests/agent-day.ts';
 import { buildAgentDayPages, groupSessions, partNumber } from '../scripts/write-agent-day-digests.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -104,6 +104,59 @@ describe('agent day-out digest', () => {
     const day = buildRoleDay('spock', '2026-10-29', [{ sessionId: 'k', slugs: ['b'], text }]);
     expect(day.shipped.map((i) => i.text)).toEqual(['I opened draft https://github.com/a/b/pull/22. I did not request a review or merge it.']);
     expect(day.failed.map((i) => i.text)).toContain('The merge of https://github.com/a/b/pull/21 failed and it did not land.');
+  });
+
+  test('zero failure counts stay out of failures while positive counts remain (DAV-8077)', () => {
+    const summaries = [
+      'All tests passed: 12 passed, 0 failed.',
+      'The test summary: 0 failures.',
+      'The test summary: 3 failed.',
+      'The test summary: 10 failed.',
+      'The test summary: 0 failed, then 3 failed.',
+      'The test summary: 0 failed, but the launcher crashed.',
+    ];
+    const day = buildRoleDay(AGENT_ROLES[0], '2026-10-29', [{
+      sessionId: 'synthetic-counts', slugs: ['synthetic-counts'],
+      text: `**Assistant** (2026-10-29 3:00 PM): ${summaries.join('\n')}`,
+    }]);
+    expect(day.failed.map((item) => item.text)).toEqual(summaries.slice(2));
+  });
+
+  test('a trailing negated qualifier does not negate a completion (DAV-8078)', () => {
+    const shipped = 'I merged https://github.com/a/b/pull/22 without changing the public API.';
+    const text = [
+      `**Assistant** (2026-10-29 3:00 PM): ${shipped}`,
+      '**Assistant** (2026-10-29 3:01 PM): I did not merge https://github.com/a/b/pull/23.',
+      '**Assistant** (2026-10-29 3:02 PM): I have not merged https://github.com/a/b/pull/24.',
+      '**Assistant** (2026-10-29 3:03 PM): I never opened https://github.com/a/b/pull/25.',
+    ].join('\n');
+    const day = buildRoleDay(AGENT_ROLES[0], '2026-10-29', [{
+      sessionId: 'synthetic-completions', slugs: ['synthetic-completions'], text,
+    }]);
+    expect(day.shipped.map((item) => item.text)).toEqual([shipped]);
+  });
+
+  test.each(['Circleback', 'Pocket'])('checks the full ask before truncation for %s (DAV-8087)', (marker) => {
+    const ask = `${'Review the synthetic report. '.repeat(12)}Summarize the ${marker} meeting.`;
+    expect(ask.indexOf(marker)).toBeGreaterThan(260);
+    for (const prompt of [ask, `<buzz-event>\nContent: ${ask}\nTags: []\n</buzz-event>`]) {
+      const day = buildRoleDay(AGENT_ROLES[0], '2026-10-29', [{
+        sessionId: 'synthetic-meeting', slugs: ['synthetic-meeting'],
+        text: [
+          `**User** (2026-10-29 3:00 PM): ${prompt}`,
+          '**Assistant** (2026-10-29 3:01 PM): I merged https://github.com/a/b/pull/26 for https://linear.app/example/issue/DAV-9002.',
+          '**Assistant** (2026-10-29 3:02 PM): The synthetic run failed with exit 1.',
+          '**Assistant** (2026-10-29 3:03 PM): The synthetic run needs a passkey.',
+        ].join('\n'),
+      }]);
+      expect(day.asked).toEqual([]);
+      expect(day.shipped).toEqual([]);
+      expect(day.failed).toEqual([]);
+      expect(day.waiting).toEqual([]);
+      expect(day.links).toEqual({ prs: [], issues: [] });
+      expect(day.sessions).toEqual([]);
+      expect(day.sessionSlugs).toEqual([]);
+    }
   });
 
   test('renders private, deterministic pages with the contract slug', () => {
