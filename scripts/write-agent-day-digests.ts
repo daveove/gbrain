@@ -45,7 +45,7 @@ export async function readLocalAgentSessions(date: string, zone: string, opts: {
 } = {}): Promise<SessionInput[]> {
   const env = opts.env ?? process.env;
   if (!localOmpReadsEnabled(env)) return [];
-  const root = opts.root ?? (env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(homedir(), '.omp', 'agent', 'sessions'));
+  const root = opts.root || env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(homedir(), '.omp', 'agent', 'sessions');
   const folders: { path: string; role?: AgentRole }[] = [];
   for (const entry of await entries(root)) {
     if (!entry.isDirectory()) continue;
