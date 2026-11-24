@@ -5,3 +5,4 @@
 - Primary folder identifiers map to digest roles. Local and captured sessions merge by session identifier.
 - Dry runs print counts only. The capture scan stays unchanged; raw primary transcripts never enter conversation pages through this generator.
 - Local OMP reads require the nightly seat opt-in and honor its root override. The launcher exports both settings to the digest generator.
+- Agent day digests carry earlier turn times across timestamp gaps. Sessions without an earlier time are excluded and counted before extraction.

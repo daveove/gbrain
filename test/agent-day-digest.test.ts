@@ -409,7 +409,55 @@ describe('agent day-out discovery (DAV-7417)', () => {
       get root(): string { throw new Error('local root accessed without opt-in'); },
       get patterns(): [] { throw new Error('patterns accessed without opt-in'); },
     });
-    expect(local).toEqual([]);
+    expect(local.sessions).toEqual([]);
+    expect(local.droppedSessionIds.size).toBe(0);
+  });
+
+  test.each([
+    ['meeting request after an earlier anchor', [
+      ['assistant', '2026-11-22T15:59:00Z', 'An ordinary status before the requested Manila day.'],
+      ['user', undefined, 'Summarize the Pocket meeting.'],
+      ['assistant', '2026-11-22T16:02:00Z', 'I merged https://github.com/acme-example/brain-example/pull/99 from private meeting detail.'],
+    ], 0, false],
+    ['leading meeting request without an earlier anchor', [
+      ['user', undefined, 'Summarize the Circleback meeting.'],
+      ['assistant', '2026-11-22T16:02:00Z', 'I merged https://github.com/acme-example/brain-example/pull/99 from private meeting detail.'],
+    ], 1, false],
+    ['ordinary turn without a timestamp after a timed turn', [
+      ['user', '2026-11-22T16:01:00Z', 'Fix the synthetic independent build.'],
+      ['assistant', undefined, 'I merged https://github.com/acme-example/brain-example/pull/99 for the independent build.'],
+    ], 0, true],
+    ['session without any usable turn timestamp', [
+      ['user', undefined, 'Fix the synthetic independent build without a time anchor.'],
+    ], 1, false],
+  ] as const)('handles timestamp gaps for %s', async (_name, turns, dropped, shipped) => {
+    const root = mkdtempSync(join(tmpdir(), 'agent-day-time-gap-'));
+    try {
+      const file = join(root, 'agentworld/cockpit-keeper/session.jsonl');
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, [
+        { type: 'session', version: 3, id: 'gap-session', timestamp: '2026-11-22T15:00:00Z' },
+        ...turns.map(([role, timestamp, text]) => ({
+          type: 'message', timestamp, message: { role, content: [{ type: 'text', text }] },
+        })),
+      ].map(line => JSON.stringify(line)).join('\n') + '\n');
+      const env = { GBRAIN_DAILY_MEMORY_SEATS: 'omp', GBRAIN_DAILY_MEMORY_OMP_ROOT: root };
+      const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { env, patterns: [] });
+      expect(local.droppedSessionIds.size).toBe(dropped);
+      expect(local.sessions).toHaveLength(dropped ? 0 : 1);
+      await seed('conversations/sessions/2026-11-22-omp-gap', [
+        '**User** (2026-11-22 4:01 PM): You are Yoda, the Buzz agent.',
+        '**Assistant** (2026-11-22 4:02 PM): I merged https://github.com/acme-example/brain-example/pull/98 from private meeting detail.',
+      ].join('\n'), 'gap-session', '2026-11-23T10:00:00Z');
+      const built = await buildAgentDayPages(engine, '2026-11-23', 'Asia/Manila', local.sessions, local.droppedSessionIds);
+      expect(built.pages).toHaveLength(shipped ? 1 : 0);
+      expect(JSON.stringify(built.pages)).not.toMatch(/private meeting detail|pull\/98/);
+      if (shipped) {
+        const day = buildRoleDay('yoda', '2026-11-23', local.sessions, 'Asia/Manila');
+        expect(day.shipped[0].time).toBe('00:01');
+        expect(built.pages[0].content).toContain('pull/99');
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   test('reads the opted-in OMP root override in memory and preserves day, privacy and deduplication rules', async () => {
@@ -450,14 +498,15 @@ describe('agent day-out discovery (DAV-7417)', () => {
         ['user', '2026-11-22T16:10:00Z', 'You are a worker reporting to Aragorn. Exclude this delegated session.'],
       ]);
       const env = { GBRAIN_DAILY_MEMORY_SEATS: 'codex omp', GBRAIN_DAILY_MEMORY_OMP_ROOT: root };
-      const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { env, patterns: [] });
+      const { sessions: local, droppedSessionIds } = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { env, patterns: [] });
       expect(local).toHaveLength(3);
+      expect(droppedSessionIds.size).toBe(0);
       expect(local.find(session => session.sessionId === 'local-yoda')?.role).toBe('yoda');
       expect(local.map(session => session.text).join('\n')).not.toContain(secret);
       const captured = 'conversations/sessions/2026-11-22-omp-synthetic';
       await seed(captured, '**User** (2026-11-22 4:01 PM): You are Spock, the Buzz agent.', 'local-yoda', '2026-11-23T10:00:00Z');
       const before = await engine.listPages({ slugPrefix: 'conversations/sessions/' });
-      const built = await buildAgentDayPages(engine, '2026-11-23', 'Asia/Manila', local);
+      const built = await buildAgentDayPages(engine, '2026-11-23', 'Asia/Manila', local, droppedSessionIds);
       expect(built.pages.map(page => [page.role, page.sessions])).toEqual([['yoda', 1], ['aslan', 1], ['aragorn', 1]]);
       const yoda = built.pages.find(page => page.role === 'yoda')!.content;
       expect(yoda).toContain('pull/2');
@@ -471,7 +520,7 @@ describe('agent day-out discovery (DAV-7417)', () => {
       expect(built.pages.every(page => page.content.includes('visibility: private'))).toBe(true);
       expect(await engine.listPages({ slugPrefix: 'conversations/sessions/' })).toEqual(before);
       const nextDay = await readLocalAgentSessions('2026-11-24', 'Asia/Manila', { env, patterns: [] });
-      const nextBuilt = await buildAgentDayPages(engine, '2026-11-24', 'Asia/Manila', nextDay);
+      const nextBuilt = await buildAgentDayPages(engine, '2026-11-24', 'Asia/Manila', nextDay.sessions, nextDay.droppedSessionIds);
       expect(nextBuilt.pages).toHaveLength(0);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

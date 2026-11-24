@@ -42,9 +42,10 @@ export function localOmpReadsEnabled(env: NodeJS.ProcessEnv = process.env): bool
 /** Read local OMP sessions without importing their raw text into the brain. */
 export async function readLocalAgentSessions(date: string, zone: string, opts: {
   root?: string; patterns?: ImportRedactionPattern[]; env?: NodeJS.ProcessEnv;
-} = {}): Promise<SessionInput[]> {
+} = {}): Promise<{ sessions: SessionInput[]; droppedSessionIds: ReadonlySet<string> }> {
   const env = opts.env ?? process.env;
-  if (!localOmpReadsEnabled(env)) return [];
+  const droppedSessionIds = new Set<string>();
+  if (!localOmpReadsEnabled(env)) return { sessions: [], droppedSessionIds };
   const root = opts.root || env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(homedir(), '.omp', 'agent', 'sessions');
   const folders: { path: string; role?: AgentRole }[] = [];
   for (const entry of await entries(root)) {
@@ -64,6 +65,16 @@ export async function readLocalAgentSessions(date: string, zone: string, opts: {
       const path = join(folder.path, entry.name);
       // Read the full file: head/tail truncation can omit the requested day's middle turns.
       for await (const parsed of ompAdapter.parse(path, { maxBytes: Number.MAX_SAFE_INTEGER })) {
+        let lastTimestamp: string | undefined;
+        for (const message of parsed.messages) {
+          if (Number.isFinite(Date.parse(message.timestamp))) lastTimestamp = message.timestamp;
+          else if (lastTimestamp) message.timestamp = lastTimestamp;
+          else { droppedSessionIds.add(parsed.meta.sessionId); break; }
+        }
+        if (droppedSessionIds.has(parsed.meta.sessionId)) {
+          sessions.delete(parsed.meta.sessionId);
+          continue;
+        }
         if (!parsed.messages.some(message => {
           const time = Date.parse(message.timestamp);
           return time >= start && time < end;
@@ -91,7 +102,7 @@ export async function readLocalAgentSessions(date: string, zone: string, opts: {
       }
     }
   }
-  return [...sessions.values()];
+  return { sessions: [...sessions.values()], droppedSessionIds };
 }
 
 /** `<hash>-p3` is part 3 of a session; no suffix is part 1. */
@@ -137,7 +148,8 @@ export interface AgentDayBuild {
  * midnight is not under today's prefix. Sessions are found by when their pages
  * last changed; every part is read and only the day's turns are kept.
  */
-export async function buildAgentDayPages(engine: BrainEngine, date: string, zone: string, localSessions: SessionInput[] = []): Promise<AgentDayBuild> {
+export async function buildAgentDayPages(engine: BrainEngine, date: string, zone: string,
+  localSessions: SessionInput[] = [], droppedSessionIds?: ReadonlySet<string>): Promise<AgentDayBuild> {
   const touched = await engine.listPages({
     slugPrefix: 'conversations/sessions/', updated_after: dayStartUtc(date, zone).toISOString(), limit: 20000, sort: 'updated_asc',
   });
@@ -159,6 +171,7 @@ export async function buildAgentDayPages(engine: BrainEngine, date: string, zone
   const byRole = new Map<AgentRole, SessionInput[]>();
   let unattributed = 0;
   for (const session of sessions.values()) {
+    if (droppedSessionIds?.has(session.sessionId)) continue;
     const role = session.role ?? attributeRole(session.text);
     if (!role) { unattributed++; continue; }
     byRole.set(role, [...(byRole.get(role) ?? []), session]);
@@ -181,13 +194,13 @@ async function main(): Promise<void> {
   const date = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a)) ?? calendarDateInTimeZone(new Date(), zone);
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
-  const localSessions = await readLocalAgentSessions(date, zone);
+  const local = await readLocalAgentSessions(date, zone);
   const engineConfig = { ...toEngineConfig(config), poolSize: 1 };
   const engine = await createEngine(engineConfig);
   let built: AgentDayBuild;
   try {
     await connectWithRetry(engine, engineConfig);
-    built = await buildAgentDayPages(engine, date, zone, localSessions);
+    built = await buildAgentDayPages(engine, date, zone, local.sessions, local.droppedSessionIds);
   } finally {
     await engine.disconnect();
   }
@@ -205,6 +218,7 @@ async function main(): Promise<void> {
     }
   }
   console.log(JSON.stringify({ date, dryRun, localReads: localOmpReadsEnabled() ? 'enabled' : 'disabled',
+    droppedSessionsUnorderable: local.droppedSessionIds.size,
     pages: rendered.map((p) => ({ slug: p.slug, sessions: p.sessions })),
     sessionsByRole: Object.fromEntries(AGENT_ROLES.map(role => [role, rendered.find(page => page.role === role)?.sessions ?? 0])),
     written, failed, unattributedSessions: unattributed }));
