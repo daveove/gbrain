@@ -8,13 +8,27 @@
  * the page; the page never paraphrases.
  */
 
-export const AGENT_ROLES = ['yoda', 'aslan', 'aragorn', 'spock', 'scotty', 'mandalorian'] as const;
+export const AGENT_ROLES = ['yoda', 'aslan', 'aragorn', 'spock', 'scotty', 'mandalorian', 'home-keeper', 'delivery-keeper', 'learning-keeper'] as const;
 export type AgentRole = typeof AGENT_ROLES[number];
+
+export const PRIMARY_ROLES: Readonly<Record<string, AgentRole>> = {
+  'cockpit-keeper': 'yoda',
+  'agentworld-keeper': 'aslan',
+  'svi-operator': 'aragorn',
+  'intown-project': 'spock',
+  'sales-marketing': 'scotty',
+  'comms-keeper': 'mandalorian',
+  'home-keeper': 'home-keeper',
+  'delivery-keeper': 'delivery-keeper',
+  'learning-keeper': 'learning-keeper',
+};
+const PRIMARY_WORKTREE_RE = new RegExp(`\\baw-(?:primary-)?(${Object.keys(PRIMARY_ROLES).join('|')})(?:-|\\b)`, 'i');
 
 export interface SessionInput {
   /** Slug of every captured part of one session, in part order. */
   slugs: string[];
   sessionId: string;
+  role?: AgentRole;
   /** Concatenated body of all parts (turns as `**User** (...)` / `**Assistant** (...)`). */
   text: string;
 }
@@ -104,18 +118,22 @@ export function splitTurns(text: string, zone = 'UTC'): Turn[] {
 }
 
 /**
- * Which role a session belongs to. Buzz primaries say "You are <Name>, the Buzz
- * agent"; crew workers say "reporting to <Name>"; AgentWorld worktrees carry
- * `aw-<role>-`. Legacy alias names map to the current role.
+ * Primaries identify themselves by their persistent AgentWorld id or Buzz name.
+ * Crew workers name their primary; worktrees carry the primary id or Buzz name.
  */
 export function attributeRole(text: string): AgentRole | null {
   const head = text.slice(0, 60_000);
-  const own = /You are (Yoda|Aslan|Aragorn|Spock|Scotty|Gandalf|Mandalorian), the Buzz agent/.exec(head);
-  const crew = /reporting to (Yoda|Aslan|Aragorn|Spock|Scotty|Gandalf|Mandalorian)\b/i.exec(head);
-  const wt = /\baw-(yoda|aslan|aragorn|spock|scotty|gandalf|mandalorian)-/i.exec(head);
-  const name = own?.[1] ?? crew?.[1] ?? wt?.[1];
-  if (!name) return null;
-  const role = name.toLowerCase() === 'gandalf' ? 'scotty' : name.toLowerCase();
+  const primary = /You are the persistent ([a-z][a-z0-9-]*) primary for Agentworld\b/i.exec(head);
+  const own = /You are (Yoda|Aslan|Aragorn|Spock|Scotty|Gandalf|Mandalorian|Alfred|Samwise|Morpheus), the Buzz agent/i.exec(head);
+  const crew = /reporting to (Yoda|Aslan|Aragorn|Spock|Scotty|Gandalf|Mandalorian|Alfred|Samwise|Morpheus)\b/i.exec(head);
+  const wt = /\baw-(yoda|aslan|aragorn|spock|scotty|gandalf|mandalorian|alfred|samwise|morpheus)-/i.exec(head);
+  const currentWt = /\bagentworld-primary-worktrees\/[^/\s]+\/([a-z][a-z0-9-]*)(?=\/|[\s"'`)]|$)/i.exec(head);
+  const identity = primary?.[1] ?? own?.[1] ?? crew?.[1] ?? currentWt?.[1] ?? PRIMARY_WORKTREE_RE.exec(head)?.[1] ?? wt?.[1];
+  if (!identity) return null;
+  const name = identity.toLowerCase();
+  if (Object.hasOwn(PRIMARY_ROLES, name)) return PRIMARY_ROLES[name];
+  const role = name === 'gandalf' ? 'scotty' : name === 'alfred' ? 'home-keeper'
+    : name === 'samwise' ? 'delivery-keeper' : name === 'morpheus' ? 'learning-keeper' : name;
   return (AGENT_ROLES as readonly string[]).includes(role) ? role as AgentRole : null;
 }
 

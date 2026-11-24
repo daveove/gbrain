@@ -8,7 +8,7 @@ const repo = resolve(import.meta.dir, '../..');
 const launcher = join(repo, 'scripts/gbrain-daily-memory.sh');
 const selector = join(repo, 'scripts/daily-memory-seat-files.py');
 const homes: string[] = [];
-type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null; pool?: string | null; writerPool?: string | null };
+type Call = { kind: string; args: string[]; url: string | null; tz?: string | null; zone?: string | null; lookback?: string | null; pool?: string | null; writerPool?: string | null; seats?: string | null; ompRoot?: string | null };
 
 function fixture(configExtra: Record<string, unknown> = { 'cycle.timezone': 'Asia/Manila' }) {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-daily-launcher-'));
@@ -42,7 +42,7 @@ if kind == 'tz':
         print(value, end='')
     sys.exit(0)
 with log.open('a') as out:
-    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK'), 'pool': os.environ.get('GBRAIN_POOL_SIZE'), 'writerPool': os.environ.get('GBRAIN_DAILY_MEMORY_POOL_SIZE')}) + '\\n')
+    out.write(json.dumps({'kind': kind, 'args': args, 'url': os.environ.get('GBRAIN_DATABASE_URL'), 'tz': os.environ.get('TZ'), 'zone': os.environ.get('GBRAIN_DAILY_MEMORY_ZONE'), 'lookback': os.environ.get('GBRAIN_DAILY_MEMORY_LOOKBACK'), 'pool': os.environ.get('GBRAIN_POOL_SIZE'), 'writerPool': os.environ.get('GBRAIN_DAILY_MEMORY_POOL_SIZE'), 'seats': os.environ.get('GBRAIN_DAILY_MEMORY_SEATS'), 'ompRoot': os.environ.get('GBRAIN_DAILY_MEMORY_OMP_ROOT')}) + '\\n')
 if kind == os.environ.get('TEST_FAIL_KIND'):
     attempts = sum(call['kind'] == kind for call in previous)
     if attempts == 0 or os.environ.get('TEST_FAIL_ALWAYS') == '1':
@@ -617,6 +617,22 @@ finally:
     expect(result.calls.map(call => call.kind)).toEqual(['ingest', 'write']);
     expect(result.calls[0].args[result.calls[0].args.indexOf('--format') + 1]).toBe('codex');
     expect(existsSync(join(home, '.local/state/gbrain/daily-memory-omp-mtime'))).toBe(false);
+  });
+
+  it('exports the same OMP opt-in and root to the digest when env.sh does not export them', () => {
+    const { home, run } = fixture();
+    const input = todayInputs(home);
+    seatSessions(home, input.start + 12 * 3600_000);
+    const root = join(home, 'custom-omp-sessions');
+    renameSync(join(home, '.omp/agent/sessions'), root);
+    writeFileSync(join(home, '.gbrain/env.sh'), `GBRAIN_DAILY_MEMORY_SEATS='codex omp'\nGBRAIN_DAILY_MEMORY_OMP_ROOT='${root}'\n`);
+    const result = run();
+    expect(result.code).toBe(0);
+    const digest = result.allCalls.find(call => call.kind === 'digest')!;
+    expect(digest.seats).toBe('codex omp');
+    expect(digest.ompRoot).toBe(root);
+    const ingest = result.calls.find(call => call.kind === 'ingest' && call.args.includes('omp'))!;
+    expect(ingest.args.at(-1)).toBe(join(root, '-proj/2026_omp.jsonl'));
   });
 
   it('ingests exactly the opted-in seats in the listed order and logs unknown names', () => {

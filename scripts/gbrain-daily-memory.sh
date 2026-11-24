@@ -112,7 +112,9 @@ run_command() {
 # GBRAIN_DAILY_MEMORY_SEATS="codex omp claude-code opencode pi cursor".
 # Each seat has its own mtime watermark under $STATE; a seat whose root is
 # absent is skipped.
-read -r -a SEATS <<< "${GBRAIN_DAILY_MEMORY_SEATS:-codex}"
+export GBRAIN_DAILY_MEMORY_SEATS="${GBRAIN_DAILY_MEMORY_SEATS:-codex}"
+export GBRAIN_DAILY_MEMORY_OMP_ROOT="${GBRAIN_DAILY_MEMORY_OMP_ROOT:-$HOME/.omp/agent/sessions}"
+read -r -a SEATS <<< "$GBRAIN_DAILY_MEMORY_SEATS"
 seat_root() {
   case "$1" in
     codex) printf '%s' "${GBRAIN_DAILY_MEMORY_CODEX_ROOT:-$HOME/.codex/sessions}" ;;
