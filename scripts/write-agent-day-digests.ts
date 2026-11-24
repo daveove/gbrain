@@ -38,7 +38,7 @@ async function entries(path: string) {
 export async function readLocalAgentSessions(date: string, zone: string, opts: {
   root?: string; patterns?: ImportRedactionPattern[];
 } = {}): Promise<SessionInput[]> {
-  const root = opts.root ?? join(homedir(), '.omp', 'agent', 'sessions');
+  const root = opts.root || process.env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(homedir(), '.omp', 'agent', 'sessions');
   const folders: { path: string; role?: AgentRole }[] = [];
   for (const entry of await entries(root)) {
     if (!entry.isDirectory()) continue;
@@ -174,7 +174,10 @@ async function main(): Promise<void> {
   const date = args.find((a) => /^\d{4}-\d{2}-\d{2}$/.test(a)) ?? calendarDateInTimeZone(new Date(), zone);
   const config = loadConfig();
   if (!config) throw new Error('no gbrain config');
-  const localSessions = await readLocalAgentSessions(date, zone);
+  // OMP is a seat beyond codex: read it only when the operator opted in via
+  // GBRAIN_DAILY_MEMORY_SEATS, the same list the nightly capture uses.
+  const seats = (process.env.GBRAIN_DAILY_MEMORY_SEATS || 'codex').split(/\s+/).filter(Boolean);
+  const localSessions = seats.includes('omp') ? await readLocalAgentSessions(date, zone) : [];
   const engineConfig = { ...toEngineConfig(config), poolSize: 1 };
   const engine = await createEngine(engineConfig);
   let built: AgentDayBuild;
