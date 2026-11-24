@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import {
   AGENT_ROLES, agentDaySlug, attributeRole, askText, buildRoleDay, dayStartUtc, renderRoleDay, splitTurns,
 } from '../src/core/digests/agent-day.ts';
-import { buildAgentDayPages, groupSessions, partNumber, putPage, readLocalAgentSessions } from '../scripts/write-agent-day-digests.ts';
+import { buildAgentDayPages, groupSessions, partNumber, putPage, readLocalAgentSessions, localOmpReadsEnabled } from '../scripts/write-agent-day-digests.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
 
@@ -394,7 +394,25 @@ describe('agent day-out discovery (DAV-7417)', () => {
     }
   });
 
-  test('reads local turns in memory, filters Manila days, redacts secrets and merges captured duplicates', async () => {
+  test.each([
+    [undefined, false], ['', false], ['codex', false], ['true', false], ['1', false],
+    ['OMP', false], ['opencode', false], ['codex omp-worker', false],
+    ['omp', true], ['codex omp cursor', true], ['\t omp \t codex ', true],
+    ['codex\nomp', false], ['omp\ncodex', true], ['omp\r', false],
+  ] as const)('matches the launcher OMP opt-in for %s', (seats, enabled) => {
+    expect(localOmpReadsEnabled({ GBRAIN_DAILY_MEMORY_SEATS: seats })).toBe(enabled);
+  });
+
+  test('does not access the local root or redaction patterns when OMP is disabled', async () => {
+    const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', {
+      env: { GBRAIN_DAILY_MEMORY_SEATS: 'codex' },
+      get root(): string { throw new Error('local root accessed without opt-in'); },
+      get patterns(): [] { throw new Error('patterns accessed without opt-in'); },
+    });
+    expect(local).toEqual([]);
+  });
+
+  test('reads the opted-in OMP root override in memory and preserves day, privacy and deduplication rules', async () => {
     const root = mkdtempSync(join(tmpdir(), 'agent-day-local-'));
     const secret = 'synthetic' + 'Ab3xY7qR9z'.repeat(3);
     const makeSession = (file: string, id: string, turns: [string, string, string][]) => {
@@ -431,7 +449,8 @@ describe('agent day-out discovery (DAV-7417)', () => {
       makeSession(join(root, '-project/worker/Child.jsonl'), 'excluded-child', [
         ['user', '2026-11-22T16:10:00Z', 'You are a worker reporting to Aragorn. Exclude this delegated session.'],
       ]);
-      const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { root, patterns: [] });
+      const env = { GBRAIN_DAILY_MEMORY_SEATS: 'codex omp', GBRAIN_DAILY_MEMORY_OMP_ROOT: root };
+      const local = await readLocalAgentSessions('2026-11-23', 'Asia/Manila', { env, patterns: [] });
       expect(local).toHaveLength(3);
       expect(local.find(session => session.sessionId === 'local-yoda')?.role).toBe('yoda');
       expect(local.map(session => session.text).join('\n')).not.toContain(secret);
@@ -451,7 +470,7 @@ describe('agent day-out discovery (DAV-7417)', () => {
       expect(aslan).not.toMatch(/pull\/5|Circleback|private meeting/);
       expect(built.pages.every(page => page.content.includes('visibility: private'))).toBe(true);
       expect(await engine.listPages({ slugPrefix: 'conversations/sessions/' })).toEqual(before);
-      const nextDay = await readLocalAgentSessions('2026-11-24', 'Asia/Manila', { root, patterns: [] });
+      const nextDay = await readLocalAgentSessions('2026-11-24', 'Asia/Manila', { env, patterns: [] });
       const nextBuilt = await buildAgentDayPages(engine, '2026-11-24', 'Asia/Manila', nextDay);
       expect(nextBuilt.pages).toHaveLength(0);
     } finally { rmSync(root, { recursive: true, force: true }); }

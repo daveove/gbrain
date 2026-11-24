@@ -34,11 +34,18 @@ async function entries(path: string) {
   }
 }
 
+/** Match Bash read -r -a: default to Codex, then split the first line on spaces and tabs. */
+export function localOmpReadsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.GBRAIN_DAILY_MEMORY_SEATS || 'codex').split('\n', 1)[0].split(/[ \t]+/).includes('omp');
+}
+
 /** Read local OMP sessions without importing their raw text into the brain. */
 export async function readLocalAgentSessions(date: string, zone: string, opts: {
-  root?: string; patterns?: ImportRedactionPattern[];
+  root?: string; patterns?: ImportRedactionPattern[]; env?: NodeJS.ProcessEnv;
 } = {}): Promise<SessionInput[]> {
-  const root = opts.root ?? join(homedir(), '.omp', 'agent', 'sessions');
+  const env = opts.env ?? process.env;
+  if (!localOmpReadsEnabled(env)) return [];
+  const root = opts.root ?? (env.GBRAIN_DAILY_MEMORY_OMP_ROOT || join(homedir(), '.omp', 'agent', 'sessions'));
   const folders: { path: string; role?: AgentRole }[] = [];
   for (const entry of await entries(root)) {
     if (!entry.isDirectory()) continue;
@@ -197,7 +204,8 @@ async function main(): Promise<void> {
       console.error(`agent-day: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  console.log(JSON.stringify({ date, dryRun, pages: rendered.map((p) => ({ slug: p.slug, sessions: p.sessions })),
+  console.log(JSON.stringify({ date, dryRun, localReads: localOmpReadsEnabled() ? 'enabled' : 'disabled',
+    pages: rendered.map((p) => ({ slug: p.slug, sessions: p.sessions })),
     sessionsByRole: Object.fromEntries(AGENT_ROLES.map(role => [role, rendered.find(page => page.role === role)?.sessions ?? 0])),
     written, failed, unattributedSessions: unattributed }));
   if (failed.length) process.exitCode = 1;
