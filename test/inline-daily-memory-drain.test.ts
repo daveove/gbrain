@@ -197,3 +197,27 @@ test('lock-renewal failure aborts without burning an attempt', async () => {
   expect(row?.attempts_made).toBe(0);
   expect(row?.data.daily_memory_date).toBe(day);
 });
+
+test('a backfill batch whose day child died through every replay dead-letters without failing the drain', async () => {
+  const queue = new MinionQueue(engine), oldDay = '2026-01-30', next = '2026-01-31';
+  await seed(next);
+  const source = await queue.add('autopilot-cycle', {});
+  const child = await queue.add('autopilot-daily-memory', dailyData(oldDay));
+  const claimed = (await queue.claim('child-lock', 60_000, 'default', ['autopilot-daily-memory']))!;
+  expect(claimed.id).toBe(child.id);
+  await queue.failJob(child.id, 'child-lock', 'aborted: timeout', 'dead');
+  const batch = await queue.add('autopilot-daily-memory', {
+    daily_memory_date: oldDay, daily_memory_dates: [oldDay], daily_memory_source_job_id: source.id,
+    daily_memory_cursor: 1, daily_memory_day_job_ids: [child.id], daily_memory_replay_round: 2,
+  }, { max_attempts: 2 });
+  const later = await queue.add('autopilot-daily-memory', dailyData(next), { max_attempts: 2 });
+  const exhausted: unknown[] = [];
+  await expect(drainInlineDailyMemory(engine, { onReplayExhausted: info => { exhausted.push(info); }, afterWrite: async () => {} })).resolves.toBe(1);
+  expect(exhausted).toEqual([{ id: batch.id, failedJobIds: [child.id], days: [oldDay] }]);
+  const row = await queue.getJob(batch.id);
+  expect(row?.status).toBe('dead');
+  expect(row?.error_text).toContain('replay exhausted');
+  expect(row?.data.daily_memory_dates).toEqual([oldDay]);
+  expect((await queue.getJob(child.id))?.status).toBe('dead');
+  expect((await queue.getJob(later.id))?.status).toBe('completed');
+});

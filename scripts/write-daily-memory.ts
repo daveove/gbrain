@@ -204,6 +204,8 @@ export async function runOneShotDailyMemoryWrite(
       timeBudgetMs: Number(process.env.GBRAIN_DAILY_MEMORY_DRAIN_MS) || 30 * 60_000,
       onJobTimeout: ({ id, day, terminal }) => console.error(
         `daily-memory: queued job ${id} (day ${String(day)}) timed out; ${terminal ? 'dead-lettered' : 'retry scheduled'}`),
+      onReplayExhausted: ({ id, failedJobIds, days }) => console.error(
+        `daily-memory: backfill batch ${id} dead-lettered; day jobs ${failedJobIds.join(',')} died through every replay (days ${days.join(',')})`),
     });
   } catch (error) {
     if (deps.signal?.aborted) throw error;
