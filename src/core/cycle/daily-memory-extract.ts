@@ -46,26 +46,31 @@ export async function extractOneShotDailyMemory(
   };
   deps.signal?.throwIfAborted();
   const exact = Boolean(result.extract_slugs?.length);
-  const slugs = exact ? result.extract_slugs! : await dailyMemoryExtractTargets(engine);
-  deps.signal?.throwIfAborted();
-  if (!slugs.length) return 0;
-  let remaining = slugs.length;
-  // The sweep stops at the first batch boundary past its deadline, so a run
-  // that used its whole budget is the only way a backlog is budget-deferred.
-  let budgetSpent = budget <= 0;
-  if (budget > 0) {
-    const started = Date.now();
-    await extract(engine, {
-      dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
-      slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
-    });
-    budgetSpent = Date.now() - started >= budget;
-    // Recount ownership as well as staleness: a human replacement is no longer
-    // index debt. Exact calls stay bounded to their frozen target set; broad
-    // nightly sweeps also discover generated indexes written during setup.
-    remaining = (await dailyMemoryExtractTargets(engine, exact ? slugs : undefined)).length;
+  const maxPasses = exact ? 1 : 3;
+  for (let pass = 0; pass < maxPasses; pass++) {
+    deps.signal?.throwIfAborted();
+    const slugs = exact ? result.extract_slugs! : await dailyMemoryExtractTargets(engine);
+    if (!slugs.length) return 0;
+    let remaining = slugs.length;
+    // The sweep stops at the first batch boundary past its deadline, so a run
+    // that used its whole budget is the only way a backlog is budget-deferred.
+    let budgetSpent = budget <= 0;
+    if (budget > 0) {
+      const started = Date.now();
+      await extract(engine, {
+        dryRun: false, jsonMode: true, quiet: true, sourceIdFilter: DAILY_MEMORY_SOURCE_ID,
+        slugs, originGuard, catchUp: false, timeBudgetMs: budget, signal: deps.signal,
+      });
+      budgetSpent = Date.now() - started >= budget;
+      // Recount ownership as well as staleness: a human replacement is no longer
+      // index debt. Exact calls stay bounded to their frozen target set; broad
+      // nightly sweeps also discover generated indexes written during setup.
+      remaining = (await dailyMemoryExtractTargets(engine, exact ? slugs : undefined)).length;
+    }
+    if (remaining === 0) return 0;
+    if (deps.allowBudgetDeferral && budgetSpent) return remaining;
+    if (pass < maxPasses - 1 && !exact) continue;
+    throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
   }
-  if (remaining === 0) return 0;
-  if (deps.allowBudgetDeferral && budgetSpent) return remaining;
-  throw new Error(`Daily memory extraction needs retry: ${remaining} generated daily-index pages remain`);
+  return 0;
 }

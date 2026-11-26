@@ -119,16 +119,21 @@ test('extractOneShotDailyMemory throws on a budget-deferred backlog unless defer
   } finally { clock.mockRestore(); }
 });
 
-test('one-shot extract fails when a generated index lands during the sweep', async () => {
+test('one-shot extract clears debt when a generated index lands during the first sweep', async () => {
   await seed();
-  await expect(runOneShotDailyMemoryWrite(engine, '2026-09-30', {
+  let calls = 0;
+  await runOneShotDailyMemoryWrite(engine, '2026-09-30', {
     extract: async (_engine, opts) => {
-      await engine.putPage('daily-memory/2026-09-27', {
-        type: 'note', title: 'Late generated index', compiled_truth: '', frontmatter: { dream_generated: true },
-      }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      calls++;
+      if (calls === 1) {
+        await engine.putPage('daily-memory/2026-09-27', {
+          type: 'note', title: 'Late generated index', compiled_truth: '', frontmatter: { dream_generated: true },
+        }, { sourceId: DAILY_MEMORY_SOURCE_ID });
+      }
       return noExtract(_engine, opts);
     },
-  })).rejects.toThrow('Daily memory extraction needs retry: 1 generated daily-index pages remain');
+  });
+  expect(calls).toBe(2);
 });
 
 test('one-shot extract fails when a selected index is rewritten after its stamp', async () => {
